@@ -48,10 +48,18 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('message', msg);
   });
 
+  socket.on('cursor', ({ x, y, username }) => {
+    if (!currentRoom) return;
+    // Broadcast cursor position to everyone else in the room
+    socket.to(currentRoom).emit('cursor', { x, y, username, id: socket.id });
+  });
+
+  // Clean up cursor when someone leaves
   socket.on('disconnect', () => {
     if (currentRoom) {
       roomUsers[currentRoom] = Math.max(0, (roomUsers[currentRoom] || 1) - 1);
       io.to(currentRoom).emit('presence', { count: roomUsers[currentRoom] });
+      io.to(currentRoom).emit('cursor-leave', { id: socket.id });  // NEW
     }
   });
 });
