@@ -8,8 +8,9 @@ const io = new Server(server, {
   cors: { origin: '*' }
 });
 
-const roomUsers = {};    // { roomName: { socketId: username } }
+const roomUsers = {};
 const roomHistory = {};
+const roomAnnotations = {};
 const MAX_HISTORY = 50;
 
 function broadcastPresence(room) {
@@ -29,6 +30,11 @@ io.on('connection', (socket) => {
 
     if (roomHistory[currentRoom]) {
       socket.emit('history', roomHistory[currentRoom]);
+    }
+
+    // Send existing annotations to newcomer
+    if (roomAnnotations[currentRoom]) {
+      socket.emit('annotations-init', roomAnnotations[currentRoom]);
     }
 
     broadcastPresence(currentRoom);
@@ -57,12 +63,29 @@ io.on('connection', (socket) => {
 
   socket.on('reaction', ({ emoji, x, y, username }) => {
     if (!currentRoom) return;
-    io.to(currentRoom).emit('reaction', { emoji, x, y, username, id: socket.id });
+    io.to(currentRoom).emit('reaction', { emoji, x, y, username });
   });
 
-  socket.on('highlight', ({ text, selector, username }) => {
+  socket.on('highlight', ({ text, username }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('highlight', { text, selector, username });
+    socket.to(currentRoom).emit('highlight', { text, username });
+  });
+
+  socket.on('annotation-add', ({ id, x, y, text, username }) => {
+    if (!currentRoom) return;
+    const annotation = { id, x, y, text, username, timestamp: Date.now() };
+    if (!roomAnnotations[currentRoom]) roomAnnotations[currentRoom] = [];
+    roomAnnotations[currentRoom].push(annotation);
+    io.to(currentRoom).emit('annotation-add', annotation);
+  });
+
+  socket.on('annotation-delete', ({ id }) => {
+    if (!currentRoom) return;
+    if (roomAnnotations[currentRoom]) {
+      roomAnnotations[currentRoom] = roomAnnotations[currentRoom]
+        .filter(a => a.id !== id);
+    }
+    io.to(currentRoom).emit('annotation-delete', { id });
   });
 
   socket.on('disconnect', () => {
