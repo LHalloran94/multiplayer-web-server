@@ -8,9 +8,14 @@ const io = new Server(server, {
   cors: { origin: '*' }
 });
 
-const roomUsers = {};
-const roomHistory = {};  // NEW: stores recent messages per room
-const MAX_HISTORY = 50;  // keep last 50 messages
+const roomUsers = {};    // { roomName: { socketId: username } }
+const roomHistory = {};
+const MAX_HISTORY = 50;
+
+function broadcastPresence(room) {
+  const users = Object.values(roomUsers[room] || {});
+  io.to(room).emit('presence', { count: users.length, users });
+}
 
 io.on('connection', (socket) => {
   let currentRoom = null;
@@ -19,13 +24,14 @@ io.on('connection', (socket) => {
     currentRoom = url;
     socket.join(currentRoom);
 
-    // Send existing history to the person who just joined
+    if (!roomUsers[currentRoom]) roomUsers[currentRoom] = {};
+    roomUsers[currentRoom][socket.id] = username;
+
     if (roomHistory[currentRoom]) {
       socket.emit('history', roomHistory[currentRoom]);
     }
 
-    roomUsers[currentRoom] = (roomUsers[currentRoom] || 0) + 1;
-    io.to(currentRoom).emit('presence', { count: roomUsers[currentRoom] });
+    broadcastPresence(currentRoom);
 
     socket.to(currentRoom).emit('message', {
       system: true,
@@ -35,31 +41,35 @@ io.on('connection', (socket) => {
 
   socket.on('message', ({ text, username }) => {
     if (!currentRoom) return;
-
     const msg = { username, text, timestamp: Date.now() };
-
-    // Save to history
     if (!roomHistory[currentRoom]) roomHistory[currentRoom] = [];
     roomHistory[currentRoom].push(msg);
     if (roomHistory[currentRoom].length > MAX_HISTORY) {
-      roomHistory[currentRoom].shift(); // drop oldest if over limit
+      roomHistory[currentRoom].shift();
     }
-
     io.to(currentRoom).emit('message', msg);
   });
 
   socket.on('cursor', ({ x, y, username }) => {
     if (!currentRoom) return;
-    // Broadcast cursor position to everyone else in the room
     socket.to(currentRoom).emit('cursor', { x, y, username, id: socket.id });
   });
 
-  // Clean up cursor when someone leaves
+  socket.on('reaction', ({ emoji, x, y, username }) => {
+    if (!currentRoom) return;
+    io.to(currentRoom).emit('reaction', { emoji, x, y, username, id: socket.id });
+  });
+
+  socket.on('highlight', ({ text, selector, username }) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('highlight', { text, selector, username });
+  });
+
   socket.on('disconnect', () => {
     if (currentRoom) {
-      roomUsers[currentRoom] = Math.max(0, (roomUsers[currentRoom] || 1) - 1);
-      io.to(currentRoom).emit('presence', { count: roomUsers[currentRoom] });
-      io.to(currentRoom).emit('cursor-leave', { id: socket.id });  // NEW
+      delete roomUsers[currentRoom][socket.id];
+      broadcastPresence(currentRoom);
+      io.to(currentRoom).emit('cursor-leave', { id: socket.id });
     }
   });
 });
