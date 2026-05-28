@@ -24,25 +24,13 @@ io.on('connection', (socket) => {
   socket.on('join', ({ url, username }) => {
     currentRoom = url;
     socket.join(currentRoom);
-
     if (!roomUsers[currentRoom]) roomUsers[currentRoom] = {};
     roomUsers[currentRoom][socket.id] = username;
-
-    if (roomHistory[currentRoom]) {
-      socket.emit('history', roomHistory[currentRoom]);
-    }
-
-    // Send existing annotations to newcomer
-    if (roomAnnotations[currentRoom]) {
-      socket.emit('annotations-init', roomAnnotations[currentRoom]);
-    }
-
+    if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
+    if (roomAnnotations[currentRoom]) socket.emit('annotations-init', roomAnnotations[currentRoom]);
     broadcastPresence(currentRoom);
-
-    socket.to(currentRoom).emit('message', {
-      system: true,
-      text: `${username} joined`
-    });
+    socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
+    console.log(`[join] ${username} joined room: ${currentRoom}`);
   });
 
   socket.on('message', ({ text, username }) => {
@@ -50,9 +38,7 @@ io.on('connection', (socket) => {
     const msg = { username, text, timestamp: Date.now() };
     if (!roomHistory[currentRoom]) roomHistory[currentRoom] = [];
     roomHistory[currentRoom].push(msg);
-    if (roomHistory[currentRoom].length > MAX_HISTORY) {
-      roomHistory[currentRoom].shift();
-    }
+    if (roomHistory[currentRoom].length > MAX_HISTORY) roomHistory[currentRoom].shift();
     io.to(currentRoom).emit('message', msg);
   });
 
@@ -71,11 +57,10 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('highlight', { text, username });
   });
 
-  socket.on('annotation-add', ({ id, x, y, text, username }) => {
+  socket.on('annotation-add', ({ id, docX, docY, text, username }) => {
     if (!currentRoom) return;
-    const annotation = { id, x, y, text, username, timestamp: Date.now() };
+    const annotation = { id, docX, docY, text, username, timestamp: Date.now() };
     if (!roomAnnotations[currentRoom]) roomAnnotations[currentRoom] = [];
-    // Prevent duplicates
     if (!roomAnnotations[currentRoom].find(a => a.id === id)) {
       roomAnnotations[currentRoom].push(annotation);
     }
@@ -84,9 +69,9 @@ io.on('connection', (socket) => {
 
   socket.on('annotation-delete', ({ id }) => {
     if (!currentRoom) return;
+    console.log(`[annotation-delete] id: ${id}`);
     if (roomAnnotations[currentRoom]) {
-      roomAnnotations[currentRoom] = roomAnnotations[currentRoom]
-        .filter(a => a.id !== id);
+      roomAnnotations[currentRoom] = roomAnnotations[currentRoom].filter(a => a.id !== id);
     }
     io.to(currentRoom).emit('annotation-delete', { id });
   });
