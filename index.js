@@ -75,7 +75,10 @@ io.on('connection', (socket) => {
     if (!currentRoom) return;
     const annotation = { id, x, y, text, username, timestamp: Date.now() };
     if (!roomAnnotations[currentRoom]) roomAnnotations[currentRoom] = [];
-    roomAnnotations[currentRoom].push(annotation);
+    // Prevent duplicates
+    if (!roomAnnotations[currentRoom].find(a => a.id === id)) {
+      roomAnnotations[currentRoom].push(annotation);
+    }
     io.to(currentRoom).emit('annotation-add', annotation);
   });
 
