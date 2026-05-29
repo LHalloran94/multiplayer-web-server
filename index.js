@@ -12,8 +12,10 @@ const roomUsers = {};
 const roomHistory = {};
 const roomAnnotations = {};
 const roomSprays = {};
+const roomMedia = {};
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
+const MAX_MEDIA = 30;
 
 function broadcastPresence(room) {
   const users = Object.values(roomUsers[room] || {});
@@ -31,6 +33,7 @@ io.on('connection', (socket) => {
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomAnnotations[currentRoom]) socket.emit('annotations-init', roomAnnotations[currentRoom]);
     if (roomSprays[currentRoom]) socket.emit('sprays-init', roomSprays[currentRoom]);
+    if (roomMedia[currentRoom]) socket.emit('media-init', roomMedia[currentRoom]);
     broadcastPresence(currentRoom);
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
     console.log(`[join] ${username} joined room: ${currentRoom}`);
@@ -115,6 +118,15 @@ io.on('connection', (socket) => {
     roomSprays[currentRoom].push(spray);
     if (roomSprays[currentRoom].length > MAX_SPRAYS) roomSprays[currentRoom].shift();
     io.to(currentRoom).emit('spray-add', spray);
+  });
+
+  socket.on('media-add', ({ id, url, username }) => {
+    if (!currentRoom) return;
+    const item = { id, url, username, timestamp: Date.now() };
+    if (!roomMedia[currentRoom]) roomMedia[currentRoom] = [];
+    roomMedia[currentRoom].push(item);
+    if (roomMedia[currentRoom].length > MAX_MEDIA) roomMedia[currentRoom].shift();
+    socket.to(currentRoom).emit('media-add', item);
   });
 
   socket.on('disconnect', () => {
