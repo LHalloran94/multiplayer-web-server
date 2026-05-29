@@ -92,6 +92,22 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('annotation-delete', { id });
   });
 
+  // draw-start/points/end are relayed only (not stored — strokes are ephemeral)
+  socket.on('draw-start', (data) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('draw-start', data);
+  });
+
+  socket.on('draw-points', (data) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('draw-points', data);
+  });
+
+  socket.on('draw-end', (data) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('draw-end', data);
+  });
+
   socket.on('spray-add', ({ id, content, size, docX, docY, username }) => {
     if (!currentRoom) return;
     const spray = { id, content, size, docX, docY, username, timestamp: Date.now() };
