@@ -60,7 +60,7 @@ io.on('connection', (socket) => {
 
   socket.on('reaction', ({ emoji, x, y, username }) => {
     if (!currentRoom) return;
-    io.to(currentRoom).emit('reaction', { emoji, x, y, username });
+    socket.to(currentRoom).emit('reaction', { emoji, x, y, username });
   });
 
   socket.on('highlight', ({ text, username }) => {
