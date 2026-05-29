@@ -57,14 +57,27 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('highlight', { text, username });
   });
 
-  socket.on('annotation-add', ({ id, docX, docY, text, username }) => {
+  socket.on('annotation-add', ({ id, selector, offsetX, offsetY, text, username }) => {
     if (!currentRoom) return;
-    const annotation = { id, docX, docY, text, username, timestamp: Date.now() };
+    const annotation = { id, selector, offsetX, offsetY, text, username, timestamp: Date.now() };
     if (!roomAnnotations[currentRoom]) roomAnnotations[currentRoom] = [];
     if (!roomAnnotations[currentRoom].find(a => a.id === id)) {
       roomAnnotations[currentRoom].push(annotation);
     }
     io.to(currentRoom).emit('annotation-add', annotation);
+  });
+
+  socket.on('annotation-move', ({ id, selector, offsetX, offsetY }) => {
+    if (!currentRoom) return;
+    if (roomAnnotations[currentRoom]) {
+      const ann = roomAnnotations[currentRoom].find(a => a.id === id);
+      if (ann) {
+        ann.selector = selector;
+        ann.offsetX = offsetX;
+        ann.offsetY = offsetY;
+      }
+    }
+    io.to(currentRoom).emit('annotation-move', { id, selector, offsetX, offsetY });
   });
 
   socket.on('annotation-delete', ({ id }) => {
