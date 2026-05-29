@@ -11,7 +11,9 @@ const io = new Server(server, {
 const roomUsers = {};
 const roomHistory = {};
 const roomAnnotations = {};
+const roomSprays = {};
 const MAX_HISTORY = 50;
+const MAX_SPRAYS = 50;
 
 function broadcastPresence(room) {
   const users = Object.values(roomUsers[room] || {});
@@ -28,6 +30,7 @@ io.on('connection', (socket) => {
     roomUsers[currentRoom][socket.id] = username;
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomAnnotations[currentRoom]) socket.emit('annotations-init', roomAnnotations[currentRoom]);
+    if (roomSprays[currentRoom]) socket.emit('sprays-init', roomSprays[currentRoom]);
     broadcastPresence(currentRoom);
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
     console.log(`[join] ${username} joined room: ${currentRoom}`);
@@ -87,6 +90,15 @@ io.on('connection', (socket) => {
       roomAnnotations[currentRoom] = roomAnnotations[currentRoom].filter(a => a.id !== id);
     }
     io.to(currentRoom).emit('annotation-delete', { id });
+  });
+
+  socket.on('spray-add', ({ id, content, size, docX, docY, username }) => {
+    if (!currentRoom) return;
+    const spray = { id, content, size, docX, docY, username, timestamp: Date.now() };
+    if (!roomSprays[currentRoom]) roomSprays[currentRoom] = [];
+    roomSprays[currentRoom].push(spray);
+    if (roomSprays[currentRoom].length > MAX_SPRAYS) roomSprays[currentRoom].shift();
+    io.to(currentRoom).emit('spray-add', spray);
   });
 
   socket.on('disconnect', () => {
