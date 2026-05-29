@@ -13,6 +13,7 @@ const roomHistory = {};
 const roomAnnotations = {};
 const roomSprays = {};
 const roomMedia = {};
+const roomAvatars = {};
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
@@ -34,6 +35,7 @@ io.on('connection', (socket) => {
     if (roomAnnotations[currentRoom]) socket.emit('annotations-init', roomAnnotations[currentRoom]);
     if (roomSprays[currentRoom]) socket.emit('sprays-init', roomSprays[currentRoom]);
     if (roomMedia[currentRoom]) socket.emit('media-init', roomMedia[currentRoom]);
+    if (roomAvatars[currentRoom]) socket.emit('avatars-init', Object.values(roomAvatars[currentRoom]));
     broadcastPresence(currentRoom);
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
     console.log(`[join] ${username} joined room: ${currentRoom}`);
@@ -134,11 +136,20 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('media-add', item);
   });
 
+  socket.on('avatar-move', ({ x, y, username }) => {
+    if (!currentRoom) return;
+    if (!roomAvatars[currentRoom]) roomAvatars[currentRoom] = {};
+    roomAvatars[currentRoom][socket.id] = { id: socket.id, x, y, username };
+    socket.to(currentRoom).emit('avatar-move', { id: socket.id, x, y, username });
+  });
+
   socket.on('disconnect', () => {
     if (currentRoom) {
       delete roomUsers[currentRoom][socket.id];
+      if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][socket.id];
       broadcastPresence(currentRoom);
       io.to(currentRoom).emit('cursor-leave', { id: socket.id });
+      io.to(currentRoom).emit('avatar-leave', { id: socket.id });
     }
   });
 });
