@@ -126,7 +126,7 @@ io.on('connection', (socket) => {
     if (!roomMedia[currentRoom]) roomMedia[currentRoom] = [];
     roomMedia[currentRoom].push(item);
     if (roomMedia[currentRoom].length > MAX_MEDIA) roomMedia[currentRoom].shift();
-    socket.to(currentRoom).emit('media-add', item);
+    io.to(currentRoom).emit('media-add', item);
   });
 
   socket.on('disconnect', () => {
