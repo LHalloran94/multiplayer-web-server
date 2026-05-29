@@ -48,9 +48,14 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('message', msg);
   });
 
-  socket.on('cursor', ({ x, y, username }) => {
+  socket.on('cursor', ({ x, y, scrollPct, username }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('cursor', { x, y, username, id: socket.id });
+    socket.to(currentRoom).emit('cursor', { x, y, scrollPct, username, id: socket.id });
+  });
+
+  socket.on('pointer-pulse', ({ x, y, username }) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('pointer-pulse', { x, y, username });
   });
 
   socket.on('reaction', ({ emoji, x, y, username }) => {
