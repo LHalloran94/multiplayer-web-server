@@ -136,6 +136,11 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('media-add', item);
   });
 
+  socket.on('avatar-emote', ({ emote }) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('avatar-emote', { id: socket.id, emote });
+  });
+
   socket.on('avatar-move', ({ x, y, username }) => {
     if (!currentRoom) return;
     if (!roomAvatars[currentRoom]) roomAvatars[currentRoom] = {};
