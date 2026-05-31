@@ -141,11 +141,11 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('avatar-emote', { id: socket.id, emote });
   });
 
-  socket.on('avatar-move', ({ x, y, username }) => {
+  socket.on('avatar-move', ({ x, y, username, facingLeft, onGround, fill }) => {
     if (!currentRoom) return;
     if (!roomAvatars[currentRoom]) roomAvatars[currentRoom] = {};
-    roomAvatars[currentRoom][socket.id] = { id: socket.id, x, y, username };
-    socket.to(currentRoom).emit('avatar-move', { id: socket.id, x, y, username });
+    roomAvatars[currentRoom][socket.id] = { id: socket.id, x, y, username, facingLeft, onGround, fill };
+    socket.to(currentRoom).emit('avatar-move', { id: socket.id, x, y, username, facingLeft, onGround, fill });
   });
 
   socket.on('disconnect', () => {
