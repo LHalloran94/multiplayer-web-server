@@ -169,6 +169,7 @@ io.on('connection', (socket) => {
   socket.on('voice-answer',   ({ to, sdp })       => { socket.to(to).emit('voice-answer',   { from: socket.id, sdp }); });
   socket.on('voice-ice',      ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
   socket.on('voice-speaking', ()                  => { if (currentRoom) socket.to(currentRoom).emit('voice-speaking', { id: socket.id }); });
+  socket.on('nav',            ({ url, username }) => { if (currentRoom) socket.to(currentRoom).emit('nav', { url, username }); });
 
   socket.on('disconnect', () => {
     if (currentRoom) {
