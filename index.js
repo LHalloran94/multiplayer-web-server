@@ -165,9 +165,10 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('voice-peer-left', { id: socket.id });
   });
 
-  socket.on('voice-offer',  ({ to, sdp })       => { socket.to(to).emit('voice-offer',  { from: socket.id, sdp }); });
-  socket.on('voice-answer', ({ to, sdp })       => { socket.to(to).emit('voice-answer', { from: socket.id, sdp }); });
-  socket.on('voice-ice',    ({ to, candidate }) => { socket.to(to).emit('voice-ice',    { from: socket.id, candidate }); });
+  socket.on('voice-offer',    ({ to, sdp })       => { socket.to(to).emit('voice-offer',    { from: socket.id, sdp }); });
+  socket.on('voice-answer',   ({ to, sdp })       => { socket.to(to).emit('voice-answer',   { from: socket.id, sdp }); });
+  socket.on('voice-ice',      ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
+  socket.on('voice-speaking', ()                  => { if (currentRoom) socket.to(currentRoom).emit('voice-speaking', { id: socket.id }); });
 
   socket.on('disconnect', () => {
     if (currentRoom) {
