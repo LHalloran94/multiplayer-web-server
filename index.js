@@ -170,6 +170,8 @@ io.on('connection', (socket) => {
   socket.on('voice-ice',      ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
   socket.on('voice-speaking', ()                  => { if (currentRoom) socket.to(currentRoom).emit('voice-speaking', { id: socket.id }); });
   socket.on('nav',            ({ url, username }) => { if (currentRoom) socket.to(currentRoom).emit('nav', { url, username }); });
+  socket.on('follow-start',   ({ target })       => { if (currentRoom) socket.to(currentRoom).emit('follow-start', { target, from: roomUsers[currentRoom]?.[socket.id] || '' }); });
+  socket.on('follow-end',     ({ target })       => { if (currentRoom) socket.to(currentRoom).emit('follow-end',   { target, from: roomUsers[currentRoom]?.[socket.id] || '' }); });
 
   socket.on('disconnect', () => {
     if (currentRoom) {
