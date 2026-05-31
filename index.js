@@ -69,9 +69,9 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('pointer-pulse', { x, y, username });
   });
 
-  socket.on('reaction', ({ emoji, x, y, username }) => {
+  socket.on('reaction', ({ emoji, x, y, username, source }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('reaction', { emoji, x, y, username });
+    socket.to(currentRoom).emit('reaction', { emoji, x, y, username, source });
   });
 
   socket.on('highlight', ({ text, username }) => {
