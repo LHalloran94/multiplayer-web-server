@@ -14,6 +14,7 @@ const roomAnnotations = {};
 const roomSprays = {};
 const roomMedia = {};
 const roomAvatars = {};
+const roomVoice = {}; // roomId → { socketId: username }
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
@@ -36,6 +37,7 @@ io.on('connection', (socket) => {
     if (roomSprays[currentRoom]) socket.emit('sprays-init', roomSprays[currentRoom]);
     if (roomMedia[currentRoom]) socket.emit('media-init', roomMedia[currentRoom]);
     if (roomAvatars[currentRoom]) socket.emit('avatars-init', Object.values(roomAvatars[currentRoom]));
+    if (roomVoice[currentRoom] && Object.keys(roomVoice[currentRoom]).length) socket.emit('voice-init', roomVoice[currentRoom]);
     broadcastPresence(currentRoom);
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
     console.log(`[join] ${username} joined room: ${currentRoom}`);
@@ -148,10 +150,33 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('avatar-move', { id: socket.id, x, y, username, facingLeft, onGround, fill });
   });
 
+  socket.on('voice-join', ({ username }) => {
+    if (!currentRoom) return;
+    if (!roomVoice[currentRoom]) roomVoice[currentRoom] = {};
+    const existingPeers = Object.keys(roomVoice[currentRoom]);
+    roomVoice[currentRoom][socket.id] = username;
+    socket.emit('voice-joined', { existingPeers });
+    io.to(currentRoom).emit('voice-peer-joined', { id: socket.id, username });
+  });
+
+  socket.on('voice-leave', () => {
+    if (!currentRoom || !roomVoice[currentRoom]) return;
+    delete roomVoice[currentRoom][socket.id];
+    io.to(currentRoom).emit('voice-peer-left', { id: socket.id });
+  });
+
+  socket.on('voice-offer',  ({ to, sdp })       => { socket.to(to).emit('voice-offer',  { from: socket.id, sdp }); });
+  socket.on('voice-answer', ({ to, sdp })       => { socket.to(to).emit('voice-answer', { from: socket.id, sdp }); });
+  socket.on('voice-ice',    ({ to, candidate }) => { socket.to(to).emit('voice-ice',    { from: socket.id, candidate }); });
+
   socket.on('disconnect', () => {
     if (currentRoom) {
       delete roomUsers[currentRoom][socket.id];
       if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][socket.id];
+      if (roomVoice[currentRoom] && roomVoice[currentRoom][socket.id]) {
+        delete roomVoice[currentRoom][socket.id];
+        io.to(currentRoom).emit('voice-peer-left', { id: socket.id });
+      }
       broadcastPresence(currentRoom);
       io.to(currentRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
