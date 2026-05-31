@@ -15,6 +15,7 @@ const roomSprays = {};
 const roomMedia = {};
 const roomAvatars = {};
 const roomVoice = {}; // roomId → { socketId: username }
+const userCurrentRoom = {}; // username → current room URL (for follow-across-pages)
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
@@ -26,10 +27,14 @@ function broadcastPresence(room) {
 
 io.on('connection', (socket) => {
   let currentRoom = null;
+  let currentUsername = null;
 
   socket.on('join', ({ url, username }) => {
     currentRoom = url;
+    currentUsername = username;
     socket.join(currentRoom);
+    socket.join('user:' + username); // personal channel for follow-across-pages
+    userCurrentRoom[username] = url;
     if (!roomUsers[currentRoom]) roomUsers[currentRoom] = {};
     roomUsers[currentRoom][socket.id] = username;
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
@@ -40,6 +45,8 @@ io.on('connection', (socket) => {
     if (roomVoice[currentRoom] && Object.keys(roomVoice[currentRoom]).length) socket.emit('voice-init', roomVoice[currentRoom]);
     broadcastPresence(currentRoom);
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
+    // Notify anyone following this user of their new location
+    socket.to('user:' + username).emit('user-location', { url });
     console.log(`[join] ${username} joined room: ${currentRoom}`);
   });
 
@@ -165,13 +172,23 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('voice-peer-left', { id: socket.id });
   });
 
-  socket.on('voice-offer',    ({ to, sdp })       => { socket.to(to).emit('voice-offer',    { from: socket.id, sdp }); });
-  socket.on('voice-answer',   ({ to, sdp })       => { socket.to(to).emit('voice-answer',   { from: socket.id, sdp }); });
-  socket.on('voice-ice',      ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
-  socket.on('voice-speaking', ()                  => { if (currentRoom) socket.to(currentRoom).emit('voice-speaking', { id: socket.id }); });
-  socket.on('nav',            ({ url, username }) => { if (currentRoom) socket.to(currentRoom).emit('nav', { url, username }); });
-  socket.on('follow-start',   ({ target })       => { if (currentRoom) socket.to(currentRoom).emit('follow-start', { target, from: roomUsers[currentRoom]?.[socket.id] || '' }); });
-  socket.on('follow-end',     ({ target })       => { if (currentRoom) socket.to(currentRoom).emit('follow-end',   { target, from: roomUsers[currentRoom]?.[socket.id] || '' }); });
+  socket.on('voice-offer',      ({ to, sdp })       => { socket.to(to).emit('voice-offer',    { from: socket.id, sdp }); });
+  socket.on('voice-answer',     ({ to, sdp })       => { socket.to(to).emit('voice-answer',   { from: socket.id, sdp }); });
+  socket.on('voice-ice',        ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
+  socket.on('voice-speaking',   ()                  => { if (currentRoom) socket.to(currentRoom).emit('voice-speaking', { id: socket.id }); });
+  socket.on('nav',              ({ url, username }) => { if (currentRoom) socket.to(currentRoom).emit('nav', { url, username }); });
+  socket.on('follow-start',     ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-start', { target, from: currentUsername || '' }); });
+  socket.on('follow-end',       ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-end',   { target, from: currentUsername || '' }); });
+
+  // Personal channel subscription for follow-across-pages
+  socket.on('follow-subscribe', ({ target }) => {
+    socket.join('user:' + target);
+    // Immediately tell this socket where the target currently is (if known)
+    if (userCurrentRoom[target]) socket.emit('user-location', { url: userCurrentRoom[target] });
+  });
+  socket.on('follow-unsubscribe', ({ target }) => {
+    socket.leave('user:' + target);
+  });
 
   socket.on('disconnect', () => {
     if (currentRoom) {
@@ -185,6 +202,7 @@ io.on('connection', (socket) => {
       io.to(currentRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
     }
+    if (currentUsername) delete userCurrentRoom[currentUsername];
   });
 });
 
