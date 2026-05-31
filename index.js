@@ -15,7 +15,7 @@ const roomSprays = {};
 const roomMedia = {};
 const roomAvatars = {};
 const roomVoice = {}; // roomId → { socketId: username }
-const userCurrentRoom = {}; // username → current room URL (for follow-across-pages)
+const userCurrentFullUrl = {}; // username → full href (for follow-across-pages)
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
@@ -29,12 +29,12 @@ io.on('connection', (socket) => {
   let currentRoom = null;
   let currentUsername = null;
 
-  socket.on('join', ({ url, username }) => {
+  socket.on('join', ({ url, fullUrl, username }) => {
     currentRoom = url;
     currentUsername = username;
     socket.join(currentRoom);
     socket.join('user:' + username); // personal channel for follow-across-pages
-    userCurrentRoom[username] = url;
+    userCurrentFullUrl[username] = fullUrl || url;
     if (!roomUsers[currentRoom]) roomUsers[currentRoom] = {};
     roomUsers[currentRoom][socket.id] = username;
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
@@ -46,7 +46,7 @@ io.on('connection', (socket) => {
     broadcastPresence(currentRoom);
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
     // Notify anyone following this user of their new location
-    socket.to('user:' + username).emit('user-location', { url });
+    socket.to('user:' + username).emit('user-location', { url: userCurrentFullUrl[username] });
     console.log(`[join] ${username} joined room: ${currentRoom}`);
   });
 
@@ -184,7 +184,7 @@ io.on('connection', (socket) => {
   socket.on('follow-subscribe', ({ target }) => {
     socket.join('user:' + target);
     // Immediately tell this socket where the target currently is (if known)
-    if (userCurrentRoom[target]) socket.emit('user-location', { url: userCurrentRoom[target] });
+    if (userCurrentFullUrl[target]) socket.emit('user-location', { url: userCurrentFullUrl[target] });
   });
   socket.on('follow-unsubscribe', ({ target }) => {
     socket.leave('user:' + target);
@@ -202,7 +202,7 @@ io.on('connection', (socket) => {
       io.to(currentRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
     }
-    if (currentUsername) delete userCurrentRoom[currentUsername];
+    if (currentUsername) delete userCurrentFullUrl[currentUsername];
   });
 });
 
