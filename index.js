@@ -1162,6 +1162,23 @@ io.on('connection', (socket) => {
       } catch {}
     }
   });
+  // Leader switched to this tab — relay to followers so they can switch too.
+  socket.on('tab-focus', ({ url }) => {
+    const dId = socketToDiscordId[socket.id];
+    if (!dId || !url) return;
+    if (discordIdToFullUrl[dId] === url) return; // no change, skip
+    discordIdToFullUrl[dId] = url;
+    try {
+      const followeeSettings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(dId);
+      if (!followeeSettings?.browsing_visible) return;
+      const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(dId);
+      myFollowers.forEach(r => {
+        const fSocks = discordIdToFollowSockets[r.follower_id];
+        if (fSocks) fSocks.forEach(sid => io.to(sid).emit('followee-tab-focus', { discordId: dId, username: currentUsername, url }));
+      });
+    } catch {}
+  });
+
   socket.on('follow-start',     ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-start', { target, from: currentUsername || '' }); });
   socket.on('follow-end',       ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-end',   { target, from: currentUsername || '' }); });
 
