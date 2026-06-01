@@ -80,6 +80,18 @@ try { db.exec('ALTER TABLE users ADD COLUMN status TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN public INTEGER DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN scope TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN description TEXT'); } catch {}
+try { db.exec(`ALTER TABLE users ADD COLUMN follow_policy TEXT DEFAULT 'friends'`); } catch {}
+try { db.exec('ALTER TABLE users ADD COLUMN follow_allowlist TEXT DEFAULT \'\''); } catch {}
+try { db.exec('ALTER TABLE users ADD COLUMN browsing_visible INTEGER DEFAULT 1'); } catch {}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS follows (
+    follower_id  TEXT NOT NULL,
+    followee_id  TEXT NOT NULL,
+    created_at   INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (follower_id, followee_id)
+  );
+`);
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS groups (
@@ -557,6 +569,102 @@ app.delete('/groups/:id/members/:discordId', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ---- Follow settings & follows endpoints ----
+app.get('/follow-settings', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const row = db.prepare('SELECT follow_policy, follow_allowlist, browsing_visible FROM users WHERE discord_id = ?').get(user.sub);
+    if (!row) return res.status(404).json({ error: 'User not found' });
+    const allowlistIds = (row.follow_allowlist || '').split(',').filter(Boolean);
+    let allowlist = [];
+    if (allowlistIds.length) {
+      const placeholders = allowlistIds.map(() => '?').join(',');
+      allowlist = db.prepare(`SELECT discord_id, username FROM users WHERE discord_id IN (${placeholders})`).all(...allowlistIds)
+        .map(r => ({ discordId: r.discord_id, username: r.username }));
+    }
+    res.json({ follow_policy: row.follow_policy || 'friends', browsing_visible: !!row.browsing_visible, allowlist });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.put('/follow-settings', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { follow_policy, browsing_visible, allowlist } = req.body;
+  const validPolicies = ['anyone', 'friends', 'specific', 'nobody'];
+  try {
+    const updates = [];
+    const params = [];
+    if (follow_policy !== undefined) {
+      if (!validPolicies.includes(follow_policy)) return res.status(400).json({ error: 'Invalid policy' });
+      updates.push('follow_policy = ?'); params.push(follow_policy);
+    }
+    if (browsing_visible !== undefined) {
+      updates.push('browsing_visible = ?'); params.push(browsing_visible ? 1 : 0);
+    }
+    if (allowlist !== undefined) {
+      const ids = Array.isArray(allowlist) ? allowlist.map(a => a.discordId).filter(Boolean).join(',') : '';
+      updates.push('follow_allowlist = ?'); params.push(ids);
+    }
+    if (!updates.length) return res.json({ ok: true });
+    params.push(user.sub);
+    db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE discord_id = ?`).run(...params);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/follows', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { followeeDiscordId } = req.body;
+  if (!followeeDiscordId || followeeDiscordId === user.sub) return res.status(400).json({ error: 'Invalid' });
+  try {
+    const followee = db.prepare('SELECT discord_id, follow_policy, follow_allowlist FROM users WHERE discord_id = ?').get(followeeDiscordId);
+    if (!followee) return res.status(404).json({ error: 'User not found' });
+    const policy = followee.follow_policy || 'friends';
+    if (policy === 'nobody') return res.status(403).json({ error: 'user_blocks_follow' });
+    if (policy === 'friends') {
+      const friendship = db.prepare(
+        `SELECT 1 FROM friends WHERE ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND status='accepted'`
+      ).get(user.sub, followeeDiscordId, followeeDiscordId, user.sub);
+      if (!friendship) return res.status(403).json({ error: 'friends_only' });
+    }
+    if (policy === 'specific') {
+      const allowed = (followee.follow_allowlist || '').split(',').includes(user.sub);
+      if (!allowed) return res.status(403).json({ error: 'not_on_allowlist' });
+    }
+    db.prepare('INSERT OR IGNORE INTO follows (follower_id, followee_id) VALUES (?, ?)').run(user.sub, followeeDiscordId);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.delete('/follows/:followeeDiscordId', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    db.prepare('DELETE FROM follows WHERE follower_id = ? AND followee_id = ?').run(user.sub, req.params.followeeDiscordId);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/follows', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(`
+      SELECT f.followee_id, u.username, u.avatar, u.browsing_visible
+      FROM follows f JOIN users u ON u.discord_id = f.followee_id
+      WHERE f.follower_id = ?
+    `).all(user.sub);
+    res.json(rows.map(r => ({
+      discordId: r.followee_id,
+      username: r.username,
+      avatar: r.avatar,
+      currentUrl: r.browsing_visible ? (discordIdToFullUrl[r.followee_id] || null) : null
+    })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 app.delete('/dms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -692,6 +800,28 @@ io.on('connection', (socket) => {
         `).all(discordId);
         socket.emit('groups-init', userGroups);
       } catch (e) { console.error('[groups-init]', e); }
+
+      // Follows: send this user their follow list
+      try {
+        const userFollows = db.prepare(`
+          SELECT f.followee_id, u.username, u.avatar
+          FROM follows f JOIN users u ON u.discord_id = f.followee_id
+          WHERE f.follower_id = ?
+        `).all(discordId);
+        socket.emit('follows-init', userFollows.map(r => ({ discordId: r.followee_id, username: r.username, avatar: r.avatar })));
+      } catch (e) { console.error('[follows-init]', e); }
+
+      // Follows: notify this user's followers they're online
+      try {
+        const followeeSettings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(discordId);
+        if (followeeSettings?.browsing_visible) {
+          const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(discordId);
+          myFollowers.forEach(r => {
+            const fs = discordIdToSocket[r.follower_id];
+            if (fs) io.to(fs).emit('followee-nav', { discordId, username, url: fullUrl || url });
+          });
+        }
+      } catch (e) { console.error('[follows-online]', e); }
     }
 
     console.log(`[join] ${username} (verified:${verified}) joined room: ${currentRoom}`);
@@ -963,6 +1093,17 @@ io.on('connection', (socket) => {
           const fs = discordIdToSocket[r.fid];
           if (fs) io.to(fs).emit('friend-location', { discord_id: dId, url });
         });
+      } catch {}
+      // Notify followers
+      try {
+        const followeeSettings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(dId);
+        if (followeeSettings?.browsing_visible) {
+          const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(dId);
+          myFollowers.forEach(r => {
+            const fs = discordIdToSocket[r.follower_id];
+            if (fs) io.to(fs).emit('followee-nav', { discordId: dId, username, url });
+          });
+        }
       } catch {}
     }
   });
