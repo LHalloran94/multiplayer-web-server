@@ -640,6 +640,11 @@ app.post('/follows', (req, res) => {
       const followerUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(user.sub);
       io.to(followeeSocket).emit('persistent-follow-start', { followerDiscordId: user.sub, username: followerUser?.username || user.username });
     }
+    // Immediately send the followee's current tab snapshot to the new follower's tabs so
+    // following takes effect right away (don't wait for the followee to next navigate).
+    const followeeUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(followeeDiscordId);
+    const followerSocks = discordIdToFollowSockets[user.sub];
+    if (followerSocks) followerSocks.forEach(sid => emitSnapshotToFollower(followeeDiscordId, followeeUser?.username, sid));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -737,26 +742,70 @@ const socketDmRooms = {};      // socketId → Set of DM roomIds
 const socketToDiscordId = {};  // socketId → discordId
 const discordIdToSocket = {};       // discordId → socketId (latest socket, for DMs/invites/etc.)
 const discordIdToFollowSockets = {}; // discordId → Set<socketId> (all active tabs, for followee-nav)
-const discordIdToFullUrl = {}; // discordId → current full URL
-const discordIdLastNavSent = {}; // discordId → { url, ts } — dedup nav+join double-fires
+const discordIdToFullUrl = {}; // discordId → current full URL (active tab)
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
+
+// ---- Follow: per-leader tab snapshots --------------------------------------
+// The authoritative model for following. Each verified user's extension tabs
+// register here (one socket per tab). On any change we emit a full `followee-tabs`
+// snapshot to their followers, who reconcile their own tabs from it (single or
+// mirror mode, decided follower-side). Replaces the old per-event followee-nav /
+// followee-tab-focus relay.
+const leaderTabs = {};         // discordId → Map<tabSession, url>  (all extension tabs)
+const leaderActiveTab = {};    // discordId → tabSession            (the focused tab)
+const socketToTabSession = {}; // socketId  → tabSession
+const leaderSnapshotSeq = {};  // discordId → monotonic int (within an epoch)
+const leaderEpoch = {};        // discordId → epoch token (changes each fresh browsing session)
 
 function broadcastPresence(room) {
   const users = Object.values(roomUsers[room] || {});
   io.to(room).emit('presence', { count: users.length, users });
 }
 
+function buildTabSnapshot(discordId, username) {
+  const tabsMap = leaderTabs[discordId];
+  if (!tabsMap || tabsMap.size === 0) return null;
+  const tabs = [...tabsMap.entries()].map(([id, url]) => ({ id, url }));
+  let activeId = leaderActiveTab[discordId];
+  if (!activeId || !tabsMap.has(activeId)) activeId = tabs[tabs.length - 1].id;
+  const activeUrl = tabsMap.get(activeId);
+  const seq = (leaderSnapshotSeq[discordId] = (leaderSnapshotSeq[discordId] || 0) + 1);
+  const epoch = leaderEpoch[discordId] || 0;
+  return { leaderId: discordId, username, tabs, activeId, activeUrl, seq, epoch };
+}
+
+// Build + push the current snapshot to all of this user's followers.
+function emitTabSnapshot(discordId, username) {
+  const settings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(discordId);
+  if (!settings?.browsing_visible) return;
+  const snap = buildTabSnapshot(discordId, username);
+  if (!snap) return;
+  discordIdToFullUrl[discordId] = snap.activeUrl; // keep friends-panel location in sync
+  const followers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(discordId);
+  followers.forEach(r => {
+    const fSocks = discordIdToFollowSockets[r.follower_id];
+    if (fSocks) fSocks.forEach(sid => io.to(sid).emit('followee-tabs', snap));
+  });
+}
+
+// Send one followee's current snapshot to a single follower socket (resync on connect).
+function emitSnapshotToFollower(followeeId, followeeUsername, socketId) {
+  const settings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(followeeId);
+  if (!settings?.browsing_visible) return;
+  const snap = buildTabSnapshot(followeeId, followeeUsername);
+  if (snap) io.to(socketId).emit('followee-tabs', snap);
+}
+
 io.on('connection', (socket) => {
   let currentRoom = null;
   let currentUsername = null;
 
-  socket.on('join', ({ url, fullUrl, username, token, visible }) => {
+  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession }) => {
     let verified = false;
     let avatar = null;
     let discordId = null;
-    let wasAlreadyConnected = false;
 
     if (token) {
       try {
@@ -765,16 +814,22 @@ io.on('connection', (socket) => {
         verified = true;
         discordId = decoded.sub;
         if (!username || !username.trim()) username = decoded.username;
-        wasAlreadyConnected = !!discordIdToSocket[discordId]; // true = this is a new-tab load
         // Upsert user in DB
         db.prepare('INSERT OR REPLACE INTO users (discord_id, username, avatar, updated_at) VALUES (?, ?, ?, unixepoch())').run(discordId, username, avatar);
         socketToDiscordId[socket.id] = discordId;
         discordIdToSocket[discordId] = socket.id;
         if (!discordIdToFollowSockets[discordId]) discordIdToFollowSockets[discordId] = new Set();
         discordIdToFollowSockets[discordId].add(socket.id);
-        // discordIdToFullUrl is intentionally NOT set here — only nav + tab-focus events update it.
-        // If we set it in join, the tab-focus dedup check fires when the leader switches to a
-        // background tab (URL matches what join already set → followee-tab-focus never emitted).
+        // Register this tab in the leader's tab set (drives follow snapshots).
+        if (tabSession) {
+          socketToTabSession[socket.id] = tabSession;
+          if (!leaderTabs[discordId]) {
+            leaderTabs[discordId] = new Map();
+            leaderEpoch[discordId] = Date.now(); // fresh browsing session → new epoch
+          }
+          leaderTabs[discordId].set(tabSession, fullUrl || url);
+          if (visible) leaderActiveTab[discordId] = tabSession;
+        }
       } catch {
         // invalid/expired token — fall through as anonymous
       }
@@ -850,7 +905,9 @@ io.on('connection', (socket) => {
           FROM follows f JOIN users u ON u.discord_id = f.followee_id
           WHERE f.follower_id = ?
         `).all(discordId);
-        socket.emit('follows-init', userFollows.map(r => ({ discordId: r.followee_id, username: r.username, avatar: r.avatar, currentUrl: discordIdToFullUrl[r.followee_id] || null })));
+        socket.emit('follows-init', userFollows.map(r => ({ discordId: r.followee_id, username: r.username, avatar: r.avatar })));
+        // Resync: send each followee's current tab snapshot to this newly-connected follower.
+        userFollows.forEach(r => emitSnapshotToFollower(r.followee_id, r.username, socket.id));
 
         const myFollowersList = db.prepare(`
           SELECT f.follower_id, u.username
@@ -860,31 +917,9 @@ io.on('connection', (socket) => {
         socket.emit('followers-init', myFollowersList.map(r => ({ discordId: r.follower_id, username: r.username })));
       } catch (e) { console.error('[follows-init]', e); }
 
-      // Follows: notify followers of this user's new page load.
-      // Skip if a 'nav' event already broadcast this URL recently (link-click nav fires both
-      // nav + join; address-bar nav only fires join, so that still goes through).
-      try {
-        const navKey = discordIdLastNavSent[discordId];
-        const joinUrl = fullUrl || url;
-        const alreadySent = navKey && navKey.url === joinUrl && Date.now() - navKey.ts < 3000;
-        if (!alreadySent) {
-          const followeeSettings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(discordId);
-          if (followeeSettings?.browsing_visible) {
-            const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(discordId);
-            myFollowers.forEach(r => {
-              const fSocks = discordIdToFollowSockets[r.follower_id];
-              if (fSocks) fSocks.forEach(sid => {
-                io.to(sid).emit('followee-nav', { discordId, username, url: joinUrl, newTab: wasAlreadyConnected });
-                // Leader opened this tab in the foreground — also send tab-focus so the follower
-                // switches to their mirror tab (pendingSwitch in background.js handles the race).
-                if (wasAlreadyConnected && visible) {
-                  io.to(sid).emit('followee-tab-focus', { discordId, username, url: joinUrl });
-                }
-              });
-            });
-          }
-        }
-      } catch (e) { console.error('[follows-online]', e); }
+      // Follows: this user's tab set changed (new tab loaded / address-bar nav / foreground tab).
+      // Push a fresh snapshot to their followers.
+      try { emitTabSnapshot(discordId, username); } catch (e) { console.error('[follows-online]', e); }
     }
 
     console.log(`[join] ${username} (verified:${verified}) joined room: ${currentRoom}`);
@@ -1142,11 +1177,13 @@ io.on('connection', (socket) => {
     } catch (e) { console.error('[group-invite]', e); }
   });
 
-  socket.on('nav', ({ url, username, newTab }) => {
+  socket.on('nav', ({ url, username }) => {
     if (currentRoom) socket.to(currentRoom).emit('nav', { url, username });
     const dId = socketToDiscordId[socket.id];
     if (dId && url) {
-      discordIdToFullUrl[dId] = url;
+      // Update this tab's URL in the leader's tab set.
+      const ts = socketToTabSession[socket.id];
+      if (ts && leaderTabs[dId]) leaderTabs[dId].set(ts, url);
       try {
         const fRows = db.prepare(
           `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
@@ -1157,35 +1194,20 @@ io.on('connection', (socket) => {
           if (fs) io.to(fs).emit('friend-location', { discord_id: dId, url });
         });
       } catch {}
-      // Notify followers — record URL first so join handler can dedup
-      try {
-        discordIdLastNavSent[dId] = { url, ts: Date.now() };
-        const followeeSettings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(dId);
-        if (followeeSettings?.browsing_visible) {
-          const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(dId);
-          myFollowers.forEach(r => {
-            const fSocks = discordIdToFollowSockets[r.follower_id];
-            if (fSocks) fSocks.forEach(sid => io.to(sid).emit('followee-nav', { discordId: dId, username, url, newTab: !!newTab }));
-          });
-        }
-      } catch {}
+      // Push an updated tab snapshot to followers.
+      try { emitTabSnapshot(dId, username); } catch {}
     }
   });
-  // Leader switched to this tab — relay to followers so they can switch too.
+  // Leader switched to this tab — mark it active and resnapshot followers.
   socket.on('tab-focus', ({ url }) => {
     const dId = socketToDiscordId[socket.id];
     if (!dId || !url) return;
-    if (discordIdToFullUrl[dId] === url) return; // no change, skip
-    discordIdToFullUrl[dId] = url;
-    try {
-      const followeeSettings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(dId);
-      if (!followeeSettings?.browsing_visible) return;
-      const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(dId);
-      myFollowers.forEach(r => {
-        const fSocks = discordIdToFollowSockets[r.follower_id];
-        if (fSocks) fSocks.forEach(sid => io.to(sid).emit('followee-tab-focus', { discordId: dId, username: currentUsername, url }));
-      });
-    } catch {}
+    const ts = socketToTabSession[socket.id];
+    if (ts && leaderTabs[dId]) {
+      leaderTabs[dId].set(ts, url); // keep this tab's URL current
+      leaderActiveTab[dId] = ts;
+    }
+    try { emitTabSnapshot(dId, currentUsername); } catch {}
   });
 
   socket.on('follow-start',     ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-start', { target, from: currentUsername || '' }); });
@@ -1223,10 +1245,20 @@ io.on('connection', (socket) => {
         discordIdToFollowSockets[dId].delete(socket.id);
         if (!discordIdToFollowSockets[dId].size) delete discordIdToFollowSockets[dId];
       }
+      // Remove this tab from the leader's tab set + resnapshot followers (a tab closed).
+      const ts = socketToTabSession[socket.id];
+      if (ts) {
+        delete socketToTabSession[socket.id];
+        if (leaderTabs[dId]) {
+          leaderTabs[dId].delete(ts);
+          if (leaderActiveTab[dId] === ts) delete leaderActiveTab[dId];
+          if (leaderTabs[dId].size === 0) { delete leaderTabs[dId]; delete leaderSnapshotSeq[dId]; delete leaderEpoch[dId]; }
+        }
+        try { emitTabSnapshot(dId, currentUsername); } catch {}
+      }
       if (discordIdToSocket[dId] === socket.id) {
         delete discordIdToSocket[dId];
         delete discordIdToFullUrl[dId];
-        delete discordIdLastNavSent[dId];
         try {
           const fRows = db.prepare(
             `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
