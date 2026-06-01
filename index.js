@@ -12,7 +12,7 @@ const io = new Server(server, {
 app.use(express.json());
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
@@ -49,7 +49,14 @@ db.exec(`
     sent_at         INTEGER DEFAULT (unixepoch() * 1000)
   );
   CREATE INDEX IF NOT EXISTS idx_dm_conv ON dm_messages(from_discord_id, to_discord_id);
+  CREATE TABLE IF NOT EXISTS blocks (
+    blocker_id TEXT NOT NULL,
+    blocked_id TEXT NOT NULL,
+    PRIMARY KEY (blocker_id, blocked_id)
+  );
 `);
+try { db.exec('ALTER TABLE users ADD COLUMN bio TEXT'); } catch {}
+try { db.exec('ALTER TABLE users ADD COLUMN status TEXT'); } catch {}
 
 function verifyToken(req) {
   const h = req.headers.authorization;
@@ -163,6 +170,60 @@ app.post('/friends/remove', (req, res) => {
   const { other } = req.body;
   try {
     db.prepare('DELETE FROM friends WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)').run(user.sub, other, other, user.sub);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ---- Profile endpoints ----
+app.get('/profile/:discordId', (req, res) => {
+  try {
+    const row = db.prepare('SELECT discord_id, username, avatar, bio, status FROM users WHERE discord_id = ?').get(req.params.discordId);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.json(row);
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.put('/profile', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { bio, status } = req.body;
+  try {
+    db.prepare('UPDATE users SET bio = ?, status = ?, updated_at = unixepoch() WHERE discord_id = ?')
+      .run((bio || '').slice(0, 160) || null, (status || '').slice(0, 60) || null, user.sub);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ---- Block endpoints ----
+app.get('/blocks', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(
+      'SELECT b.blocked_id, u.username FROM blocks b LEFT JOIN users u ON u.discord_id = b.blocked_id WHERE b.blocker_id = ?'
+    ).all(user.sub);
+    res.json(rows.map(r => ({ discordId: r.blocked_id, username: r.username || null })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/blocks', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { blocked } = req.body;
+  if (!blocked || blocked === user.sub) return res.status(400).json({ error: 'Invalid' });
+  try {
+    db.prepare('INSERT OR IGNORE INTO blocks (blocker_id, blocked_id) VALUES (?, ?)').run(user.sub, blocked);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.delete('/blocks', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const blockedId = req.query.blocked;
+  if (!blockedId) return res.status(400).json({ error: 'Missing blocked param' });
+  try {
+    db.prepare('DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?').run(user.sub, blockedId);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -401,6 +462,16 @@ io.on('connection', (socket) => {
 
   socket.on('dm-open', ({ to, roomId, text, toDiscordId }) => {
     if (!roomId) return;
+    const senderDiscordId = socketToDiscordId[socket.id];
+    if (senderDiscordId) {
+      let recipientDiscordId = toDiscordId;
+      if (!recipientDiscordId) {
+        try { const row = db.prepare('SELECT discord_id FROM users WHERE username = ?').get(to); recipientDiscordId = row?.discord_id; } catch {}
+      }
+      if (recipientDiscordId) {
+        try { if (db.prepare('SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?').get(recipientDiscordId, senderDiscordId)) return; } catch {}
+      }
+    }
     socket.join(roomId);
     if (!socketDmRooms[socket.id]) socketDmRooms[socket.id] = new Set();
     socketDmRooms[socket.id].add(roomId);
@@ -425,6 +496,10 @@ io.on('connection', (socket) => {
 
   socket.on('dm-message', ({ roomId, from, text, toDiscordId }) => {
     if (!roomId || !text) return;
+    const senderDiscordId = socketToDiscordId[socket.id];
+    if (senderDiscordId && toDiscordId) {
+      try { if (db.prepare('SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?').get(toDiscordId, senderDiscordId)) return; } catch {}
+    }
     const ts = Date.now();
     socket.to(roomId).emit('dm-message', { roomId, from, text, timestamp: ts });
     const fromDiscordId = socketToDiscordId[socket.id];
