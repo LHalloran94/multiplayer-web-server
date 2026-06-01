@@ -1,6 +1,7 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const server = http.createServer(app);
@@ -8,14 +9,64 @@ const io = new Server(server, {
   cors: { origin: '*' }
 });
 
-const roomUsers = {};
+app.use(express.json());
+
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '';
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
+
+// ---- Discord OAuth endpoint ----
+app.post('/auth/discord', async (req, res) => {
+  const { code, redirectUri } = req.body;
+  if (!code || !redirectUri) return res.status(400).json({ error: 'Missing code or redirectUri' });
+  if (!DISCORD_CLIENT_SECRET) return res.status(500).json({ error: 'Auth not configured on server' });
+
+  try {
+    const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        client_id: DISCORD_CLIENT_ID,
+        client_secret: DISCORD_CLIENT_SECRET,
+        grant_type: 'authorization_code',
+        code,
+        redirect_uri: redirectUri
+      })
+    });
+    const tokenData = await tokenRes.json();
+    if (!tokenRes.ok) return res.status(400).json({ error: tokenData.error_description || 'Token exchange failed' });
+
+    const userRes = await fetch('https://discord.com/api/users/@me', {
+      headers: { Authorization: `Bearer ${tokenData.access_token}` }
+    });
+    const user = await userRes.json();
+    if (!userRes.ok) return res.status(400).json({ error: 'Failed to fetch Discord profile' });
+
+    const avatarUrl = user.avatar
+      ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png`
+      : null;
+
+    const token = jwt.sign(
+      { sub: user.id, username: user.username, avatar: avatarUrl },
+      JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+
+    res.json({ jwt: token, username: user.username, avatar: avatarUrl });
+  } catch (err) {
+    console.error('[auth/discord]', err);
+    res.status(500).json({ error: 'Internal error' });
+  }
+});
+
+const roomUsers = {};       // roomId → { socketId: { username, verified, avatar } }
 const roomHistory = {};
 const roomAnnotations = {};
 const roomSprays = {};
 const roomMedia = {};
 const roomAvatars = {};
-const roomVoice = {}; // roomId → { socketId: username }
-const userCurrentFullUrl = {}; // username → full href (for follow-across-pages)
+const roomVoice = {};
+const userCurrentFullUrl = {};
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
@@ -29,14 +80,28 @@ io.on('connection', (socket) => {
   let currentRoom = null;
   let currentUsername = null;
 
-  socket.on('join', ({ url, fullUrl, username }) => {
+  socket.on('join', ({ url, fullUrl, username, token }) => {
+    let verified = false;
+    let avatar = null;
+
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        username = decoded.username;
+        avatar = decoded.avatar || null;
+        verified = true;
+      } catch {
+        // invalid/expired token — fall through as anonymous
+      }
+    }
+
     currentRoom = url;
     currentUsername = username;
     socket.join(currentRoom);
-    socket.join('user:' + username); // personal channel for follow-across-pages
+    socket.join('user:' + username);
     userCurrentFullUrl[username] = fullUrl || url;
     if (!roomUsers[currentRoom]) roomUsers[currentRoom] = {};
-    roomUsers[currentRoom][socket.id] = username;
+    roomUsers[currentRoom][socket.id] = { username, verified, avatar };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomAnnotations[currentRoom]) socket.emit('annotations-init', roomAnnotations[currentRoom]);
     if (roomSprays[currentRoom]) socket.emit('sprays-init', roomSprays[currentRoom]);
@@ -45,9 +110,8 @@ io.on('connection', (socket) => {
     if (roomVoice[currentRoom] && Object.keys(roomVoice[currentRoom]).length) socket.emit('voice-init', roomVoice[currentRoom]);
     broadcastPresence(currentRoom);
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
-    // Notify anyone following this user of their new location
     socket.to('user:' + username).emit('user-location', { url: userCurrentFullUrl[username] });
-    console.log(`[join] ${username} joined room: ${currentRoom}`);
+    console.log(`[join] ${username} (verified:${verified}) joined room: ${currentRoom}`);
   });
 
   socket.on('message', ({ text, username }) => {
@@ -74,6 +138,11 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('reaction', { emoji, x, y, username, source });
   });
 
+  socket.on('soundboard', ({ soundIndex, label, username }) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('soundboard', { soundIndex, label, username });
+  });
+
   socket.on('highlight', ({ text, username }) => {
     if (!currentRoom) return;
     socket.to(currentRoom).emit('highlight', { text, username });
@@ -93,11 +162,7 @@ io.on('connection', (socket) => {
     if (!currentRoom) return;
     if (roomAnnotations[currentRoom]) {
       const ann = roomAnnotations[currentRoom].find(a => a.id === id);
-      if (ann) {
-        ann.selector = selector;
-        ann.offsetX = offsetX;
-        ann.offsetY = offsetY;
-      }
+      if (ann) { ann.selector = selector; ann.offsetX = offsetX; ann.offsetY = offsetY; }
     }
     io.to(currentRoom).emit('annotation-move', { id, selector, offsetX, offsetY });
   });
@@ -111,21 +176,9 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('annotation-delete', { id });
   });
 
-  // draw-start/points/end are relayed only (not stored — strokes are ephemeral)
-  socket.on('draw-start', (data) => {
-    if (!currentRoom) return;
-    socket.to(currentRoom).emit('draw-start', data);
-  });
-
-  socket.on('draw-points', (data) => {
-    if (!currentRoom) return;
-    socket.to(currentRoom).emit('draw-points', data);
-  });
-
-  socket.on('draw-end', (data) => {
-    if (!currentRoom) return;
-    socket.to(currentRoom).emit('draw-end', data);
-  });
+  socket.on('draw-start',  (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-start',  data); });
+  socket.on('draw-points', (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-points', data); });
+  socket.on('draw-end',    (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-end',    data); });
 
   socket.on('spray-add', ({ id, content, size, docX, docY, username }) => {
     if (!currentRoom) return;
@@ -180,15 +233,11 @@ io.on('connection', (socket) => {
   socket.on('follow-start',     ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-start', { target, from: currentUsername || '' }); });
   socket.on('follow-end',       ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-end',   { target, from: currentUsername || '' }); });
 
-  // Personal channel subscription for follow-across-pages
   socket.on('follow-subscribe', ({ target }) => {
     socket.join('user:' + target);
-    // Immediately tell this socket where the target currently is (if known)
     if (userCurrentFullUrl[target]) socket.emit('user-location', { url: userCurrentFullUrl[target] });
   });
-  socket.on('follow-unsubscribe', ({ target }) => {
-    socket.leave('user:' + target);
-  });
+  socket.on('follow-unsubscribe', ({ target }) => { socket.leave('user:' + target); });
 
   socket.on('disconnect', () => {
     if (currentRoom) {
