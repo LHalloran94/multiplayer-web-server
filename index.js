@@ -735,7 +735,8 @@ const roomVoice = {};
 const userCurrentFullUrl = {};
 const socketDmRooms = {};      // socketId → Set of DM roomIds
 const socketToDiscordId = {};  // socketId → discordId
-const discordIdToSocket = {};  // discordId → socketId
+const discordIdToSocket = {};       // discordId → socketId (latest socket, for DMs/invites/etc.)
+const discordIdToFollowSockets = {}; // discordId → Set<socketId> (all active tabs, for followee-nav)
 const discordIdToFullUrl = {}; // discordId → current full URL
 const discordIdLastNavSent = {}; // discordId → { url, ts } — dedup nav+join double-fires
 const MAX_HISTORY = 50;
@@ -769,6 +770,8 @@ io.on('connection', (socket) => {
         db.prepare('INSERT OR REPLACE INTO users (discord_id, username, avatar, updated_at) VALUES (?, ?, ?, unixepoch())').run(discordId, username, avatar);
         socketToDiscordId[socket.id] = discordId;
         discordIdToSocket[discordId] = socket.id;
+        if (!discordIdToFollowSockets[discordId]) discordIdToFollowSockets[discordId] = new Set();
+        discordIdToFollowSockets[discordId].add(socket.id);
         discordIdToFullUrl[discordId] = fullUrl || url;
       } catch {
         // invalid/expired token — fall through as anonymous
@@ -867,9 +870,8 @@ io.on('connection', (socket) => {
           if (followeeSettings?.browsing_visible) {
             const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(discordId);
             myFollowers.forEach(r => {
-              const fs = discordIdToSocket[r.follower_id];
-              // wasAlreadyConnected=true means the original tab is still open → this is a new-tab load
-              if (fs) io.to(fs).emit('followee-nav', { discordId, username, url: joinUrl, newTab: wasAlreadyConnected });
+              const fSocks = discordIdToFollowSockets[r.follower_id];
+              if (fSocks) fSocks.forEach(sid => io.to(sid).emit('followee-nav', { discordId, username, url: joinUrl, newTab: wasAlreadyConnected }));
             });
           }
         }
@@ -1153,8 +1155,8 @@ io.on('connection', (socket) => {
         if (followeeSettings?.browsing_visible) {
           const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(dId);
           myFollowers.forEach(r => {
-            const fs = discordIdToSocket[r.follower_id];
-            if (fs) io.to(fs).emit('followee-nav', { discordId: dId, username, url, newTab: !!newTab });
+            const fSocks = discordIdToFollowSockets[r.follower_id];
+            if (fSocks) fSocks.forEach(sid => io.to(sid).emit('followee-nav', { discordId: dId, username, url, newTab: !!newTab }));
           });
         }
       } catch {}
@@ -1191,6 +1193,10 @@ io.on('connection', (socket) => {
     const dId = socketToDiscordId[socket.id];
     if (dId) {
       delete socketToDiscordId[socket.id];
+      if (discordIdToFollowSockets[dId]) {
+        discordIdToFollowSockets[dId].delete(socket.id);
+        if (!discordIdToFollowSockets[dId].size) delete discordIdToFollowSockets[dId];
+      }
       if (discordIdToSocket[dId] === socket.id) {
         delete discordIdToSocket[dId];
         delete discordIdToFullUrl[dId];
