@@ -54,6 +54,26 @@ db.exec(`
     blocked_id TEXT NOT NULL,
     PRIMARY KEY (blocker_id, blocked_id)
   );
+  CREATE TABLE IF NOT EXISTS rooms (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    created_at INTEGER DEFAULT (unixepoch())
+  );
+  CREATE TABLE IF NOT EXISTS room_members (
+    room_id TEXT NOT NULL,
+    discord_id TEXT NOT NULL,
+    joined_at INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (room_id, discord_id)
+  );
+  CREATE TABLE IF NOT EXISTS room_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    room_id TEXT NOT NULL,
+    from_discord_id TEXT NOT NULL,
+    text TEXT NOT NULL,
+    sent_at INTEGER DEFAULT (unixepoch() * 1000)
+  );
+  CREATE INDEX IF NOT EXISTS idx_room_msgs ON room_messages(room_id, sent_at);
 `);
 try { db.exec('ALTER TABLE users ADD COLUMN bio TEXT'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN status TEXT'); } catch {}
@@ -62,6 +82,15 @@ function verifyToken(req) {
   const h = req.headers.authorization;
   if (!h || !h.startsWith('Bearer ')) return null;
   try { return jwt.verify(h.slice(7), JWT_SECRET); } catch { return null; }
+}
+
+function generateRoomCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code;
+  do {
+    code = Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  } while (db.prepare('SELECT 1 FROM rooms WHERE id = ?').get(code));
+  return code;
 }
 
 // ---- Discord OAuth endpoint ----
@@ -228,6 +257,98 @@ app.delete('/blocks', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ---- Private room endpoints ----
+app.post('/rooms', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
+  try {
+    const id = generateRoomCode();
+    const trimmed = name.trim().slice(0, 40);
+    db.prepare('INSERT INTO rooms (id, name, owner_id) VALUES (?, ?, ?)').run(id, trimmed, user.sub);
+    db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(id, user.sub);
+    res.json({ id, name: trimmed, owner_id: user.sub, member_count: 1 });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/rooms', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(`
+      SELECT r.id, r.name, r.owner_id,
+             (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count
+      FROM rooms r
+      JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
+      ORDER BY r.created_at ASC
+    `).all(user.sub);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/rooms/join', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'Code required' });
+  try {
+    const room = db.prepare('SELECT id, name, owner_id FROM rooms WHERE id = ?').get(code.toUpperCase().trim());
+    if (!room) return res.status(404).json({ error: 'Room not found' });
+    db.prepare('INSERT OR IGNORE INTO room_members (room_id, discord_id) VALUES (?, ?)').run(room.id, user.sub);
+    const memberCount = db.prepare('SELECT COUNT(*) as c FROM room_members WHERE room_id = ?').get(room.id).c;
+    res.json({ ...room, member_count: memberCount });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/rooms/:id/leave', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id } = req.params;
+  try {
+    db.prepare('DELETE FROM room_members WHERE room_id = ? AND discord_id = ?').run(id, user.sub);
+    const count = db.prepare('SELECT COUNT(*) as c FROM room_members WHERE room_id = ?').get(id).c;
+    if (count === 0) {
+      db.prepare('DELETE FROM room_messages WHERE room_id = ?').run(id);
+      db.prepare('DELETE FROM rooms WHERE id = ?').run(id);
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.delete('/rooms/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id } = req.params;
+  try {
+    const room = db.prepare('SELECT owner_id FROM rooms WHERE id = ?').get(id);
+    if (!room) return res.status(404).json({ error: 'Not found' });
+    if (room.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+    db.prepare('DELETE FROM room_messages WHERE room_id = ?').run(id);
+    db.prepare('DELETE FROM room_members WHERE room_id = ?').run(id);
+    db.prepare('DELETE FROM rooms WHERE id = ?').run(id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/rooms/:id/messages', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id } = req.params;
+  try {
+    const member = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(id, user.sub);
+    if (!member) return res.status(403).json({ error: 'Not a member' });
+    const rows = db.prepare(`
+      SELECT rm.from_discord_id, u.username, rm.text, rm.sent_at
+      FROM room_messages rm
+      LEFT JOIN users u ON u.discord_id = rm.from_discord_id
+      WHERE rm.room_id = ?
+      ORDER BY rm.sent_at ASC LIMIT 100
+    `).all(id);
+    res.json(rows.map(r => ({ fromDiscordId: r.from_discord_id, username: r.username || 'Unknown', text: r.text, ts: r.sent_at })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 app.delete('/dms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -339,6 +460,18 @@ io.on('connection', (socket) => {
           .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id], url: discordIdToFullUrl[r.discord_id] || null }));
         socket.emit('friends-init', friendsData);
       } catch (e) { console.error('[friends-init]', e); }
+
+      // Private rooms
+      try {
+        const userRooms = db.prepare(`
+          SELECT r.id, r.name, r.owner_id,
+                 (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count
+          FROM rooms r
+          JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
+          ORDER BY r.created_at ASC
+        `).all(discordId);
+        socket.emit('private-rooms-init', userRooms);
+      } catch (e) { console.error('[private-rooms-init]', e); }
     }
 
     console.log(`[join] ${username} (verified:${verified}) joined room: ${currentRoom}`);
@@ -507,6 +640,26 @@ io.on('connection', (socket) => {
       try { db.prepare('INSERT INTO dm_messages (from_discord_id, to_discord_id, text, sent_at) VALUES (?,?,?,?)').run(fromDiscordId, toDiscordId, text, ts); } catch {}
     }
   });
+  socket.on('private-room-connect', ({ roomId }) => {
+    socket.join('proom:' + roomId);
+  });
+  socket.on('private-room-disconnect', ({ roomId }) => {
+    socket.leave('proom:' + roomId);
+  });
+  socket.on('private-room-message', ({ roomId, text }) => {
+    const senderDiscordId = socketToDiscordId[socket.id];
+    if (!senderDiscordId || !roomId || !text) return;
+    try {
+      const member = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(roomId, senderDiscordId);
+      if (!member) return;
+      const senderUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(senderDiscordId);
+      const username = senderUser?.username || currentUsername;
+      const ts = Date.now();
+      db.prepare('INSERT INTO room_messages (room_id, from_discord_id, text, sent_at) VALUES (?, ?, ?, ?)').run(roomId, senderDiscordId, text.slice(0, 2000), ts);
+      socket.to('proom:' + roomId).emit('private-room-message', { roomId, from: username, fromDiscordId: senderDiscordId, text, timestamp: ts });
+    } catch (e) { console.error('[private-room-message]', e); }
+  });
+
   socket.on('nav', ({ url, username }) => {
     if (currentRoom) socket.to(currentRoom).emit('nav', { url, username });
     const dId = socketToDiscordId[socket.id];
