@@ -737,6 +737,7 @@ const socketDmRooms = {};      // socketId → Set of DM roomIds
 const socketToDiscordId = {};  // socketId → discordId
 const discordIdToSocket = {};  // discordId → socketId
 const discordIdToFullUrl = {}; // discordId → current full URL
+const discordIdLastNavSent = {}; // discordId → { url, ts } — dedup nav+join double-fires
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
@@ -854,15 +855,23 @@ io.on('connection', (socket) => {
         socket.emit('followers-init', myFollowersList.map(r => ({ discordId: r.follower_id, username: r.username })));
       } catch (e) { console.error('[follows-init]', e); }
 
-      // Follows: notify this user's followers they're online (newTab=wasAlreadyConnected means they opened a new tab)
+      // Follows: notify followers of this user's new page load.
+      // Skip if a 'nav' event already broadcast this URL recently (link-click nav fires both
+      // nav + join; address-bar nav only fires join, so that still goes through).
       try {
-        const followeeSettings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(discordId);
-        if (followeeSettings?.browsing_visible) {
-          const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(discordId);
-          myFollowers.forEach(r => {
-            const fs = discordIdToSocket[r.follower_id];
-            if (fs) io.to(fs).emit('followee-nav', { discordId, username, url: fullUrl || url, newTab: wasAlreadyConnected });
-          });
+        const navKey = discordIdLastNavSent[discordId];
+        const joinUrl = fullUrl || url;
+        const alreadySent = navKey && navKey.url === joinUrl && Date.now() - navKey.ts < 3000;
+        if (!alreadySent) {
+          const followeeSettings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(discordId);
+          if (followeeSettings?.browsing_visible) {
+            const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(discordId);
+            myFollowers.forEach(r => {
+              const fs = discordIdToSocket[r.follower_id];
+              // wasAlreadyConnected=true means the original tab is still open → this is a new-tab load
+              if (fs) io.to(fs).emit('followee-nav', { discordId, username, url: joinUrl, newTab: wasAlreadyConnected });
+            });
+          }
         }
       } catch (e) { console.error('[follows-online]', e); }
     }
@@ -1137,8 +1146,9 @@ io.on('connection', (socket) => {
           if (fs) io.to(fs).emit('friend-location', { discord_id: dId, url });
         });
       } catch {}
-      // Notify followers
+      // Notify followers — record URL first so join handler can dedup
       try {
+        discordIdLastNavSent[dId] = { url, ts: Date.now() };
         const followeeSettings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(dId);
         if (followeeSettings?.browsing_visible) {
           const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(dId);
@@ -1184,6 +1194,7 @@ io.on('connection', (socket) => {
       if (discordIdToSocket[dId] === socket.id) {
         delete discordIdToSocket[dId];
         delete discordIdToFullUrl[dId];
+        delete discordIdLastNavSent[dId];
         try {
           const fRows = db.prepare(
             `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
