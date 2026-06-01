@@ -15,6 +15,33 @@ const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '';
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
 
+// SQLite (built-in node:sqlite, Node ≥ 22.5) — mount a Railway Volume at /data and set DB_PATH=/data/db.sqlite
+const { DatabaseSync } = require('node:sqlite');
+const db = new DatabaseSync(process.env.DB_PATH || './db.sqlite');
+db.exec('PRAGMA journal_mode = WAL');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    discord_id TEXT PRIMARY KEY,
+    username   TEXT NOT NULL,
+    avatar     TEXT,
+    updated_at INTEGER DEFAULT (unixepoch())
+  );
+  CREATE TABLE IF NOT EXISTS friends (
+    from_id    TEXT NOT NULL,
+    to_id      TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (from_id, to_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_friends_to ON friends(to_id);
+`);
+
+function verifyToken(req) {
+  const h = req.headers.authorization;
+  if (!h || !h.startsWith('Bearer ')) return null;
+  try { return jwt.verify(h.slice(7), JWT_SECRET); } catch { return null; }
+}
+
 // ---- Discord OAuth endpoint ----
 app.post('/auth/discord', async (req, res) => {
   const { code, redirectUri } = req.body;
@@ -59,7 +86,73 @@ app.post('/auth/discord', async (req, res) => {
   }
 });
 
-const roomUsers = {};       // roomId → { socketId: { username, verified, avatar } }
+// ---- Friends endpoints ----
+app.get('/friends', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(`
+      SELECT u.discord_id, u.username, u.avatar, f.status,
+             CASE WHEN f.from_id = ? THEN 0 ELSE 1 END as incoming
+      FROM friends f
+      JOIN users u ON u.discord_id = CASE WHEN f.from_id = ? THEN f.to_id ELSE f.from_id END
+      WHERE f.from_id = ? OR f.to_id = ?
+    `).all(user.sub, user.sub, user.sub, user.sub);
+    res.json(rows.map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id] })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/friends/request', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { to } = req.body;
+  if (!to || to === user.sub) return res.status(400).json({ error: 'Invalid' });
+  try {
+    const target = db.prepare('SELECT discord_id FROM users WHERE discord_id = ?').get(to);
+    if (!target) return res.status(404).json({ error: 'User not found' });
+    db.prepare('INSERT INTO friends (from_id, to_id) VALUES (?, ?)').run(user.sub, to);
+    const targetSocket = discordIdToSocket[to];
+    if (targetSocket) {
+      io.to(targetSocket).emit('friend-request', {
+        from: { discord_id: user.sub, username: user.username, avatar: user.avatar || null }
+      });
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    if (e.code && e.code.startsWith('SQLITE_CONSTRAINT')) return res.status(409).json({ error: 'Already sent' });
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.post('/friends/accept', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { from } = req.body;
+  try {
+    const result = db.prepare(`UPDATE friends SET status='accepted' WHERE from_id=? AND to_id=? AND status='pending'`).run(from, user.sub);
+    if (!result.changes) return res.status(404).json({ error: 'Not found' });
+    const fromSocket = discordIdToSocket[from];
+    if (fromSocket) {
+      const me = db.prepare('SELECT username, avatar FROM users WHERE discord_id = ?').get(user.sub);
+      io.to(fromSocket).emit('friend-accepted', {
+        by: { discord_id: user.sub, username: me?.username || user.username, avatar: me?.avatar || null }
+      });
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/friends/remove', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { other } = req.body;
+  try {
+    db.prepare('DELETE FROM friends WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)').run(user.sub, other, other, user.sub);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+const roomUsers = {};       // roomId → { socketId: { username, verified, avatar, discord_id } }
 const roomHistory = {};
 const roomAnnotations = {};
 const roomSprays = {};
@@ -67,7 +160,9 @@ const roomMedia = {};
 const roomAvatars = {};
 const roomVoice = {};
 const userCurrentFullUrl = {};
-const socketDmRooms = {};   // socketId → Set of DM roomIds
+const socketDmRooms = {};      // socketId → Set of DM roomIds
+const socketToDiscordId = {};  // socketId → discordId
+const discordIdToSocket = {};  // discordId → socketId
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
@@ -84,14 +179,19 @@ io.on('connection', (socket) => {
   socket.on('join', ({ url, fullUrl, username, token }) => {
     let verified = false;
     let avatar = null;
+    let discordId = null;
 
     if (token) {
       try {
         const decoded = jwt.verify(token, JWT_SECRET);
         avatar = decoded.avatar || null;
         verified = true;
-        // Fall back to Discord username only if client sent nothing
+        discordId = decoded.sub;
         if (!username || !username.trim()) username = decoded.username;
+        // Upsert user in DB
+        db.prepare('INSERT OR REPLACE INTO users (discord_id, username, avatar, updated_at) VALUES (?, ?, ?, unixepoch())').run(discordId, username, avatar);
+        socketToDiscordId[socket.id] = discordId;
+        discordIdToSocket[discordId] = socket.id;
       } catch {
         // invalid/expired token — fall through as anonymous
       }
@@ -103,7 +203,7 @@ io.on('connection', (socket) => {
     socket.join('user:' + username);
     userCurrentFullUrl[username] = fullUrl || url;
     if (!roomUsers[currentRoom]) roomUsers[currentRoom] = {};
-    roomUsers[currentRoom][socket.id] = { username, verified, avatar };
+    roomUsers[currentRoom][socket.id] = { username, verified, avatar, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomAnnotations[currentRoom]) socket.emit('annotations-init', roomAnnotations[currentRoom]);
     if (roomSprays[currentRoom]) socket.emit('sprays-init', roomSprays[currentRoom]);
@@ -113,6 +213,30 @@ io.on('connection', (socket) => {
     broadcastPresence(currentRoom);
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
     socket.to('user:' + username).emit('user-location', { url: userCurrentFullUrl[username] });
+
+    // Friends: notify online friends + send friends list to joiner
+    if (discordId) {
+      try {
+        const acceptedFriends = db.prepare(
+          `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
+           FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
+        ).all(discordId, discordId, discordId);
+        acceptedFriends.forEach(r => {
+          const fs = discordIdToSocket[r.fid];
+          if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar });
+        });
+        const friendsData = db.prepare(`
+          SELECT u.discord_id, u.username, u.avatar, f.status,
+                 CASE WHEN f.from_id=? THEN 0 ELSE 1 END as incoming
+          FROM friends f
+          JOIN users u ON u.discord_id = CASE WHEN f.from_id=? THEN f.to_id ELSE f.from_id END
+          WHERE f.from_id=? OR f.to_id=?
+        `).all(discordId, discordId, discordId, discordId)
+          .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id] }));
+        socket.emit('friends-init', friendsData);
+      } catch (e) { console.error('[friends-init]', e); }
+    }
+
     console.log(`[join] ${username} (verified:${verified}) joined room: ${currentRoom}`);
   });
 
@@ -280,6 +404,24 @@ io.on('connection', (socket) => {
         socket.to(roomId).emit('dm-user-left', { roomId, from: currentUsername });
       }
       delete socketDmRooms[socket.id];
+    }
+    // Friends: notify accepted friends this user went offline
+    const dId = socketToDiscordId[socket.id];
+    if (dId) {
+      delete socketToDiscordId[socket.id];
+      if (discordIdToSocket[dId] === socket.id) {
+        delete discordIdToSocket[dId];
+        try {
+          const fRows = db.prepare(
+            `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
+             FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
+          ).all(dId, dId, dId);
+          fRows.forEach(r => {
+            const fs = discordIdToSocket[r.fid];
+            if (fs) io.to(fs).emit('friend-offline', { discord_id: dId });
+          });
+        } catch {}
+      }
     }
     if (currentUsername) delete userCurrentFullUrl[currentUsername];
   });
