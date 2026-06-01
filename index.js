@@ -1177,8 +1177,12 @@ io.on('connection', (socket) => {
     } catch (e) { console.error('[group-invite]', e); }
   });
 
-  socket.on('nav', ({ url, username }) => {
+  socket.on('nav', ({ url, username, newTab }) => {
     if (currentRoom) socket.to(currentRoom).emit('nav', { url, username });
+    // A new-tab open (ctrl/middle/shift-click) fires from the CURRENT tab but doesn't change it —
+    // the new tab will register itself via its own `join`. Don't touch the current tab's URL here,
+    // or the snapshot's active tab would wrongly become the new link.
+    if (newTab) return;
     const dId = socketToDiscordId[socket.id];
     if (dId && url) {
       // Update this tab's URL in the leader's tab set.
