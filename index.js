@@ -232,12 +232,14 @@ io.on('connection', (socket) => {
   socket.on('voice-ice',        ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
   socket.on('voice-speaking',   ()                  => { if (currentRoom) socket.to(currentRoom).emit('voice-speaking', { id: socket.id }); });
 
-  socket.on('dm-open', ({ to, roomId }) => {
+  socket.on('dm-open', ({ to, roomId, text }) => {
     if (!roomId) return;
     socket.join(roomId);
     if (!socketDmRooms[socket.id]) socketDmRooms[socket.id] = new Set();
     socketDmRooms[socket.id].add(roomId);
-    socket.to('user:' + to).emit('dm-incoming', { from: currentUsername, roomId });
+    const payload = { from: currentUsername, roomId };
+    if (text) payload.firstMessage = { text, timestamp: Date.now() };
+    socket.to('user:' + to).emit('dm-incoming', payload);
   });
 
   socket.on('dm-join', ({ roomId }) => {
