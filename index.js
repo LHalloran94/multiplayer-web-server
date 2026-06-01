@@ -850,7 +850,7 @@ io.on('connection', (socket) => {
           FROM follows f JOIN users u ON u.discord_id = f.followee_id
           WHERE f.follower_id = ?
         `).all(discordId);
-        socket.emit('follows-init', userFollows.map(r => ({ discordId: r.followee_id, username: r.username, avatar: r.avatar })));
+        socket.emit('follows-init', userFollows.map(r => ({ discordId: r.followee_id, username: r.username, avatar: r.avatar, currentUrl: discordIdToFullUrl[r.followee_id] || null })));
 
         const myFollowersList = db.prepare(`
           SELECT f.follower_id, u.username
