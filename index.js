@@ -77,6 +77,9 @@ db.exec(`
 `);
 try { db.exec('ALTER TABLE users ADD COLUMN bio TEXT'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN status TEXT'); } catch {}
+try { db.exec('ALTER TABLE rooms ADD COLUMN public INTEGER DEFAULT 0'); } catch {}
+try { db.exec('ALTER TABLE rooms ADD COLUMN scope TEXT'); } catch {}
+try { db.exec('ALTER TABLE rooms ADD COLUMN description TEXT'); } catch {}
 
 function verifyToken(req) {
   const h = req.headers.authorization;
@@ -261,14 +264,31 @@ app.delete('/blocks', (req, res) => {
 app.post('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { name } = req.body;
+  const { name, description, public: isPublic, scope } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   try {
     const id = generateRoomCode();
-    const trimmed = name.trim().slice(0, 40);
-    db.prepare('INSERT INTO rooms (id, name, owner_id) VALUES (?, ?, ?)').run(id, trimmed, user.sub);
+    const trimmedName = name.trim().slice(0, 40);
+    const trimmedDesc = (description || '').trim().slice(0, 100) || null;
+    const pub = isPublic ? 1 : 0;
+    const roomScope = (isPublic && scope) ? scope.trim().slice(0, 253) : null;
+    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, description) VALUES (?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, trimmedDesc);
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(id, user.sub);
-    res.json({ id, name: trimmed, owner_id: user.sub, member_count: 1 });
+    res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, description: trimmedDesc });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/rooms/public', (req, res) => {
+  const hostname = (req.query.hostname || '').trim().toLowerCase();
+  try {
+    const rows = db.prepare(`
+      SELECT r.id, r.name, r.owner_id, r.scope, r.description,
+             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count
+      FROM rooms r
+      WHERE r.public = 1 AND (r.scope IS NULL OR r.scope = ?)
+      ORDER BY r.created_at DESC LIMIT 50
+    `).all(hostname || '');
+    res.json(rows);
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -277,7 +297,7 @@ app.get('/rooms', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id,
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description,
              (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count
       FROM rooms r
       JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
@@ -332,12 +352,16 @@ app.delete('/rooms/:id', (req, res) => {
 });
 
 app.get('/rooms/:id/messages', (req, res) => {
-  const user = verifyToken(req);
-  if (!user) return res.status(401).json({ error: 'Unauthorized' });
   const { id } = req.params;
   try {
-    const member = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(id, user.sub);
-    if (!member) return res.status(403).json({ error: 'Not a member' });
+    const room = db.prepare('SELECT public FROM rooms WHERE id = ?').get(id);
+    if (!room) return res.status(404).json({ error: 'Not found' });
+    if (!room.public) {
+      const user = verifyToken(req);
+      if (!user) return res.status(401).json({ error: 'Unauthorized' });
+      const member = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(id, user.sub);
+      if (!member) return res.status(403).json({ error: 'Not a member' });
+    }
     const rows = db.prepare(`
       SELECT rm.from_discord_id, u.username, rm.text, rm.sent_at
       FROM room_messages rm
@@ -464,7 +488,7 @@ io.on('connection', (socket) => {
       // Private rooms
       try {
         const userRooms = db.prepare(`
-          SELECT r.id, r.name, r.owner_id,
+          SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description,
                  (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count
           FROM rooms r
           JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
@@ -669,15 +693,24 @@ io.on('connection', (socket) => {
   });
   socket.on('private-room-message', ({ roomId, text }) => {
     const senderDiscordId = socketToDiscordId[socket.id];
-    if (!senderDiscordId || !roomId || !text) return;
+    if (!roomId || !text) return;
     try {
-      const member = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(roomId, senderDiscordId);
-      if (!member) return;
-      const senderUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(senderDiscordId);
-      const username = senderUser?.username || currentUsername;
+      const room = db.prepare('SELECT public FROM rooms WHERE id = ?').get(roomId);
+      if (!room) return;
+      if (!room.public) {
+        if (!senderDiscordId) return;
+        const member = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(roomId, senderDiscordId);
+        if (!member) return;
+      }
+      let username = currentUsername;
+      if (senderDiscordId) {
+        const senderUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(senderDiscordId);
+        username = senderUser?.username || currentUsername;
+      }
+      if (!username) return;
       const ts = Date.now();
-      db.prepare('INSERT INTO room_messages (room_id, from_discord_id, text, sent_at) VALUES (?, ?, ?, ?)').run(roomId, senderDiscordId, text.slice(0, 2000), ts);
-      socket.to('proom:' + roomId).emit('private-room-message', { roomId, from: username, fromDiscordId: senderDiscordId, text, timestamp: ts });
+      db.prepare('INSERT INTO room_messages (room_id, from_discord_id, text, sent_at) VALUES (?, ?, ?, ?)').run(roomId, senderDiscordId || null, text.slice(0, 2000), ts);
+      socket.to('proom:' + roomId).emit('private-room-message', { roomId, from: username, fromDiscordId: senderDiscordId || null, text, timestamp: ts });
     } catch (e) { console.error('[private-room-message]', e); }
   });
 
