@@ -752,7 +752,7 @@ io.on('connection', (socket) => {
   let currentRoom = null;
   let currentUsername = null;
 
-  socket.on('join', ({ url, fullUrl, username, token }) => {
+  socket.on('join', ({ url, fullUrl, username, token, visible }) => {
     let verified = false;
     let avatar = null;
     let discordId = null;
@@ -871,7 +871,14 @@ io.on('connection', (socket) => {
             const myFollowers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(discordId);
             myFollowers.forEach(r => {
               const fSocks = discordIdToFollowSockets[r.follower_id];
-              if (fSocks) fSocks.forEach(sid => io.to(sid).emit('followee-nav', { discordId, username, url: joinUrl, newTab: wasAlreadyConnected }));
+              if (fSocks) fSocks.forEach(sid => {
+                io.to(sid).emit('followee-nav', { discordId, username, url: joinUrl, newTab: wasAlreadyConnected });
+                // Leader opened this tab in the foreground — also send tab-focus so the follower
+                // switches to their mirror tab (pendingSwitch in background.js handles the race).
+                if (wasAlreadyConnected && visible) {
+                  io.to(sid).emit('followee-tab-focus', { discordId, username, url: joinUrl });
+                }
+              });
             });
           }
         }
