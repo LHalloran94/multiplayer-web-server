@@ -81,6 +81,32 @@ try { db.exec('ALTER TABLE rooms ADD COLUMN public INTEGER DEFAULT 0'); } catch 
 try { db.exec('ALTER TABLE rooms ADD COLUMN scope TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN description TEXT'); } catch {}
 
+db.exec(`
+  CREATE TABLE IF NOT EXISTS groups (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT,
+    owner_id    TEXT NOT NULL,
+    open        INTEGER DEFAULT 0,
+    created_at  INTEGER DEFAULT (unixepoch())
+  );
+  CREATE TABLE IF NOT EXISTS group_members (
+    group_id   TEXT NOT NULL,
+    discord_id TEXT NOT NULL,
+    role       TEXT DEFAULT 'member',
+    joined_at  INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (group_id, discord_id)
+  );
+  CREATE TABLE IF NOT EXISTS group_messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id        TEXT NOT NULL,
+    from_discord_id TEXT NOT NULL,
+    text            TEXT NOT NULL,
+    sent_at         INTEGER DEFAULT (unixepoch() * 1000)
+  );
+  CREATE INDEX IF NOT EXISTS idx_group_msgs ON group_messages(group_id, sent_at);
+`);
+
 function verifyToken(req) {
   const h = req.headers.authorization;
   if (!h || !h.startsWith('Bearer ')) return null;
@@ -93,6 +119,15 @@ function generateRoomCode() {
   do {
     code = Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   } while (db.prepare('SELECT 1 FROM rooms WHERE id = ?').get(code));
+  return code;
+}
+
+function generateGroupCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code;
+  do {
+    code = Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+  } while (db.prepare('SELECT 1 FROM groups WHERE id = ?').get(code));
   return code;
 }
 
@@ -373,6 +408,155 @@ app.get('/rooms/:id/messages', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ---- Groups endpoints ----
+app.post('/groups', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { name, description, open } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
+  try {
+    const id = generateGroupCode();
+    const trimmedName = name.trim().slice(0, 40);
+    const trimmedDesc = (description || '').trim().slice(0, 100) || null;
+    const isOpen = open ? 1 : 0;
+    db.prepare('INSERT INTO groups (id, name, description, owner_id, open) VALUES (?, ?, ?, ?, ?)').run(id, trimmedName, trimmedDesc, user.sub, isOpen);
+    db.prepare('INSERT INTO group_members (group_id, discord_id, role) VALUES (?, ?, ?)').run(id, user.sub, 'owner');
+    res.json({ id, name: trimmedName, description: trimmedDesc, owner_id: user.sub, open: isOpen, member_count: 1, role: 'owner' });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/groups', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(`
+      SELECT g.id, g.name, g.description, g.owner_id, g.open, gm.role,
+             (SELECT COUNT(*) FROM group_members gm2 WHERE gm2.group_id = g.id) as member_count
+      FROM groups g
+      JOIN group_members gm ON gm.group_id = g.id AND gm.discord_id = ?
+      ORDER BY g.created_at ASC
+    `).all(user.sub);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/groups/search', (req, res) => {
+  const q = (req.query.q || '').trim().slice(0, 40);
+  try {
+    const rows = db.prepare(`
+      SELECT g.id, g.name, g.description, g.open,
+             (SELECT COUNT(*) FROM group_members gm WHERE gm.group_id = g.id) as member_count
+      FROM groups g WHERE g.open = 1 AND g.name LIKE ?
+      ORDER BY member_count DESC LIMIT 20
+    `).all('%' + q + '%');
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/users/by-username', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const username = (req.query.username || '').trim();
+  if (!username) return res.status(400).json({ error: 'Missing username' });
+  try {
+    const row = db.prepare('SELECT discord_id FROM users WHERE username = ? COLLATE NOCASE').get(username);
+    if (!row) return res.status(404).json({ error: 'User not found' });
+    res.json({ discordId: row.discord_id });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/groups/join', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'Code required' });
+  try {
+    const group = db.prepare('SELECT id, name, description, owner_id, open FROM groups WHERE id = ?').get(code.toUpperCase().trim());
+    if (!group) return res.status(404).json({ error: 'Group not found' });
+    db.prepare('INSERT OR IGNORE INTO group_members (group_id, discord_id, role) VALUES (?, ?, ?)').run(group.id, user.sub, 'member');
+    const memberCount = db.prepare('SELECT COUNT(*) as c FROM group_members WHERE group_id = ?').get(group.id).c;
+    const role = db.prepare('SELECT role FROM group_members WHERE group_id = ? AND discord_id = ?').get(group.id, user.sub)?.role || 'member';
+    res.json({ ...group, member_count: memberCount, role });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/groups/:id/leave', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id } = req.params;
+  try {
+    const group = db.prepare('SELECT owner_id FROM groups WHERE id = ?').get(id);
+    if (!group) return res.status(404).json({ error: 'Not found' });
+    if (group.owner_id === user.sub) return res.status(400).json({ error: 'Owner cannot leave — delete the group instead' });
+    db.prepare('DELETE FROM group_members WHERE group_id = ? AND discord_id = ?').run(id, user.sub);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.delete('/groups/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id } = req.params;
+  try {
+    const group = db.prepare('SELECT owner_id FROM groups WHERE id = ?').get(id);
+    if (!group) return res.status(404).json({ error: 'Not found' });
+    if (group.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+    db.prepare('DELETE FROM group_messages WHERE group_id = ?').run(id);
+    db.prepare('DELETE FROM group_members WHERE group_id = ?').run(id);
+    db.prepare('DELETE FROM groups WHERE id = ?').run(id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/groups/:id/messages', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id } = req.params;
+  try {
+    const member = db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND discord_id = ?').get(id, user.sub);
+    if (!member) return res.status(403).json({ error: 'Not a member' });
+    const rows = db.prepare(`
+      SELECT gm.from_discord_id, u.username, gm.text, gm.sent_at
+      FROM group_messages gm
+      LEFT JOIN users u ON u.discord_id = gm.from_discord_id
+      WHERE gm.group_id = ? ORDER BY gm.sent_at ASC LIMIT 100
+    `).all(id);
+    res.json(rows.map(r => ({ fromDiscordId: r.from_discord_id, username: r.username || 'Unknown', text: r.text, ts: r.sent_at })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/groups/:id/members', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id } = req.params;
+  try {
+    const member = db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND discord_id = ?').get(id, user.sub);
+    if (!member) return res.status(403).json({ error: 'Not a member' });
+    const rows = db.prepare(`
+      SELECT gm.discord_id, gm.role, u.username, u.avatar
+      FROM group_members gm
+      LEFT JOIN users u ON u.discord_id = gm.discord_id
+      WHERE gm.group_id = ?
+      ORDER BY CASE gm.role WHEN 'owner' THEN 0 ELSE 1 END, gm.joined_at ASC
+    `).all(id);
+    res.json(rows.map(r => ({ discordId: r.discord_id, role: r.role, username: r.username || 'Unknown', avatar: r.avatar, online: !!discordIdToSocket[r.discord_id] })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.delete('/groups/:id/members/:discordId', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id, discordId } = req.params;
+  try {
+    const group = db.prepare('SELECT owner_id FROM groups WHERE id = ?').get(id);
+    if (!group) return res.status(404).json({ error: 'Not found' });
+    if (group.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+    if (discordId === user.sub) return res.status(400).json({ error: 'Cannot kick yourself' });
+    db.prepare('DELETE FROM group_members WHERE group_id = ? AND discord_id = ?').run(id, discordId);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 app.delete('/dms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
@@ -496,6 +680,18 @@ io.on('connection', (socket) => {
         `).all(discordId);
         socket.emit('private-rooms-init', userRooms);
       } catch (e) { console.error('[private-rooms-init]', e); }
+
+      // Groups
+      try {
+        const userGroups = db.prepare(`
+          SELECT g.id, g.name, g.description, g.owner_id, g.open, gm.role,
+                 (SELECT COUNT(*) FROM group_members gm2 WHERE gm2.group_id = g.id) as member_count
+          FROM groups g
+          JOIN group_members gm ON gm.group_id = g.id AND gm.discord_id = ?
+          ORDER BY g.created_at ASC
+        `).all(discordId);
+        socket.emit('groups-init', userGroups);
+      } catch (e) { console.error('[groups-init]', e); }
     }
 
     console.log(`[join] ${username} (verified:${verified}) joined room: ${currentRoom}`);
@@ -712,6 +908,45 @@ io.on('connection', (socket) => {
       db.prepare('INSERT INTO room_messages (room_id, from_discord_id, text, sent_at) VALUES (?, ?, ?, ?)').run(roomId, senderDiscordId || null, text.slice(0, 2000), ts);
       socket.to('proom:' + roomId).emit('private-room-message', { roomId, from: username, fromDiscordId: senderDiscordId || null, text, timestamp: ts });
     } catch (e) { console.error('[private-room-message]', e); }
+  });
+
+  socket.on('group-connect',    ({ groupId }) => { socket.join('pgroup:' + groupId); });
+  socket.on('group-disconnect', ({ groupId }) => { socket.leave('pgroup:' + groupId); });
+
+  socket.on('group-message', ({ groupId, text }) => {
+    const senderDiscordId = socketToDiscordId[socket.id];
+    if (!groupId || !text || !senderDiscordId) return;
+    try {
+      const member = db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND discord_id = ?').get(groupId, senderDiscordId);
+      if (!member) return;
+      const senderUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(senderDiscordId);
+      const username = senderUser?.username || currentUsername;
+      if (!username) return;
+      const ts = Date.now();
+      db.prepare('INSERT INTO group_messages (group_id, from_discord_id, text, sent_at) VALUES (?, ?, ?, ?)').run(groupId, senderDiscordId, text.slice(0, 2000), ts);
+      socket.to('pgroup:' + groupId).emit('group-message', { groupId, from: username, fromDiscordId: senderDiscordId, text, timestamp: ts });
+    } catch (e) { console.error('[group-message]', e); }
+  });
+
+  socket.on('group-invite', ({ toDiscordId, groupId }) => {
+    const senderDiscordId = socketToDiscordId[socket.id];
+    if (!senderDiscordId || !toDiscordId || !groupId) return;
+    try {
+      const member = db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND discord_id = ?').get(groupId, senderDiscordId);
+      if (!member) return;
+      const group = db.prepare('SELECT name FROM groups WHERE id = ?').get(groupId);
+      if (!group) return;
+      const sender = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(senderDiscordId);
+      const recipientSocket = discordIdToSocket[toDiscordId];
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('group-invite', {
+          groupId,
+          groupName: group.name,
+          fromDiscordId: senderDiscordId,
+          fromUsername: sender?.username || currentUsername
+        });
+      }
+    } catch (e) { console.error('[group-invite]', e); }
   });
 
   socket.on('nav', ({ url, username }) => {
