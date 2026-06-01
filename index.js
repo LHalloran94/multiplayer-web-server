@@ -170,6 +170,7 @@ const userCurrentFullUrl = {};
 const socketDmRooms = {};      // socketId → Set of DM roomIds
 const socketToDiscordId = {};  // socketId → discordId
 const discordIdToSocket = {};  // discordId → socketId
+const discordIdToFullUrl = {}; // discordId → current full URL
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
@@ -199,6 +200,7 @@ io.on('connection', (socket) => {
         db.prepare('INSERT OR REPLACE INTO users (discord_id, username, avatar, updated_at) VALUES (?, ?, ?, unixepoch())').run(discordId, username, avatar);
         socketToDiscordId[socket.id] = discordId;
         discordIdToSocket[discordId] = socket.id;
+        discordIdToFullUrl[discordId] = fullUrl || url;
       } catch {
         // invalid/expired token — fall through as anonymous
       }
@@ -230,7 +232,7 @@ io.on('connection', (socket) => {
         ).all(discordId, discordId, discordId);
         acceptedFriends.forEach(r => {
           const fs = discordIdToSocket[r.fid];
-          if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar });
+          if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar, url: fullUrl || url });
         });
         const friendsData = db.prepare(`
           SELECT u.discord_id, u.username, u.avatar, f.status,
@@ -239,7 +241,7 @@ io.on('connection', (socket) => {
           JOIN users u ON u.discord_id = CASE WHEN f.from_id=? THEN f.to_id ELSE f.from_id END
           WHERE f.from_id=? OR f.to_id=?
         `).all(discordId, discordId, discordId, discordId)
-          .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id] }));
+          .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id], url: discordIdToFullUrl[r.discord_id] || null }));
         socket.emit('friends-init', friendsData);
       } catch (e) { console.error('[friends-init]', e); }
     }
@@ -384,7 +386,23 @@ io.on('connection', (socket) => {
     if (!roomId || !text) return;
     socket.to(roomId).emit('dm-message', { roomId, from, text, timestamp: Date.now() });
   });
-  socket.on('nav',              ({ url, username }) => { if (currentRoom) socket.to(currentRoom).emit('nav', { url, username }); });
+  socket.on('nav', ({ url, username }) => {
+    if (currentRoom) socket.to(currentRoom).emit('nav', { url, username });
+    const dId = socketToDiscordId[socket.id];
+    if (dId && url) {
+      discordIdToFullUrl[dId] = url;
+      try {
+        const fRows = db.prepare(
+          `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
+           FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
+        ).all(dId, dId, dId);
+        fRows.forEach(r => {
+          const fs = discordIdToSocket[r.fid];
+          if (fs) io.to(fs).emit('friend-location', { discord_id: dId, url });
+        });
+      } catch {}
+    }
+  });
   socket.on('follow-start',     ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-start', { target, from: currentUsername || '' }); });
   socket.on('follow-end',       ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-end',   { target, from: currentUsername || '' }); });
 
@@ -418,6 +436,7 @@ io.on('connection', (socket) => {
       delete socketToDiscordId[socket.id];
       if (discordIdToSocket[dId] === socket.id) {
         delete discordIdToSocket[dId];
+        delete discordIdToFullUrl[dId];
         try {
           const fRows = db.prepare(
             `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
