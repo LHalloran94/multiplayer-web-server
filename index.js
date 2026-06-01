@@ -41,6 +41,14 @@ db.exec(`
     PRIMARY KEY (from_id, to_id)
   );
   CREATE INDEX IF NOT EXISTS idx_friends_to ON friends(to_id);
+  CREATE TABLE IF NOT EXISTS dm_messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_discord_id TEXT NOT NULL,
+    to_discord_id   TEXT NOT NULL,
+    text            TEXT NOT NULL,
+    sent_at         INTEGER DEFAULT (unixepoch() * 1000)
+  );
+  CREATE INDEX IF NOT EXISTS idx_dm_conv ON dm_messages(from_discord_id, to_discord_id);
 `);
 
 function verifyToken(req) {
@@ -156,6 +164,21 @@ app.post('/friends/remove', (req, res) => {
   try {
     db.prepare('DELETE FROM friends WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)').run(user.sub, other, other, user.sub);
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.get('/dms', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const withId = req.query.with;
+  if (!withId) return res.status(400).json({ error: 'Missing with param' });
+  try {
+    const rows = db.prepare(`
+      SELECT from_discord_id, text, sent_at FROM dm_messages
+      WHERE (from_discord_id=? AND to_discord_id=?) OR (from_discord_id=? AND to_discord_id=?)
+      ORDER BY sent_at ASC LIMIT 200
+    `).all(user.sub, withId, withId, user.sub);
+    res.json(rows.map(r => ({ fromDiscordId: r.from_discord_id, text: r.text, ts: r.sent_at })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -365,13 +388,20 @@ io.on('connection', (socket) => {
   socket.on('voice-ice',        ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
   socket.on('voice-speaking',   ()                  => { if (currentRoom) socket.to(currentRoom).emit('voice-speaking', { id: socket.id }); });
 
-  socket.on('dm-open', ({ to, roomId, text }) => {
+  socket.on('dm-open', ({ to, roomId, text, toDiscordId }) => {
     if (!roomId) return;
     socket.join(roomId);
     if (!socketDmRooms[socket.id]) socketDmRooms[socket.id] = new Set();
     socketDmRooms[socket.id].add(roomId);
-    const payload = { from: currentUsername, roomId };
-    if (text) payload.firstMessage = { text, timestamp: Date.now() };
+    const fromDiscordId = socketToDiscordId[socket.id] || null;
+    const payload = { from: currentUsername, roomId, fromDiscordId };
+    if (text) {
+      const ts = Date.now();
+      payload.firstMessage = { text, timestamp: ts };
+      if (fromDiscordId && toDiscordId) {
+        try { db.prepare('INSERT INTO dm_messages (from_discord_id, to_discord_id, text, sent_at) VALUES (?,?,?,?)').run(fromDiscordId, toDiscordId, text, ts); } catch {}
+      }
+    }
     socket.to('user:' + to).emit('dm-incoming', payload);
   });
 
@@ -382,9 +412,14 @@ io.on('connection', (socket) => {
     socketDmRooms[socket.id].add(roomId);
   });
 
-  socket.on('dm-message', ({ roomId, from, text }) => {
+  socket.on('dm-message', ({ roomId, from, text, toDiscordId }) => {
     if (!roomId || !text) return;
-    socket.to(roomId).emit('dm-message', { roomId, from, text, timestamp: Date.now() });
+    const ts = Date.now();
+    socket.to(roomId).emit('dm-message', { roomId, from, text, timestamp: ts });
+    const fromDiscordId = socketToDiscordId[socket.id];
+    if (fromDiscordId && toDiscordId) {
+      try { db.prepare('INSERT INTO dm_messages (from_discord_id, to_discord_id, text, sent_at) VALUES (?,?,?,?)').run(fromDiscordId, toDiscordId, text, ts); } catch {}
+    }
   });
   socket.on('nav', ({ url, username }) => {
     if (currentRoom) socket.to(currentRoom).emit('nav', { url, username });
