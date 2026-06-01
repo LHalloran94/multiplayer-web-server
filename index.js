@@ -67,6 +67,7 @@ const roomMedia = {};
 const roomAvatars = {};
 const roomVoice = {};
 const userCurrentFullUrl = {};
+const socketDmRooms = {};   // socketId → Set of DM roomIds
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
@@ -87,9 +88,10 @@ io.on('connection', (socket) => {
     if (token) {
       try {
         const decoded = jwt.verify(token, JWT_SECRET);
-        username = decoded.username;
         avatar = decoded.avatar || null;
         verified = true;
+        // Fall back to Discord username only if client sent nothing
+        if (!username || !username.trim()) username = decoded.username;
       } catch {
         // invalid/expired token — fall through as anonymous
       }
@@ -229,6 +231,26 @@ io.on('connection', (socket) => {
   socket.on('voice-answer',     ({ to, sdp })       => { socket.to(to).emit('voice-answer',   { from: socket.id, sdp }); });
   socket.on('voice-ice',        ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
   socket.on('voice-speaking',   ()                  => { if (currentRoom) socket.to(currentRoom).emit('voice-speaking', { id: socket.id }); });
+
+  socket.on('dm-open', ({ to, roomId }) => {
+    if (!roomId) return;
+    socket.join(roomId);
+    if (!socketDmRooms[socket.id]) socketDmRooms[socket.id] = new Set();
+    socketDmRooms[socket.id].add(roomId);
+    socket.to('user:' + to).emit('dm-incoming', { from: currentUsername, roomId });
+  });
+
+  socket.on('dm-join', ({ roomId }) => {
+    if (!roomId) return;
+    socket.join(roomId);
+    if (!socketDmRooms[socket.id]) socketDmRooms[socket.id] = new Set();
+    socketDmRooms[socket.id].add(roomId);
+  });
+
+  socket.on('dm-message', ({ roomId, from, text }) => {
+    if (!roomId || !text) return;
+    socket.to(roomId).emit('dm-message', { roomId, from, text, timestamp: Date.now() });
+  });
   socket.on('nav',              ({ url, username }) => { if (currentRoom) socket.to(currentRoom).emit('nav', { url, username }); });
   socket.on('follow-start',     ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-start', { target, from: currentUsername || '' }); });
   socket.on('follow-end',       ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-end',   { target, from: currentUsername || '' }); });
@@ -250,6 +272,12 @@ io.on('connection', (socket) => {
       broadcastPresence(currentRoom);
       io.to(currentRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
+    }
+    if (socketDmRooms[socket.id]) {
+      for (const roomId of socketDmRooms[socket.id]) {
+        socket.to(roomId).emit('dm-user-left', { roomId, from: currentUsername });
+      }
+      delete socketDmRooms[socket.id];
     }
     if (currentUsername) delete userCurrentFullUrl[currentUsername];
   });
