@@ -640,6 +640,27 @@ io.on('connection', (socket) => {
       try { db.prepare('INSERT INTO dm_messages (from_discord_id, to_discord_id, text, sent_at) VALUES (?,?,?,?)').run(fromDiscordId, toDiscordId, text, ts); } catch {}
     }
   });
+  socket.on('room-invite', ({ toDiscordId, roomId }) => {
+    const senderDiscordId = socketToDiscordId[socket.id];
+    if (!senderDiscordId || !toDiscordId || !roomId) return;
+    try {
+      const member = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(roomId, senderDiscordId);
+      if (!member) return;
+      const room = db.prepare('SELECT name FROM rooms WHERE id = ?').get(roomId);
+      if (!room) return;
+      const sender = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(senderDiscordId);
+      const recipientSocket = discordIdToSocket[toDiscordId];
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('room-invite', {
+          roomId,
+          roomName: room.name,
+          fromDiscordId: senderDiscordId,
+          fromUsername: sender?.username || currentUsername
+        });
+      }
+    } catch (e) { console.error('[room-invite]', e); }
+  });
+
   socket.on('private-room-connect', ({ roomId }) => {
     socket.join('proom:' + roomId);
   });
