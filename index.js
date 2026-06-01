@@ -772,7 +772,9 @@ io.on('connection', (socket) => {
         discordIdToSocket[discordId] = socket.id;
         if (!discordIdToFollowSockets[discordId]) discordIdToFollowSockets[discordId] = new Set();
         discordIdToFollowSockets[discordId].add(socket.id);
-        discordIdToFullUrl[discordId] = fullUrl || url;
+        // discordIdToFullUrl is intentionally NOT set here — only nav + tab-focus events update it.
+        // If we set it in join, the tab-focus dedup check fires when the leader switches to a
+        // background tab (URL matches what join already set → followee-tab-focus never emitted).
       } catch {
         // invalid/expired token — fall through as anonymous
       }
