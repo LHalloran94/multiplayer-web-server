@@ -83,6 +83,7 @@ try { db.exec('ALTER TABLE rooms ADD COLUMN description TEXT'); } catch {}
 try { db.exec(`ALTER TABLE users ADD COLUMN follow_policy TEXT DEFAULT 'friends'`); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN follow_allowlist TEXT DEFAULT \'\''); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN browsing_visible INTEGER DEFAULT 1'); } catch {}
+try { db.exec('ALTER TABLE users ADD COLUMN social_links TEXT'); } catch {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS follows (
@@ -256,19 +257,32 @@ app.post('/friends/remove', (req, res) => {
 // ---- Profile endpoints ----
 app.get('/profile/:discordId', (req, res) => {
   try {
-    const row = db.prepare('SELECT discord_id, username, avatar, bio, status FROM users WHERE discord_id = ?').get(req.params.discordId);
+    const row = db.prepare('SELECT discord_id, username, avatar, bio, status, social_links FROM users WHERE discord_id = ?').get(req.params.discordId);
     if (!row) return res.status(404).json({ error: 'Not found' });
-    res.json(row);
+    let socialLinks = {};
+    try { if (row.social_links) socialLinks = JSON.parse(row.social_links); } catch {}
+    res.json({ ...row, social_links: socialLinks });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
 app.put('/profile', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { bio, status } = req.body;
+  const { bio, status, social_links } = req.body;
+  const ALLOWED_KEYS = ['twitter', 'github', 'twitch', 'youtube', 'instagram'];
+  let linksJson = null;
+  if (social_links && typeof social_links === 'object') {
+    const cleaned = {};
+    for (const k of ALLOWED_KEYS) {
+      if (social_links[k] && typeof social_links[k] === 'string') {
+        cleaned[k] = social_links[k].trim().slice(0, 64).replace(/^@/, '');
+      }
+    }
+    if (Object.keys(cleaned).length) linksJson = JSON.stringify(cleaned);
+  }
   try {
-    db.prepare('UPDATE users SET bio = ?, status = ?, updated_at = unixepoch() WHERE discord_id = ?')
-      .run((bio || '').slice(0, 160) || null, (status || '').slice(0, 60) || null, user.sub);
+    db.prepare('UPDATE users SET bio = ?, status = ?, social_links = ?, updated_at = unixepoch() WHERE discord_id = ?')
+      .run((bio || '').slice(0, 160) || null, (status || '').slice(0, 60) || null, linksJson, user.sub);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
