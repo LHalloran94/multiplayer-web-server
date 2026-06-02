@@ -1037,6 +1037,11 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('avatar-emote', { id: socket.id, emote });
   });
 
+  socket.on('avatar-interact', ({ type, targetId }) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('avatar-interact', { id: socket.id, type, targetId });
+  });
+
   socket.on('avatar-move', ({ x, y, username, facingLeft, onGround, fill }) => {
     if (!currentRoom) return;
     if (!roomAvatars[currentRoom]) roomAvatars[currentRoom] = {};
@@ -1245,6 +1250,22 @@ io.on('connection', (socket) => {
     if (userCurrentFullUrl[target]) socket.emit('user-location', { url: userCurrentFullUrl[target] });
   });
   socket.on('follow-unsubscribe', ({ target }) => { socket.leave('user:' + target); });
+
+  socket.on('friend-beacon', ({ url }) => {
+    const dId = socketToDiscordId[socket.id];
+    if (!dId || !url) return;
+    try {
+      const rows = db.prepare(
+        `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
+         FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
+      ).all(dId, dId, dId);
+      const uname = db.prepare('SELECT username FROM users WHERE discord_id=?').get(dId)?.username || socket.username;
+      rows.forEach(r => {
+        const fs = discordIdToSocket[r.fid];
+        if (fs) io.to(fs).emit('friend-beacon', { fromId: dId, username: uname, url });
+      });
+    } catch {}
+  });
 
   socket.on('disconnect', () => {
     if (currentRoom) {
