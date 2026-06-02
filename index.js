@@ -635,10 +635,10 @@ app.post('/follows', (req, res) => {
     }
     db.prepare('INSERT OR IGNORE INTO follows (follower_id, followee_id) VALUES (?, ?)').run(user.sub, followeeDiscordId);
     // Notify followee they have a new follower
-    const followeeSocket = discordIdToSocket[followeeDiscordId];
-    if (followeeSocket) {
+    const followeeSocks = discordIdToFollowSockets[followeeDiscordId];
+    if (followeeSocks) {
       const followerUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(user.sub);
-      io.to(followeeSocket).emit('persistent-follow-start', { followerDiscordId: user.sub, username: followerUser?.username || user.username });
+      followeeSocks.forEach(sid => io.to(sid).emit('persistent-follow-start', { followerDiscordId: user.sub, username: followerUser?.username || user.username }));
     }
     // Immediately send the followee's current tab snapshot to the new follower's tabs so
     // following takes effect right away (don't wait for the followee to next navigate).
@@ -654,9 +654,9 @@ app.delete('/follows/:followeeDiscordId', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     db.prepare('DELETE FROM follows WHERE follower_id = ? AND followee_id = ?').run(user.sub, req.params.followeeDiscordId);
-    // Notify followee
-    const followeeSocket = discordIdToSocket[req.params.followeeDiscordId];
-    if (followeeSocket) io.to(followeeSocket).emit('persistent-follow-end', { followerDiscordId: user.sub });
+    // Notify followee on all their tabs
+    const followeeSocks = discordIdToFollowSockets[req.params.followeeDiscordId];
+    if (followeeSocks) followeeSocks.forEach(sid => io.to(sid).emit('persistent-follow-end', { followerDiscordId: user.sub }));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -680,8 +680,8 @@ app.delete('/follows/by-follower/:followerDiscordId', (req, res) => {
   const { followerDiscordId } = req.params;
   try {
     db.prepare('DELETE FROM follows WHERE follower_id = ? AND followee_id = ?').run(followerDiscordId, user.sub);
-    const followerSocket = discordIdToSocket[followerDiscordId];
-    if (followerSocket) io.to(followerSocket).emit('follow-kicked', { followeeDiscordId: user.sub });
+    const followerSocks = discordIdToFollowSockets[followerDiscordId];
+    if (followerSocks) followerSocks.forEach(sid => io.to(sid).emit('follow-kicked', { followeeDiscordId: user.sub }));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -758,6 +758,11 @@ const leaderActiveTab = {};    // discordId → tabSession            (the focus
 const socketToTabSession = {}; // socketId  → tabSession
 const leaderSnapshotSeq = {};  // discordId → monotonic int (within an epoch)
 const leaderEpoch = {};        // discordId → epoch token (changes each fresh browsing session)
+// When a socket disconnects we wait briefly before emitting the "tab gone" snapshot.
+// Same-tab navigation briefly disconnects then reconnects with the SAME tabSession; the
+// debounce lets the rejoin cancel the removal, preventing a close+reopen flicker for followers.
+const tabDisconnectTimers = {}; // `${discordId}:${tabSession}` → timerId
+const TAB_DISCONNECT_DEBOUNCE_MS = 1000;
 
 function broadcastPresence(room) {
   const users = Object.values(roomUsers[room] || {});
@@ -822,6 +827,10 @@ io.on('connection', (socket) => {
         discordIdToFollowSockets[discordId].add(socket.id);
         // Register this tab in the leader's tab set (drives follow snapshots).
         if (tabSession) {
+          // Cancel any pending "tab gone" debounce for this session (same-tab navigation rejoining).
+          const debounceKey = `${discordId}:${tabSession}`;
+          clearTimeout(tabDisconnectTimers[debounceKey]);
+          delete tabDisconnectTimers[debounceKey];
           socketToTabSession[socket.id] = tabSession;
           if (!leaderTabs[discordId]) {
             leaderTabs[discordId] = new Map();
@@ -1249,16 +1258,22 @@ io.on('connection', (socket) => {
         discordIdToFollowSockets[dId].delete(socket.id);
         if (!discordIdToFollowSockets[dId].size) delete discordIdToFollowSockets[dId];
       }
-      // Remove this tab from the leader's tab set + resnapshot followers (a tab closed).
+      // Remove this tab from the leader's tab set. Debounced: same-tab navigation causes a
+      // disconnect + reconnect with the same tabSession — wait briefly so the rejoin can cancel
+      // the removal and avoid sending followers a spurious "tab gone" snapshot.
       const ts = socketToTabSession[socket.id];
       if (ts) {
         delete socketToTabSession[socket.id];
-        if (leaderTabs[dId]) {
+        const debounceKey = `${dId}:${ts}`;
+        clearTimeout(tabDisconnectTimers[debounceKey]);
+        tabDisconnectTimers[debounceKey] = setTimeout(() => {
+          delete tabDisconnectTimers[debounceKey];
+          if (!leaderTabs[dId] || !leaderTabs[dId].has(ts)) return; // already re-added by rejoin
           leaderTabs[dId].delete(ts);
           if (leaderActiveTab[dId] === ts) delete leaderActiveTab[dId];
           if (leaderTabs[dId].size === 0) { delete leaderTabs[dId]; delete leaderSnapshotSeq[dId]; delete leaderEpoch[dId]; }
-        }
-        try { emitTabSnapshot(dId, currentUsername); } catch {}
+          try { emitTabSnapshot(dId, currentUsername); } catch {}
+        }, TAB_DISCONNECT_DEBOUNCE_MS);
       }
       if (discordIdToSocket[dId] === socket.id) {
         delete discordIdToSocket[dId];
