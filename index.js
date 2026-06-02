@@ -84,6 +84,7 @@ try { db.exec(`ALTER TABLE users ADD COLUMN follow_policy TEXT DEFAULT 'friends'
 try { db.exec('ALTER TABLE users ADD COLUMN follow_allowlist TEXT DEFAULT \'\''); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN browsing_visible INTEGER DEFAULT 1'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN social_links TEXT'); } catch {}
+try { db.exec('ALTER TABLE users ADD COLUMN beacon_url TEXT'); } catch {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS follows (
@@ -257,7 +258,7 @@ app.post('/friends/remove', (req, res) => {
 // ---- Profile endpoints ----
 app.get('/profile/:discordId', (req, res) => {
   try {
-    const row = db.prepare('SELECT discord_id, username, avatar, bio, status, social_links FROM users WHERE discord_id = ?').get(req.params.discordId);
+    const row = db.prepare('SELECT discord_id, username, avatar, bio, status, social_links, beacon_url FROM users WHERE discord_id = ?').get(req.params.discordId);
     if (!row) return res.status(404).json({ error: 'Not found' });
     let socialLinks = {};
     try { if (row.social_links) socialLinks = JSON.parse(row.social_links); } catch {}
@@ -882,18 +883,20 @@ io.on('connection', (socket) => {
           `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
            FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
         ).all(discordId, discordId, discordId);
+        const ownBeaconRow = db.prepare('SELECT beacon_url FROM users WHERE discord_id=?').get(discordId);
         acceptedFriends.forEach(r => {
           const fs = discordIdToSocket[r.fid];
-          if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar, url: fullUrl || url });
+          if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar, url: fullUrl || url, beacon_url: ownBeaconRow?.beacon_url || null });
         });
         const friendsData = db.prepare(`
           SELECT u.discord_id, u.username, u.avatar, f.status,
-                 CASE WHEN f.from_id=? THEN 0 ELSE 1 END as incoming
+                 CASE WHEN f.from_id=? THEN 0 ELSE 1 END as incoming,
+                 u.beacon_url
           FROM friends f
           JOIN users u ON u.discord_id = CASE WHEN f.from_id=? THEN f.to_id ELSE f.from_id END
           WHERE f.from_id=? OR f.to_id=?
         `).all(discordId, discordId, discordId, discordId)
-          .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id], url: discordIdToFullUrl[r.discord_id] || null }));
+          .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id], url: discordIdToFullUrl[r.discord_id] || null, beacon_url: r.beacon_url || null }));
         socket.emit('friends-init', friendsData);
       } catch (e) { console.error('[friends-init]', e); }
 
@@ -1255,6 +1258,7 @@ io.on('connection', (socket) => {
     const dId = socketToDiscordId[socket.id];
     if (!dId || !url) return;
     try {
+      db.prepare('UPDATE users SET beacon_url=? WHERE discord_id=?').run(url, dId);
       const rows = db.prepare(
         `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
          FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
@@ -1263,6 +1267,23 @@ io.on('connection', (socket) => {
       rows.forEach(r => {
         const fs = discordIdToSocket[r.fid];
         if (fs) io.to(fs).emit('friend-beacon', { fromId: dId, username: uname, url });
+      });
+      socket.emit('friend-beacon-own', { url }); // echo own beacon back to confirm persistence
+    } catch {}
+  });
+
+  socket.on('clear-beacon', () => {
+    const dId = socketToDiscordId[socket.id];
+    if (!dId) return;
+    try {
+      db.prepare('UPDATE users SET beacon_url=NULL WHERE discord_id=?').run(dId);
+      const rows = db.prepare(
+        `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
+         FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
+      ).all(dId, dId, dId);
+      rows.forEach(r => {
+        const fs = discordIdToSocket[r.fid];
+        if (fs) io.to(fs).emit('friend-beacon-cleared', { fromId: dId });
       });
     } catch {}
   });
