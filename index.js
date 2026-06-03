@@ -747,11 +747,13 @@ app.get('/dms', (req, res) => {
 
 const roomUsers = {};       // roomId → { socketId: { username, verified, avatar, discord_id } }
 const roomHistory = {};
+const roomMsgReactions = {}; // roomId → { msgId → { emoji → [username] } }
 const roomAnnotations = {};
 const roomSprays = {};
 const roomMedia = {};
 const roomAvatars = {};
 const roomVoice = {};
+const socketVoiceScope = {}; // socketId → voice scope ('page' uses currentRoom; else 'dm:X', 'room:X', 'group:X')
 const userCurrentFullUrl = {};
 const socketDmRooms = {};      // socketId → Set of DM roomIds
 const socketToDiscordId = {};  // socketId → discordId
@@ -867,6 +869,7 @@ io.on('connection', (socket) => {
     if (!roomUsers[currentRoom]) roomUsers[currentRoom] = {};
     roomUsers[currentRoom][socket.id] = { username, verified, avatar, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
+    if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
     if (roomAnnotations[currentRoom]) socket.emit('annotations-init', roomAnnotations[currentRoom]);
     if (roomSprays[currentRoom]) socket.emit('sprays-init', roomSprays[currentRoom]);
     if (roomMedia[currentRoom]) socket.emit('media-init', roomMedia[currentRoom]);
@@ -953,11 +956,24 @@ io.on('connection', (socket) => {
 
   socket.on('message', ({ text, username }) => {
     if (!currentRoom) return;
-    const msg = { username, text, timestamp: Date.now() };
+    const msg = { id: Date.now() + '-' + Math.random().toString(36).slice(2, 6), username, text, timestamp: Date.now() };
     if (!roomHistory[currentRoom]) roomHistory[currentRoom] = [];
     roomHistory[currentRoom].push(msg);
     if (roomHistory[currentRoom].length > MAX_HISTORY) roomHistory[currentRoom].shift();
     io.to(currentRoom).emit('message', msg);
+  });
+
+  socket.on('msg-react', ({ msgId, emoji, username }) => {
+    if (!currentRoom || !msgId || !emoji || !username) return;
+    if (!roomMsgReactions[currentRoom]) roomMsgReactions[currentRoom] = {};
+    const reactions = roomMsgReactions[currentRoom];
+    if (!reactions[msgId]) reactions[msgId] = {};
+    if (!reactions[msgId][emoji]) reactions[msgId][emoji] = [];
+    const users = reactions[msgId][emoji];
+    const idx = users.indexOf(username);
+    if (idx === -1) users.push(username); else users.splice(idx, 1);
+    if (users.length === 0) delete reactions[msgId][emoji];
+    io.to(currentRoom).emit('msg-reaction-update', { msgId, emoji, users: reactions[msgId][emoji] || [] });
   });
 
   socket.on('cursor', ({ x, y, scrollPct, username }) => {
@@ -978,6 +994,11 @@ io.on('connection', (socket) => {
   socket.on('soundboard', ({ soundIndex, label, username }) => {
     if (!currentRoom) return;
     socket.to(currentRoom).emit('soundboard', { soundIndex, label, username });
+  });
+
+  socket.on('scroll-position', ({ username, scrollX, scrollY }) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('scroll-position', { username, scrollX, scrollY });
   });
 
   socket.on('highlight', ({ text, username }) => {
@@ -1052,25 +1073,59 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('avatar-move', { id: socket.id, x, y, username, facingLeft, onGround, fill });
   });
 
-  socket.on('voice-join', ({ username }) => {
-    if (!currentRoom) return;
-    if (!roomVoice[currentRoom]) roomVoice[currentRoom] = {};
-    const existingPeers = Object.keys(roomVoice[currentRoom]);
-    roomVoice[currentRoom][socket.id] = username;
+  socket.on('voice-join', ({ username, scope }) => {
+    // Resolve the scope key: 'page' uses the URL room; otherwise use as-is (dm:X, room:X, group:X)
+    const voiceScope = (!scope || scope === 'page') ? currentRoom : scope;
+    if (!voiceScope) return;
+
+    // Auto-leave any existing scope if switching
+    const oldScope = socketVoiceScope[socket.id];
+    if (oldScope && oldScope !== voiceScope) {
+      if (roomVoice[oldScope]) {
+        delete roomVoice[oldScope][socket.id];
+        const oldTarget = oldScope === currentRoom ? currentRoom : 'voice:' + oldScope;
+        io.to(oldTarget).emit('voice-peer-left', { id: socket.id });
+      }
+      socket.leave('voice:' + oldScope);
+    }
+
+    socketVoiceScope[socket.id] = voiceScope;
+    if (!roomVoice[voiceScope]) roomVoice[voiceScope] = {};
+    const existingPeers = Object.keys(roomVoice[voiceScope]);
+    roomVoice[voiceScope][socket.id] = username;
+    socket.join('voice:' + voiceScope);
     socket.emit('voice-joined', { existingPeers });
-    io.to(currentRoom).emit('voice-peer-joined', { id: socket.id, username });
+
+    // Page-scope: broadcast to all room members (who's-here speaking indicators)
+    // Other scopes: broadcast only to voice-scope members (private call)
+    if (voiceScope === currentRoom) {
+      io.to(currentRoom).emit('voice-peer-joined', { id: socket.id, username });
+    } else {
+      socket.to('voice:' + voiceScope).emit('voice-peer-joined', { id: socket.id, username });
+    }
   });
 
   socket.on('voice-leave', () => {
-    if (!currentRoom || !roomVoice[currentRoom]) return;
-    delete roomVoice[currentRoom][socket.id];
-    io.to(currentRoom).emit('voice-peer-left', { id: socket.id });
+    const voiceScope = socketVoiceScope[socket.id];
+    if (!voiceScope) return;
+    if (roomVoice[voiceScope]) {
+      delete roomVoice[voiceScope][socket.id];
+      const target = voiceScope === currentRoom ? currentRoom : 'voice:' + voiceScope;
+      io.to(target).emit('voice-peer-left', { id: socket.id });
+    }
+    socket.leave('voice:' + voiceScope);
+    delete socketVoiceScope[socket.id];
   });
 
   socket.on('voice-offer',      ({ to, sdp })       => { socket.to(to).emit('voice-offer',    { from: socket.id, sdp }); });
   socket.on('voice-answer',     ({ to, sdp })       => { socket.to(to).emit('voice-answer',   { from: socket.id, sdp }); });
   socket.on('voice-ice',        ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
-  socket.on('voice-speaking',   ()                  => { if (currentRoom) socket.to(currentRoom).emit('voice-speaking', { id: socket.id }); });
+  socket.on('voice-speaking',   () => {
+    const voiceScope = socketVoiceScope[socket.id];
+    if (!voiceScope) return;
+    const target = voiceScope === currentRoom ? currentRoom : 'voice:' + voiceScope;
+    socket.to(target).emit('voice-speaking', { id: socket.id });
+  });
 
   socket.on('dm-open', ({ to, roomId, text, toDiscordId }) => {
     if (!roomId) return;
@@ -1292,10 +1347,14 @@ io.on('connection', (socket) => {
     if (currentRoom) {
       delete roomUsers[currentRoom][socket.id];
       if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][socket.id];
-      if (roomVoice[currentRoom] && roomVoice[currentRoom][socket.id]) {
-        delete roomVoice[currentRoom][socket.id];
-        io.to(currentRoom).emit('voice-peer-left', { id: socket.id });
+      const voiceScope = socketVoiceScope[socket.id];
+      if (voiceScope && roomVoice[voiceScope] && roomVoice[voiceScope][socket.id]) {
+        delete roomVoice[voiceScope][socket.id];
+        const voiceTarget = voiceScope === currentRoom ? currentRoom : 'voice:' + voiceScope;
+        io.to(voiceTarget).emit('voice-peer-left', { id: socket.id });
+        socket.leave('voice:' + voiceScope);
       }
+      delete socketVoiceScope[socket.id];
       broadcastPresence(currentRoom);
       io.to(currentRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
