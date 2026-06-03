@@ -917,7 +917,11 @@ io.on('connection', (socket) => {
           JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
           ORDER BY r.created_at ASC
         `).all(discordId);
-        socket.emit('private-rooms-init', userRooms);
+        const getMemberIds = db.prepare('SELECT discord_id FROM room_members WHERE room_id = ?');
+        socket.emit('private-rooms-init', userRooms.map(r => ({
+          ...r,
+          memberIds: getMemberIds.all(r.id).map(m => m.discord_id)
+        })));
       } catch (e) { console.error('[private-rooms-init]', e); }
 
       // Groups
@@ -929,7 +933,11 @@ io.on('connection', (socket) => {
           JOIN group_members gm ON gm.group_id = g.id AND gm.discord_id = ?
           ORDER BY g.created_at ASC
         `).all(discordId);
-        socket.emit('groups-init', userGroups);
+        const getGroupMemberIds = db.prepare('SELECT discord_id FROM group_members WHERE group_id = ?');
+        socket.emit('groups-init', userGroups.map(g => ({
+          ...g,
+          memberIds: getGroupMemberIds.all(g.id).map(m => m.discord_id)
+        })));
       } catch (e) { console.error('[groups-init]', e); }
 
       // Follows: send this user their follow list + their followers list
