@@ -989,24 +989,24 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('msg-reaction-update', { msgId, emoji, users: reactions[msgId][emoji] || [] });
   });
 
-  socket.on('cursor', ({ x, y, scrollPct, username }) => {
+  socket.on('cursor', ({ x, y, scrollPct, username, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('cursor', { x, y, scrollPct, username, id: socket.id });
+    socket.to(currentRoom).emit('cursor', { x, y, scrollPct, username, scope, id: socket.id });
   });
 
-  socket.on('pointer-pulse', ({ x, y, username }) => {
+  socket.on('pointer-pulse', ({ x, y, username, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('pointer-pulse', { x, y, username });
+    socket.to(currentRoom).emit('pointer-pulse', { x, y, username, scope });
   });
 
-  socket.on('reaction', ({ emoji, x, y, username, source }) => {
+  socket.on('reaction', ({ emoji, x, y, username, source, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('reaction', { emoji, x, y, username, source });
+    socket.to(currentRoom).emit('reaction', { emoji, x, y, username, source, scope });
   });
 
-  socket.on('soundboard', ({ soundIndex, label, username }) => {
+  socket.on('soundboard', ({ soundIndex, label, username, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('soundboard', { soundIndex, label, username });
+    socket.to(currentRoom).emit('soundboard', { soundIndex, label, username, scope });
   });
 
   socket.on('scroll-position', ({ username, scrollX, scrollY }) => {
@@ -1014,14 +1014,14 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('scroll-position', { username, scrollX, scrollY });
   });
 
-  socket.on('highlight', ({ text, username }) => {
+  socket.on('highlight', ({ text, username, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('highlight', { text, username });
+    socket.to(currentRoom).emit('highlight', { text, username, scope });
   });
 
-  socket.on('annotation-add', ({ id, selector, offsetX, offsetY, text, username }) => {
+  socket.on('annotation-add', ({ id, selector, offsetX, offsetY, text, username, scope }) => {
     if (!currentRoom) return;
-    const annotation = { id, selector, offsetX, offsetY, text, username, timestamp: Date.now() };
+    const annotation = { id, selector, offsetX, offsetY, text, username, scope, timestamp: Date.now() };
     if (!roomAnnotations[currentRoom]) roomAnnotations[currentRoom] = [];
     if (!roomAnnotations[currentRoom].find(a => a.id === id)) {
       roomAnnotations[currentRoom].push(annotation);
@@ -1051,9 +1051,9 @@ io.on('connection', (socket) => {
   socket.on('draw-points', (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-points', data); });
   socket.on('draw-end',    (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-end',    data); });
 
-  socket.on('spray-add', ({ id, content, size, docX, docY, username }) => {
+  socket.on('spray-add', ({ id, content, size, docX, docY, username, scope }) => {
     if (!currentRoom) return;
-    const spray = { id, content, size, docX, docY, username, timestamp: Date.now() };
+    const spray = { id, content, size, docX, docY, username, scope, timestamp: Date.now() };
     if (!roomSprays[currentRoom]) roomSprays[currentRoom] = [];
     roomSprays[currentRoom].push(spray);
     if (roomSprays[currentRoom].length > MAX_SPRAYS) roomSprays[currentRoom].shift();
