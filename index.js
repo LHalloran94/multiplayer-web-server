@@ -1418,4 +1418,5 @@ server.listen(3000, () => console.log('Server running on port 3000'));
 
 process.on('SIGTERM', () => {
   server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
 });
