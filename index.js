@@ -1051,9 +1051,9 @@ io.on('connection', (socket) => {
   socket.on('draw-points', (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-points', data); });
   socket.on('draw-end',    (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-end',    data); });
 
-  socket.on('spray-add', ({ id, content, size, docX, docY, username, scope }) => {
+  socket.on('spray-add', ({ id, content, size, docX, docY, relX, relY, surface, username, scope }) => {
     if (!currentRoom) return;
-    const spray = { id, content, size, docX, docY, username, scope, timestamp: Date.now() };
+    const spray = { id, content, size, docX, docY, relX, relY, surface, username, scope, timestamp: Date.now() };
     if (!roomSprays[currentRoom]) roomSprays[currentRoom] = [];
     roomSprays[currentRoom].push(spray);
     if (roomSprays[currentRoom].length > MAX_SPRAYS) roomSprays[currentRoom].shift();
