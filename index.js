@@ -756,6 +756,8 @@ const roomMsgReactions = {}; // roomId → { msgId → { emoji → [username] } 
 const roomAnnotations = {};
 const roomSprays = {};
 const roomMedia = {};
+const roomCanvases = {}; // `${roomId}:${scope}` → { strokes: Map<id,stroke>, stamps: [] }
+const MAX_CANVAS_ITEMS = 200;
 const roomAvatars = {};
 const roomVoice = {};
 const socketVoiceScope = {}; // socketId → voice scope ('page' uses currentRoom; else 'dm:X', 'room:X', 'group:X')
@@ -1050,6 +1052,71 @@ io.on('connection', (socket) => {
   socket.on('draw-start',  (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-start',  data); });
   socket.on('draw-points', (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-points', data); });
   socket.on('draw-end',    (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-end',    data); });
+
+  // ---- Shared canvas ----
+  socket.on('canvas-subscribe', ({ scope }) => {
+    if (!currentRoom) return;
+    const key = currentRoom + ':' + (scope || 'page');
+    const data = roomCanvases[key];
+    socket.emit('canvas-init', {
+      scope,
+      strokes: data ? [...data.strokes.values()] : [],
+      stamps:  data ? data.stamps : []
+    });
+  });
+
+  socket.on('canvas-stroke-start', ({ id, scope, color, size, eraser, x, y }) => {
+    if (!currentRoom) return;
+    const key = currentRoom + ':' + (scope || 'page');
+    if (!roomCanvases[key]) roomCanvases[key] = { strokes: new Map(), stamps: [] };
+    const data = roomCanvases[key];
+    if (data.strokes.size >= MAX_CANVAS_ITEMS) {
+      const oldestId = data.strokes.keys().next().value;
+      data.strokes.delete(oldestId);
+    }
+    data.strokes.set(id, { id, username: currentUsername, color, size, eraser: !!eraser, points: [{ x, y }] });
+    socket.to(currentRoom).emit('canvas-stroke-start', { id, scope, username: currentUsername, color, size, eraser: !!eraser, x, y });
+  });
+
+  socket.on('canvas-stroke-points', ({ id, scope, points }) => {
+    if (!currentRoom) return;
+    const key = currentRoom + ':' + (scope || 'page');
+    const stroke = roomCanvases[key]?.strokes.get(id);
+    if (stroke) stroke.points.push(...points);
+    socket.to(currentRoom).emit('canvas-stroke-points', { id, scope, points });
+  });
+
+  socket.on('canvas-stroke-end', ({ id, scope }) => {
+    if (!currentRoom) return;
+    socket.to(currentRoom).emit('canvas-stroke-end', { id, scope });
+  });
+
+  socket.on('canvas-stamp', ({ id, scope, content, x, y, size }) => {
+    if (!currentRoom) return;
+    const key = currentRoom + ':' + (scope || 'page');
+    if (!roomCanvases[key]) roomCanvases[key] = { strokes: new Map(), stamps: [] };
+    const data = roomCanvases[key];
+    const stamp = { id, scope, username: currentUsername, content, x, y, size };
+    data.stamps.push(stamp);
+    if (data.stamps.length > MAX_CANVAS_ITEMS) data.stamps.shift();
+    io.to(currentRoom).emit('canvas-stamp', stamp);
+  });
+
+  socket.on('canvas-clear-mine', ({ scope }) => {
+    if (!currentRoom) return;
+    const key = currentRoom + ':' + (scope || 'page');
+    const data = roomCanvases[key];
+    if (!data) return;
+    for (const [id, stroke] of data.strokes) {
+      if (stroke.username === currentUsername) data.strokes.delete(id);
+    }
+    data.stamps = data.stamps.filter(s => s.username !== currentUsername);
+    io.to(currentRoom).emit('canvas-redraw', {
+      scope,
+      strokes: [...data.strokes.values()],
+      stamps: data.stamps
+    });
+  });
 
   socket.on('spray-add', ({ id, content, size, docX, docY, relX, relY, surface, username, scope }) => {
     if (!currentRoom) return;
