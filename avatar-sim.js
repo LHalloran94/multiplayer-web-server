@@ -288,17 +288,34 @@
     }
   }
 
-  // Serialize the minimal authoritative fields for a snapshot entry.
+  // Serialize the FULL reconcilable state for a snapshot entry. The owning client
+  // resets to this and replays its unacked inputs (exact, deterministic). Other
+  // clients only read x/y/facingLeft/onGround/grabbing/grabbedBy for rendering.
   function snapshot(s) {
     return {
       id: s.id, x: s.x, y: s.y, vx: s.vx, vy: s.vy,
-      facingLeft: s.facingLeft, onGround: s.onGround,
-      grabbing: s.grabbing, grabbedBy: s.grabbedBy, seq: s.lastSeq
+      facingLeft: s.facingLeft, onGround: s.onGround, wasOnGround: s.wasOnGround,
+      hasDoubleJump: s.hasDoubleJump, wallSlideDir: s.wallSlideDir,
+      coyote: s.coyote, jumpBuffer: s.jumpBuffer, fallThroughIdx: s.fallThroughIdx,
+      grabbing: s.grabbing, grabbedBy: s.grabbedBy,
+      prevJump: s.prevJump, prevDown: s.prevDown, prevGrab: s.prevGrab, prevRespawn: s.prevRespawn,
+      seq: s.lastSeq
     };
+  }
+
+  // Apply a snapshot entry back onto a state object (client reconciliation).
+  function applySnapshot(s, a) {
+    s.x = a.x; s.y = a.y; s.vx = a.vx; s.vy = a.vy;
+    s.facingLeft = a.facingLeft; s.onGround = a.onGround; s.wasOnGround = a.wasOnGround;
+    s.hasDoubleJump = a.hasDoubleJump; s.wallSlideDir = a.wallSlideDir;
+    s.coyote = a.coyote; s.jumpBuffer = a.jumpBuffer; s.fallThroughIdx = a.fallThroughIdx;
+    s.grabbing = a.grabbing; s.grabbedBy = a.grabbedBy;
+    s.prevJump = a.prevJump; s.prevDown = a.prevDown; s.prevGrab = a.prevGrab; s.prevRespawn = a.prevRespawn;
+    s.lastSeq = a.seq;
   }
 
   return {
     C, STAGE_LAYOUTS, layoutIndex, platformsFor, floorY,
-    createState, stepMovement, resolveGrabThrow, resolveCollisions, snapshot
+    createState, stepMovement, resolveGrabThrow, resolveCollisions, snapshot, applySnapshot
   };
 });
