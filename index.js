@@ -1147,11 +1147,11 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('avatar-interact', { id: socket.id, type, targetId, vx, vy });
   });
 
-  socket.on('avatar-move', ({ x, y, username, facingLeft, onGround, fill }) => {
+  socket.on('avatar-move', ({ x, y, t, username, facingLeft, onGround, fill }) => {
     if (!currentRoom) return;
     if (!roomAvatars[currentRoom]) roomAvatars[currentRoom] = {};
     roomAvatars[currentRoom][socket.id] = { id: socket.id, x, y, username, facingLeft, onGround, fill };
-    socket.to(currentRoom).emit('avatar-move', { id: socket.id, x, y, username, facingLeft, onGround, fill });
+    socket.to(currentRoom).emit('avatar-move', { id: socket.id, x, y, t, username, facingLeft, onGround, fill });
   });
 
   socket.on('voice-join', ({ username, scope }) => {
