@@ -1,0 +1,304 @@
+// ============================================================================
+// avatar-sim.js — SHARED authoritative avatar simulation (single source of truth)
+//
+// This exact file runs in TWO places:
+//   • server/index.js requires it (authoritative simulation)
+//   • the extension bundle inlines it verbatim (build.js prepends it to
+//     content_script.js) so the client's prediction is byte-identical.
+//
+// DETERMINISM IS THE WHOLE POINT. Do not branch on environment, wall-clock,
+// Math.random, or anything that differs between server and client. One fixed
+// timestep = one call to stepMovement(). Keep it pure.
+// ============================================================================
+(function (root, factory) {
+  const api = factory();
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else (root || (typeof self !== 'undefined' ? self : globalThis)).MWSim = api;
+})(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this), function () {
+  'use strict';
+
+  // ---- Constants (mirror of the client's avatar constants) ----
+  const C = {
+    STAGE_W: 1280, STAGE_H: 720, WORLD_W: 5120,
+    BLOB_R: 20, AV_W: 40, AV_H: 40,
+    GRAVITY_BASE: 0.62, GRAVITY_UP_MULT: 0.88, GRAVITY_DOWN_MULT: 1.58,
+    GRAVITY_APEX_MULT: 0.68, APEX_VY_THRESH: 0.38,
+    JUMP_VY: -14, MAX_VY: 22,
+    ACCEL: 0.75, DECEL: 0.68, MAX_VX: 5.0,
+    AIR_ACCEL: 0.52, AIR_DECEL: 0.985,
+    COYOTE_FRAMES: 7, JUMP_BUFFER_FRAMES: 10,
+    // Interactions
+    GRAB_RANGE: 72,        // BLOB_R * 3.6
+    THROW_VX: 9, THROW_VY: -9,
+    CARRY_DX: 22,          // BLOB_R * 1.1
+    CARRY_DY: 38,          // BLOB_R * 1.9
+    PUSH_SPEED_MIN: 3.0,
+    TICK_HZ: 60,           // simulation rate
+    SNAPSHOT_HZ: 30        // broadcast rate
+  };
+
+  // ---- Stage layouts (must match the client's STAGE_LAYOUTS exactly) ----
+  const STAGE_LAYOUTS = [
+    [ // 0: meandering path
+      { x: 0, y: 650, w: 5120, h: 70 },
+      { x: 100, y: 520, w: 280, h: 18 }, { x: 480, y: 400, w: 260, h: 18 },
+      { x: 820, y: 300, w: 240, h: 18 }, { x: 1120, y: 430, w: 260, h: 18 },
+      { x: 1460, y: 540, w: 280, h: 18 }, { x: 1800, y: 410, w: 260, h: 18 },
+      { x: 2100, y: 290, w: 240, h: 18 }, { x: 2400, y: 420, w: 260, h: 18 },
+      { x: 2740, y: 540, w: 280, h: 18 }, { x: 3060, y: 410, w: 260, h: 18 },
+      { x: 3380, y: 290, w: 240, h: 18 }, { x: 3680, y: 420, w: 260, h: 18 },
+      { x: 4020, y: 540, w: 280, h: 18 }, { x: 4360, y: 400, w: 260, h: 18 },
+      { x: 4700, y: 290, w: 240, h: 18 }, { x: 4950, y: 490, w: 170, h: 18 }
+    ],
+    [ // 1: stepping stones
+      { x: 0, y: 650, w: 5120, h: 70 },
+      { x: 80, y: 540, w: 220, h: 18 }, { x: 360, y: 430, w: 200, h: 18 },
+      { x: 600, y: 330, w: 200, h: 18 }, { x: 860, y: 450, w: 200, h: 18 },
+      { x: 1110, y: 550, w: 220, h: 18 }, { x: 1390, y: 430, w: 200, h: 18 },
+      { x: 1640, y: 310, w: 200, h: 18 }, { x: 1890, y: 450, w: 200, h: 18 },
+      { x: 2150, y: 560, w: 220, h: 18 }, { x: 2430, y: 440, w: 200, h: 18 },
+      { x: 2680, y: 320, w: 200, h: 18 }, { x: 2940, y: 450, w: 200, h: 18 },
+      { x: 3190, y: 560, w: 220, h: 18 }, { x: 3470, y: 440, w: 200, h: 18 },
+      { x: 3720, y: 320, w: 200, h: 18 }, { x: 3970, y: 450, w: 200, h: 18 },
+      { x: 4220, y: 560, w: 220, h: 18 }, { x: 4500, y: 430, w: 200, h: 18 },
+      { x: 4750, y: 310, w: 200, h: 18 }, { x: 4970, y: 560, w: 150, h: 18 }
+    ],
+    [ // 2: repeating pyramids
+      { x: 0, y: 650, w: 5120, h: 70 },
+      { x: 80, y: 530, w: 1000, h: 18 }, { x: 260, y: 410, w: 640, h: 18 },
+      { x: 440, y: 290, w: 280, h: 18 }, { x: 1200, y: 570, w: 200, h: 18 },
+      { x: 1480, y: 530, w: 1000, h: 18 }, { x: 1660, y: 410, w: 640, h: 18 },
+      { x: 1840, y: 290, w: 280, h: 18 }, { x: 2600, y: 570, w: 200, h: 18 },
+      { x: 2880, y: 530, w: 1000, h: 18 }, { x: 3060, y: 410, w: 640, h: 18 },
+      { x: 3240, y: 290, w: 280, h: 18 }, { x: 4000, y: 570, w: 200, h: 18 },
+      { x: 4280, y: 530, w: 840, h: 18 }, { x: 4460, y: 410, w: 480, h: 18 },
+      { x: 4640, y: 290, w: 240, h: 18 }
+    ]
+  ];
+
+  // URL → deterministic layout index (matches the client's urlHash)
+  function layoutIndex(url) {
+    let h = 0;
+    for (let i = 0; i < url.length; i++) h = (h * 31 + url.charCodeAt(i)) & 0xFFFF;
+    return h % STAGE_LAYOUTS.length;
+  }
+  function platformsFor(url) { return STAGE_LAYOUTS[layoutIndex(url)]; }
+  function floorY(P) { return P[0].y; }
+
+  // ---- State ----
+  function createState(id, P) {
+    return {
+      id,
+      x: C.WORLD_W / 2, y: floorY(P),
+      vx: 0, vy: 0,
+      facingLeft: false, onGround: false, wasOnGround: false,
+      hasDoubleJump: true, wallSlideDir: 0,
+      coyote: 0, jumpBuffer: 0, fallThroughIdx: -1,
+      grabbing: null, grabbedBy: null,
+      // input edge memory
+      prevJump: false, prevDown: false, prevRespawn: false, prevGrab: false,
+      grab: false,        // latest grab-held flag (consumed by resolveGrabThrow)
+      lastSeq: 0
+    };
+  }
+
+  // ---- Platform + bounds collision (mirror of client resolveStage*) ----
+  function resolveStageCollisions(s, P) {
+    s.onGround = false;
+    if (s.fallThroughIdx >= 0 && (s.y - C.AV_H) > P[s.fallThroughIdx].y + P[s.fallThroughIdx].h) s.fallThroughIdx = -1;
+    for (let i = 0; i < P.length; i++) {
+      if (i === s.fallThroughIdx) continue;
+      const p = P[i];
+      const al = s.x - C.AV_W / 2, ar = s.x + C.AV_W / 2;
+      const at = s.y - C.AV_H, ab = s.y;
+      if (ar <= p.x || al >= p.x + p.w || ab <= p.y || at >= p.y + p.h) continue;
+      const oTop = ab - p.y, oBot = (p.y + p.h) - at;
+      if (s.vy >= 0 && oTop < oBot) { s.y -= oTop; s.vy = 0; s.onGround = true; break; }
+    }
+  }
+  function resolveStageBounds(s) {
+    if (s.x - C.AV_W / 2 < 0) {
+      s.x = C.AV_W / 2; s.vx = 0;
+      if (!s.onGround && s.vy > 0) s.wallSlideDir = -1;
+    }
+    if (s.x + C.AV_W / 2 > C.WORLD_W) {
+      s.x = C.WORLD_W - C.AV_W / 2; s.vx = 0;
+      if (!s.onGround && s.vy > 0) s.wallSlideDir = 1;
+    }
+    if (s.y - C.AV_H < 0) { s.y = C.AV_H; if (s.vy < 0) s.vy = 0; }
+    if (s.y > C.STAGE_H) { s.y = C.STAGE_H; s.vy = 0; s.onGround = true; }
+  }
+
+  // ---- One fixed-timestep movement step for a single avatar ----
+  // input: { seq, left, right, down, jump, grab, respawn } (all booleans)
+  // Grabbed avatars are pinned elsewhere; do not step them.
+  function stepMovement(s, input, P) {
+    s.grab = !!input.grab; // stored for resolveGrabThrow's edge detection
+
+    const inputX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+    const wantsDown = !!input.down;
+
+    // Respawn (edge)
+    if (input.respawn && !s.prevRespawn) {
+      s.x = C.WORLD_W / 2; s.y = floorY(P); s.vx = 0; s.vy = 0;
+      s.hasDoubleJump = true; s.fallThroughIdx = -1; s.wallSlideDir = 0;
+    }
+
+    // Jump buffer (edge)
+    if (input.jump && !s.prevJump) s.jumpBuffer = C.JUMP_BUFFER_FRAMES;
+
+    // Wall slide persistence
+    if (s.wallSlideDir !== 0) {
+      if (s.onGround || s.vy < 0) {
+        s.wallSlideDir = 0;
+      } else {
+        s.x = s.wallSlideDir === -1 ? C.AV_W / 2 : C.WORLD_W - C.AV_W / 2;
+        s.vx = 0; s.vy = Math.min(s.vy, 1.5);
+      }
+    }
+
+    const canJump = s.onGround || s.coyote > 0;
+    const canDoubleJump = !canJump && s.hasDoubleJump && s.wallSlideDir === 0;
+    const canWallJump = s.wallSlideDir !== 0 && !s.onGround;
+
+    if (s.jumpBuffer > 0) {
+      if (wantsDown && s.onGround) {
+        let onIdx = -1;
+        for (let i = 0; i < P.length; i++) {
+          const p = P[i];
+          if (Math.abs(s.y - p.y) <= 3 && s.x + C.AV_W / 2 > p.x && s.x - C.AV_W / 2 < p.x + p.w) { onIdx = i; break; }
+        }
+        if (onIdx >= 0 && P[onIdx].y + P[onIdx].h < C.STAGE_H) { s.fallThroughIdx = onIdx; s.vy = 5; }
+        s.jumpBuffer = 0; s.coyote = 0;
+      } else if (canWallJump) {
+        s.vy = C.JUMP_VY; s.vx = -s.wallSlideDir * C.MAX_VX * 1.4;
+        s.facingLeft = s.wallSlideDir > 0; s.hasDoubleJump = true;
+        s.wallSlideDir = 0; s.jumpBuffer = 0; s.coyote = 0;
+      } else if (canJump) {
+        s.vy = C.JUMP_VY; s.jumpBuffer = 0; s.coyote = 0;
+      } else if (canDoubleJump) {
+        s.vy = C.JUMP_VY * 0.78; s.hasDoubleJump = false; s.jumpBuffer = 0;
+      }
+    }
+
+    // Horizontal
+    if (inputX !== 0) {
+      if (s.onGround && Math.sign(inputX) !== Math.sign(s.vx) && Math.abs(s.vx) > 1.0) s.vx *= 0.40;
+      const accel = s.onGround ? C.ACCEL : C.AIR_ACCEL;
+      s.vx += inputX * accel;
+      s.vx = Math.max(-C.MAX_VX, Math.min(C.MAX_VX, s.vx));
+    } else {
+      s.vx *= s.onGround ? C.DECEL : C.AIR_DECEL;
+      if (Math.abs(s.vx) < 0.05) s.vx = 0;
+    }
+    if (s.vx < -0.3 && !s.facingLeft) s.facingLeft = true;
+    if (s.vx > 0.3 && s.facingLeft) s.facingLeft = false;
+
+    // Gravity (asymmetric)
+    const prevVy = s.vy;
+    const isApex = !s.onGround && Math.abs(s.vy) < C.APEX_VY_THRESH;
+    const gMult = isApex ? C.GRAVITY_APEX_MULT : (s.vy < 0 ? C.GRAVITY_UP_MULT : C.GRAVITY_DOWN_MULT);
+    s.vy = Math.min(s.vy + C.GRAVITY_BASE * gMult, C.MAX_VY);
+
+    // Integrate + collide
+    s.x += s.vx; s.y += s.vy;
+    resolveStageCollisions(s, P);
+    resolveStageBounds(s);
+
+    // Landing / coyote / buffer bookkeeping
+    const wasOnGround = s.wasOnGround;
+    if (!wasOnGround && s.onGround) { s.hasDoubleJump = true; s.wallSlideDir = 0; }
+    if (!s.onGround && wasOnGround && prevVy >= 0) s.coyote = C.COYOTE_FRAMES;
+    else if (s.onGround) s.coyote = 0;
+    else s.coyote = Math.max(0, s.coyote - 1);
+    if (s.jumpBuffer > 0) s.jumpBuffer--;
+    s.wasOnGround = s.onGround;
+
+    // Variable jump height: releasing jump while rising cuts upward velocity
+    if (!input.jump && s.prevJump && s.vy < 0) s.vy *= 0.45;
+
+    // Edge memory
+    s.prevJump = !!input.jump;
+    s.prevDown = wantsDown;
+    s.prevRespawn = !!input.respawn;
+    if (input.seq != null) s.lastSeq = input.seq;
+  }
+
+  // ---- Grab / throw resolution + carried pinning (server-authoritative) ----
+  function resolveGrabThrow(list, byId) {
+    for (const s of list) {
+      if (s.grab && !s.prevGrab) {
+        if (s.grabbing) {
+          const tgt = byId[s.grabbing];
+          if (tgt) {
+            const dir = s.facingLeft ? -1 : 1;
+            tgt.vx = dir * C.THROW_VX + s.vx * 0.5;
+            tgt.vy = C.THROW_VY;
+            tgt.grabbedBy = null; tgt.hasDoubleJump = true;
+          }
+          s.grabbing = null;
+        } else if (!s.grabbedBy) {
+          let best = null, bestD = C.GRAB_RANGE;
+          for (const o of list) {
+            if (o.id === s.id || o.grabbedBy || o.grabbing) continue;
+            const d = Math.hypot(s.x - o.x, s.y - o.y);
+            if (d < bestD) { bestD = d; best = o; }
+          }
+          if (best) { s.grabbing = best.id; best.grabbedBy = s.id; }
+        }
+      }
+      s.prevGrab = !!s.grab;
+    }
+    // Pin carried avatars above/in front of their grabber
+    for (const s of list) {
+      if (s.grabbedBy) {
+        const g = byId[s.grabbedBy];
+        if (!g || g.grabbing !== s.id) { s.grabbedBy = null; continue; }
+        const dir = g.facingLeft ? -1 : 1;
+        s.x = g.x + dir * C.CARRY_DX; s.y = g.y - C.CARRY_DY;
+        s.vx = 0; s.vy = 0; s.onGround = false; s.facingLeft = g.facingLeft;
+      }
+    }
+  }
+
+  // ---- Avatar↔avatar collision (mutual separation + shove) ----
+  function resolveCollisions(list, byId) {
+    const minDist = C.BLOB_R * 2.1;
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const a = list[i], b = list[j];
+        if (a.grabbedBy || b.grabbedBy) continue;          // carried blobs don't collide
+        if (a.grabbing === b.id || b.grabbing === a.id) continue;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.hypot(dx, dy);
+        if (dist >= minDist || dist <= 0.5) continue;
+        const nx = dx / dist, ny = dy / dist;
+        const overlap = minDist - dist;
+        // Separate both equally (x more than y so they don't launch vertically)
+        a.x -= nx * overlap * 0.5; a.y -= ny * overlap * 0.3;
+        b.x += nx * overlap * 0.5; b.y += ny * overlap * 0.3;
+        // Exchange momentum along the contact normal when approaching = the shove
+        const vn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
+        if (vn < 0) {
+          const imp = -vn * 0.6;
+          a.vx -= nx * imp; a.vy -= ny * imp * 0.5;
+          b.vx += nx * imp; b.vy += ny * imp * 0.5;
+        }
+      }
+    }
+  }
+
+  // Serialize the minimal authoritative fields for a snapshot entry.
+  function snapshot(s) {
+    return {
+      id: s.id, x: s.x, y: s.y, vx: s.vx, vy: s.vy,
+      facingLeft: s.facingLeft, onGround: s.onGround,
+      grabbing: s.grabbing, grabbedBy: s.grabbedBy, seq: s.lastSeq
+    };
+  }
+
+  return {
+    C, STAGE_LAYOUTS, layoutIndex, platformsFor, floorY,
+    createState, stepMovement, resolveGrabThrow, resolveCollisions, snapshot
+  };
+});

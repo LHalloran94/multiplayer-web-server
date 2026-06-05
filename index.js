@@ -4,6 +4,7 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
+const MWSim = require('./avatar-sim'); // shared authoritative avatar simulation
 
 const app = express();
 const server = http.createServer(app);
@@ -758,8 +759,85 @@ const roomSprays = {};
 const roomMedia = {};
 const roomCanvases = {}; // `${roomId}:${scope}` → { strokes: Map<id,stroke>, stamps: [] }
 const MAX_CANVAS_ITEMS = 200;
-const roomAvatars = {};
+const roomAvatars = {}; // legacy (old position-broadcast model; kept for back-compat)
 const roomVoice = {};
+
+// ---- Authoritative avatar simulation (Stage 1b) ----------------------------
+// One fixed-timestep simulation per room that has active avatars. Clients send
+// inputs (avatar-input); the server steps the shared MWSim and broadcasts
+// authoritative snapshots (avatar-snapshot). See server/avatar-sim.js.
+const roomSim = {}; // room → { platforms, avatars:{id:state}, queues:{id:[input]}, lastInput:{id}, meta:{id:{username,fill}}, tick, snapCount, interval }
+const NEUTRAL_INPUT = { left: false, right: false, down: false, jump: false, grab: false, respawn: false };
+const TICKS_PER_SNAPSHOT = Math.max(1, Math.round(MWSim.C.TICK_HZ / MWSim.C.SNAPSHOT_HZ));
+
+function ensureRoomSim(room, layout) {
+  let rs = roomSim[room];
+  if (!rs) {
+    const idx = ((layout | 0) % MWSim.STAGE_LAYOUTS.length + MWSim.STAGE_LAYOUTS.length) % MWSim.STAGE_LAYOUTS.length;
+    rs = roomSim[room] = {
+      platforms: MWSim.STAGE_LAYOUTS[idx], avatars: {}, queues: {}, lastInput: {}, meta: {},
+      tick: 0, snapCount: 0, interval: null
+    };
+  }
+  return rs;
+}
+
+function startRoomTick(room) {
+  const rs = roomSim[room];
+  if (!rs || rs.interval) return;
+  const stepMs = 1000 / MWSim.C.TICK_HZ;
+  rs.interval = setInterval(() => {
+    const ids = Object.keys(rs.avatars);
+    if (ids.length === 0) { stopRoomTick(room); return; }
+    const list = ids.map(id => rs.avatars[id]);
+    const byId = rs.avatars;
+    // 1) Movement: process each avatar's queued inputs (one per tick, draining a
+    //    backlog up to 2/tick), or repeat the last input when starved.
+    for (const s of list) {
+      const q = rs.queues[s.id] || (rs.queues[s.id] = []);
+      if (s.grabbedBy) { // pinned by the grabber; consume inputs without applying
+        if (q.length) { s.lastSeq = q[q.length - 1].seq; rs.lastInput[s.id] = q[q.length - 1]; q.length = 0; }
+        continue;
+      }
+      const steps = q.length > 6 ? 2 : 1;
+      for (let k = 0; k < steps; k++) {
+        let inp;
+        if (q.length) { inp = q.shift(); rs.lastInput[s.id] = inp; }
+        else inp = rs.lastInput[s.id] || NEUTRAL_INPUT;
+        MWSim.stepMovement(s, inp, rs.platforms);
+      }
+    }
+    // 2) Interactions, resolved authoritatively after everyone has moved.
+    MWSim.resolveGrabThrow(list, byId);
+    MWSim.resolveCollisions(list, byId);
+    rs.tick++;
+    // 3) Broadcast a snapshot at SNAPSHOT_HZ.
+    if (++rs.snapCount >= TICKS_PER_SNAPSHOT) {
+      rs.snapCount = 0;
+      const avatars = list.map(s => Object.assign(MWSim.snapshot(s), rs.meta[s.id] || {}));
+      io.to(room).emit('avatar-snapshot', { tick: rs.tick, t: Date.now(), avatars });
+    }
+  }, stepMs);
+}
+
+function stopRoomTick(room) {
+  const rs = roomSim[room];
+  if (rs && rs.interval) { clearInterval(rs.interval); rs.interval = null; }
+  delete roomSim[room];
+}
+
+function removeSimAvatar(room, id) {
+  const rs = roomSim[room];
+  if (!rs) return;
+  const s = rs.avatars[id];
+  if (s) { // release any grab relationship so partners aren't left dangling
+    if (s.grabbing && rs.avatars[s.grabbing]) rs.avatars[s.grabbing].grabbedBy = null;
+    if (s.grabbedBy && rs.avatars[s.grabbedBy]) rs.avatars[s.grabbedBy].grabbing = null;
+  }
+  delete rs.avatars[id]; delete rs.queues[id]; delete rs.lastInput[id]; delete rs.meta[id];
+  io.to(room).emit('avatar-leave', { id });
+  if (Object.keys(rs.avatars).length === 0) stopRoomTick(room);
+}
 const socketVoiceScope = {}; // socketId → voice scope ('page' uses currentRoom; else 'dm:X', 'room:X', 'group:X')
 const userCurrentFullUrl = {};
 const socketDmRooms = {};      // socketId → Set of DM roomIds
@@ -1154,6 +1232,44 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('avatar-move', { id: socket.id, x, y, t, username, facingLeft, onGround, fill });
   });
 
+  // ---- Authoritative avatar sim: client enters, streams inputs, exits ----
+  socket.on('avatar-enter', ({ layout, username, fill }) => {
+    if (!currentRoom) return;
+    const rs = ensureRoomSim(currentRoom, layout);
+    if (!rs.avatars[socket.id]) {
+      rs.avatars[socket.id] = MWSim.createState(socket.id, rs.platforms);
+      rs.queues[socket.id] = [];
+      rs.lastInput[socket.id] = null;
+    }
+    rs.meta[socket.id] = { username: username || currentUsername, fill: fill || null };
+    startRoomTick(currentRoom);
+    // Immediately send the newcomer the current state so they see everyone.
+    const list = Object.values(rs.avatars);
+    socket.emit('avatar-snapshot', {
+      tick: rs.tick, t: Date.now(),
+      avatars: list.map(s => Object.assign(MWSim.snapshot(s), rs.meta[s.id] || {}))
+    });
+  });
+
+  socket.on('avatar-input', (input) => {
+    if (!currentRoom || !input) return;
+    const rs = roomSim[currentRoom];
+    if (!rs || !rs.avatars[socket.id]) return;
+    const q = rs.queues[socket.id];
+    q.push({
+      seq: input.seq | 0,
+      left: !!input.left, right: !!input.right, down: !!input.down,
+      jump: !!input.jump, grab: !!input.grab, respawn: !!input.respawn
+    });
+    if (q.length > 20) q.splice(0, q.length - 20); // bound a runaway backlog
+    if (input.fill && rs.meta[socket.id]) rs.meta[socket.id].fill = input.fill;
+    if (input.username && rs.meta[socket.id]) rs.meta[socket.id].username = input.username;
+  });
+
+  socket.on('avatar-exit', () => {
+    if (currentRoom) removeSimAvatar(currentRoom, socket.id);
+  });
+
   socket.on('voice-join', ({ username, scope }) => {
     // Resolve the scope key: 'page' uses the URL room; otherwise use as-is (dm:X, room:X, group:X)
     const voiceScope = (!scope || scope === 'page') ? currentRoom : scope;
@@ -1428,6 +1544,7 @@ io.on('connection', (socket) => {
     if (currentRoom) {
       delete roomUsers[currentRoom][socket.id];
       if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][socket.id];
+      removeSimAvatar(currentRoom, socket.id);
       const voiceScope = socketVoiceScope[socket.id];
       if (voiceScope && roomVoice[voiceScope] && roomVoice[voiceScope][socket.id]) {
         delete roomVoice[voiceScope][socket.id];
