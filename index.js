@@ -792,19 +792,18 @@ function startRoomTick(room) {
     const list = ids.map(id => rs.avatars[id]);
     const byId = rs.avatars;
     // 1) Movement: process each avatar's queued inputs (one per tick, draining a
-    //    backlog up to 2/tick), or repeat the last input when starved.
+    //    backlog up to 2/tick). On an EMPTY queue we HOLD — we do NOT repeat the last
+    //    input. Repeating would advance the sim past what the client predicted for that
+    //    seq and force a reconciliation correction every snapshot (the mid-jump jitter).
     for (const s of list) {
       const q = rs.queues[s.id] || (rs.queues[s.id] = []);
       if (s.grabbedBy) { // pinned by the grabber; consume inputs without applying
-        if (q.length) { s.lastSeq = q[q.length - 1].seq; rs.lastInput[s.id] = q[q.length - 1]; q.length = 0; }
+        if (q.length) { s.lastSeq = q[q.length - 1].seq; q.length = 0; }
         continue;
       }
-      const steps = q.length > 6 ? 2 : 1;
+      const steps = q.length > 6 ? 2 : (q.length > 0 ? 1 : 0);
       for (let k = 0; k < steps; k++) {
-        let inp;
-        if (q.length) { inp = q.shift(); rs.lastInput[s.id] = inp; }
-        else inp = rs.lastInput[s.id] || NEUTRAL_INPUT;
-        MWSim.stepMovement(s, inp, rs.platforms);
+        MWSim.stepMovement(s, q.shift(), rs.platforms);
       }
     }
     // 2) Interactions, resolved authoritatively after everyone has moved.
