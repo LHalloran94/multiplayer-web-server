@@ -95,6 +95,7 @@
       hasDoubleJump: true, wallSlideDir: 0,
       coyote: 0, jumpBuffer: 0, fallThroughIdx: -1,
       grabbing: null, grabbedBy: null,
+      noCollideId: null, noCollideTicks: 0,   // post-throw collision grace
       // input edge memory
       prevJump: false, prevDown: false, prevRespawn: false, prevGrab: false,
       grab: false,        // latest grab-held flag (consumed by resolveGrabThrow)
@@ -217,6 +218,9 @@
     // Variable jump height: releasing jump while rising cuts upward velocity
     if (!input.jump && s.prevJump && s.vy < 0) s.vy *= 0.45;
 
+    // Decay post-throw collision grace
+    if (s.noCollideTicks > 0) { s.noCollideTicks--; if (s.noCollideTicks === 0) s.noCollideId = null; }
+
     // Edge memory
     s.prevJump = !!input.jump;
     s.prevDown = wantsDown;
@@ -235,6 +239,9 @@
             tgt.vx = dir * C.THROW_VX + s.vx * 0.5;
             tgt.vy = C.THROW_VY;
             tgt.grabbedBy = null; tgt.hasDoubleJump = true;
+            // Don't let the just-released victim immediately collide-shove the thrower.
+            s.noCollideId = tgt.id; s.noCollideTicks = 15;
+            tgt.noCollideId = s.id; tgt.noCollideTicks = 15;
           }
           s.grabbing = null;
         } else if (!s.grabbedBy) {
@@ -269,6 +276,8 @@
         const a = list[i], b = list[j];
         if (a.grabbedBy || b.grabbedBy) continue;          // carried blobs don't collide
         if (a.grabbing === b.id || b.grabbing === a.id) continue;
+        if ((a.noCollideId === b.id && a.noCollideTicks > 0) ||
+            (b.noCollideId === a.id && b.noCollideTicks > 0)) continue;  // post-throw grace
         const dx = b.x - a.x, dy = b.y - a.y;
         const dist = Math.hypot(dx, dy);
         if (dist >= minDist || dist <= 0.5) continue;
@@ -288,6 +297,28 @@
     }
   }
 
+  // Client-side collision PREDICTION: resolve one avatar `s` against a set of fixed
+  // obstacles, using the EXACT a-side math from resolveCollisions (half separation +
+  // momentum exchange). Because it mirrors the server's own-side update, the predicting
+  // client's trajectory matches authority → no pass-through, no reconciliation jitter.
+  // obstacles: [{ id, x, y, vx, vy }] — usually the interpolated remote avatars.
+  function resolveOwnCollision(s, obstacles) {
+    if (s.grabbedBy) return;
+    const minDist = C.BLOB_R * 2.1;
+    for (const o of obstacles) {
+      if (s.grabbing === o.id) continue;
+      if (s.noCollideId === o.id && s.noCollideTicks > 0) continue;
+      const dx = o.x - s.x, dy = o.y - s.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist >= minDist || dist <= 0.5) continue;
+      const nx = dx / dist, ny = dy / dist, overlap = minDist - dist;
+      s.x -= nx * overlap * 0.5; s.y -= ny * overlap * 0.3;
+      const ovx = o.vx || 0, ovy = o.vy || 0;
+      const vn = (ovx - s.vx) * nx + (ovy - s.vy) * ny;
+      if (vn < 0) { const imp = -vn * 0.6; s.vx -= nx * imp; s.vy -= ny * imp * 0.5; }
+    }
+  }
+
   // Serialize the FULL reconcilable state for a snapshot entry. The owning client
   // resets to this and replays its unacked inputs (exact, deterministic). Other
   // clients only read x/y/facingLeft/onGround/grabbing/grabbedBy for rendering.
@@ -298,6 +329,7 @@
       hasDoubleJump: s.hasDoubleJump, wallSlideDir: s.wallSlideDir,
       coyote: s.coyote, jumpBuffer: s.jumpBuffer, fallThroughIdx: s.fallThroughIdx,
       grabbing: s.grabbing, grabbedBy: s.grabbedBy,
+      noCollideId: s.noCollideId, noCollideTicks: s.noCollideTicks,
       prevJump: s.prevJump, prevDown: s.prevDown, prevGrab: s.prevGrab, prevRespawn: s.prevRespawn,
       seq: s.lastSeq
     };
@@ -310,12 +342,13 @@
     s.hasDoubleJump = a.hasDoubleJump; s.wallSlideDir = a.wallSlideDir;
     s.coyote = a.coyote; s.jumpBuffer = a.jumpBuffer; s.fallThroughIdx = a.fallThroughIdx;
     s.grabbing = a.grabbing; s.grabbedBy = a.grabbedBy;
+    s.noCollideId = a.noCollideId; s.noCollideTicks = a.noCollideTicks;
     s.prevJump = a.prevJump; s.prevDown = a.prevDown; s.prevGrab = a.prevGrab; s.prevRespawn = a.prevRespawn;
     s.lastSeq = a.seq;
   }
 
   return {
     C, STAGE_LAYOUTS, layoutIndex, platformsFor, floorY,
-    createState, stepMovement, resolveGrabThrow, resolveCollisions, snapshot, applySnapshot
+    createState, stepMovement, resolveGrabThrow, resolveCollisions, resolveOwnCollision, snapshot, applySnapshot
   };
 });
