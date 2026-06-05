@@ -1142,9 +1142,9 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('avatar-emote', { id: socket.id, emote });
   });
 
-  socket.on('avatar-interact', ({ type, targetId }) => {
+  socket.on('avatar-interact', ({ type, targetId, vx, vy }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('avatar-interact', { id: socket.id, type, targetId });
+    socket.to(currentRoom).emit('avatar-interact', { id: socket.id, type, targetId, vx, vy });
   });
 
   socket.on('avatar-move', ({ x, y, username, facingLeft, onGround, fill }) => {
