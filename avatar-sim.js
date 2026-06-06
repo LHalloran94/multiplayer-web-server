@@ -27,6 +27,7 @@
     ACCEL: 0.75, DECEL: 0.68, MAX_VX: 5.0,
     AIR_ACCEL: 0.52, AIR_DECEL: 0.985,
     COYOTE_FRAMES: 7, JUMP_BUFFER_FRAMES: 10,
+    WALL_SLIDE_VY: 1.5, WALL_SLIDE_VY_FAST: 6,   // hold ↓ on a wall to slide down faster
     // Interactions
     GRAB_RANGE: 72,        // BLOB_R * 3.6
     THROW_VX: 9, THROW_VY: -9,
@@ -154,7 +155,7 @@
         s.wallSlideDir = 0;
       } else {
         s.x = s.wallSlideDir === -1 ? C.AV_W / 2 : C.WORLD_W - C.AV_W / 2;
-        s.vx = 0; s.vy = Math.min(s.vy, 1.5);
+        s.vx = 0; s.vy = Math.min(s.vy, wantsDown ? C.WALL_SLIDE_VY_FAST : C.WALL_SLIDE_VY);
       }
     }
 
