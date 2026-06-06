@@ -760,6 +760,7 @@ const roomMedia = {};
 const roomCanvases = {}; // `${roomId}:${scope}` → { strokes: Map<id,stroke>, stamps: [] }
 const MAX_CANVAS_ITEMS = 200;
 const roomAvatars = {}; // legacy (old position-broadcast model; kept for back-compat)
+const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel mesh (Stage 6 pivot)
 const roomVoice = {};
 
 // ---- Authoritative avatar simulation (Stage 1b) ----------------------------
@@ -1269,6 +1270,27 @@ io.on('connection', (socket) => {
     if (currentRoom) removeSimAvatar(currentRoom, socket.id);
   });
 
+  // ---- Avatar P2P transport signaling (Stage 6 pivot) ----
+  // Thin relays for the unreliable WebRTC DataChannel mesh that carries avatar
+  // positions peer-to-peer. Mirrors the voice handshake (new joiner offers to all
+  // existing peers — single initiator, no glare) but is independent of voice and
+  // carries no game state. Scoped to the URL room (currentRoom).
+  socket.on('avt-join', () => {
+    if (!currentRoom) return;
+    if (!roomAvt[currentRoom]) roomAvt[currentRoom] = new Set();
+    const existingPeers = [...roomAvt[currentRoom]];
+    roomAvt[currentRoom].add(socket.id);
+    socket.emit('avt-joined', { existingPeers });
+  });
+  socket.on('avt-leave', () => {
+    if (currentRoom && roomAvt[currentRoom] && roomAvt[currentRoom].delete(socket.id)) {
+      socket.to(currentRoom).emit('avt-peer-left', { id: socket.id });
+    }
+  });
+  socket.on('avt-offer',  ({ to, sdp })       => { socket.to(to).emit('avt-offer',  { from: socket.id, sdp }); });
+  socket.on('avt-answer', ({ to, sdp })       => { socket.to(to).emit('avt-answer', { from: socket.id, sdp }); });
+  socket.on('avt-ice',    ({ to, candidate }) => { socket.to(to).emit('avt-ice',    { from: socket.id, candidate }); });
+
   socket.on('voice-join', ({ username, scope }) => {
     // Resolve the scope key: 'page' uses the URL room; otherwise use as-is (dm:X, room:X, group:X)
     const voiceScope = (!scope || scope === 'page') ? currentRoom : scope;
@@ -1552,6 +1574,9 @@ io.on('connection', (socket) => {
         socket.leave('voice:' + voiceScope);
       }
       delete socketVoiceScope[socket.id];
+      if (roomAvt[currentRoom] && roomAvt[currentRoom].delete(socket.id)) {
+        socket.to(currentRoom).emit('avt-peer-left', { id: socket.id });
+      }
       broadcastPresence(currentRoom);
       io.to(currentRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
