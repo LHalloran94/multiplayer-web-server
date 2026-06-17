@@ -1323,6 +1323,16 @@ io.on('connection', (socket) => {
     if (!currentRoom || !roomObjects[currentRoom]) return;
     if (roomObjects[currentRoom].delete(id)) io.to(currentRoom).emit('avatar-object-removed', { id });
   });
+  // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
+  // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
+  socket.on('avatar-object-hit', ({ id }) => {
+    if (!currentRoom || !roomObjects[currentRoom]) return;
+    const obj = roomObjects[currentRoom].get(id);
+    if (!obj || typeof obj.hp !== 'number') return;
+    obj.hp -= 1;
+    if (obj.hp <= 0) { roomObjects[currentRoom].delete(id); io.to(currentRoom).emit('avatar-object-removed', { id }); }
+    else io.to(currentRoom).emit('avatar-object-update', { id, hp: obj.hp });
+  });
 
   socket.on('voice-join', ({ username, scope }) => {
     // Resolve the scope key: 'page' uses the URL room; otherwise use as-is (dm:X, room:X, group:X)
