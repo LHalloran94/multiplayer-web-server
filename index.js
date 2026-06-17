@@ -1325,11 +1325,11 @@ io.on('connection', (socket) => {
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
-  socket.on('avatar-object-hit', ({ id }) => {
+  socket.on('avatar-object-hit', ({ id, dmg }) => {
     if (!currentRoom || !roomObjects[currentRoom]) return;
     const obj = roomObjects[currentRoom].get(id);
     if (!obj || typeof obj.hp !== 'number') return;
-    obj.hp -= 1;
+    obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
     if (obj.hp <= 0) { roomObjects[currentRoom].delete(id); io.to(currentRoom).emit('avatar-object-removed', { id }); }
     else io.to(currentRoom).emit('avatar-object-update', { id, hp: obj.hp });
   });
