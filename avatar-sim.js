@@ -19,7 +19,7 @@
 
   // ---- Constants (mirror of the client's avatar constants) ----
   const C = {
-    STAGE_W: 1280, STAGE_H: 720, WORLD_W: 5120,
+    STAGE_W: 1280, STAGE_H: 720, WORLD_W: 5120, WORLD_H: 2160,
     BLOB_R: 20, AV_W: 40, AV_H: 40,
     GRAVITY_BASE: 0.62, GRAVITY_UP_MULT: 0.88, GRAVITY_DOWN_MULT: 1.58,
     GRAVITY_APEX_MULT: 0.68, APEX_VY_THRESH: 0.38,
@@ -77,6 +77,12 @@
     ]
   ];
 
+  // Stage 6 — taller world for building. Shift each authored 720-tall layout down so
+  // its floor sits at the bottom of WORLD_H and the original platform arrangement sits
+  // just above it; the large vertical space ABOVE is left open as building canvas.
+  const V_SHIFT = C.WORLD_H - C.STAGE_H;
+  for (const layout of STAGE_LAYOUTS) for (const p of layout) p.y += V_SHIFT;
+
   // URL → deterministic layout index (matches the client's urlHash)
   function layoutIndex(url) {
     let h = 0;
@@ -128,7 +134,7 @@
       if (!s.onGround && s.vy > 0) s.wallSlideDir = 1;
     }
     if (s.y - C.AV_H < 0) { s.y = C.AV_H; if (s.vy < 0) s.vy = 0; }
-    if (s.y > C.STAGE_H) { s.y = C.STAGE_H; s.vy = 0; s.onGround = true; }
+    if (s.y > C.WORLD_H) { s.y = C.WORLD_H; s.vy = 0; s.onGround = true; }
   }
 
   // ---- One fixed-timestep movement step for a single avatar ----
@@ -170,7 +176,7 @@
           const p = P[i];
           if (Math.abs(s.y - p.y) <= 3 && s.x + C.AV_W / 2 > p.x && s.x - C.AV_W / 2 < p.x + p.w) { onIdx = i; break; }
         }
-        if (onIdx >= 0 && P[onIdx].y + P[onIdx].h < C.STAGE_H) { s.fallThroughIdx = onIdx; s.vy = 5; }
+        if (onIdx >= 0 && P[onIdx].y + P[onIdx].h < C.WORLD_H) { s.fallThroughIdx = onIdx; s.vy = 5; }
         s.jumpBuffer = 0; s.coyote = 0;
       } else if (canWallJump) {
         s.vy = C.JUMP_VY; s.vx = -s.wallSlideDir * C.MAX_VX * 1.4;
@@ -306,6 +312,8 @@
   function resolveOwnCollision(s, obstacles) {
     if (s.grabbedBy) return;
     const minDist = C.BLOB_R * 2.1;
+    const SLOP = 3;                                      // resting tolerance: don't correct tiny overlaps →
+                                                        // kills the two-body feedback jitter when blobs touch
     for (const o of obstacles) {
       if (s.grabbing === o.id) continue;
       if (s.noCollideId === o.id && s.noCollideTicks > 0) continue;
@@ -313,10 +321,10 @@
       const dist = Math.hypot(dx, dy);
       if (dist >= minDist || dist <= 0.5) continue;
       const nx = dx / dist, ny = dy / dist, overlap = minDist - dist;
-      s.x -= nx * overlap * 0.5; s.y -= ny * overlap * 0.3;
+      if (overlap > SLOP) { s.x -= nx * (overlap - SLOP) * 0.5; s.y -= ny * (overlap - SLOP) * 0.3; }
       const ovx = o.vx || 0, ovy = o.vy || 0;
       const vn = (ovx - s.vx) * nx + (ovy - s.vy) * ny;
-      if (vn < 0) { const imp = -vn * 0.6; s.vx -= nx * imp; s.vy -= ny * imp * 0.5; }
+      if (vn < -0.6) { const imp = -vn * 0.6; s.vx -= nx * imp; s.vy -= ny * imp * 0.5; } // ignore interpolation-jitter rel-vel
     }
   }
 

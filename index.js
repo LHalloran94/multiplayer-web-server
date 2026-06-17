@@ -761,6 +761,9 @@ const roomCanvases = {}; // `${roomId}:${scope}` → { strokes: Map<id,stroke>, 
 const MAX_CANVAS_ITEMS = 200;
 const roomAvatars = {}; // legacy (old position-broadcast model; kept for back-compat)
 const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel mesh (Stage 6 pivot)
+const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
+let objSeq = 0;
+const MAX_OBJECTS_PER_ROOM = 60;   // FIFO cap bounds clutter/memory (destruction is the main limiter)
 const roomVoice = {};
 
 // ---- Authoritative avatar simulation (Stage 1b) ----------------------------
@@ -1281,6 +1284,8 @@ io.on('connection', (socket) => {
     const existingPeers = [...roomAvt[currentRoom]];
     roomAvt[currentRoom].add(socket.id);
     socket.emit('avt-joined', { existingPeers });
+    // Replay the current world objects to the new joiner (late-joiner sync).
+    socket.emit('avatar-objects-init', { objects: roomObjects[currentRoom] ? [...roomObjects[currentRoom].values()] : [] });
   });
   socket.on('avt-leave', () => {
     if (currentRoom && roomAvt[currentRoom] && roomAvt[currentRoom].delete(socket.id)) {
@@ -1290,6 +1295,30 @@ io.on('connection', (socket) => {
   socket.on('avt-offer',  ({ to, sdp })       => { socket.to(to).emit('avt-offer',  { from: socket.id, sdp }); });
   socket.on('avt-answer', ({ to, sdp })       => { socket.to(to).emit('avt-answer', { from: socket.id, sdp }); });
   socket.on('avt-ice',    ({ to, candidate }) => { socket.to(to).emit('avt-ice',    { from: socket.id, candidate }); });
+
+  // ---- Avatar world objects (Stage 6) — server-authoritative existence over reliable
+  // socket.io; physics response is applied locally on each client. Persist till restart.
+  socket.on('avatar-object-spawn', ({ type, x, y }) => {
+    if (!currentRoom) return;
+    if (type !== 'bouncepad' && type !== 'ramp' && type !== 'crate') return;
+    if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return;
+    if (!roomObjects[currentRoom]) roomObjects[currentRoom] = new Map();
+    const map = roomObjects[currentRoom];
+    if (map.size >= MAX_OBJECTS_PER_ROOM) {                 // FIFO eviction
+      const oldest = map.keys().next().value;
+      map.delete(oldest);
+      io.to(currentRoom).emit('avatar-object-removed', { id: oldest });
+    }
+    const id = 'o' + (++objSeq);
+    const obj = { id, type, x, y, ownerId: socket.id };
+    if (type === 'crate') obj.hp = 2;
+    map.set(id, obj);
+    io.to(currentRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
+  });
+  socket.on('avatar-object-remove', ({ id }) => {
+    if (!currentRoom || !roomObjects[currentRoom]) return;
+    if (roomObjects[currentRoom].delete(id)) io.to(currentRoom).emit('avatar-object-removed', { id });
+  });
 
   socket.on('voice-join', ({ username, scope }) => {
     // Resolve the scope key: 'page' uses the URL room; otherwise use as-is (dm:X, room:X, group:X)
