@@ -1298,18 +1298,22 @@ io.on('connection', (socket) => {
 
   // ---- Avatar world objects (Stage 6) — server-authoritative existence over reliable
   // socket.io; physics response is applied locally on each client. Persist till restart.
-  socket.on('avatar-object-spawn', ({ type, x, y }) => {
+  socket.on('avatar-object-spawn', ({ id, type, x, y }) => {
     if (!currentRoom) return;
     if (type !== 'bouncepad' && type !== 'ramp' && type !== 'crate') return;
     if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return;
+    // Client supplies the id (for optimistic local placement). Require it to be namespaced to
+    // this socket (anti-spoof); otherwise mint a fallback. Echoing the same id back means the
+    // placer's optimistic object is overwritten in place rather than duplicated.
+    if (typeof id !== 'string' || !id.startsWith(socket.id + '-')) id = socket.id + '-s' + (++objSeq);
     if (!roomObjects[currentRoom]) roomObjects[currentRoom] = new Map();
     const map = roomObjects[currentRoom];
+    if (map.has(id)) return;                                // ignore duplicate spawn for an existing id
     if (map.size >= MAX_OBJECTS_PER_ROOM) {                 // FIFO eviction
       const oldest = map.keys().next().value;
       map.delete(oldest);
       io.to(currentRoom).emit('avatar-object-removed', { id: oldest });
     }
-    const id = 'o' + (++objSeq);
     const obj = { id, type, x, y, ownerId: socket.id };
     if (type === 'crate') obj.hp = 2;
     map.set(id, obj);
