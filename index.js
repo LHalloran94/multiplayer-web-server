@@ -764,6 +764,8 @@ const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel 
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
 const MAX_OBJECTS_PER_ROOM = 60;   // FIFO cap bounds clutter/memory (destruction is the main limiter)
+const OBJ_TYPES = new Set(['bouncepad', 'ramp', 'crate', 'stamp', 'stroke']);
+const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 const roomVoice = {};
 
 // ---- Authoritative avatar simulation (Stage 1b) ----------------------------
@@ -1298,25 +1300,53 @@ io.on('connection', (socket) => {
 
   // ---- Avatar world objects (Stage 6) — server-authoritative existence over reliable
   // socket.io; physics response is applied locally on each client. Persist till restart.
-  socket.on('avatar-object-spawn', ({ id, type, x, y, dir }) => {
-    if (!currentRoom) return;
-    if (type !== 'bouncepad' && type !== 'ramp' && type !== 'crate') return;
-    if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return;
+  socket.on('avatar-object-spawn', (data) => {
+    if (!currentRoom || !data || !OBJ_TYPES.has(data.type)) return;
+    const type = data.type;
     // Client supplies the id (for optimistic local placement). Require it to be namespaced to
     // this socket (anti-spoof); otherwise mint a fallback. Echoing the same id back means the
     // placer's optimistic object is overwritten in place rather than duplicated.
+    let id = data.id;
     if (typeof id !== 'string' || !id.startsWith(socket.id + '-')) id = socket.id + '-s' + (++objSeq);
     if (!roomObjects[currentRoom]) roomObjects[currentRoom] = new Map();
     const map = roomObjects[currentRoom];
     if (map.has(id)) return;                                // ignore duplicate spawn for an existing id
+    const WW = MWSim.C.WORLD_W, WH = MWSim.C.WORLD_H;
+    let obj;
+    if (type === 'stroke') {
+      // Freehand solid terrain (Tier B): validate + clamp the world-coord point list.
+      if (!Array.isArray(data.pts)) return;
+      const pts = [];
+      for (const p of data.pts) {
+        if (!p || !isFinite(p.x) || !isFinite(p.y)) continue;
+        pts.push({ x: Math.max(0, Math.min(WW, p.x)), y: Math.max(0, Math.min(WH, p.y)) });
+        if (pts.length >= 200) break;                       // per-stroke point cap
+      }
+      if (pts.length < 2) return;
+      let sx = 0, sy = 0; for (const p of pts) { sx += p.x; sy += p.y; }
+      obj = { id, type, ownerId: socket.id, x: sx / pts.length, y: sy / pts.length, pts,
+              w: clampN(data.w, 2, 40, 8),
+              color: (typeof data.color === 'string' && data.color.length <= 32) ? data.color : '#22c55e',
+              hp: 3 };
+    } else if (type === 'stamp') {
+      // Solid, destructible textured box (Tier B): `content` is an emoji or image URL/data-URI.
+      if (typeof data.content !== 'string' || !data.content || data.content.length > 8192) return;
+      if (!isFinite(data.x) || !isFinite(data.y)) return;
+      obj = { id, type, ownerId: socket.id,
+              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+              content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64), hp: 2 };
+    } else {
+      // Tier A props (bouncepad / ramp / crate).
+      if (!isFinite(data.x) || !isFinite(data.y)) return;
+      obj = { id, type, x: data.x, y: data.y, ownerId: socket.id };
+      if (type === 'crate') obj.hp = 2;
+      if (type === 'ramp' && (data.dir === 1 || data.dir === -1)) obj.dir = data.dir;
+    }
     if (map.size >= MAX_OBJECTS_PER_ROOM) {                 // FIFO eviction
       const oldest = map.keys().next().value;
       map.delete(oldest);
       io.to(currentRoom).emit('avatar-object-removed', { id: oldest });
     }
-    const obj = { id, type, x, y, ownerId: socket.id };
-    if (type === 'crate') obj.hp = 2;
-    if (type === 'ramp' && (dir === 1 || dir === -1)) obj.dir = dir;
     map.set(id, obj);
     io.to(currentRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
   });
