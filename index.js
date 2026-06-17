@@ -1298,7 +1298,7 @@ io.on('connection', (socket) => {
 
   // ---- Avatar world objects (Stage 6) — server-authoritative existence over reliable
   // socket.io; physics response is applied locally on each client. Persist till restart.
-  socket.on('avatar-object-spawn', ({ id, type, x, y }) => {
+  socket.on('avatar-object-spawn', ({ id, type, x, y, dir }) => {
     if (!currentRoom) return;
     if (type !== 'bouncepad' && type !== 'ramp' && type !== 'crate') return;
     if (typeof x !== 'number' || typeof y !== 'number' || !isFinite(x) || !isFinite(y)) return;
@@ -1316,6 +1316,7 @@ io.on('connection', (socket) => {
     }
     const obj = { id, type, x, y, ownerId: socket.id };
     if (type === 'crate') obj.hp = 2;
+    if (type === 'ramp' && (dir === 1 || dir === -1)) obj.dir = dir;
     map.set(id, obj);
     io.to(currentRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
   });
