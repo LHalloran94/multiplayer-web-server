@@ -764,7 +764,7 @@ const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel 
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
 const MAX_OBJECTS_PER_ROOM = 60;   // FIFO cap bounds clutter/memory (destruction is the main limiter)
-const OBJ_TYPES = new Set(['bouncepad', 'ramp', 'stamp', 'stroke', 'movplat', 'fan', 'conveyor', 'booster']);
+const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers)
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 const roomVoice = {};
 
@@ -1330,27 +1330,36 @@ io.on('connection', (socket) => {
               hp: 3 };
     } else if (type === 'stamp') {
       // Solid, destructible textured box (Tier B): `content` is an emoji or image URL/data-URI.
+      // Now carries a shape (rect/ellipse/tri) + rotation angle.
       if (typeof data.content !== 'string' || !data.content || data.content.length > 8192) return;
       if (!isFinite(data.x) || !isFinite(data.y)) return;
       obj = { id, type, ownerId: socket.id,
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-              content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64), hp: 2 };
-    } else if (type === 'movplat') {
-      // Moving platform (Increment 2): solid bar that sweeps a fixed amplitude around (x,y).
-      // Live position is derived client-side from Date.now() + phase, so only the static
-      // descriptor is stored/replayed (axis, amplitude, phase) — no per-tick streaming.
-      if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type, ownerId: socket.id,
-              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-              axis: data.axis === 'v' ? 'v' : 'h',
-              amp: clampN(data.amp, 40, 400, 120),
-              phase: clampN(data.phase, 0, Math.PI * 2, 0), hp: 2 };
+              content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64),
+              shape: (data.shape === 'ellipse' || data.shape === 'tri') ? data.shape : 'rect',
+              angle: clampN(data.angle, -Math.PI, Math.PI, 0), hp: 2 };
     } else {
-      // Tier A props + directional strips (bouncepad / ramp / conveyor / booster / fan).
-      // All punch-destructible (hp). conveyor/booster/ramp carry a facing dir (±1).
+      // Unified PLATFORM: a solid one-way bar with optional rotation, modifiers, and a motion path.
+      // Modifiers absorb the old props: bouncy (jump pad), boost (conveyor/booster/ramp — signed
+      // strength), updraft (fan). A `path` makes it move; live position is derived client-side from
+      // the wall clock + a phase fraction, so only the static descriptor is stored/replayed.
       if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type, x: data.x, y: data.y, ownerId: socket.id, hp: 2 };
-      if ((type === 'ramp' || type === 'conveyor' || type === 'booster') && (data.dir === 1 || data.dir === -1)) obj.dir = data.dir;
+      obj = { id, type: 'platform', ownerId: socket.id,
+              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+              w: clampN(data.w, 24, 400, 96), h: clampN(data.h, 8, 60, 16),
+              angle: clampN(data.angle, -Math.PI, Math.PI, 0),
+              boost: clampN(data.boost, -16, 16, 0), updraft: clampN(data.updraft, 0, 12, 0), hp: 2 };
+      if (data.bouncy) obj.bouncy = 1;
+      if (data.path && Array.isArray(data.path.pts) && data.path.pts.length >= 2) {
+        const pts = [];
+        for (const p of data.path.pts) {
+          if (!p || !isFinite(p.x) || !isFinite(p.y)) continue;
+          pts.push({ x: Math.max(0, Math.min(WW, p.x)), y: Math.max(0, Math.min(WH, p.y)) });
+          if (pts.length >= 64) break;
+        }
+        if (pts.length >= 2) obj.path = { pts, loop: !!data.path.loop,
+          speed: clampN(data.path.speed, 0.02, 1.2, 0.18), phase: clampN(data.path.phase, 0, 1, 0) };
+      }
     }
     if (map.size >= MAX_OBJECTS_PER_ROOM) {                 // FIFO eviction
       const oldest = map.keys().next().value;

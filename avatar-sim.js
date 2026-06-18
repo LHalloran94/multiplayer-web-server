@@ -39,42 +39,13 @@
   };
 
   // ---- Stage layouts (must match the client's STAGE_LAYOUTS exactly) ----
+  // Stage 6: the built-in floating platforms were removed — players build their own with the
+  // hotbar Platform tool. Only the ground floor remains so there's footing at spawn. (Three
+  // identical entries are kept so layoutIndex/urlHash callers still resolve.)
   const STAGE_LAYOUTS = [
-    [ // 0: meandering path
-      { x: 0, y: 650, w: 5120, h: 70 },
-      { x: 100, y: 520, w: 280, h: 18 }, { x: 480, y: 400, w: 260, h: 18 },
-      { x: 820, y: 300, w: 240, h: 18 }, { x: 1120, y: 430, w: 260, h: 18 },
-      { x: 1460, y: 540, w: 280, h: 18 }, { x: 1800, y: 410, w: 260, h: 18 },
-      { x: 2100, y: 290, w: 240, h: 18 }, { x: 2400, y: 420, w: 260, h: 18 },
-      { x: 2740, y: 540, w: 280, h: 18 }, { x: 3060, y: 410, w: 260, h: 18 },
-      { x: 3380, y: 290, w: 240, h: 18 }, { x: 3680, y: 420, w: 260, h: 18 },
-      { x: 4020, y: 540, w: 280, h: 18 }, { x: 4360, y: 400, w: 260, h: 18 },
-      { x: 4700, y: 290, w: 240, h: 18 }, { x: 4950, y: 490, w: 170, h: 18 }
-    ],
-    [ // 1: stepping stones
-      { x: 0, y: 650, w: 5120, h: 70 },
-      { x: 80, y: 540, w: 220, h: 18 }, { x: 360, y: 430, w: 200, h: 18 },
-      { x: 600, y: 330, w: 200, h: 18 }, { x: 860, y: 450, w: 200, h: 18 },
-      { x: 1110, y: 550, w: 220, h: 18 }, { x: 1390, y: 430, w: 200, h: 18 },
-      { x: 1640, y: 310, w: 200, h: 18 }, { x: 1890, y: 450, w: 200, h: 18 },
-      { x: 2150, y: 560, w: 220, h: 18 }, { x: 2430, y: 440, w: 200, h: 18 },
-      { x: 2680, y: 320, w: 200, h: 18 }, { x: 2940, y: 450, w: 200, h: 18 },
-      { x: 3190, y: 560, w: 220, h: 18 }, { x: 3470, y: 440, w: 200, h: 18 },
-      { x: 3720, y: 320, w: 200, h: 18 }, { x: 3970, y: 450, w: 200, h: 18 },
-      { x: 4220, y: 560, w: 220, h: 18 }, { x: 4500, y: 430, w: 200, h: 18 },
-      { x: 4750, y: 310, w: 200, h: 18 }, { x: 4970, y: 560, w: 150, h: 18 }
-    ],
-    [ // 2: repeating pyramids
-      { x: 0, y: 650, w: 5120, h: 70 },
-      { x: 80, y: 530, w: 1000, h: 18 }, { x: 260, y: 410, w: 640, h: 18 },
-      { x: 440, y: 290, w: 280, h: 18 }, { x: 1200, y: 570, w: 200, h: 18 },
-      { x: 1480, y: 530, w: 1000, h: 18 }, { x: 1660, y: 410, w: 640, h: 18 },
-      { x: 1840, y: 290, w: 280, h: 18 }, { x: 2600, y: 570, w: 200, h: 18 },
-      { x: 2880, y: 530, w: 1000, h: 18 }, { x: 3060, y: 410, w: 640, h: 18 },
-      { x: 3240, y: 290, w: 280, h: 18 }, { x: 4000, y: 570, w: 200, h: 18 },
-      { x: 4280, y: 530, w: 840, h: 18 }, { x: 4460, y: 410, w: 480, h: 18 },
-      { x: 4640, y: 290, w: 240, h: 18 }
-    ]
+    [ { x: 0, y: 650, w: 5120, h: 70 } ],
+    [ { x: 0, y: 650, w: 5120, h: 70 } ],
+    [ { x: 0, y: 650, w: 5120, h: 70 } ]
   ];
 
   // Stage 6 — taller world for building. Shift each authored 720-tall layout down so
