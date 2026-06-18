@@ -764,7 +764,7 @@ const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel 
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
 const MAX_OBJECTS_PER_ROOM = 60;   // FIFO cap bounds clutter/memory (destruction is the main limiter)
-const OBJ_TYPES = new Set(['bouncepad', 'ramp', 'crate', 'stamp', 'stroke']);
+const OBJ_TYPES = new Set(['bouncepad', 'ramp', 'stamp', 'stroke']);
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 const roomVoice = {};
 
@@ -1336,10 +1336,9 @@ io.on('connection', (socket) => {
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64), hp: 2 };
     } else {
-      // Tier A props (bouncepad / ramp / crate).
+      // Tier A props (bouncepad / ramp). Both punch-destructible (hp), so they carry hp too.
       if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type, x: data.x, y: data.y, ownerId: socket.id };
-      if (type === 'crate') obj.hp = 2;
+      obj = { id, type, x: data.x, y: data.y, ownerId: socket.id, hp: 2 };
       if (type === 'ramp' && (data.dir === 1 || data.dir === -1)) obj.dir = data.dir;
     }
     if (map.size >= MAX_OBJECTS_PER_ROOM) {                 // FIFO eviction
@@ -1350,9 +1349,14 @@ io.on('connection', (socket) => {
     map.set(id, obj);
     io.to(currentRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
   });
+  // Mouse-eraser removal: only the OWNER may delete their own object this way. (Physically
+  // destroying anyone's object goes through avatar-object-hit, which is unrestricted.)
   socket.on('avatar-object-remove', ({ id }) => {
     if (!currentRoom || !roomObjects[currentRoom]) return;
-    if (roomObjects[currentRoom].delete(id)) io.to(currentRoom).emit('avatar-object-removed', { id });
+    const obj = roomObjects[currentRoom].get(id);
+    if (!obj || obj.ownerId !== socket.id) return;
+    roomObjects[currentRoom].delete(id);
+    io.to(currentRoom).emit('avatar-object-removed', { id });
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
