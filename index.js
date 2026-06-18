@@ -764,7 +764,7 @@ const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel 
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
 const MAX_OBJECTS_PER_ROOM = 60;   // FIFO cap bounds clutter/memory (destruction is the main limiter)
-const OBJ_TYPES = new Set(['bouncepad', 'ramp', 'stamp', 'stroke']);
+const OBJ_TYPES = new Set(['bouncepad', 'ramp', 'stamp', 'stroke', 'movplat', 'fan', 'conveyor', 'booster']);
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 const roomVoice = {};
 
@@ -1335,11 +1335,22 @@ io.on('connection', (socket) => {
       obj = { id, type, ownerId: socket.id,
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64), hp: 2 };
+    } else if (type === 'movplat') {
+      // Moving platform (Increment 2): solid bar that sweeps a fixed amplitude around (x,y).
+      // Live position is derived client-side from Date.now() + phase, so only the static
+      // descriptor is stored/replayed (axis, amplitude, phase) — no per-tick streaming.
+      if (!isFinite(data.x) || !isFinite(data.y)) return;
+      obj = { id, type, ownerId: socket.id,
+              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+              axis: data.axis === 'v' ? 'v' : 'h',
+              amp: clampN(data.amp, 40, 400, 120),
+              phase: clampN(data.phase, 0, Math.PI * 2, 0), hp: 2 };
     } else {
-      // Tier A props (bouncepad / ramp). Both punch-destructible (hp), so they carry hp too.
+      // Tier A props + directional strips (bouncepad / ramp / conveyor / booster / fan).
+      // All punch-destructible (hp). conveyor/booster/ramp carry a facing dir (±1).
       if (!isFinite(data.x) || !isFinite(data.y)) return;
       obj = { id, type, x: data.x, y: data.y, ownerId: socket.id, hp: 2 };
-      if (type === 'ramp' && (data.dir === 1 || data.dir === -1)) obj.dir = data.dir;
+      if ((type === 'ramp' || type === 'conveyor' || type === 'booster') && (data.dir === 1 || data.dir === -1)) obj.dir = data.dir;
     }
     if (map.size >= MAX_OBJECTS_PER_ROOM) {                 // FIFO eviction
       const oldest = map.keys().next().value;
