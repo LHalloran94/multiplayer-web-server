@@ -1337,7 +1337,8 @@ io.on('connection', (socket) => {
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64),
               shape: (data.shape === 'ellipse' || data.shape === 'tri') ? data.shape : 'rect',
-              angle: clampN(data.angle, -Math.PI, Math.PI, 0), hp: 2 };
+              angle: clampN(data.angle, -Math.PI, Math.PI, 0),
+              hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
     } else {
       // Unified PLATFORM: a solid one-way bar with optional rotation, modifiers, and a motion path.
       // Modifiers absorb the old props: bouncy (jump pad), boost (conveyor/booster/ramp — signed
@@ -1348,7 +1349,9 @@ io.on('connection', (socket) => {
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               w: clampN(data.w, 24, 400, 96), h: clampN(data.h, 8, 60, 16),
               angle: clampN(data.angle, -Math.PI, Math.PI, 0),
-              boost: clampN(data.boost, -16, 16, 0), updraft: clampN(data.updraft, 0, 12, 0), hp: 2 };
+              spin: clampN(data.spin, -0.006, 0.006, 0),     // continuous rotation (rad/ms; 0 = static)
+              boost: clampN(data.boost, -16, 16, 0), updraft: clampN(data.updraft, 0, 12, 0),
+              hp: data.breakable === false ? null : 2 };     // indestructible when breakable:false
       if (data.bouncy) obj.bouncy = 1;
       if (data.path && Array.isArray(data.path.pts) && data.path.pts.length >= 2) {
         const pts = [];
