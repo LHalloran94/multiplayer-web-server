@@ -1350,7 +1350,8 @@ io.on('connection', (socket) => {
               w: clampN(data.w, 24, 400, 96), h: clampN(data.h, 8, 60, 16),
               angle: clampN(data.angle, -Math.PI, Math.PI, 0),
               spin: clampN(data.spin, -0.012, 0.012, 0),     // continuous rotation (rad/ms; 0 = static)
-              boost: clampN(data.boost, -16, 16, 0), updraft: clampN(data.updraft, 0, 12, 0),
+              boost: clampN(data.boost, -48, 48, 0), updraft: clampN(data.updraft, 0, 30, 0),
+              fanLen: clampN(data.fanLen, 0.3, 3, 1),        // fan effective-distance multiplier (× base column height)
               hp: data.breakable === false ? null : 2 };     // indestructible when breakable:false
       if (data.bouncy) obj.bouncy = 1;
       if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // rotate around an edge
