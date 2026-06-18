@@ -1349,13 +1349,13 @@ io.on('connection', (socket) => {
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               w: clampN(data.w, 24, 400, 96), h: clampN(data.h, 8, 60, 16),
               angle: clampN(data.angle, -Math.PI, Math.PI, 0),
-              spin: clampN(data.spin, -0.006, 0.006, 0),     // continuous rotation (rad/ms; 0 = static)
+              spin: clampN(data.spin, -0.012, 0.012, 0),     // continuous rotation (rad/ms; 0 = static)
               boost: clampN(data.boost, -16, 16, 0), updraft: clampN(data.updraft, 0, 12, 0),
               hp: data.breakable === false ? null : 2 };     // indestructible when breakable:false
       if (data.bouncy) obj.bouncy = 1;
       if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // rotate around an edge
       if (data.osc && typeof data.osc === 'object' && isFinite(data.osc.w) && isFinite(data.osc.amp)) {
-        obj.osc = { w: clampN(data.osc.w, -0.05, 0.05, 0),   // oscillating rotation (sweep an arc, no full spin)
+        obj.osc = { w: clampN(data.osc.w, -0.25, 0.25, 0),   // oscillating rotation (sweep an arc, no full spin)
                     amp: clampN(data.osc.amp, 0, Math.PI, 0),
                     phase: clampN(data.osc.phase, 0, Math.PI * 2, 0) };
       }
