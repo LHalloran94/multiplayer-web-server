@@ -1328,6 +1328,12 @@ io.on('connection', (socket) => {
               w: clampN(data.w, 2, 40, 8),
               color: (typeof data.color === 'string' && data.color.length <= 32) ? data.color : '#22c55e',
               hp: 3 };
+      if (pts.length === 2) {                                  // a straight Line can carry a modifier (same clamps as platforms)
+        const boost = clampN(data.boost, -48, 48, 0), updraft = clampN(data.updraft, 0, 30, 0);
+        if (data.bouncy) obj.bouncy = 1;
+        else if (boost) obj.boost = boost;
+        else if (updraft) { obj.updraft = updraft; obj.fanLen = clampN(data.fanLen, 0.3, 3, 1); }
+      }
     } else if (type === 'stamp') {
       // Solid, destructible textured box (Tier B): `content` is an emoji or image URL/data-URI.
       // Now carries a shape (rect/ellipse/tri) + rotation angle.
