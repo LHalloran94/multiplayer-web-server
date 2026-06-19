@@ -765,6 +765,7 @@ const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; 
 let objSeq = 0;
 const MAX_OBJECTS_PER_ROOM = 60;   // FIFO cap bounds clutter/memory (destruction is the main limiter)
 const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers)
+const SURF_TYPES = ['ice', 'mud', 'sticky', 'hazard'];      // contact-property surface modifiers (Inc 10)
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 const roomVoice = {};
 
@@ -1336,6 +1337,7 @@ io.on('connection', (socket) => {
           obj.fanMode = ['push', 'pull', 'pulse', 'pulsepush', 'pulsepull', 'alt'].includes(data.fanMode) ? data.fanMode : 'push';
           obj.fanPeriod = clampN(data.fanPeriod, 0.5, 6, 2); }
         if (obj.bouncy || obj.boost || obj.updraft) obj.side = (data.side === -1) ? -1 : 1;   // open-stroke active side
+        if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;     // contact-property surface modifier
       }
     } else if (type === 'stamp') {
       // Solid, destructible textured box (Tier B): `content` is an emoji or image URL/data-URI.
@@ -1349,6 +1351,7 @@ io.on('connection', (socket) => {
               angle: clampN(data.angle, -Math.PI, Math.PI, 0),
               stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
               hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
+      if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     } else {
       // Unified PLATFORM: a solid one-way bar with optional rotation, modifiers, and a motion path.
       // Modifiers absorb the old props: bouncy (jump pad), boost (conveyor/booster/ramp — signed
@@ -1366,6 +1369,7 @@ io.on('connection', (socket) => {
               fanPeriod: clampN(data.fanPeriod, 0.5, 6, 2),  // pulse/alt cycle length (seconds)
               hp: data.breakable === false ? null : 2 };     // indestructible when breakable:false
       if (data.bouncy) obj.bouncy = 1;
+      if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
       if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // rotate around an edge
       if (data.osc && typeof data.osc === 'object' && isFinite(data.osc.w) && isFinite(data.osc.amp)) {
         obj.osc = { w: clampN(data.osc.w, -0.25, 0.25, 0),   // oscillating rotation (sweep an arc, no full spin)
