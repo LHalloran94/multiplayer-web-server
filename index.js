@@ -1338,6 +1338,7 @@ io.on('connection', (socket) => {
               content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64),
               shape: (data.shape === 'ellipse' || data.shape === 'tri') ? data.shape : 'rect',
               angle: clampN(data.angle, -Math.PI, Math.PI, 0),
+              pinned: data.pinned === false ? false : true,  // false = loose (falls + player-pushable; owner sims pos)
               hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
     } else {
       // Unified PLATFORM: a solid one-way bar with optional rotation, modifiers, and a motion path.
@@ -1397,6 +1398,18 @@ io.on('connection', (socket) => {
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
     if (obj.hp <= 0) { roomObjects[currentRoom].delete(id); io.to(currentRoom).emit('avatar-object-removed', { id }); }
     else io.to(currentRoom).emit('avatar-object-update', { id, hp: obj.hp });
+  });
+  // Loose (unpinned) stamp position stream. Owner-authority: only the spawner simulates a loose
+  // stamp's gravity/rest/push, so only it may move it. Validate ownership + clamp + relay to the
+  // rest of the room (the sender already has the authoritative pos locally).
+  socket.on('avatar-object-move', ({ id, x, y }) => {
+    if (!currentRoom || !roomObjects[currentRoom]) return;
+    const obj = roomObjects[currentRoom].get(id);
+    if (!obj || obj.ownerId !== socket.id || obj.type !== 'stamp' || obj.pinned !== false) return;
+    if (!isFinite(x) || !isFinite(y)) return;
+    obj.x = Math.max(0, Math.min(MWSim.C.WORLD_W, x));
+    obj.y = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
+    socket.to(currentRoom).emit('avatar-object-moved', { id, x: obj.x, y: obj.y });
   });
 
   socket.on('voice-join', ({ username, scope }) => {
