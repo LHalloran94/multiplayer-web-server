@@ -768,6 +768,127 @@ const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke']); // unified primitive
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 const roomVoice = {};
 
+// ---- Loose-stamp physics (Stage 6 8b-2) — server-authoritative dynamic world objects ----------
+// Loose (unpinned) stamps FALL, rest/stack on solids, can't overlap, roll (round shapes), and are
+// shoved by avatars. ONE authority sims them (here), so stacking/collision needs no cross-client
+// agreement — this sidesteps the abandoned Tier-3 rubber-band trap (see ROADMAP "interaction
+// taxonomy": stacking + continuous push were cut for AVATARS precisely because two self-authoritative
+// bodies can't agree continuously; a stamp is a world object that can have a single authority).
+// The avatar→stamp push arrives as discrete Tier-2 `avatar-object-shove` impulses; stamp→avatar
+// solidity stays a local cosmetic concern on each client. The tick runs only while a room has an
+// AWAKE loose stamp, then stops; clients ease toward the broadcast positions.
+const STAMP_HZ = 30;
+const STAMP = {
+  GRAV: 1.1, MAXVY: 46, MAXVX: 13,
+  FRIC_GROUND: 0.86, FRIC_AIR: 0.99,
+  LAND_TOL: 10, SLEEP_SPEED: 0.3, SLEEP_FRAMES: 16
+};
+const roomStampTick = {}; // room → setInterval handle (present only while simulating)
+
+function looseStampList(room) {
+  const map = roomObjects[room]; if (!map) return [];
+  const out = []; for (const o of map.values()) if (o.type === 'stamp' && o.pinned === false) out.push(o);
+  return out;
+}
+// Wake every loose stamp in the room (and (re)start the tick). Called whenever the world changes —
+// a shove, or any object spawned/removed — so stacks re-settle against their new support. Cheap
+// (few loose stamps per room) and avoids stale stacks hanging in mid-air.
+function wakeRoomStamps(room) {
+  let any = false;
+  for (const o of looseStampList(room)) { o._sleep = false; o._sleepF = 0; any = true; }
+  if (any && !roomStampTick[room]) roomStampTick[room] = setInterval(() => stepRoomStamps(room), 1000 / STAMP_HZ);
+}
+function stopStampTick(room) {
+  if (roomStampTick[room]) { clearInterval(roomStampTick[room]); delete roomStampTick[room]; }
+}
+// Live centre of a moving world platform (mirror of the client's _platformBasePos; wall-clock based
+// so both sides agree). Static platforms return their stored centre.
+function platBaseSrv(o) {
+  const path = o.path;
+  if (!path || !path.pts || path.pts.length < 2) return { x: o.x, y: o.y };
+  const pts = path.pts;
+  if (!o._cum) { const cum = [0]; let L = 0; for (let i = 1; i < pts.length; i++) { L += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y); cum.push(L); } o._cum = cum; o._len = L || 1; }
+  const len = o._len, loop = path.loop, period = loop ? len : len * 2;
+  let d = ((path.phase || 0) * period + Date.now() * (path.speed || 0.18)) % period; if (d < 0) d += period;
+  if (!loop && d > len) d = period - d;
+  const cum = o._cum; let i = 1; while (i < cum.length && cum[i] < d) i++;
+  if (i >= cum.length) return { x: pts[pts.length - 1].x, y: pts[pts.length - 1].y };
+  const seg = cum[i] - cum[i - 1] || 1, t = (d - cum[i - 1]) / seg;
+  return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * t, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * t };
+}
+// The bodies a loose stamp `self` can rest/stack on. `solids` are full AABBs (every other stamp —
+// pinned or loose) resolved by least-penetration; `tops` are one-way surfaces (layout ground,
+// world platform tops, stroke samples at self.x) you only land on from above.
+function buildStampWorld(room, self) {
+  const map = roomObjects[room], solids = [], tops = [];
+  for (const p of MWSim.STAGE_LAYOUTS[MWSim.layoutIndex(room)]) tops.push({ l: p.x, r: p.x + p.w, y: p.y });
+  if (map) for (const o of map.values()) {
+    if (o === self) continue;
+    if (o.type === 'platform') {
+      const b = platBaseSrv(o), rot = o.angle || o.spin || o.osc;
+      const hw = (rot ? Math.max(o.w, o.h) : o.w) / 2, hh = (rot ? Math.max(o.w, o.h) : o.h) / 2;
+      tops.push({ l: b.x - hw, r: b.x + hw, y: b.y - hh });
+    } else if (o.type === 'stamp') {
+      const hw = (o.w || 64) / 2, hh = (o.h || 64) / 2;
+      solids.push({ l: o.x - hw, r: o.x + hw, t: o.y - hh, b: o.y + hh });
+    } else if (o.type === 'stroke' && o.pts && o.pts.length >= 2) {
+      const half = (o.w || 8) / 2, xc = self.x;
+      for (let i = 0; i < o.pts.length - 1; i++) {
+        const ax = o.pts[i].x, ay = o.pts[i].y, bx = o.pts[i + 1].x, by = o.pts[i + 1].y;
+        if (xc < Math.min(ax, bx) || xc > Math.max(ax, bx)) continue;
+        const t = (bx - ax) ? (xc - ax) / (bx - ax) : 0;
+        tops.push({ l: Math.min(ax, bx), r: Math.max(ax, bx), y: ay + (by - ay) * t - half });
+      }
+    }
+  }
+  return { solids, tops };
+}
+function stepRoomStamps(room) {
+  const list = looseStampList(room);
+  if (!list.length) { stopStampTick(room); return; }
+  const WW = MWSim.C.WORLD_W, WH = MWSim.C.WORLD_H, moved = [];
+  let anyAwake = false;
+  for (const o of list) {
+    if (o._sleep) continue;                                    // asleep: skip sim (still a solid via stored pos)
+    anyAwake = true;
+    const hw = (o.w || 64) / 2, hh = (o.h || 64) / 2;
+    o._vx = o._vx || 0; o._vy = o._vy || 0;
+    const px = o.x, py = o.y, prevBottom = o.y + hh;
+    o._vy = Math.min(o._vy + STAMP.GRAV, STAMP.MAXVY);
+    o.x += o._vx; o.y += o._vy;
+    const { solids, tops } = buildStampWorld(room, o);
+    let grounded = false;
+    for (let pass = 0; pass < 2; pass++) for (const s of solids) {     // full-AABB stamps: least-pen separation → stacking + no overlap
+      const l = o.x - hw, r = o.x + hw, t = o.y - hh, b = o.y + hh;
+      if (r <= s.l || l >= s.r || b <= s.t || t >= s.b) continue;
+      const penL = r - s.l, penR = s.r - l, penT = b - s.t, penB = s.b - t;
+      const m = Math.min(penL, penR, penT, penB);
+      if (m === penT) { o.y = s.t - hh; if (o._vy > 0) o._vy = 0; grounded = true; }
+      else if (m === penB) { o.y = s.b + hh; if (o._vy < 0) o._vy = 0; }
+      else if (m === penL) { o.x = s.l - hw; if (o._vx > 0) o._vx = 0; }
+      else { o.x = s.r + hw; if (o._vx < 0) o._vx = 0; }
+    }
+    let bestTop = Infinity;                                     // one-way tops + world floor: land only when falling onto them
+    for (const tp of tops) {
+      if (o.x + hw <= tp.l || o.x - hw >= tp.r) continue;
+      if (prevBottom <= tp.y + STAMP.LAND_TOL && o.y + hh >= tp.y && tp.y < bestTop) bestTop = tp.y;
+    }
+    if (prevBottom <= WH + STAMP.LAND_TOL && o.y + hh >= WH && WH < bestTop) bestTop = WH;
+    if (bestTop < Infinity) { o.y = bestTop - hh; if (o._vy > 0) o._vy = 0; grounded = true; }
+    o.x = Math.max(hw, Math.min(WW - hw, o.x));
+    o._vx *= grounded ? STAMP.FRIC_GROUND : STAMP.FRIC_AIR;
+    if (Math.abs(o._vx) < 0.05) o._vx = 0;
+    if ((o.shape || 'rect') === 'ellipse') o.angle = (o.angle || 0) + o._vx / Math.max(8, hw);   // round shapes roll
+    const still = grounded && Math.abs(o._vx) < STAMP.SLEEP_SPEED && Math.abs(o._vy) < STAMP.SLEEP_SPEED;
+    o._sleepF = still ? (o._sleepF || 0) + 1 : 0;
+    if (o._sleepF > STAMP.SLEEP_FRAMES) { o._sleep = true; o._vx = 0; o._vy = 0; }
+    if (Math.abs(o.x - px) + Math.abs(o.y - py) > 0.05) moved.push(o);
+  }
+  if (moved.length) io.to(room).emit('avatar-stamps', { items: moved.map(o => ({
+    id: o.id, x: Math.round(o.x * 10) / 10, y: Math.round(o.y * 10) / 10, a: o.angle ? Math.round(o.angle * 1000) / 1000 : 0 })) });
+  if (!anyAwake) stopStampTick(room);
+}
+
 // ---- Authoritative avatar simulation (Stage 1b) ----------------------------
 // One fixed-timestep simulation per room that has active avatars. Clients send
 // inputs (avatar-input); the server steps the shared MWSim and broadcasts
@@ -1379,6 +1500,7 @@ io.on('connection', (socket) => {
     }
     map.set(id, obj);
     io.to(currentRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
+    wakeRoomStamps(currentRoom);                            // new geometry → loose stamps re-settle (+ starts the sim tick)
   });
   // Mouse-eraser removal: only the OWNER may delete their own object this way. (Physically
   // destroying anyone's object goes through avatar-object-hit, which is unrestricted.)
@@ -1388,6 +1510,7 @@ io.on('connection', (socket) => {
     if (!obj || obj.ownerId !== socket.id) return;
     roomObjects[currentRoom].delete(id);
     io.to(currentRoom).emit('avatar-object-removed', { id });
+    wakeRoomStamps(currentRoom);                            // support may have vanished → stacks re-settle
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
@@ -1396,20 +1519,21 @@ io.on('connection', (socket) => {
     const obj = roomObjects[currentRoom].get(id);
     if (!obj || typeof obj.hp !== 'number') return;
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
-    if (obj.hp <= 0) { roomObjects[currentRoom].delete(id); io.to(currentRoom).emit('avatar-object-removed', { id }); }
+    if (obj.hp <= 0) { roomObjects[currentRoom].delete(id); io.to(currentRoom).emit('avatar-object-removed', { id }); wakeRoomStamps(currentRoom); }
     else io.to(currentRoom).emit('avatar-object-update', { id, hp: obj.hp });
   });
-  // Loose (unpinned) stamp position stream. Owner-authority: only the spawner simulates a loose
-  // stamp's gravity/rest/push, so only it may move it. Validate ownership + clamp + relay to the
-  // rest of the room (the sender already has the authoritative pos locally).
-  socket.on('avatar-object-move', ({ id, x, y }) => {
-    if (!currentRoom || !roomObjects[currentRoom]) return;
+  // Avatar→stamp push (Tier-2 one-shot impulse). A client whose own blob walks into a loose stamp
+  // emits its intended push velocity; the server (sole authority for the stamp's motion) wakes it
+  // and adopts the impulse when it's stronger than the current motion (so repeated walk-into shoves
+  // hold a steady push without runaway accumulation). No two-body agreement → no Tier-3 rubber-band.
+  socket.on('avatar-object-shove', ({ id, vx }) => {
+    if (!currentRoom || !roomObjects[currentRoom] || !isFinite(vx)) return;
     const obj = roomObjects[currentRoom].get(id);
-    if (!obj || obj.ownerId !== socket.id || obj.type !== 'stamp' || obj.pinned !== false) return;
-    if (!isFinite(x) || !isFinite(y)) return;
-    obj.x = Math.max(0, Math.min(MWSim.C.WORLD_W, x));
-    obj.y = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
-    socket.to(currentRoom).emit('avatar-object-moved', { id, x: obj.x, y: obj.y });
+    if (!obj || obj.type !== 'stamp' || obj.pinned !== false) return;
+    const target = Math.max(-STAMP.MAXVX, Math.min(STAMP.MAXVX, vx));
+    if (Math.abs(target) > Math.abs(obj._vx || 0) || Math.sign(target) !== Math.sign(obj._vx || 0)) obj._vx = target;
+    obj._sleep = false; obj._sleepF = 0;
+    if (!roomStampTick[currentRoom]) roomStampTick[currentRoom] = setInterval(() => stepRoomStamps(currentRoom), 1000 / STAMP_HZ);
   });
 
   socket.on('voice-join', ({ username, scope }) => {
