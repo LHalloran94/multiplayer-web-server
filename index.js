@@ -1332,7 +1332,9 @@ io.on('connection', (socket) => {
         const boost = clampN(data.boost, -48, 48, 0), updraft = clampN(data.updraft, 0, 30, 0);
         if (data.bouncy) obj.bouncy = 1;
         else if (boost) obj.boost = boost;
-        else if (updraft) { obj.updraft = updraft; obj.fanLen = clampN(data.fanLen, 0.3, 3, 1); }
+        else if (updraft) { obj.updraft = updraft; obj.fanLen = clampN(data.fanLen, 0.3, 3, 1);
+          obj.fanMode = ['push', 'pull', 'pulse', 'alt'].includes(data.fanMode) ? data.fanMode : 'push';
+          obj.fanPeriod = clampN(data.fanPeriod, 0.5, 6, 2); }
         if (obj.bouncy || obj.boost || obj.updraft) obj.side = (data.side === -1) ? -1 : 1;   // open-stroke active side
       }
     } else if (type === 'stamp') {
@@ -1360,6 +1362,8 @@ io.on('connection', (socket) => {
               spin: clampN(data.spin, -0.012, 0.012, 0),     // continuous rotation (rad/ms; 0 = static)
               boost: clampN(data.boost, -48, 48, 0), updraft: clampN(data.updraft, 0, 30, 0),
               fanLen: clampN(data.fanLen, 0.3, 3, 1),        // fan effective-distance multiplier (× base column height)
+              fanMode: ['push', 'pull', 'pulse', 'alt'].includes(data.fanMode) ? data.fanMode : 'push',
+              fanPeriod: clampN(data.fanPeriod, 0.5, 6, 2),  // pulse/alt cycle length (seconds)
               hp: data.breakable === false ? null : 2 };     // indestructible when breakable:false
       if (data.bouncy) obj.bouncy = 1;
       if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // rotate around an edge
