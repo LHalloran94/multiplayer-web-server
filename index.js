@@ -1345,6 +1345,7 @@ io.on('connection', (socket) => {
               content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64),
               shape: (data.shape === 'ellipse' || data.shape === 'tri') ? data.shape : 'rect',
               angle: clampN(data.angle, -Math.PI, Math.PI, 0),
+              stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
               hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
     } else {
       // Unified PLATFORM: a solid one-way bar with optional rotation, modifiers, and a motion path.
