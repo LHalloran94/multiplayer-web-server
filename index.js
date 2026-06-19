@@ -1395,6 +1395,22 @@ io.on('connection', (socket) => {
     roomObjects[currentRoom].delete(id);
     io.to(currentRoom).emit('avatar-object-removed', { id });
   });
+  // Bulk-remove all of MY own objects (the Erase tool's "Remove all mine" button). Owner-scoped,
+  // like the single mouse-eraser, but in one round-trip.
+  socket.on('avatar-objects-remove-mine', () => {
+    if (!currentRoom || !roomObjects[currentRoom]) return;
+    const map = roomObjects[currentRoom], ids = [];
+    for (const [id, o] of map) if (o.ownerId === socket.id) ids.push(id);
+    for (const id of ids) map.delete(id);
+    if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
+  });
+  // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
+  socket.on('avatar-objects-clear-all', () => {
+    if (!currentRoom || !roomObjects[currentRoom]) return;
+    const map = roomObjects[currentRoom], ids = [...map.keys()];
+    map.clear();
+    if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
+  });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
   socket.on('avatar-object-hit', ({ id, dmg }) => {
