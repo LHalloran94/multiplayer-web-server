@@ -1324,10 +1324,10 @@ io.on('connection', (socket) => {
       }
       if (pts.length < 2) return;
       let sx = 0, sy = 0; for (const p of pts) { sx += p.x; sy += p.y; }
-      obj = { id, type, ownerId: socket.id, x: sx / pts.length, y: sy / pts.length, pts,
+      obj = { id, type, ownerId: socket.id, owner: currentUsername || socket.id, x: sx / pts.length, y: sy / pts.length, pts,
               w: clampN(data.w, 2, 40, 8),
               color: (typeof data.color === 'string' && data.color.length <= 32) ? data.color : '#22c55e',
-              hp: 3 };
+              hp: data.breakable === false ? null : 3 };   // indestructible when breakable:false (matches stamps/platforms)
       {                                                        // any stroke can carry a modifier (same clamps as platforms)
         const boost = clampN(data.boost, -48, 48, 0), updraft = clampN(data.updraft, 0, 30, 0);
         if (data.bouncy) obj.bouncy = 1;
@@ -1340,7 +1340,7 @@ io.on('connection', (socket) => {
       // Now carries a shape (rect/ellipse/tri) + rotation angle.
       if (typeof data.content !== 'string' || !data.content || data.content.length > 8192) return;
       if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type, ownerId: socket.id,
+      obj = { id, type, ownerId: socket.id, owner: currentUsername || socket.id,
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64),
               shape: (data.shape === 'ellipse' || data.shape === 'tri') ? data.shape : 'rect',
@@ -1352,7 +1352,7 @@ io.on('connection', (socket) => {
       // strength), updraft (fan). A `path` makes it move; live position is derived client-side from
       // the wall clock + a phase fraction, so only the static descriptor is stored/replayed.
       if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type: 'platform', ownerId: socket.id,
+      obj = { id, type: 'platform', ownerId: socket.id, owner: currentUsername || socket.id,
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               w: clampN(data.w, 24, 400, 96), h: clampN(data.h, 8, 60, 16),
               angle: clampN(data.angle, -Math.PI, Math.PI, 0),
@@ -1391,7 +1391,8 @@ io.on('connection', (socket) => {
   socket.on('avatar-object-remove', ({ id }) => {
     if (!currentRoom || !roomObjects[currentRoom]) return;
     const obj = roomObjects[currentRoom].get(id);
-    if (!obj || obj.ownerId !== socket.id) return;
+    // Owner by stable username (survives reconnect/new socket.id) OR the live socket.id.
+    if (!obj || !(obj.ownerId === socket.id || (obj.owner && obj.owner === currentUsername))) return;
     roomObjects[currentRoom].delete(id);
     io.to(currentRoom).emit('avatar-object-removed', { id });
   });
@@ -1400,7 +1401,7 @@ io.on('connection', (socket) => {
   socket.on('avatar-objects-remove-mine', () => {
     if (!currentRoom || !roomObjects[currentRoom]) return;
     const map = roomObjects[currentRoom], ids = [];
-    for (const [id, o] of map) if (o.ownerId === socket.id) ids.push(id);
+    for (const [id, o] of map) if (o.ownerId === socket.id || (o.owner && o.owner === currentUsername)) ids.push(id);
     for (const id of ids) map.delete(id);
     if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
   });
