@@ -765,7 +765,7 @@ const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; 
 let objSeq = 0;
 const MAX_OBJECTS_PER_ROOM = 60;   // FIFO cap bounds clutter/memory (destruction is the main limiter)
 const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers)
-const SURF_TYPES = ['ice', 'mud', 'sticky', 'hazard'];      // contact-property surface modifiers (Inc 10)
+const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 const roomVoice = {};
 
