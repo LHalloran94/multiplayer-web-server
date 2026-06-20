@@ -117,9 +117,12 @@
     const inputX = (input.right ? 1 : 0) - (input.left ? 1 : 0);
     const wantsDown = !!input.down;
 
-    // Respawn (edge)
+    // Respawn (edge) — to the active checkpoint if one is set, else world spawn.
+    // respawnX/Y are set out-of-sim (server: avatar-checkpoint handler; client: checkpoint touch).
     if (input.respawn && !s.prevRespawn) {
-      s.x = C.WORLD_W / 2; s.y = floorY(P); s.vx = 0; s.vy = 0;
+      s.x = (typeof s.respawnX === 'number') ? s.respawnX : C.WORLD_W / 2;
+      s.y = (typeof s.respawnY === 'number') ? s.respawnY : floorY(P);
+      s.vx = 0; s.vy = 0;
       s.hasDoubleJump = true; s.fallThroughIdx = -1; s.wallSlideDir = 0;
     }
 

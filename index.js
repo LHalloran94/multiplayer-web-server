@@ -764,7 +764,7 @@ const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel 
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
 const MAX_OBJECTS_PER_ROOM = 60;   // FIFO cap bounds clutter/memory (destruction is the main limiter)
-const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers)
+const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint = non-solid respawn flag
 const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 const roomVoice = {};
@@ -1276,6 +1276,17 @@ io.on('connection', (socket) => {
     if (currentRoom) removeSimAvatar(currentRoom, socket.id);
   });
 
+  // Set this player's authoritative respawn point (from touching a checkpoint flag).
+  // The sim's respawn (R key / hazard) reads s.respawnX/Y; default (unset) = world spawn.
+  socket.on('avatar-checkpoint', ({ x, y }) => {
+    if (!currentRoom) return;
+    const rs = roomSim[currentRoom];
+    const s = rs && rs.avatars[socket.id];
+    if (!s || !isFinite(x) || !isFinite(y)) return;
+    s.respawnX = Math.max(0, Math.min(MWSim.C.WORLD_W, x));
+    s.respawnY = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
+  });
+
   // ---- Avatar P2P transport signaling (Stage 6 pivot) ----
   // Thin relays for the unreliable WebRTC DataChannel mesh that carries avatar
   // positions peer-to-peer. Mirrors the voice handshake (new joiner offers to all
@@ -1352,6 +1363,13 @@ io.on('connection', (socket) => {
               stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
               hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
       if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
+    } else if (type === 'checkpoint') {
+      // Respawn flag (Inc 10b): non-solid, no physics. (x, y) is the pole BASE (ground level).
+      // Touching it client-side sets that player's local respawn point (broadcast via avatar-checkpoint).
+      if (!isFinite(data.x) || !isFinite(data.y)) return;
+      obj = { id, type: 'checkpoint', ownerId: socket.id, owner: currentUsername || socket.id,
+              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+              hp: data.breakable === false ? null : 2 };  // erasable/destructible like other props
     } else {
       // Unified PLATFORM: a solid one-way bar with optional rotation, modifiers, and a motion path.
       // Modifiers absorb the old props: bouncy (jump pad), boost (conveyor/booster/ramp — signed
