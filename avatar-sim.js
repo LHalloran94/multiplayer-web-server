@@ -43,9 +43,9 @@
   // hotbar Platform tool. Only the ground floor remains so there's footing at spawn. (Three
   // identical entries are kept so layoutIndex/urlHash callers still resolve.)
   const STAGE_LAYOUTS = [
-    [ { x: 0, y: 650, w: 5120, h: 70 } ],
-    [ { x: 0, y: 650, w: 5120, h: 70 } ],
-    [ { x: 0, y: 650, w: 5120, h: 70 } ]
+    [ { x: 0, y: 648, w: 5120, h: 70 } ],
+    [ { x: 0, y: 648, w: 5120, h: 70 } ],
+    [ { x: 0, y: 648, w: 5120, h: 70 } ]
   ];
 
   // Stage 6 — taller world for building. Shift each authored 720-tall layout down so
