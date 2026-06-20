@@ -791,11 +791,12 @@ function rasterTerrainCircle(grid, wx, wy, r, val) {
   }
   return changed;
 }
-function terrainRLE(grid) {                          // alternating run lengths; `first` = grid[0]'s value
+const TERRAIN_MAT_MAX = 4;                            // material ids 1..4 (earth/stone/sand/ice); 0 = empty
+function terrainRLE(grid) {                          // [value, count] runs (value = material id, 0 = empty)
   const runs = []; let v = grid[0], n = 0;
-  for (let i = 0; i < grid.length; i++) { if (grid[i] === v) n++; else { runs.push(n); v = grid[i]; n = 1; } }
-  runs.push(n);
-  return { first: grid[0], runs };
+  for (let i = 0; i < grid.length; i++) { if (grid[i] === v) n++; else { runs.push([v, n]); v = grid[i]; n = 1; } }
+  runs.push([v, n]);
+  return { runs };
 }
 const roomVoice = {};
 
@@ -1479,14 +1480,15 @@ io.on('connection', (socket) => {
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
   // Destructible terrain: paint/carve a circle into the room grid, then rebroadcast the op so every
   // client rasterizes it identically (client also applies optimistically). Only echoes on a real change.
-  socket.on('terrain-edit', ({ op, x, y, r }) => {
+  socket.on('terrain-edit', ({ op, x, y, r, mat }) => {
     if (!currentRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
     const cx = Math.max(0, Math.min(MWSim.C.WORLD_W, x)), cy = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
     const rr = Math.max(8, Math.min(160, r));
+    const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_MAX, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..MAX (carve = 0)
     const grid = ensureTerrain(currentRoom);
-    if (rasterTerrainCircle(grid, cx, cy, rr, op === 'paint' ? 1 : 0))
-      io.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr });
+    if (rasterTerrainCircle(grid, cx, cy, rr, m))
+      io.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m });
   });
   socket.on('avatar-object-hit', ({ id, dmg }) => {
     if (!currentRoom || !roomObjects[currentRoom]) return;
