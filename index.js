@@ -791,6 +791,19 @@ function rasterTerrainCircle(grid, wx, wy, r, val) {
   }
   return changed;
 }
+// Axis-aligned square fill (the manual brush; r = half-extent). Carves/paints blocky, grid-aligned terrain.
+function rasterTerrainSquare(grid, wx, wy, r, val) {
+  const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(TERRAIN_COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
+  const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(TERRAIN_ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
+  let changed = false;
+  for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
+    const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
+    if (Math.abs(ccx - wx) <= r && Math.abs(ccy - wy) <= r) {
+      const i = ry * TERRAIN_COLS + cx; if (grid[i] !== val) { grid[i] = val; changed = true; }
+    }
+  }
+  return changed;
+}
 const TERRAIN_MAT_MAX = 15;                           // material ids 1..15 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil); 0 = empty
 function terrainRLE(grid) {                          // [value, count] runs (value = material id, 0 = empty)
   const runs = []; let v = grid[0], n = 0;
@@ -1465,6 +1478,8 @@ io.on('connection', (socket) => {
     for (const [id, o] of map) if (o.ownerId === socket.id || (o.owner && o.owner === currentUsername)) ids.push(id);
     for (const id of ids) map.delete(id);
     if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
+    // Terrain is unowned (and ephemeral / all player-placed), so "Remove all" wipes the whole grid too.
+    if (roomTerrain[currentRoom]) { roomTerrain[currentRoom].fill(0); io.to(currentRoom).emit('terrain-cleared'); }
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   socket.on('avatar-objects-clear-all', () => {
@@ -1480,15 +1495,28 @@ io.on('connection', (socket) => {
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
   // Destructible terrain: paint/carve a circle into the room grid, then rebroadcast the op so every
   // client rasterizes it identically (client also applies optimistically). Only echoes on a real change.
-  socket.on('terrain-edit', ({ op, x, y, r, mat }) => {
+  socket.on('terrain-edit', ({ op, x, y, r, mat, shape }) => {
     if (!currentRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
     const cx = Math.max(0, Math.min(MWSim.C.WORLD_W, x)), cy = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
     const rr = Math.max(8, Math.min(160, r));
     const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_MAX, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..MAX (carve = 0)
+    const sq = shape === 'square';
     const grid = ensureTerrain(currentRoom);
-    if (rasterTerrainCircle(grid, cx, cy, rr, m))
-      io.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m });
+    if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, cx, cy, rr, m))
+      io.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined });
+  });
+  // Undo for placed terrain: restore an explicit list of cells to prior values. Flat [index, value, ...].
+  // Owner-agnostic (terrain isn't owner-tracked), but bounded and rebroadcast so all clients stay in sync.
+  socket.on('terrain-set', ({ cells }) => {
+    if (!currentRoom || !Array.isArray(cells) || cells.length > 16384) return;
+    const grid = ensureTerrain(currentRoom);
+    let changed = false;
+    for (let k = 0; k + 1 < cells.length; k += 2) {
+      const i = cells[k] | 0, v = Math.max(0, Math.min(TERRAIN_MAT_MAX, cells[k + 1] | 0));
+      if (i >= 0 && i < grid.length && grid[i] !== v) { grid[i] = v; changed = true; }
+    }
+    if (changed) io.to(currentRoom).emit('terrain-set', { cells });
   });
   socket.on('avatar-object-hit', ({ id, dmg }) => {
     if (!currentRoom || !roomObjects[currentRoom]) return;
