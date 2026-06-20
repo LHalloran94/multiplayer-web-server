@@ -791,7 +791,7 @@ function rasterTerrainCircle(grid, wx, wy, r, val) {
   }
   return changed;
 }
-const TERRAIN_MAT_MAX = 13;                           // material ids 1..13 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←); 0 = empty
+const TERRAIN_MAT_MAX = 15;                           // material ids 1..15 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil); 0 = empty
 function terrainRLE(grid) {                          // [value, count] runs (value = material id, 0 = empty)
   const runs = []; let v = grid[0], n = 0;
   for (let i = 0; i < grid.length; i++) { if (grid[i] === v) n++; else { runs.push([v, n]); v = grid[i]; n = 1; } }
