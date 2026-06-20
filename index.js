@@ -767,6 +767,36 @@ const MAX_OBJECTS_PER_ROOM = 60;   // FIFO cap bounds clutter/memory (destructio
 const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint = non-solid respawn flag
 const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
+
+// ---- Destructible terrain (Tier C) -----------------------------------------
+// A coarse solidity grid per room — a raster mask at TERRAIN_CELL resolution (0 empty / 1 solid).
+// Server-authoritative EXISTENCE (paint/carve ops are applied here then rebroadcast so every client
+// rasterizes identically); collision response is client-local like every other Stage-6 object.
+// Fixed-size (no op-log growth, no snapshot problem); synced to late joiners run-length-encoded
+// (terrain is mostly empty → tiny). Cleared on the debug clear-all. Persist till restart.
+const TERRAIN_CELL = 24;
+const TERRAIN_COLS = Math.ceil(MWSim.C.WORLD_W / TERRAIN_CELL);
+const TERRAIN_ROWS = Math.ceil(MWSim.C.WORLD_H / TERRAIN_CELL);
+const roomTerrain = {}; // room → Uint8Array(TERRAIN_COLS*TERRAIN_ROWS)
+function ensureTerrain(room) { return roomTerrain[room] || (roomTerrain[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+function rasterTerrainCircle(grid, wx, wy, r, val) {
+  const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(TERRAIN_COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
+  const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(TERRAIN_ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
+  const r2 = r * r; let changed = false;
+  for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
+    const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
+    if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) <= r2) {
+      const i = ry * TERRAIN_COLS + cx; if (grid[i] !== val) { grid[i] = val; changed = true; }
+    }
+  }
+  return changed;
+}
+function terrainRLE(grid) {                          // alternating run lengths; `first` = grid[0]'s value
+  const runs = []; let v = grid[0], n = 0;
+  for (let i = 0; i < grid.length; i++) { if (grid[i] === v) n++; else { runs.push(n); v = grid[i]; n = 1; } }
+  runs.push(n);
+  return { first: grid[0], runs };
+}
 const roomVoice = {};
 
 // ---- Authoritative avatar simulation (Stage 1b) ----------------------------
@@ -1300,6 +1330,9 @@ io.on('connection', (socket) => {
     socket.emit('avt-joined', { existingPeers });
     // Replay the current world objects to the new joiner (late-joiner sync).
     socket.emit('avatar-objects-init', { objects: roomObjects[currentRoom] ? [...roomObjects[currentRoom].values()] : [] });
+    // Replay the destructible terrain grid (RLE) — only if any has been placed in this room.
+    const tg = roomTerrain[currentRoom];
+    if (tg) socket.emit('terrain-init', { cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg) });
   });
   socket.on('avt-leave', () => {
     if (currentRoom && roomAvt[currentRoom] && roomAvt[currentRoom].delete(socket.id)) {
@@ -1434,13 +1467,27 @@ io.on('connection', (socket) => {
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   socket.on('avatar-objects-clear-all', () => {
-    if (!currentRoom || !roomObjects[currentRoom]) return;
-    const map = roomObjects[currentRoom], ids = [...map.keys()];
-    map.clear();
-    if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
+    if (!currentRoom) return;
+    if (roomObjects[currentRoom]) {
+      const map = roomObjects[currentRoom], ids = [...map.keys()];
+      map.clear();
+      if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
+    }
+    if (roomTerrain[currentRoom]) { roomTerrain[currentRoom].fill(0); io.to(currentRoom).emit('terrain-cleared'); }
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
+  // Destructible terrain: paint/carve a circle into the room grid, then rebroadcast the op so every
+  // client rasterizes it identically (client also applies optimistically). Only echoes on a real change.
+  socket.on('terrain-edit', ({ op, x, y, r }) => {
+    if (!currentRoom || (op !== 'paint' && op !== 'carve')) return;
+    if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
+    const cx = Math.max(0, Math.min(MWSim.C.WORLD_W, x)), cy = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
+    const rr = Math.max(8, Math.min(160, r));
+    const grid = ensureTerrain(currentRoom);
+    if (rasterTerrainCircle(grid, cx, cy, rr, op === 'paint' ? 1 : 0))
+      io.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr });
+  });
   socket.on('avatar-object-hit', ({ id, dmg }) => {
     if (!currentRoom || !roomObjects[currentRoom]) return;
     const obj = roomObjects[currentRoom].get(id);
