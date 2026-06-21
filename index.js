@@ -827,6 +827,11 @@ const CUSTOM_MAT_MIN = 16, CUSTOM_MAT_CAP = 200;     // up to 200 custom mats pe
 const roomMats = {};                                 // room → { id: def }
 function ensureMats(room) { return roomMats[room] || (roomMats[room] = {}); }
 const MAT_HEX = /^#[0-9a-fA-F]{6}$/;
+function sanitizeMatTex(raw) {                          // hand-drawn 8×8 appearance: array of 64 ('' | #rrggbb); null if blank/invalid
+  if (!Array.isArray(raw) || raw.length !== 64) return null;
+  const t = raw.map(c => (typeof c === 'string' && MAT_HEX.test(c)) ? c : '');
+  return t.some(c => c) ? t : null;
+}
 function sanitizeMatDef(raw) {
   if (!raw || typeof raw !== 'object' || !MAT_HEX.test(raw.fill) || !MAT_HEX.test(raw.cap)) return null;
   return {
@@ -836,9 +841,10 @@ function sanitizeMatDef(raw) {
     capShade: MAT_HEX.test(raw.capShade) ? raw.capShade : raw.cap,
     breakable: raw.breakable !== false,
     strength: Math.max(1, Math.min(9, (raw.strength | 0) || 1)),   // hits to destroy (only applies when breakable)
+    tex: sanitizeMatTex(raw.tex),
   };
 }
-function matSig(d) { return d.name + '|' + d.base + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0) + '|' + (d.strength | 0); }
+function matSig(d) { return d.name + '|' + d.base + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0) + '|' + (d.strength | 0) + '|' + (d.tex ? d.tex.join('') : ''); }
 function terrainRLE(grid) {                          // [value, count] runs (value = material id, 0 = empty)
   const runs = []; let v = grid[0], n = 0;
   for (let i = 0; i < grid.length; i++) { if (grid[i] === v) n++; else { runs.push([v, n]); v = grid[i]; n = 1; } }
