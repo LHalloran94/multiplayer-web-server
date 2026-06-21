@@ -782,7 +782,8 @@ const roomTerrainHp = {}; // room → Uint8Array (per-cell remaining hits for mu
 function ensureTerrain(room) { return roomTerrain[room] || (roomTerrain[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 function ensureTerrainHp(room) { return roomTerrainHp[room] || (roomTerrainHp[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 // Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
-function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
+const BUILTIN_STRENGTH = { 2: 3, 4: 2, 5: 2 };         // stone tough, ice/mud middling (matches client TERRAIN_MATS); others 1
+function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return BUILTIN_STRENGTH[v] || 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
 const BUILTIN_UNBREAKABLE = new Set([7, 13]);          // built-in conveyor belts are unbreakable (matches client TERRAIN_MATS)
 function matBreakableSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return !BUILTIN_UNBREAKABLE.has(v); const d = mats[v]; return !d || d.breakable !== false; }
 // Carve one cell with breakable/strength semantics (mirrors the client's carveCellHp). Returns true if cleared.
