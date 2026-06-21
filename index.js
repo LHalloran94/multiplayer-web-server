@@ -778,29 +778,44 @@ const TERRAIN_CELL = 24;
 const TERRAIN_COLS = Math.ceil(MWSim.C.WORLD_W / TERRAIN_CELL);
 const TERRAIN_ROWS = Math.ceil(MWSim.C.WORLD_H / TERRAIN_CELL);
 const roomTerrain = {}; // room → Uint8Array(TERRAIN_COLS*TERRAIN_ROWS)
+const roomTerrainHp = {}; // room → Uint8Array (per-cell remaining hits for multi-hit/strength>1 mats; 0 = n/a)
 function ensureTerrain(room) { return roomTerrain[room] || (roomTerrain[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
-function rasterTerrainCircle(grid, wx, wy, r, val) {
+function ensureTerrainHp(room) { return roomTerrainHp[room] || (roomTerrainHp[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+// Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
+function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
+function matBreakableSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return true; const d = mats[v]; return !d || d.breakable !== false; }
+// Carve one cell with breakable/strength semantics (mirrors the client's carveCellHp). Returns true if cleared.
+function carveCellSrv(grid, hp, mats, i) {
+  const v = grid[i]; if (!v) return false;
+  if (!matBreakableSrv(mats, v)) return false;
+  const s = matStrengthSrv(mats, v);
+  if (s > 1) { let h = hp[i] || s; h--; if (h > 0) { hp[i] = h; return false; } }
+  grid[i] = 0; hp[i] = 0; return true;
+}
+function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val) {
   const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(TERRAIN_COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
   const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(TERRAIN_ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
   const r2 = r * r; let changed = false;
   for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
-    if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) <= r2) {
-      const i = ry * TERRAIN_COLS + cx; if (grid[i] !== val) { grid[i] = val; changed = true; }
-    }
+    if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) > r2) continue;
+    const i = ry * TERRAIN_COLS + cx;
+    if (val) { if (grid[i] !== val) { grid[i] = val; changed = true; } hp[i] = matStrengthSrv(mats, val); }
+    else if (carveCellSrv(grid, hp, mats, i)) changed = true;
   }
   return changed;
 }
 // Axis-aligned square fill (the manual brush; r = half-extent). Carves/paints blocky, grid-aligned terrain.
-function rasterTerrainSquare(grid, wx, wy, r, val) {
+function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val) {
   const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(TERRAIN_COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
   const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(TERRAIN_ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
   let changed = false;
   for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
-    if (Math.abs(ccx - wx) <= r && Math.abs(ccy - wy) <= r) {
-      const i = ry * TERRAIN_COLS + cx; if (grid[i] !== val) { grid[i] = val; changed = true; }
-    }
+    if (Math.abs(ccx - wx) > r || Math.abs(ccy - wy) > r) continue;
+    const i = ry * TERRAIN_COLS + cx;
+    if (val) { if (grid[i] !== val) { grid[i] = val; changed = true; } hp[i] = matStrengthSrv(mats, val); }
+    else if (carveCellSrv(grid, hp, mats, i)) changed = true;
   }
   return changed;
 }
@@ -820,9 +835,10 @@ function sanitizeMatDef(raw) {
     fill: raw.fill, cap: raw.cap,
     capShade: MAT_HEX.test(raw.capShade) ? raw.capShade : raw.cap,
     breakable: raw.breakable !== false,
+    strength: Math.max(1, Math.min(9, (raw.strength | 0) || 1)),   // hits to destroy (only applies when breakable)
   };
 }
-function matSig(d) { return d.name + '|' + d.base + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0); }
+function matSig(d) { return d.name + '|' + d.base + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0) + '|' + (d.strength | 0); }
 function terrainRLE(grid) {                          // [value, count] runs (value = material id, 0 = empty)
   const runs = []; let v = grid[0], n = 0;
   for (let i = 0; i < grid.length; i++) { if (grid[i] === v) n++; else { runs.push([v, n]); v = grid[i]; n = 1; } }
@@ -1364,7 +1380,7 @@ io.on('connection', (socket) => {
     socket.emit('avatar-objects-init', { objects: roomObjects[currentRoom] ? [...roomObjects[currentRoom].values()] : [] });
     // Replay the destructible terrain grid (RLE) — only if any has been placed in this room.
     const tg = roomTerrain[currentRoom];
-    if (tg) socket.emit('terrain-init', { cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg) });
+    if (tg) socket.emit('terrain-init', { cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: roomTerrainHp[currentRoom] ? terrainRLE(roomTerrainHp[currentRoom]).runs : undefined });
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
     const mm = roomMats[currentRoom];
     if (mm && Object.keys(mm).length) socket.emit('mats-init', { mats: mm });
@@ -1500,7 +1516,7 @@ io.on('connection', (socket) => {
     for (const id of ids) map.delete(id);
     if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
     // Terrain is unowned (and ephemeral / all player-placed), so "Remove all" wipes the whole grid too.
-    if (roomTerrain[currentRoom]) { roomTerrain[currentRoom].fill(0); io.to(currentRoom).emit('terrain-cleared'); }
+    if (roomTerrain[currentRoom]) { roomTerrain[currentRoom].fill(0); if (roomTerrainHp[currentRoom]) roomTerrainHp[currentRoom].fill(0); io.to(currentRoom).emit('terrain-cleared'); }
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   socket.on('avatar-objects-clear-all', () => {
@@ -1510,7 +1526,7 @@ io.on('connection', (socket) => {
       map.clear();
       if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
     }
-    if (roomTerrain[currentRoom]) { roomTerrain[currentRoom].fill(0); io.to(currentRoom).emit('terrain-cleared'); }
+    if (roomTerrain[currentRoom]) { roomTerrain[currentRoom].fill(0); if (roomTerrainHp[currentRoom]) roomTerrainHp[currentRoom].fill(0); io.to(currentRoom).emit('terrain-cleared'); }
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
@@ -1523,19 +1539,21 @@ io.on('connection', (socket) => {
     const rr = Math.max(8, Math.min(160, r));
     const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
     const sq = shape === 'square';
-    const grid = ensureTerrain(currentRoom);
-    if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, cx, cy, rr, m))
-      io.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined });
+    const grid = ensureTerrain(currentRoom), hp = ensureTerrainHp(currentRoom), mats = roomMats[currentRoom] || {};
+    // The sender already applied this op optimistically, so echo to OTHERS only — carve = hp decrement is
+    // NOT idempotent, double-applying would desync the sender's per-cell hp from everyone else's.
+    if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m))
+      socket.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined });
   });
   // Undo for placed terrain: restore an explicit list of cells to prior values. Flat [index, value, ...].
   // Owner-agnostic (terrain isn't owner-tracked), but bounded and rebroadcast so all clients stay in sync.
   socket.on('terrain-set', ({ cells }) => {
     if (!currentRoom || !Array.isArray(cells) || cells.length > 16384) return;
-    const grid = ensureTerrain(currentRoom);
+    const grid = ensureTerrain(currentRoom), hp = ensureTerrainHp(currentRoom), mats = roomMats[currentRoom] || {};
     let changed = false;
     for (let k = 0; k + 1 < cells.length; k += 2) {
       const i = cells[k] | 0, v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
-      if (i >= 0 && i < grid.length && grid[i] !== v) { grid[i] = v; changed = true; }
+      if (i >= 0 && i < grid.length) { if (grid[i] !== v) { grid[i] = v; changed = true; } hp[i] = v ? matStrengthSrv(mats, v) : 0; }
     }
     if (changed) io.to(currentRoom).emit('terrain-set', { cells });
   });
