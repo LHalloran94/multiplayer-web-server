@@ -150,7 +150,8 @@
           const p = P[i];
           if (Math.abs(s.y - p.y) <= 3 && s.x + C.AV_W / 2 > p.x && s.x - C.AV_W / 2 < p.x + p.w) { onIdx = i; break; }
         }
-        if (onIdx >= 0 && P[onIdx].y + P[onIdx].h < C.WORLD_H) { s.fallThroughIdx = onIdx; s.vy = 5; }
+        // index 0 is the canonical ground floor (floorY = P[0].y) — always solid, never droppable.
+        if (onIdx > 0 && P[onIdx].y + P[onIdx].h < C.WORLD_H) { s.fallThroughIdx = onIdx; s.vy = 5; }
         s.jumpBuffer = 0; s.coyote = 0;
       } else if (canWallJump) {
         s.vy = C.JUMP_VY; s.vx = -s.wallSlideDir * C.MAX_VX * 1.4;
