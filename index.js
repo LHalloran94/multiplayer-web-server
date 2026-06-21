@@ -832,6 +832,11 @@ function sanitizeMatTex(raw) {                          // hand-drawn 8×8 appea
   const t = raw.map(c => (typeof c === 'string' && MAT_HEX.test(c)) ? c : '');
   return t.some(c => c) ? t : null;
 }
+function sanitizeMatImg(raw) {                          // optional http(s) image-URL skin; null if invalid (data: rejected to keep defs small for broadcast)
+  if (typeof raw !== 'string') return null;
+  const u = raw.trim();
+  return /^https?:\/\//i.test(u) && u.length <= 1024 ? u : null;
+}
 function sanitizeMatDef(raw) {
   if (!raw || typeof raw !== 'object' || !MAT_HEX.test(raw.fill) || !MAT_HEX.test(raw.cap)) return null;
   return {
@@ -842,9 +847,10 @@ function sanitizeMatDef(raw) {
     breakable: raw.breakable !== false,
     strength: Math.max(1, Math.min(9, (raw.strength | 0) || 1)),   // hits to destroy (only applies when breakable)
     tex: sanitizeMatTex(raw.tex),
+    img: sanitizeMatImg(raw.img),
   };
 }
-function matSig(d) { return d.name + '|' + d.base + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0) + '|' + (d.strength | 0) + '|' + (d.tex ? d.tex.join('') : ''); }
+function matSig(d) { return d.name + '|' + d.base + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0) + '|' + (d.strength | 0) + '|' + (d.tex ? d.tex.join('') : '') + '|' + (d.img || ''); }
 function terrainRLE(grid) {                          // [value, count] runs (value = material id, 0 = empty)
   const runs = []; let v = grid[0], n = 0;
   for (let i = 0; i < grid.length; i++) { if (grid[i] === v) n++; else { runs.push([v, n]); v = grid[i]; n = 1; } }
