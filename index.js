@@ -783,16 +783,20 @@ function ensureTerrain(room) { return roomTerrain[room] || (roomTerrain[room] = 
 function ensureTerrainHp(room) { return roomTerrainHp[room] || (roomTerrainHp[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 // Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
 function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
-function matBreakableSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return true; const d = mats[v]; return !d || d.breakable !== false; }
+const BUILTIN_UNBREAKABLE = new Set([7, 13]);          // built-in conveyor belts are unbreakable (matches client TERRAIN_MATS)
+function matBreakableSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return !BUILTIN_UNBREAKABLE.has(v); const d = mats[v]; return !d || d.breakable !== false; }
 // Carve one cell with breakable/strength semantics (mirrors the client's carveCellHp). Returns true if cleared.
-function carveCellSrv(grid, hp, mats, i) {
+// `hard` (the editor Carve tool) removes any cell outright; without it (gameplay slam) the rules apply.
+function carveCellSrv(grid, hp, mats, i, hard) {
   const v = grid[i]; if (!v) return false;
-  if (!matBreakableSrv(mats, v)) return false;
-  const s = matStrengthSrv(mats, v);
-  if (s > 1) { let h = hp[i] || s; h--; if (h > 0) { hp[i] = h; return false; } }
+  if (!hard) {
+    if (!matBreakableSrv(mats, v)) return false;
+    const s = matStrengthSrv(mats, v);
+    if (s > 1) { let h = hp[i] || s; h--; if (h > 0) { hp[i] = h; return false; } }
+  }
   grid[i] = 0; hp[i] = 0; return true;
 }
-function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val) {
+function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard) {
   const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(TERRAIN_COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
   const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(TERRAIN_ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
   const r2 = r * r; let changed = false;
@@ -801,12 +805,12 @@ function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val) {
     if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) > r2) continue;
     const i = ry * TERRAIN_COLS + cx;
     if (val) { if (grid[i] !== val) { grid[i] = val; changed = true; } hp[i] = matStrengthSrv(mats, val); }
-    else if (carveCellSrv(grid, hp, mats, i)) changed = true;
+    else if (carveCellSrv(grid, hp, mats, i, hard)) changed = true;
   }
   return changed;
 }
 // Axis-aligned square fill (the manual brush; r = half-extent). Carves/paints blocky, grid-aligned terrain.
-function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val) {
+function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard) {
   const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(TERRAIN_COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
   const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(TERRAIN_ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
   let changed = false;
@@ -815,7 +819,7 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val) {
     if (Math.abs(ccx - wx) > r || Math.abs(ccy - wy) > r) continue;
     const i = ry * TERRAIN_COLS + cx;
     if (val) { if (grid[i] !== val) { grid[i] = val; changed = true; } hp[i] = matStrengthSrv(mats, val); }
-    else if (carveCellSrv(grid, hp, mats, i)) changed = true;
+    else if (carveCellSrv(grid, hp, mats, i, hard)) changed = true;
   }
   return changed;
 }
@@ -1550,18 +1554,19 @@ io.on('connection', (socket) => {
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
   // Destructible terrain: paint/carve a circle into the room grid, then rebroadcast the op so every
   // client rasterizes it identically (client also applies optimistically). Only echoes on a real change.
-  socket.on('terrain-edit', ({ op, x, y, r, mat, shape }) => {
+  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard }) => {
     if (!currentRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
     const cx = Math.max(0, Math.min(MWSim.C.WORLD_W, x)), cy = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
     const rr = Math.max(8, Math.min(160, r));
     const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
     const sq = shape === 'square';
+    const hd = op === 'carve' && !!hard;                 // editor Carve tool: hard delete (any block); gameplay slam stays soft
     const grid = ensureTerrain(currentRoom), hp = ensureTerrainHp(currentRoom), mats = roomMats[currentRoom] || {};
     // The sender already applied this op optimistically, so echo to OTHERS only — carve = hp decrement is
     // NOT idempotent, double-applying would desync the sender's per-cell hp from everyone else's.
-    if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m))
-      socket.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined });
+    if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd))
+      socket.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd });
   });
   // Undo for placed terrain: restore an explicit list of cells to prior values. Flat [index, value, ...].
   // Owner-agnostic (terrain isn't owner-tracked), but bounded and rebroadcast so all clients stay in sync.
