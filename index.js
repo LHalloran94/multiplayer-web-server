@@ -804,7 +804,25 @@ function rasterTerrainSquare(grid, wx, wy, r, val) {
   }
   return changed;
 }
-const TERRAIN_MAT_MAX = 15;                           // material ids 1..15 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil); 0 = empty
+const TERRAIN_MAT_MAX = 15;                           // built-in material ids 1..15 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil); 0 = empty
+const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → custom material ids live in 16..255
+// ---- Custom material registry (Stage 6 feature A): per-room map of custom mat id → opaque appearance/property def.
+// The server stores + dedups + assigns ids; it does NOT interpret the def physically (the client clones a base mat).
+const CUSTOM_MAT_MIN = 16, CUSTOM_MAT_CAP = 200;     // up to 200 custom mats per room
+const roomMats = {};                                 // room → { id: def }
+function ensureMats(room) { return roomMats[room] || (roomMats[room] = {}); }
+const MAT_HEX = /^#[0-9a-fA-F]{6}$/;
+function sanitizeMatDef(raw) {
+  if (!raw || typeof raw !== 'object' || !MAT_HEX.test(raw.fill) || !MAT_HEX.test(raw.cap)) return null;
+  return {
+    name: String(raw.name || 'Custom').slice(0, 24),
+    base: Math.max(0, Math.min(TERRAIN_MAT_MAX, raw.base | 0)),   // built-in id whose physics this clones
+    fill: raw.fill, cap: raw.cap,
+    capShade: MAT_HEX.test(raw.capShade) ? raw.capShade : raw.cap,
+    breakable: raw.breakable !== false,
+  };
+}
+function matSig(d) { return d.name + '|' + d.base + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0); }
 function terrainRLE(grid) {                          // [value, count] runs (value = material id, 0 = empty)
   const runs = []; let v = grid[0], n = 0;
   for (let i = 0; i < grid.length; i++) { if (grid[i] === v) n++; else { runs.push([v, n]); v = grid[i]; n = 1; } }
@@ -1347,6 +1365,9 @@ io.on('connection', (socket) => {
     // Replay the destructible terrain grid (RLE) — only if any has been placed in this room.
     const tg = roomTerrain[currentRoom];
     if (tg) socket.emit('terrain-init', { cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg) });
+    // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
+    const mm = roomMats[currentRoom];
+    if (mm && Object.keys(mm).length) socket.emit('mats-init', { mats: mm });
   });
   socket.on('avt-leave', () => {
     if (currentRoom && roomAvt[currentRoom] && roomAvt[currentRoom].delete(socket.id)) {
@@ -1500,7 +1521,7 @@ io.on('connection', (socket) => {
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
     const cx = Math.max(0, Math.min(MWSim.C.WORLD_W, x)), cy = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
     const rr = Math.max(8, Math.min(160, r));
-    const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_MAX, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..MAX (carve = 0)
+    const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
     const sq = shape === 'square';
     const grid = ensureTerrain(currentRoom);
     if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, cx, cy, rr, m))
@@ -1513,10 +1534,26 @@ io.on('connection', (socket) => {
     const grid = ensureTerrain(currentRoom);
     let changed = false;
     for (let k = 0; k + 1 < cells.length; k += 2) {
-      const i = cells[k] | 0, v = Math.max(0, Math.min(TERRAIN_MAT_MAX, cells[k + 1] | 0));
+      const i = cells[k] | 0, v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
       if (i >= 0 && i < grid.length && grid[i] !== v) { grid[i] = v; changed = true; }
     }
     if (changed) io.to(currentRoom).emit('terrain-set', { cells });
+  });
+  // Custom material registry: define a new custom mat (or match an identical existing one). Dedups by signature,
+  // assigns the next free id (16..255), stores per-room + broadcasts so every client can render/paint it. Acks {id, def}.
+  socket.on('mat-define', (raw, ack) => {
+    if (!currentRoom) { if (typeof ack === 'function') ack(null); return; }
+    const def = sanitizeMatDef(raw);
+    if (!def) { if (typeof ack === 'function') ack(null); return; }
+    const mats = ensureMats(currentRoom), sig = matSig(def);
+    for (const id in mats) if (matSig(mats[id]) === sig) { if (typeof ack === 'function') ack({ id: +id, def: mats[id] }); return; }
+    if (Object.keys(mats).length >= CUSTOM_MAT_CAP) { if (typeof ack === 'function') ack(null); return; }
+    let id = -1;
+    for (let i = CUSTOM_MAT_MIN; i <= TERRAIN_MAT_HI; i++) if (!mats[i]) { id = i; break; }
+    if (id < 0) { if (typeof ack === 'function') ack(null); return; }
+    mats[id] = def;
+    io.to(currentRoom).emit('mat-defined', { id, def });
+    if (typeof ack === 'function') ack({ id, def });
   });
   socket.on('avatar-object-hit', ({ id, dmg }) => {
     if (!currentRoom || !roomObjects[currentRoom]) return;
