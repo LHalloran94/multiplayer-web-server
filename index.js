@@ -841,7 +841,13 @@ function sanitizeMatDef(raw) {
   if (!raw || typeof raw !== 'object' || !MAT_HEX.test(raw.fill) || !MAT_HEX.test(raw.cap)) return null;
   return {
     name: String(raw.name || 'Custom').slice(0, 24),
-    base: Math.max(0, Math.min(TERRAIN_MAT_MAX, raw.base | 0)),   // built-in id whose physics this clones
+    base: Math.max(0, Math.min(TERRAIN_MAT_MAX, raw.base | 0)),   // representative built-in id (cosmetic/back-compat)
+    behavior: ['solid', 'fluid', 'hazard'].includes(raw.behavior) ? raw.behavior : 'solid',   // 11s class
+    surface: ['none', 'ice', 'mud', 'snow'].includes(raw.surface) ? raw.surface : 'none',     // 11s solid friction group
+    bouncy: raw.bouncy === true,
+    conveyor: raw.conveyor > 0 ? 1 : raw.conveyor < 0 ? -1 : 0,
+    dusty: raw.dusty === true,
+    liquid: ['water', 'brine', 'oil', 'quicksand'].includes(raw.liquid) ? raw.liquid : 'water',
     fill: raw.fill, cap: raw.cap,
     capShade: MAT_HEX.test(raw.capShade) ? raw.capShade : raw.cap,
     breakable: raw.breakable !== false,
@@ -850,7 +856,7 @@ function sanitizeMatDef(raw) {
     img: sanitizeMatImg(raw.img),
   };
 }
-function matSig(d) { return d.name + '|' + d.base + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0) + '|' + (d.strength | 0) + '|' + (d.tex ? d.tex.join('') : '') + '|' + (d.img || ''); }
+function matSig(d) { return d.name + '|' + d.base + '|' + d.behavior + '|' + d.surface + '|' + (d.bouncy ? 1 : 0) + '|' + d.conveyor + '|' + (d.dusty ? 1 : 0) + '|' + d.liquid + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0) + '|' + (d.strength | 0) + '|' + (d.tex ? d.tex.join('') : '') + '|' + (d.img || ''); }
 function terrainRLE(grid) {                          // [value, count] runs (value = material id, 0 = empty)
   const runs = []; let v = grid[0], n = 0;
   for (let i = 0; i < grid.length; i++) { if (grid[i] === v) n++; else { runs.push([v, n]); v = grid[i]; n = 1; } }
