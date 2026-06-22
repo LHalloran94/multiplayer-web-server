@@ -838,6 +838,70 @@ const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → custom
 const CUSTOM_MAT_MIN = 16, CUSTOM_MAT_CAP = 200;     // up to 200 custom mats per room
 const roomMats = {};                                 // room → { id: def }
 function ensureMats(room) { return roomMats[room] || (roomMats[room] = {}); }
+
+// ---- Avatar-world MODES (Sandbox vs World) ---------------------------------
+// Each page (URL) hosts TWO parallel avatar worlds: 'sandbox' (blank, build freely — the
+// original behavior) and 'world' (a seeded heightmap, generated once and persistent). They
+// are namespaced by a distinct socket.io room + state-map key so the two never mix; the social
+// layer (chat/cursors/presence) stays on the bare URL room. A client switches at will by
+// re-joining the mesh under the other mode (avt-leave → avt-join {mode}).
+const AVATAR_MODES = new Set(['sandbox', 'world']);
+function avatarRoomKey(url, mode) { return 'av:' + (AVATAR_MODES.has(mode) ? mode : 'sandbox') + ':' + url; }
+const socketToAvatarRoom = {};                       // socketId → its current avatar-world room key (for cross-socket cleanup)
+const worldGenerated = new Set();                    // avatarRoom keys whose 'world' terrain has been generated this server lifetime
+
+// Per-page world SEED persists in SQLite so a 'world' regenerates IDENTICALLY after a server
+// restart (generation is deterministic from the seed). Player EDITS to a world stay in-memory
+// (ephemeral, clear on restart) — same durability Sandbox has always had.
+db.exec('CREATE TABLE IF NOT EXISTS avatar_worlds (url TEXT PRIMARY KEY, seed INTEGER NOT NULL)');
+const _getWorldSeed = db.prepare('SELECT seed FROM avatar_worlds WHERE url = ?');
+const _insWorldSeed = db.prepare('INSERT OR IGNORE INTO avatar_worlds (url, seed) VALUES (?, ?)');
+function worldSeedFor(url) {
+  const row = _getWorldSeed.get(url);
+  if (row && Number.isFinite(row.seed)) return row.seed >>> 0;
+  const seed = (Math.random() * 0xFFFFFFFF) >>> 0;
+  _insWorldSeed.run(url, seed);
+  return seed;
+}
+function mulberry32(a) {                              // tiny deterministic PRNG (same family the client could mirror)
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// Generate a seeded rolling-hill heightmap into the existing terrain grid (no new render/collision
+// code needed — the terrain pipeline already draws grass-capped earth + stone and collides against it).
+// Materials: 1 = Earth (auto grass cap when exposed), 2 = Stone (deeper). Sits on the indestructible floor.
+function generateWorld(avatarRoom, seed) {
+  const grid = ensureTerrain(avatarRoom), hp = ensureTerrainHp(avatarRoom);
+  grid.fill(0); hp.fill(0);
+  const rng = mulberry32(seed);
+  const p0 = rng() * Math.PI * 2, p1 = rng() * Math.PI * 2, p2 = rng() * Math.PI * 2;
+  const a0 = 5 + rng() * 4, a1 = 2 + rng() * 2, a2 = 1 + rng() * 1.5;   // octave amplitudes (rows)
+  const floorTop = (MWSim.STAGE_LAYOUTS[0] && MWSim.STAGE_LAYOUTS[0][0]) ? MWSim.STAGE_LAYOUTS[0][0].y : MWSim.C.WORLD_H - 72;
+  const bottomRow = Math.ceil(floorTop / TERRAIN_CELL) - 1;             // last terrain row that still rests on the floor
+  const baseRow = bottomRow - 13;                                       // mean surface ~13 tiles above the floor
+  const EARTH = 1, STONE = 2;
+  for (let c = 0; c < TERRAIN_COLS; c++) {
+    const h = Math.sin(c * 0.045 + p0) * a0 + Math.sin(c * 0.13 + p1) * a1 + Math.sin(c * 0.31 + p2) * a2;
+    let surf = Math.round(baseRow - h);
+    if (surf < 1) surf = 1; if (surf > bottomRow) surf = bottomRow;
+    for (let r = surf; r <= bottomRow; r++) {
+      const v = (r < surf + 5) ? EARTH : STONE;
+      const i = r * TERRAIN_COLS + c;
+      grid[i] = v;
+      hp[i] = matStrengthSrv({}, v);
+    }
+  }
+}
+// Ensure a 'world'-mode room has its terrain generated exactly once per server lifetime.
+function ensureWorldGenerated(avatarRoom, url) {
+  if (worldGenerated.has(avatarRoom)) return;
+  worldGenerated.add(avatarRoom);
+  generateWorld(avatarRoom, worldSeedFor(url));
+}
 const MAT_HEX = /^#[0-9a-fA-F]{6}$/;
 function sanitizeMatTex(raw) {                          // hand-drawn 8×8 appearance: array of 64 ('' | #rrggbb); null if blank/invalid
   if (!Array.isArray(raw) || raw.length !== 64) return null;
@@ -1022,6 +1086,7 @@ function emitSnapshotToFollower(followeeId, followeeUsername, socketId) {
 io.on('connection', (socket) => {
   let currentRoom = null;
   let currentUsername = null;
+  let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
 
   socket.on('join', ({ url, fullUrl, username, token, visible, tabSession }) => {
     let verified = false;
@@ -1062,6 +1127,7 @@ io.on('connection', (socket) => {
 
     currentRoom = url;
     currentUsername = username;
+    currentAvatarRoom = avatarRoomKey(url, 'sandbox');   // default until avt-join picks a mode (joins the av room there)
     socket.join(currentRoom);
     socket.join('user:' + username);
     userCurrentFullUrl[username] = fullUrl || url;
@@ -1078,7 +1144,8 @@ io.on('connection', (socket) => {
         delete roomUsers[currentRoom][oldSid];
         if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][oldSid];
         removeSimAvatar(currentRoom, oldSid);
-        if (roomAvt[currentRoom] && roomAvt[currentRoom].delete(oldSid)) socket.to(currentRoom).emit('avt-peer-left', { id: oldSid });
+        const oldAv = socketToAvatarRoom[oldSid];   // the evicted socket's avatar-world room (mode-scoped, may differ from this one)
+        if (oldAv && roomAvt[oldAv] && roomAvt[oldAv].delete(oldSid)) { socket.to(oldAv).emit('avt-peer-left', { id: oldSid }); delete socketToAvatarRoom[oldSid]; }
         io.to(currentRoom).emit('cursor-leave', { id: oldSid });
         io.to(currentRoom).emit('avatar-leave', { id: oldSid });
         const oldSock = io.sockets.sockets.get(oldSid);
@@ -1418,26 +1485,41 @@ io.on('connection', (socket) => {
   // Thin relays for the unreliable WebRTC DataChannel mesh that carries avatar
   // positions peer-to-peer. Mirrors the voice handshake (new joiner offers to all
   // existing peers — single initiator, no glare) but is independent of voice and
-  // carries no game state. Scoped to the URL room (currentRoom).
-  socket.on('avt-join', () => {
+  // carries no game state. Scoped to the avatar-world room = URL + MODE (sandbox/world),
+  // so the two parallel worlds on a page mesh + replay independently. The presence/chat
+  // layer stays on the bare URL room (currentRoom) regardless of mode.
+  socket.on('avt-join', (data) => {
     if (!currentRoom) return;
-    if (!roomAvt[currentRoom]) roomAvt[currentRoom] = new Set();
-    const existingPeers = [...roomAvt[currentRoom]];
-    roomAvt[currentRoom].add(socket.id);
-    socket.emit('avt-joined', { existingPeers });
+    const mode = (data && AVATAR_MODES.has(data.mode)) ? data.mode : 'sandbox';
+    const avRoom = avatarRoomKey(currentRoom, mode);
+    // Leave any previous avatar room (mode switch without an explicit avt-leave).
+    if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
+      socket.leave(currentAvatarRoom);
+      if (roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
+    }
+    currentAvatarRoom = avRoom;
+    socketToAvatarRoom[socket.id] = avRoom;
+    socket.join(avRoom);
+    if (mode === 'world') ensureWorldGenerated(avRoom, currentRoom);   // seed-deterministic terrain, once per server lifetime
+    if (!roomAvt[avRoom]) roomAvt[avRoom] = new Set();
+    const existingPeers = [...roomAvt[avRoom]];
+    roomAvt[avRoom].add(socket.id);
+    socket.emit('avt-joined', { existingPeers, mode });
     // Replay the current world objects to the new joiner (late-joiner sync).
-    socket.emit('avatar-objects-init', { objects: roomObjects[currentRoom] ? [...roomObjects[currentRoom].values()] : [] });
-    // Replay the destructible terrain grid (RLE) — only if any has been placed in this room.
-    const tg = roomTerrain[currentRoom];
-    if (tg) socket.emit('terrain-init', { cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: roomTerrainHp[currentRoom] ? terrainRLE(roomTerrainHp[currentRoom]).runs : undefined });
+    socket.emit('avatar-objects-init', { objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
+    // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
+    const tg = roomTerrain[avRoom];
+    if (tg) socket.emit('terrain-init', { cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: roomTerrainHp[avRoom] ? terrainRLE(roomTerrainHp[avRoom]).runs : undefined });
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
-    const mm = roomMats[currentRoom];
+    const mm = roomMats[avRoom];
     if (mm && Object.keys(mm).length) socket.emit('mats-init', { mats: mm });
   });
   socket.on('avt-leave', () => {
-    if (currentRoom && roomAvt[currentRoom] && roomAvt[currentRoom].delete(socket.id)) {
-      socket.to(currentRoom).emit('avt-peer-left', { id: socket.id });
+    if (currentAvatarRoom && roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) {
+      socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
     }
+    if (currentAvatarRoom) socket.leave(currentAvatarRoom);
+    delete socketToAvatarRoom[socket.id];
   });
   socket.on('avt-offer',  ({ to, sdp })       => { socket.to(to).emit('avt-offer',  { from: socket.id, sdp }); });
   socket.on('avt-answer', ({ to, sdp })       => { socket.to(to).emit('avt-answer', { from: socket.id, sdp }); });
@@ -1446,15 +1528,15 @@ io.on('connection', (socket) => {
   // ---- Avatar world objects (Stage 6) — server-authoritative existence over reliable
   // socket.io; physics response is applied locally on each client. Persist till restart.
   socket.on('avatar-object-spawn', (data) => {
-    if (!currentRoom || !data || !OBJ_TYPES.has(data.type)) return;
+    if (!currentAvatarRoom || !data || !OBJ_TYPES.has(data.type)) return;
     const type = data.type;
     // Client supplies the id (for optimistic local placement). Require it to be namespaced to
     // this socket (anti-spoof); otherwise mint a fallback. Echoing the same id back means the
     // placer's optimistic object is overwritten in place rather than duplicated.
     let id = data.id;
     if (typeof id !== 'string' || !id.startsWith(socket.id + '-')) id = socket.id + '-s' + (++objSeq);
-    if (!roomObjects[currentRoom]) roomObjects[currentRoom] = new Map();
-    const map = roomObjects[currentRoom];
+    if (!roomObjects[currentAvatarRoom]) roomObjects[currentAvatarRoom] = new Map();
+    const map = roomObjects[currentAvatarRoom];
     if (map.has(id)) return;                                // ignore duplicate spawn for an existing id
     const WW = MWSim.C.WORLD_W, WH = MWSim.C.WORLD_H;
     let obj;
@@ -1541,95 +1623,95 @@ io.on('connection', (socket) => {
     if (map.size >= MAX_OBJECTS_PER_ROOM) {                 // FIFO eviction
       const oldest = map.keys().next().value;
       map.delete(oldest);
-      io.to(currentRoom).emit('avatar-object-removed', { id: oldest });
+      io.to(currentAvatarRoom).emit('avatar-object-removed', { id: oldest });
     }
     map.set(id, obj);
-    io.to(currentRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
+    io.to(currentAvatarRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
   });
   // Mouse-eraser removal: only the OWNER may delete their own object this way. (Physically
   // destroying anyone's object goes through avatar-object-hit, which is unrestricted.)
   socket.on('avatar-object-remove', ({ id }) => {
-    if (!currentRoom || !roomObjects[currentRoom]) return;
-    const obj = roomObjects[currentRoom].get(id);
+    if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
+    const obj = roomObjects[currentAvatarRoom].get(id);
     // Owner by stable username (survives reconnect/new socket.id) OR the live socket.id.
     if (!obj || !(obj.ownerId === socket.id || (obj.owner && obj.owner === currentUsername))) return;
-    roomObjects[currentRoom].delete(id);
-    io.to(currentRoom).emit('avatar-object-removed', { id });
+    roomObjects[currentAvatarRoom].delete(id);
+    io.to(currentAvatarRoom).emit('avatar-object-removed', { id });
   });
   // Bulk-remove all of MY own objects (the Erase tool's "Remove all mine" button). Owner-scoped,
   // like the single mouse-eraser, but in one round-trip.
   socket.on('avatar-objects-remove-mine', () => {
-    if (!currentRoom || !roomObjects[currentRoom]) return;
-    const map = roomObjects[currentRoom], ids = [];
+    if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
+    const map = roomObjects[currentAvatarRoom], ids = [];
     for (const [id, o] of map) if (o.ownerId === socket.id || (o.owner && o.owner === currentUsername)) ids.push(id);
     for (const id of ids) map.delete(id);
-    if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
+    if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     // Terrain is unowned (and ephemeral / all player-placed), so "Remove all" wipes the whole grid too.
-    if (roomTerrain[currentRoom]) { roomTerrain[currentRoom].fill(0); if (roomTerrainHp[currentRoom]) roomTerrainHp[currentRoom].fill(0); io.to(currentRoom).emit('terrain-cleared'); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); io.to(currentAvatarRoom).emit('terrain-cleared'); }
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   socket.on('avatar-objects-clear-all', () => {
-    if (!currentRoom) return;
-    if (roomObjects[currentRoom]) {
-      const map = roomObjects[currentRoom], ids = [...map.keys()];
+    if (!currentAvatarRoom) return;
+    if (roomObjects[currentAvatarRoom]) {
+      const map = roomObjects[currentAvatarRoom], ids = [...map.keys()];
       map.clear();
-      if (ids.length) io.to(currentRoom).emit('avatar-objects-removed', { ids });
+      if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     }
-    if (roomTerrain[currentRoom]) { roomTerrain[currentRoom].fill(0); if (roomTerrainHp[currentRoom]) roomTerrainHp[currentRoom].fill(0); io.to(currentRoom).emit('terrain-cleared'); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); io.to(currentAvatarRoom).emit('terrain-cleared'); }
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
   // Destructible terrain: paint/carve a circle into the room grid, then rebroadcast the op so every
   // client rasterizes it identically (client also applies optimistically). Only echoes on a real change.
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard }) => {
-    if (!currentRoom || (op !== 'paint' && op !== 'carve')) return;
+    if (!currentAvatarRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
     const cx = Math.max(0, Math.min(MWSim.C.WORLD_W, x)), cy = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
     const rr = Math.max(8, Math.min(160, r));
     const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
     const sq = shape === 'square';
     const hd = op === 'carve' && !!hard;                 // editor Carve tool: hard delete (any block); gameplay slam stays soft
-    const grid = ensureTerrain(currentRoom), hp = ensureTerrainHp(currentRoom), mats = roomMats[currentRoom] || {};
+    const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
     // The sender already applied this op optimistically, so echo to OTHERS only — carve = hp decrement is
     // NOT idempotent, double-applying would desync the sender's per-cell hp from everyone else's.
     if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd))
-      socket.to(currentRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd });
+      socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd });
   });
   // Undo for placed terrain: restore an explicit list of cells to prior values. Flat [index, value, ...].
   // Owner-agnostic (terrain isn't owner-tracked), but bounded and rebroadcast so all clients stay in sync.
   socket.on('terrain-set', ({ cells }) => {
-    if (!currentRoom || !Array.isArray(cells) || cells.length > 16384) return;
-    const grid = ensureTerrain(currentRoom), hp = ensureTerrainHp(currentRoom), mats = roomMats[currentRoom] || {};
+    if (!currentAvatarRoom || !Array.isArray(cells) || cells.length > 16384) return;
+    const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
     let changed = false;
     for (let k = 0; k + 1 < cells.length; k += 2) {
       const i = cells[k] | 0, v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
       if (i >= 0 && i < grid.length) { if (grid[i] !== v) { grid[i] = v; changed = true; } hp[i] = v ? matStrengthSrv(mats, v) : 0; }
     }
-    if (changed) io.to(currentRoom).emit('terrain-set', { cells });
+    if (changed) io.to(currentAvatarRoom).emit('terrain-set', { cells });
   });
   // Custom material registry: define a new custom mat (or match an identical existing one). Dedups by signature,
   // assigns the next free id (16..255), stores per-room + broadcasts so every client can render/paint it. Acks {id, def}.
   socket.on('mat-define', (raw, ack) => {
-    if (!currentRoom) { if (typeof ack === 'function') ack(null); return; }
+    if (!currentAvatarRoom) { if (typeof ack === 'function') ack(null); return; }
     const def = sanitizeMatDef(raw);
     if (!def) { if (typeof ack === 'function') ack(null); return; }
-    const mats = ensureMats(currentRoom), sig = matSig(def);
+    const mats = ensureMats(currentAvatarRoom), sig = matSig(def);
     for (const id in mats) if (matSig(mats[id]) === sig) { if (typeof ack === 'function') ack({ id: +id, def: mats[id] }); return; }
     if (Object.keys(mats).length >= CUSTOM_MAT_CAP) { if (typeof ack === 'function') ack(null); return; }
     let id = -1;
     for (let i = CUSTOM_MAT_MIN; i <= TERRAIN_MAT_HI; i++) if (!mats[i]) { id = i; break; }
     if (id < 0) { if (typeof ack === 'function') ack(null); return; }
     mats[id] = def;
-    io.to(currentRoom).emit('mat-defined', { id, def });
+    io.to(currentAvatarRoom).emit('mat-defined', { id, def });
     if (typeof ack === 'function') ack({ id, def });
   });
   socket.on('avatar-object-hit', ({ id, dmg }) => {
-    if (!currentRoom || !roomObjects[currentRoom]) return;
-    const obj = roomObjects[currentRoom].get(id);
+    if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
+    const obj = roomObjects[currentAvatarRoom].get(id);
     if (!obj || typeof obj.hp !== 'number') return;
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
-    if (obj.hp <= 0) { roomObjects[currentRoom].delete(id); io.to(currentRoom).emit('avatar-object-removed', { id }); }
-    else io.to(currentRoom).emit('avatar-object-update', { id, hp: obj.hp });
+    if (obj.hp <= 0) { roomObjects[currentAvatarRoom].delete(id); io.to(currentAvatarRoom).emit('avatar-object-removed', { id }); }
+    else io.to(currentAvatarRoom).emit('avatar-object-update', { id, hp: obj.hp });
   });
 
   socket.on('voice-join', ({ username, scope }) => {
@@ -1915,9 +1997,10 @@ io.on('connection', (socket) => {
         socket.leave('voice:' + voiceScope);
       }
       delete socketVoiceScope[socket.id];
-      if (roomAvt[currentRoom] && roomAvt[currentRoom].delete(socket.id)) {
-        socket.to(currentRoom).emit('avt-peer-left', { id: socket.id });
+      if (currentAvatarRoom && roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) {
+        socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
       }
+      delete socketToAvatarRoom[socket.id];
       broadcastPresence(currentRoom);
       io.to(currentRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
