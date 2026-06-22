@@ -9,7 +9,14 @@ const MWSim = require('./avatar-sim'); // shared authoritative avatar simulation
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*' }
+  cors: { origin: '*' },
+  // Custom avatar skins, materials, sprays and drawings are sent as data-URL images; these routinely
+  // exceed the 1 MB engine.io default, which would force-close the offending socket. Bump to 10 MB.
+  maxHttpBufferSize: 1e7,
+  // Backgrounded browser tabs throttle the heartbeat timer; transient lag/proxy hiccups delay it too.
+  // The 20 s default ping timeout drops those clients (→ reconnect churn). Be more tolerant.
+  pingInterval: 25000,
+  pingTimeout: 60000
 });
 
 app.use(express.json());
