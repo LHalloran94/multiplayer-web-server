@@ -1059,6 +1059,25 @@ io.on('connection', (socket) => {
     socket.join('user:' + username);
     userCurrentFullUrl[username] = fullUrl || url;
     if (!roomUsers[currentRoom]) roomUsers[currentRoom] = {};
+    // Reconnect dedup: a socket.io reconnect arrives as a NEW socket.id while the previous socket
+    // can linger in presence until its server-side ping-timeout (~20s) fires `disconnect`. During
+    // that window the SAME physical tab shows twice in the who-list and leaves a ghost avatar/cursor.
+    // Evict any prior socket in THIS room carrying the same tabSession (same tab) so the rejoin
+    // cleanly replaces it instead of waiting for the timeout. (Distinct real tabs have distinct
+    // tabSessions, so this never collapses two genuine tabs.)
+    if (tabSession) {
+      for (const oldSid of Object.keys(roomUsers[currentRoom])) {
+        if (oldSid === socket.id || socketToTabSession[oldSid] !== tabSession) continue;
+        delete roomUsers[currentRoom][oldSid];
+        if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][oldSid];
+        removeSimAvatar(currentRoom, oldSid);
+        if (roomAvt[currentRoom] && roomAvt[currentRoom].delete(oldSid)) socket.to(currentRoom).emit('avt-peer-left', { id: oldSid });
+        io.to(currentRoom).emit('cursor-leave', { id: oldSid });
+        io.to(currentRoom).emit('avatar-leave', { id: oldSid });
+        const oldSock = io.sockets.sockets.get(oldSid);
+        if (oldSock) oldSock.disconnect(true);   // force full cleanup of any zombie socket
+      }
+    }
     roomUsers[currentRoom][socket.id] = { username, verified, avatar, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
