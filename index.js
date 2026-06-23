@@ -895,8 +895,18 @@ function resolveAvRoomId(clientRoomId, currentRoom, socketId) {
   if (!room) return currentRoom;                              // unknown id → default URL room
   if (room.public) return clientRoomId;                       // public room World: open to anyone present
   const did = socketToDiscordId[socketId];
+  if (did && room.owner_id === did) return clientRoomId;      // owner always has access to their own room
   if (did && _avRoomMember.get(clientRoomId, did)) return clientRoomId;
   return currentRoom;                                         // private room, not a member → default URL room
+}
+// 2c: who-list/presence follows the active context Room (the portable layer). A socket's PRESENCE bucket
+// is its context Room ('pg:'+roomId) when it's in one and allowed, else the bare URL room (currentRoom) —
+// preserving today's exact behavior for the page-default Room. Page-bound features (cursors/sprays/chat/
+// history) stay on the URL room regardless; only the who-list bucket diverges. resolveAvRoomId does the
+// membership gating, so a non-member's ctxRoomId silently collapses to the URL room.
+function resolvePresenceRoom(clientCtxRoomId, currentRoom, socketId) {
+  const rid = resolveAvRoomId(clientCtxRoomId, currentRoom, socketId);
+  return rid === currentRoom ? currentRoom : 'pg:' + rid;
 }
 const socketToAvatarRoom = {};                       // socketId → its current avatar-world room key (for cross-socket cleanup)
 const worldGenerated = new Set();                    // avatarRoom keys whose 'world' terrain has been generated this server lifetime
@@ -1231,9 +1241,10 @@ function emitSnapshotToFollower(followeeId, followeeUsername, socketId) {
 io.on('connection', (socket) => {
   let currentRoom = null;
   let currentUsername = null;
+  let currentPresenceRoom = null; // this socket's who-list bucket: URL room by default, or 'pg:'+ctxRoomId when in a context Room
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
 
-  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession }) => {
+  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId }) => {
     let verified = false;
     let avatar = null;
     let discordId = null;
@@ -1276,7 +1287,10 @@ io.on('connection', (socket) => {
     socket.join(currentRoom);
     socket.join('user:' + username);
     userCurrentFullUrl[username] = fullUrl || url;
-    if (!roomUsers[currentRoom]) roomUsers[currentRoom] = {};
+    // 2c: presence bucket follows the context Room (membership-gated). Page-default Room → URL room (== today).
+    currentPresenceRoom = resolvePresenceRoom(ctxRoomId, currentRoom, socket.id);
+    if (currentPresenceRoom !== currentRoom) socket.join(currentPresenceRoom);
+    if (!roomUsers[currentPresenceRoom]) roomUsers[currentPresenceRoom] = {};
     // Reconnect dedup: a socket.io reconnect arrives as a NEW socket.id while the previous socket
     // can linger in presence until its server-side ping-timeout (~20s) fires `disconnect`. During
     // that window the SAME physical tab shows twice in the who-list and leaves a ghost avatar/cursor.
@@ -1284,9 +1298,9 @@ io.on('connection', (socket) => {
     // cleanly replaces it instead of waiting for the timeout. (Distinct real tabs have distinct
     // tabSessions, so this never collapses two genuine tabs.)
     if (tabSession) {
-      for (const oldSid of Object.keys(roomUsers[currentRoom])) {
+      for (const oldSid of Object.keys(roomUsers[currentPresenceRoom])) {
         if (oldSid === socket.id || socketToTabSession[oldSid] !== tabSession) continue;
-        delete roomUsers[currentRoom][oldSid];
+        delete roomUsers[currentPresenceRoom][oldSid];
         if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][oldSid];
         removeSimAvatar(currentRoom, oldSid);
         const oldAv = socketToAvatarRoom[oldSid];   // the evicted socket's avatar-world room (mode-scoped, may differ from this one)
@@ -1297,7 +1311,7 @@ io.on('connection', (socket) => {
         if (oldSock) oldSock.disconnect(true);   // force full cleanup of any zombie socket
       }
     }
-    roomUsers[currentRoom][socket.id] = { username, verified, avatar, discord_id: discordId };
+    roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
     if (roomAnnotations[currentRoom]) socket.emit('annotations-init', roomAnnotations[currentRoom]);
@@ -1305,7 +1319,7 @@ io.on('connection', (socket) => {
     if (roomMedia[currentRoom]) socket.emit('media-init', roomMedia[currentRoom]);
     if (roomAvatars[currentRoom]) socket.emit('avatars-init', Object.values(roomAvatars[currentRoom]));
     if (roomVoice[currentRoom] && Object.keys(roomVoice[currentRoom]).length) socket.emit('voice-init', roomVoice[currentRoom]);
-    broadcastPresence(currentRoom);
+    broadcastPresence(currentPresenceRoom);
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
     socket.to('user:' + username).emit('user-location', { url: userCurrentFullUrl[username] });
 
@@ -2164,9 +2178,28 @@ io.on('connection', (socket) => {
     } catch {}
   });
 
+  // 2c: the client switched its active context Room — move this socket's who-list bucket to match.
+  // The URL socket.io room is untouched (page-bound features keep flowing); only presence migrates.
+  socket.on('ctx-room', ({ roomId } = {}) => {
+    if (!currentRoom) return;
+    const next = resolvePresenceRoom(roomId, currentRoom, socket.id);
+    if (next === currentPresenceRoom) return;
+    const info = roomUsers[currentPresenceRoom] && roomUsers[currentPresenceRoom][socket.id];
+    // leave old bucket (but never leave the bare URL room — page-bound events live there)
+    if (roomUsers[currentPresenceRoom]) delete roomUsers[currentPresenceRoom][socket.id];
+    if (currentPresenceRoom !== currentRoom) socket.leave(currentPresenceRoom);
+    broadcastPresence(currentPresenceRoom);
+    // join new bucket
+    currentPresenceRoom = next;
+    if (next !== currentRoom) socket.join(next);
+    if (!roomUsers[next]) roomUsers[next] = {};
+    roomUsers[next][socket.id] = info || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null };
+    broadcastPresence(next);
+  });
+
   socket.on('disconnect', () => {
     if (currentRoom) {
-      delete roomUsers[currentRoom][socket.id];
+      if (roomUsers[currentPresenceRoom]) delete roomUsers[currentPresenceRoom][socket.id];
       if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][socket.id];
       removeSimAvatar(currentRoom, socket.id);
       const voiceScope = socketVoiceScope[socket.id];
@@ -2181,7 +2214,7 @@ io.on('connection', (socket) => {
         socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
       }
       delete socketToAvatarRoom[socket.id];
-      broadcastPresence(currentRoom);
+      broadcastPresence(currentPresenceRoom);
       io.to(currentRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
     }
