@@ -845,8 +845,14 @@ function ensureMats(room) { return roomMats[room] || (roomMats[room] = {}); }
 // are namespaced by a distinct socket.io room + state-map key so the two never mix; the social
 // layer (chat/cursors/presence) stays on the bare URL room. A client switches at will by
 // re-joining the mesh under the other mode (avt-leave → avt-join {mode}).
-const AVATAR_MODES = new Set(['sandbox', 'world']);
-function avatarRoomKey(url, mode) { return 'av:' + (AVATAR_MODES.has(mode) ? mode : 'sandbox') + ':' + url; }
+const AVATAR_MODES = new Set(['sandbox', 'world']);   // Level TYPE tokens (generation discriminator; 'world' == "Life"). No longer part of the room key.
+// Avatar-world room key is now `av:{roomId}:{levelIndex}` (Stage 6 Phase 2; was `av:{mode}:{url}`).
+// For the default per-URL room, roomId IS the URL, so a Level's key + its seed lookup stay byte-stable
+// across the migration. levelIndex selects a Level within a room's World ([sandbox=0, life=1] default).
+function avatarRoomKey(roomId, levelIndex) { return 'av:' + roomId + ':' + (levelIndex | 0); }
+// 2a: the avatar world still always lives on the page URL. The client sends a roomId on avt-join for
+// forward-compat, but until 2b wires user-rooms we trust only the server-side currentRoom.
+function resolveAvRoomId(_clientRoomId, currentRoom) { return currentRoom; }
 const socketToAvatarRoom = {};                       // socketId → its current avatar-world room key (for cross-socket cleanup)
 const worldGenerated = new Set();                    // avatarRoom keys whose 'world' terrain has been generated this server lifetime
 // Indestructible ground top (= the floor platform's y). Surface terrain rests ON this.
@@ -1211,7 +1217,7 @@ io.on('connection', (socket) => {
 
     currentRoom = url;
     currentUsername = username;
-    currentAvatarRoom = avatarRoomKey(url, 'sandbox');   // default until avt-join picks a mode (joins the av room there)
+    currentAvatarRoom = avatarRoomKey(url, 0);   // default Level 0 (sandbox) until avt-join picks a Level
     socket.join(currentRoom);
     socket.join('user:' + username);
     userCurrentFullUrl[username] = fullUrl || url;
@@ -1574,9 +1580,13 @@ io.on('connection', (socket) => {
   // layer stays on the bare URL room (currentRoom) regardless of mode.
   socket.on('avt-join', (data) => {
     if (!currentRoom) return;
-    const mode = (data && AVATAR_MODES.has(data.mode)) ? data.mode : 'sandbox';
-    const avRoom = avatarRoomKey(currentRoom, mode);
-    // Leave any previous avatar room (mode switch without an explicit avt-leave).
+    // Level TYPE drives generation/spawn (was `mode`); accept legacy `mode` from a stale old client.
+    const type = (data && AVATAR_MODES.has(data.type || data.mode)) ? (data.type || data.mode) : 'sandbox';
+    const roomId = resolveAvRoomId(data && data.roomId, currentRoom);
+    // levelIndex selects the Level within the room's World; default the per-URL room's [sandbox=0, life=1].
+    const levelIndex = (data && Number.isInteger(data.levelIndex) && data.levelIndex >= 0) ? data.levelIndex : (type === 'world' ? 1 : 0);
+    const avRoom = avatarRoomKey(roomId, levelIndex);
+    // Leave any previous avatar room (Level switch without an explicit avt-leave).
     if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
       socket.leave(currentAvatarRoom);
       if (roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
@@ -1584,11 +1594,11 @@ io.on('connection', (socket) => {
     currentAvatarRoom = avRoom;
     socketToAvatarRoom[socket.id] = avRoom;
     socket.join(avRoom);
-    if (mode === 'world') ensureWorldGenerated(avRoom, currentRoom);   // seed-deterministic terrain, once per server lifetime
+    if (type === 'world') ensureWorldGenerated(avRoom, roomId);   // seed keyed by roomId (=URL for the default room → identical worlds), once per server lifetime
     if (!roomAvt[avRoom]) roomAvt[avRoom] = new Set();
     const existingPeers = [...roomAvt[avRoom]];
     roomAvt[avRoom].add(socket.id);
-    socket.emit('avt-joined', { existingPeers, mode, spawn: (mode === 'world') ? worldSpawnFor(avRoom) : null });
+    socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, spawn: (type === 'world') ? worldSpawnFor(avRoom) : null });
     // Replay the current world objects to the new joiner (late-joiner sync).
     socket.emit('avatar-objects-init', { objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
     // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
