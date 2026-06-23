@@ -343,11 +343,26 @@ app.delete('/blocks', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ---- Room avatar-World spec (Stage 6 Phase 2b) ----
+const ROOM_LEVEL_CAP = 8;                                  // max Levels in a room's World (v1 cap)
+const LEVEL_TYPES = new Set(['sandbox', 'life', 'stage']); // Level type tokens (life == generated; stage == host-authored)
+// env_spec stores the World's ordered Level list (type + display name) + nav mode. Terrain/object CONTENT
+// stays host-local in v1 (hydrated live on entry), so the spec is public-safe metadata only.
+function sanitizeEnvSpec(raw) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.levels) || !raw.levels.length) return null;
+  const levels = raw.levels.slice(0, ROOM_LEVEL_CAP).map((l, i) => ({
+    type: (l && LEVEL_TYPES.has(l.type)) ? l.type : 'sandbox',
+    name: (l && typeof l.name === 'string' && l.name.trim()) ? l.name.trim().slice(0, 40) : ('Level ' + (i + 1)),
+  }));
+  return { levels, nav: (raw.nav === 'series') ? 'series' : 'free' };
+}
+function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { return null; } }
+
 // ---- Private room endpoints ----
 app.post('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, description, public: isPublic, scope } = req.body;
+  const { name, description, public: isPublic, scope, env_spec } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   try {
     const id = generateRoomCode();
@@ -355,9 +370,11 @@ app.post('/rooms', (req, res) => {
     const trimmedDesc = (description || '').trim().slice(0, 100) || null;
     const pub = isPublic ? 1 : 0;
     const roomScope = (isPublic && scope) ? scope.trim().slice(0, 253) : null;
-    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, description) VALUES (?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, trimmedDesc);
+    const spec = sanitizeEnvSpec(env_spec);                // null = a plain chat room (no World)
+    const kind = spec ? 'world' : null;
+    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, description, kind, env_spec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, trimmedDesc, kind, spec ? JSON.stringify(spec) : null);
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(id, user.sub);
-    res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, description: trimmedDesc });
+    res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, description: trimmedDesc, kind, env_spec: spec });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -365,13 +382,13 @@ app.get('/rooms/public', (req, res) => {
   const hostname = (req.query.hostname || '').trim().toLowerCase();
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.scope, r.description,
+      SELECT r.id, r.name, r.owner_id, r.scope, r.description, r.kind, r.env_spec,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count
       FROM rooms r
       WHERE r.public = 1 AND (r.scope IS NULL OR r.scope = ?)
       ORDER BY r.created_at DESC LIMIT 50
     `).all(hostname || '');
-    res.json(rows);
+    res.json(rows.map(r => ({ ...r, env_spec: parseEnvSpec(r.env_spec) })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -380,13 +397,13 @@ app.get('/rooms', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description,
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description, r.kind, r.env_spec,
              (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count
       FROM rooms r
       JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
       ORDER BY r.created_at ASC
     `).all(user.sub);
-    res.json(rows);
+    res.json(rows.map(r => ({ ...r, env_spec: parseEnvSpec(r.env_spec) })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -396,11 +413,11 @@ app.post('/rooms/join', (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
   try {
-    const room = db.prepare('SELECT id, name, owner_id FROM rooms WHERE id = ?').get(code.toUpperCase().trim());
+    const room = db.prepare('SELECT id, name, owner_id, public, scope, description, kind, env_spec FROM rooms WHERE id = ?').get(code.toUpperCase().trim());
     if (!room) return res.status(404).json({ error: 'Room not found' });
     db.prepare('INSERT OR IGNORE INTO room_members (room_id, discord_id) VALUES (?, ?)').run(room.id, user.sub);
     const memberCount = db.prepare('SELECT COUNT(*) as c FROM room_members WHERE room_id = ?').get(room.id).c;
-    res.json({ ...room, member_count: memberCount });
+    res.json({ ...room, env_spec: parseEnvSpec(room.env_spec), member_count: memberCount });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -1301,7 +1318,7 @@ io.on('connection', (socket) => {
       // Private rooms
       try {
         const userRooms = db.prepare(`
-          SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description,
+          SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description, r.kind, r.env_spec,
                  (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count
           FROM rooms r
           JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
@@ -1310,6 +1327,7 @@ io.on('connection', (socket) => {
         const getMemberIds = db.prepare('SELECT discord_id FROM room_members WHERE room_id = ?');
         socket.emit('private-rooms-init', userRooms.map(r => ({
           ...r,
+          env_spec: parseEnvSpec(r.env_spec),
           memberIds: getMemberIds.all(r.id).map(m => m.discord_id)
         })));
       } catch (e) { console.error('[private-rooms-init]', e); }
