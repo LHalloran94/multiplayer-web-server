@@ -849,6 +849,12 @@ const AVATAR_MODES = new Set(['sandbox', 'world']);
 function avatarRoomKey(url, mode) { return 'av:' + (AVATAR_MODES.has(mode) ? mode : 'sandbox') + ':' + url; }
 const socketToAvatarRoom = {};                       // socketId → its current avatar-world room key (for cross-socket cleanup)
 const worldGenerated = new Set();                    // avatarRoom keys whose 'world' terrain has been generated this server lifetime
+// Indestructible ground top (= the floor platform's y). Surface terrain rests ON this.
+const FLOOR_TOP = (MWSim.STAGE_LAYOUTS[0] && MWSim.STAGE_LAYOUTS[0][0]) ? MWSim.STAGE_LAYOUTS[0][0].y : MWSim.C.WORLD_H - 72;
+// World-mode spawn keep-clear box (px, world coords) above the spawn surface: nobody can build
+// here, so you can't be walled in / crushed on (re)spawn. Generation also flattens this footprint.
+const SPAWN_CLEAR_HALF_W = 52;                       // half-width each side of the spawn x (~1.5 tiles past the 40-wide blob)
+const SPAWN_CLEAR_H = 96;                             // headroom kept clear above the surface
 
 // Per-page world SEED persists in SQLite so a 'world' regenerates IDENTICALLY after a server
 // restart (generation is deterministic from the seed). Player EDITS to a world stay in-memory
@@ -880,14 +886,21 @@ function generateWorld(avatarRoom, seed) {
   const rng = mulberry32(seed);
   const p0 = rng() * Math.PI * 2, p1 = rng() * Math.PI * 2, p2 = rng() * Math.PI * 2;
   const a0 = 5 + rng() * 4, a1 = 2 + rng() * 2, a2 = 1 + rng() * 1.5;   // octave amplitudes (rows)
-  const floorTop = (MWSim.STAGE_LAYOUTS[0] && MWSim.STAGE_LAYOUTS[0][0]) ? MWSim.STAGE_LAYOUTS[0][0].y : MWSim.C.WORLD_H - 72;
-  const bottomRow = Math.ceil(floorTop / TERRAIN_CELL) - 1;             // last terrain row that still rests on the floor
+  const bottomRow = Math.ceil(FLOOR_TOP / TERRAIN_CELL) - 1;            // last terrain row that still rests on the floor
   const baseRow = bottomRow - 13;                                       // mean surface ~13 tiles above the floor
-  const EARTH = 1, STONE = 2;
-  for (let c = 0; c < TERRAIN_COLS; c++) {
+  const heightAt = (c) => {                                             // surface row for column c (clamped to the playable band)
     const h = Math.sin(c * 0.045 + p0) * a0 + Math.sin(c * 0.13 + p1) * a1 + Math.sin(c * 0.31 + p2) * a2;
     let surf = Math.round(baseRow - h);
-    if (surf < 1) surf = 1; if (surf > bottomRow) surf = bottomRow;
+    return surf < 1 ? 1 : (surf > bottomRow ? bottomRow : surf);
+  };
+  // Flat spawn plateau: clamp the columns under the spawn keep-clear box to the centre height,
+  // so the spawn is level (no slide) and the no-build box sits cleanly on solid ground.
+  const centerCol = Math.floor((MWSim.C.WORLD_W / 2) / TERRAIN_CELL);
+  const plateauHalf = Math.ceil(SPAWN_CLEAR_HALF_W / TERRAIN_CELL) + 1;
+  const plateauSurf = heightAt(centerCol);
+  const EARTH = 1, STONE = 2;
+  for (let c = 0; c < TERRAIN_COLS; c++) {
+    const surf = (Math.abs(c - centerCol) <= plateauHalf) ? plateauSurf : heightAt(c);
     for (let r = surf; r <= bottomRow; r++) {
       const v = (r < surf + 5) ? EARTH : STONE;
       const i = r * TERRAIN_COLS + c;
@@ -901,6 +914,26 @@ function ensureWorldGenerated(avatarRoom, url) {
   if (worldGenerated.has(avatarRoom)) return;
   worldGenerated.add(avatarRoom);
   generateWorld(avatarRoom, worldSeedFor(url));
+}
+// Spawn point = world-centre column resting on the terrain SURFACE there (so a generated world
+// drops you on top of the ground, not buried in it). Falls back to the floor when that column is
+// empty (sandbox / un-generated). y is the feet position (top of the first solid cell).
+function worldSpawnFor(avatarRoom) {
+  const x = MWSim.C.WORLD_W / 2;
+  const grid = roomTerrain[avatarRoom];
+  if (!grid) return { x, y: FLOOR_TOP };
+  const col = Math.max(0, Math.min(TERRAIN_COLS - 1, Math.floor(x / TERRAIN_CELL)));
+  for (let r = 0; r < TERRAIN_ROWS; r++) if (grid[r * TERRAIN_COLS + col]) return { x, y: r * TERRAIN_CELL };
+  return { x, y: FLOOR_TOP };
+}
+// Keep-clear no-build box above the spawn surface — world mode only (sandbox has no protection).
+function spawnClearRect(avatarRoom) {
+  if (!worldGenerated.has(avatarRoom)) return null;
+  const sp = worldSpawnFor(avatarRoom);
+  return { x0: sp.x - SPAWN_CLEAR_HALF_W, x1: sp.x + SPAWN_CLEAR_HALF_W, y0: sp.y - SPAWN_CLEAR_H, y1: sp.y };
+}
+function aabbHitsClear(rect, x0, y0, x1, y1) {       // AABB overlap test (null rect = no protection)
+  return !!rect && x0 < rect.x1 && x1 > rect.x0 && y0 < rect.y1 && y1 > rect.y0;
 }
 const MAT_HEX = /^#[0-9a-fA-F]{6}$/;
 function sanitizeMatTex(raw) {                          // hand-drawn 8×8 appearance: array of 64 ('' | #rrggbb); null if blank/invalid
@@ -1504,7 +1537,7 @@ io.on('connection', (socket) => {
     if (!roomAvt[avRoom]) roomAvt[avRoom] = new Set();
     const existingPeers = [...roomAvt[avRoom]];
     roomAvt[avRoom].add(socket.id);
-    socket.emit('avt-joined', { existingPeers, mode });
+    socket.emit('avt-joined', { existingPeers, mode, spawn: (mode === 'world') ? worldSpawnFor(avRoom) : null });
     // Replay the current world objects to the new joiner (late-joiner sync).
     socket.emit('avatar-objects-init', { objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
     // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
@@ -1620,6 +1653,18 @@ io.on('connection', (socket) => {
           speed: clampN(data.path.speed, 0.02, 1.2, 0.18), phase: clampN(data.path.phase, 0, 1, 0) };
       }
     }
+    if (type !== 'checkpoint') {                            // no building solids on the spawn (world mode); flags are non-solid → allowed
+      const clear = spawnClearRect(currentAvatarRoom);
+      if (clear) {
+        let bx0, by0, bx1, by1;
+        if (type === 'stroke') {
+          bx0 = by0 = Infinity; bx1 = by1 = -Infinity;
+          for (const p of obj.pts) { if (p.x < bx0) bx0 = p.x; if (p.x > bx1) bx1 = p.x; if (p.y < by0) by0 = p.y; if (p.y > by1) by1 = p.y; }
+          const pad = (obj.w || 8) / 2; bx0 -= pad; by0 -= pad; bx1 += pad; by1 += pad;
+        } else { const hw = (obj.w || 0) / 2, hh = (obj.h || 0) / 2; bx0 = obj.x - hw; by0 = obj.y - hh; bx1 = obj.x + hw; by1 = obj.y + hh; }
+        if (aabbHitsClear(clear, bx0, by0, bx1, by1)) return;
+      }
+    }
     if (map.size >= MAX_OBJECTS_PER_ROOM) {                 // FIFO eviction
       const oldest = map.keys().next().value;
       map.delete(oldest);
@@ -1671,6 +1716,7 @@ io.on('connection', (socket) => {
     const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
     const sq = shape === 'square';
     const hd = op === 'carve' && !!hard;                 // editor Carve tool: hard delete (any block); gameplay slam stays soft
+    if (op === 'paint' && aabbHitsClear(spawnClearRect(currentAvatarRoom), cx - rr, cy - rr, cx + rr, cy + rr)) return; // no building on the spawn (world mode)
     const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
     // The sender already applied this op optimistically, so echo to OTHERS only — carve = hp decrement is
     // NOT idempotent, double-applying would desync the sender's per-cell hp from everyone else's.
@@ -1682,9 +1728,15 @@ io.on('connection', (socket) => {
   socket.on('terrain-set', ({ cells }) => {
     if (!currentAvatarRoom || !Array.isArray(cells) || cells.length > 16384) return;
     const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
+    const clear = spawnClearRect(currentAvatarRoom);     // null in sandbox; clamps any spawn-box fill back to empty (kept consistent on rebroadcast)
     let changed = false;
     for (let k = 0; k + 1 < cells.length; k += 2) {
-      const i = cells[k] | 0, v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
+      const i = cells[k] | 0;
+      let v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
+      if (v && clear) {
+        const cc = (i % TERRAIN_COLS + 0.5) * TERRAIN_CELL, cr = (Math.floor(i / TERRAIN_COLS) + 0.5) * TERRAIN_CELL;
+        if (aabbHitsClear(clear, cc, cr, cc, cr)) { v = 0; cells[k + 1] = 0; }
+      }
       if (i >= 0 && i < grid.length) { if (grid[i] !== v) { grid[i] = v; changed = true; } hp[i] = v ? matStrengthSrv(mats, v) : 0; }
     }
     if (changed) io.to(currentAvatarRoom).emit('terrain-set', { cells });
