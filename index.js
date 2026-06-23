@@ -901,12 +901,20 @@ function resolveAvRoomId(clientRoomId, currentRoom, socketId) {
 }
 // 2c: who-list/presence follows the active context Room (the portable layer). A socket's PRESENCE bucket
 // is its context Room ('pg:'+roomId) when it's in one and allowed, else the bare URL room (currentRoom) —
-// preserving today's exact behavior for the page-default Room. Page-bound features (cursors/sprays/chat/
-// history) stay on the URL room regardless; only the who-list bucket diverges. resolveAvRoomId does the
-// membership gating, so a non-member's ctxRoomId silently collapses to the URL room.
+// preserving today's exact behavior for the page-default Room. Chat/history stay on the URL room; only the
+// who-list bucket diverges. resolveAvRoomId does the membership gating, so a non-member's ctxRoomId silently
+// collapses to the URL room.
 function resolvePresenceRoom(clientCtxRoomId, currentRoom, socketId) {
   const rid = resolveAvRoomId(clientCtxRoomId, currentRoom, socketId);
   return rid === currentRoom ? currentRoom : 'pg:' + rid;
+}
+// 2d: page-bound layer (cursors/sprays/highlights/annotations + reactions/drawing/scroll) is shared among
+// people in the SAME context Room AND on the same URL. A socket's PAGE bucket is 'pb:'+roomId+'|'+url when
+// in an allowed context Room, else the bare URL room — so the page-default Room stays byte-identical to
+// today. Navigating to a new URL while locked into a Room naturally re-keys (currentRoom changes).
+function resolvePageRoom(clientCtxRoomId, currentRoom, socketId) {
+  const rid = resolveAvRoomId(clientCtxRoomId, currentRoom, socketId);
+  return rid === currentRoom ? currentRoom : 'pb:' + rid + '|' + currentRoom;
 }
 const socketToAvatarRoom = {};                       // socketId → its current avatar-world room key (for cross-socket cleanup)
 const worldGenerated = new Set();                    // avatarRoom keys whose 'world' terrain has been generated this server lifetime
@@ -1242,6 +1250,7 @@ io.on('connection', (socket) => {
   let currentRoom = null;
   let currentUsername = null;
   let currentPresenceRoom = null; // this socket's who-list bucket: URL room by default, or 'pg:'+ctxRoomId when in a context Room
+  let currentPageRoom = null;     // this socket's page-bound bucket (cursors/sprays/annotations/highlights): URL room, or 'pb:'+ctxRoomId+'|'+url in a context Room
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
 
   socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId }) => {
@@ -1291,6 +1300,9 @@ io.on('connection', (socket) => {
     currentPresenceRoom = resolvePresenceRoom(ctxRoomId, currentRoom, socket.id);
     if (currentPresenceRoom !== currentRoom) socket.join(currentPresenceRoom);
     if (!roomUsers[currentPresenceRoom]) roomUsers[currentPresenceRoom] = {};
+    // 2d: page-bound bucket follows (context Room, url). Page-default Room → URL room (== today).
+    currentPageRoom = resolvePageRoom(ctxRoomId, currentRoom, socket.id);
+    if (currentPageRoom !== currentRoom) socket.join(currentPageRoom);
     // Reconnect dedup: a socket.io reconnect arrives as a NEW socket.id while the previous socket
     // can linger in presence until its server-side ping-timeout (~20s) fires `disconnect`. During
     // that window the SAME physical tab shows twice in the who-list and leaves a ghost avatar/cursor.
@@ -1305,7 +1317,7 @@ io.on('connection', (socket) => {
         removeSimAvatar(currentRoom, oldSid);
         const oldAv = socketToAvatarRoom[oldSid];   // the evicted socket's avatar-world room (mode-scoped, may differ from this one)
         if (oldAv && roomAvt[oldAv] && roomAvt[oldAv].delete(oldSid)) { socket.to(oldAv).emit('avt-peer-left', { id: oldSid }); delete socketToAvatarRoom[oldSid]; }
-        io.to(currentRoom).emit('cursor-leave', { id: oldSid });
+        io.to(currentPageRoom).emit('cursor-leave', { id: oldSid });
         io.to(currentRoom).emit('avatar-leave', { id: oldSid });
         const oldSock = io.sockets.sockets.get(oldSid);
         if (oldSock) oldSock.disconnect(true);   // force full cleanup of any zombie socket
@@ -1314,8 +1326,8 @@ io.on('connection', (socket) => {
     roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
-    if (roomAnnotations[currentRoom]) socket.emit('annotations-init', roomAnnotations[currentRoom]);
-    if (roomSprays[currentRoom]) socket.emit('sprays-init', roomSprays[currentRoom]);
+    if (roomAnnotations[currentPageRoom]) socket.emit('annotations-init', roomAnnotations[currentPageRoom]);
+    if (roomSprays[currentPageRoom]) socket.emit('sprays-init', roomSprays[currentPageRoom]);
     if (roomMedia[currentRoom]) socket.emit('media-init', roomMedia[currentRoom]);
     if (roomAvatars[currentRoom]) socket.emit('avatars-init', Object.values(roomAvatars[currentRoom]));
     if (roomVoice[currentRoom] && Object.keys(roomVoice[currentRoom]).length) socket.emit('voice-init', roomVoice[currentRoom]);
@@ -1429,67 +1441,68 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('msg-reaction-update', { msgId, emoji, users: reactions[msgId][emoji] || [] });
   });
 
+  // 2d: page-bound layer routes to currentPageRoom (== currentRoom for the page-default Room).
   socket.on('cursor', ({ x, y, scrollPct, username, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('cursor', { x, y, scrollPct, username, scope, id: socket.id });
+    socket.to(currentPageRoom).emit('cursor', { x, y, scrollPct, username, scope, id: socket.id });
   });
 
   socket.on('pointer-pulse', ({ x, y, username, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('pointer-pulse', { x, y, username, scope });
+    socket.to(currentPageRoom).emit('pointer-pulse', { x, y, username, scope });
   });
 
   socket.on('reaction', ({ emoji, x, y, username, source, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('reaction', { emoji, x, y, username, source, scope });
+    socket.to(currentPageRoom).emit('reaction', { emoji, x, y, username, source, scope });
   });
 
   socket.on('soundboard', ({ soundIndex, label, username, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('soundboard', { soundIndex, label, username, scope });
+    socket.to(currentPageRoom).emit('soundboard', { soundIndex, label, username, scope });
   });
 
   socket.on('scroll-position', ({ username, scrollX, scrollY }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('scroll-position', { username, scrollX, scrollY });
+    socket.to(currentPageRoom).emit('scroll-position', { username, scrollX, scrollY });
   });
 
   socket.on('highlight', ({ text, username, scope }) => {
     if (!currentRoom) return;
-    socket.to(currentRoom).emit('highlight', { text, username, scope });
+    socket.to(currentPageRoom).emit('highlight', { text, username, scope });
   });
 
   socket.on('annotation-add', ({ id, selector, offsetX, offsetY, text, username, scope }) => {
     if (!currentRoom) return;
     const annotation = { id, selector, offsetX, offsetY, text, username, scope, timestamp: Date.now() };
-    if (!roomAnnotations[currentRoom]) roomAnnotations[currentRoom] = [];
-    if (!roomAnnotations[currentRoom].find(a => a.id === id)) {
-      roomAnnotations[currentRoom].push(annotation);
+    if (!roomAnnotations[currentPageRoom]) roomAnnotations[currentPageRoom] = [];
+    if (!roomAnnotations[currentPageRoom].find(a => a.id === id)) {
+      roomAnnotations[currentPageRoom].push(annotation);
     }
-    io.to(currentRoom).emit('annotation-add', annotation);
+    io.to(currentPageRoom).emit('annotation-add', annotation);
   });
 
   socket.on('annotation-move', ({ id, selector, offsetX, offsetY }) => {
     if (!currentRoom) return;
-    if (roomAnnotations[currentRoom]) {
-      const ann = roomAnnotations[currentRoom].find(a => a.id === id);
+    if (roomAnnotations[currentPageRoom]) {
+      const ann = roomAnnotations[currentPageRoom].find(a => a.id === id);
       if (ann) { ann.selector = selector; ann.offsetX = offsetX; ann.offsetY = offsetY; }
     }
-    io.to(currentRoom).emit('annotation-move', { id, selector, offsetX, offsetY });
+    io.to(currentPageRoom).emit('annotation-move', { id, selector, offsetX, offsetY });
   });
 
   socket.on('annotation-delete', ({ id }) => {
     if (!currentRoom) return;
     console.log(`[annotation-delete] id: ${id}`);
-    if (roomAnnotations[currentRoom]) {
-      roomAnnotations[currentRoom] = roomAnnotations[currentRoom].filter(a => a.id !== id);
+    if (roomAnnotations[currentPageRoom]) {
+      roomAnnotations[currentPageRoom] = roomAnnotations[currentPageRoom].filter(a => a.id !== id);
     }
-    io.to(currentRoom).emit('annotation-delete', { id });
+    io.to(currentPageRoom).emit('annotation-delete', { id });
   });
 
-  socket.on('draw-start',  (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-start',  data); });
-  socket.on('draw-points', (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-points', data); });
-  socket.on('draw-end',    (data) => { if (currentRoom) socket.to(currentRoom).emit('draw-end',    data); });
+  socket.on('draw-start',  (data) => { if (currentRoom) socket.to(currentPageRoom).emit('draw-start',  data); });
+  socket.on('draw-points', (data) => { if (currentRoom) socket.to(currentPageRoom).emit('draw-points', data); });
+  socket.on('draw-end',    (data) => { if (currentRoom) socket.to(currentPageRoom).emit('draw-end',    data); });
 
   // ---- Shared canvas ----
   socket.on('canvas-subscribe', ({ scope }) => {
@@ -1560,10 +1573,10 @@ io.on('connection', (socket) => {
   socket.on('spray-add', ({ id, content, size, docX, docY, relX, relY, surface, username, scope }) => {
     if (!currentRoom) return;
     const spray = { id, content, size, docX, docY, relX, relY, surface, username, scope, timestamp: Date.now() };
-    if (!roomSprays[currentRoom]) roomSprays[currentRoom] = [];
-    roomSprays[currentRoom].push(spray);
-    if (roomSprays[currentRoom].length > MAX_SPRAYS) roomSprays[currentRoom].shift();
-    io.to(currentRoom).emit('spray-add', spray);
+    if (!roomSprays[currentPageRoom]) roomSprays[currentPageRoom] = [];
+    roomSprays[currentPageRoom].push(spray);
+    if (roomSprays[currentPageRoom].length > MAX_SPRAYS) roomSprays[currentPageRoom].shift();
+    io.to(currentPageRoom).emit('spray-add', spray);
   });
 
   socket.on('media-add', ({ id, url, username }) => {
@@ -2179,22 +2192,37 @@ io.on('connection', (socket) => {
   });
 
   // 2c: the client switched its active context Room — move this socket's who-list bucket to match.
-  // The URL socket.io room is untouched (page-bound features keep flowing); only presence migrates.
+  // The bare URL socket.io room is untouched (chat/history keep flowing); presence (2c) AND the page-bound
+  // layer (2d) migrate to the new context Room without a page reload.
   socket.on('ctx-room', ({ roomId } = {}) => {
     if (!currentRoom) return;
+    // ---- presence bucket (2c) ----
     const next = resolvePresenceRoom(roomId, currentRoom, socket.id);
-    if (next === currentPresenceRoom) return;
-    const info = roomUsers[currentPresenceRoom] && roomUsers[currentPresenceRoom][socket.id];
-    // leave old bucket (but never leave the bare URL room — page-bound events live there)
-    if (roomUsers[currentPresenceRoom]) delete roomUsers[currentPresenceRoom][socket.id];
-    if (currentPresenceRoom !== currentRoom) socket.leave(currentPresenceRoom);
-    broadcastPresence(currentPresenceRoom);
-    // join new bucket
-    currentPresenceRoom = next;
-    if (next !== currentRoom) socket.join(next);
-    if (!roomUsers[next]) roomUsers[next] = {};
-    roomUsers[next][socket.id] = info || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null };
-    broadcastPresence(next);
+    if (next !== currentPresenceRoom) {
+      const info = roomUsers[currentPresenceRoom] && roomUsers[currentPresenceRoom][socket.id];
+      // leave old bucket (but never leave the bare URL room — chat/history live there)
+      if (roomUsers[currentPresenceRoom]) delete roomUsers[currentPresenceRoom][socket.id];
+      if (currentPresenceRoom !== currentRoom) socket.leave(currentPresenceRoom);
+      broadcastPresence(currentPresenceRoom);
+      // join new bucket
+      currentPresenceRoom = next;
+      if (next !== currentRoom) socket.join(next);
+      if (!roomUsers[next]) roomUsers[next] = {};
+      roomUsers[next][socket.id] = info || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null };
+      broadcastPresence(next);
+    }
+    // ---- page-bound bucket (2d): cursors/sprays/highlights/annotations ----
+    const nextPage = resolvePageRoom(roomId, currentRoom, socket.id);
+    if (nextPage !== currentPageRoom) {
+      // drop our cursor from the old page bucket so peers there stop tracking us
+      socket.to(currentPageRoom).emit('cursor-leave', { id: socket.id });
+      if (currentPageRoom !== currentRoom) socket.leave(currentPageRoom);
+      currentPageRoom = nextPage;
+      if (nextPage !== currentRoom) socket.join(nextPage);
+      // re-seed the persistent page-bound layer for the new (Room,url) bucket (client cleared its old layer)
+      if (roomAnnotations[currentPageRoom]) socket.emit('annotations-init', roomAnnotations[currentPageRoom]);
+      if (roomSprays[currentPageRoom]) socket.emit('sprays-init', roomSprays[currentPageRoom]);
+    }
   });
 
   socket.on('disconnect', () => {
@@ -2215,7 +2243,7 @@ io.on('connection', (socket) => {
       }
       delete socketToAvatarRoom[socket.id];
       broadcastPresence(currentPresenceRoom);
-      io.to(currentRoom).emit('cursor-leave', { id: socket.id });
+      io.to(currentPageRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
     }
     if (socketDmRooms[socket.id]) {
