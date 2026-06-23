@@ -98,6 +98,14 @@ try { db.exec('ALTER TABLE users ADD COLUMN follow_allowlist TEXT DEFAULT \'\'')
 try { db.exec('ALTER TABLE users ADD COLUMN browsing_visible INTEGER DEFAULT 1'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN social_links TEXT'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN beacon_url TEXT'); } catch {}
+// Stage 6 Phase 2b — rooms can host an avatar World. `env_spec` = JSON { levels:[{type,name,…cfg}], nav }
+// (the ordered Level list + per-Level config + nav mode; terrain/object CONTENT stays host-local in v1,
+// hydrated live on entry). `kind` distinguishes a plain chat room from one with a World; `perms`/`meta`
+// reserved for Phase 3 host-permissions. All nullable → existing rooms read as plain chat rooms.
+try { db.exec('ALTER TABLE rooms ADD COLUMN kind TEXT'); } catch {}
+try { db.exec('ALTER TABLE rooms ADD COLUMN env_spec TEXT'); } catch {}
+try { db.exec('ALTER TABLE rooms ADD COLUMN perms TEXT'); } catch {}
+try { db.exec('ALTER TABLE rooms ADD COLUMN meta TEXT'); } catch {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS follows (
@@ -850,9 +858,21 @@ const AVATAR_MODES = new Set(['sandbox', 'world']);   // Level TYPE tokens (gene
 // For the default per-URL room, roomId IS the URL, so a Level's key + its seed lookup stay byte-stable
 // across the migration. levelIndex selects a Level within a room's World ([sandbox=0, life=1] default).
 function avatarRoomKey(roomId, levelIndex) { return 'av:' + roomId + ':' + (levelIndex | 0); }
-// 2a: the avatar world still always lives on the page URL. The client sends a roomId on avt-join for
-// forward-compat, but until 2b wires user-rooms we trust only the server-side currentRoom.
-function resolveAvRoomId(_clientRoomId, currentRoom) { return currentRoom; }
+// 2b: a client may request a user-room's avatar World via `data.roomId` (a 6-char room code). We trust
+// it only after an access check — member of a private room, or any public room — else fall back to the
+// default per-URL room (currentRoom). Falsy/unknown id → the per-URL room. The page URL is never a valid
+// `rooms.id` (it's not a generated code), so a malicious URL-as-roomId just resolves to itself.
+const _avRoomLookup = db.prepare('SELECT public FROM rooms WHERE id = ?');
+const _avRoomMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?');
+function resolveAvRoomId(clientRoomId, currentRoom, socketId) {
+  if (!clientRoomId || typeof clientRoomId !== 'string') return currentRoom;
+  const room = _avRoomLookup.get(clientRoomId);
+  if (!room) return currentRoom;                              // unknown id → default URL room
+  if (room.public) return clientRoomId;                       // public room World: open to anyone present
+  const did = socketToDiscordId[socketId];
+  if (did && _avRoomMember.get(clientRoomId, did)) return clientRoomId;
+  return currentRoom;                                         // private room, not a member → default URL room
+}
 const socketToAvatarRoom = {};                       // socketId → its current avatar-world room key (for cross-socket cleanup)
 const worldGenerated = new Set();                    // avatarRoom keys whose 'world' terrain has been generated this server lifetime
 // Indestructible ground top (= the floor platform's y). Surface terrain rests ON this.
@@ -1582,7 +1602,7 @@ io.on('connection', (socket) => {
     if (!currentRoom) return;
     // Level TYPE drives generation/spawn (was `mode`); accept legacy `mode` from a stale old client.
     const type = (data && AVATAR_MODES.has(data.type || data.mode)) ? (data.type || data.mode) : 'sandbox';
-    const roomId = resolveAvRoomId(data && data.roomId, currentRoom);
+    const roomId = resolveAvRoomId(data && data.roomId, currentRoom, socket.id);
     // levelIndex selects the Level within the room's World; default the per-URL room's [sandbox=0, life=1].
     const levelIndex = (data && Number.isInteger(data.levelIndex) && data.levelIndex >= 0) ? data.levelIndex : (type === 'world' ? 1 : 0);
     const avRoom = avatarRoomKey(roomId, levelIndex);
