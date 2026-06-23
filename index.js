@@ -350,10 +350,18 @@ const LEVEL_TYPES = new Set(['sandbox', 'life', 'stage']); // Level type tokens 
 // stays host-local in v1 (hydrated live on entry), so the spec is public-safe metadata only.
 function sanitizeEnvSpec(raw) {
   if (!raw || typeof raw !== 'object' || !Array.isArray(raw.levels) || !raw.levels.length) return null;
-  const levels = raw.levels.slice(0, ROOM_LEVEL_CAP).map((l, i) => ({
-    type: (l && LEVEL_TYPES.has(l.type)) ? l.type : 'sandbox',
-    name: (l && typeof l.name === 'string' && l.name.trim()) ? l.name.trim().slice(0, 40) : ('Level ' + (i + 1)),
-  }));
+  const levels = raw.levels.slice(0, ROOM_LEVEL_CAP).map((l, i) => {
+    const out = {
+      type: (l && LEVEL_TYPES.has(l.type)) ? l.type : 'sandbox',
+      name: (l && typeof l.name === 'string' && l.name.trim()) ? l.name.trim().slice(0, 40) : ('Level ' + (i + 1)),
+    };
+    // Optional host-local content reference (Phase 2b follow-up): a pointer into the host's own
+    // mw_levels store, NOT a terrain blob — members can't resolve it, so it stays public-safe metadata.
+    if (l && l.src && typeof l.src.id === 'string' && l.src.id && Number.isInteger(l.src.lvl) && l.src.lvl >= 0) {
+      out.src = { id: l.src.id.slice(0, 40), lvl: l.src.lvl };
+    }
+    return out;
+  });
   return { levels, nav: (raw.nav === 'series') ? 'series' : 'free' };
 }
 function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { return null; } }
@@ -879,7 +887,7 @@ function avatarRoomKey(roomId, levelIndex) { return 'av:' + roomId + ':' + (leve
 // it only after an access check — member of a private room, or any public room — else fall back to the
 // default per-URL room (currentRoom). Falsy/unknown id → the per-URL room. The page URL is never a valid
 // `rooms.id` (it's not a generated code), so a malicious URL-as-roomId just resolves to itself.
-const _avRoomLookup = db.prepare('SELECT public FROM rooms WHERE id = ?');
+const _avRoomLookup = db.prepare('SELECT public, owner_id FROM rooms WHERE id = ?');
 const _avRoomMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?');
 function resolveAvRoomId(clientRoomId, currentRoom, socketId) {
   if (!clientRoomId || typeof clientRoomId !== 'string') return currentRoom;
@@ -892,6 +900,16 @@ function resolveAvRoomId(clientRoomId, currentRoom, socketId) {
 }
 const socketToAvatarRoom = {};                       // socketId → its current avatar-world room key (for cross-socket cleanup)
 const worldGenerated = new Set();                    // avatarRoom keys whose 'world' terrain has been generated this server lifetime
+const hydratedAvRooms = new Set();                   // avatarRoom keys the host has already auto-hydrated this server lifetime (one-shot, never re-clobber)
+// A blank (un-built, un-generated) av-room: nothing for hydration to overwrite. (A 'world'/life Level
+// is seed-generated on join → non-empty → skipped, which is correct: only host-saved Levels hydrate.)
+function avRoomIsEmpty(avRoom) {
+  const objs = roomObjects[avRoom];
+  if (objs && objs.size) return false;
+  const tg = roomTerrain[avRoom];
+  if (tg) { for (let i = 0; i < tg.length; i++) if (tg[i]) return false; }
+  return true;
+}
 // Indestructible ground top (= the floor platform's y). Surface terrain rests ON this.
 const FLOOR_TOP = (MWSim.STAGE_LAYOUTS[0] && MWSim.STAGE_LAYOUTS[0][0]) ? MWSim.STAGE_LAYOUTS[0][0].y : MWSim.C.WORLD_H - 72;
 // World-mode spawn keep-clear box (px, world coords) above the spawn surface: nobody can build
@@ -1621,6 +1639,9 @@ io.on('connection', (socket) => {
     // Level TYPE drives generation/spawn (was `mode`); accept legacy `mode` from a stale old client.
     const type = (data && AVATAR_MODES.has(data.type || data.mode)) ? (data.type || data.mode) : 'sandbox';
     const roomId = resolveAvRoomId(data && data.roomId, currentRoom, socket.id);
+    // Owner-of-a-real-user-room? (the URL page room has no DB row / owner → never hydrates)
+    const rinfo = (roomId !== currentRoom) ? _avRoomLookup.get(roomId) : null;
+    const isRoomOwner = !!(rinfo && socketToDiscordId[socket.id] && rinfo.owner_id === socketToDiscordId[socket.id]);
     // levelIndex selects the Level within the room's World; default the per-URL room's [sandbox=0, life=1].
     const levelIndex = (data && Number.isInteger(data.levelIndex) && data.levelIndex >= 0) ? data.levelIndex : (type === 'world' ? 1 : 0);
     const avRoom = avatarRoomKey(roomId, levelIndex);
@@ -1645,6 +1666,14 @@ io.on('connection', (socket) => {
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
     const mm = roomMats[avRoom];
     if (mm && Object.keys(mm).length) socket.emit('mats-init', { mats: mm });
+    // Auto host-hydration (Phase 2b follow-up): if the room OWNER joins a still-blank Level we haven't
+    // hydrated yet this server lifetime, ask their client to apply its host-local saved content. Emitted
+    // LAST (after the empty replay above) so the inits can't clobber what the host is about to apply.
+    // One-shot per av-room: once marked, members' live edits persist and are never re-pushed.
+    if (isRoomOwner && !hydratedAvRooms.has(avRoom) && avRoomIsEmpty(avRoom)) {
+      hydratedAvRooms.add(avRoom);
+      socket.emit('avt-hydrate', { levelIndex });
+    }
   });
   socket.on('avt-leave', () => {
     if (currentAvatarRoom && roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) {
