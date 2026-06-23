@@ -19,7 +19,7 @@
 
   // ---- Constants (mirror of the client's avatar constants) ----
   const C = {
-    STAGE_W: 1280, STAGE_H: 720, WORLD_W: 5120, WORLD_H: 2160,
+    STAGE_W: 1280, STAGE_H: 720, WORLD_W: 15360, WORLD_H: 3240,
     BLOB_R: 20, AV_W: 40, AV_H: 40,
     GRAVITY_BASE: 0.62, GRAVITY_UP_MULT: 0.88, GRAVITY_DOWN_MULT: 1.58,
     GRAVITY_APEX_MULT: 0.68, APEX_VY_THRESH: 0.38,
@@ -43,8 +43,8 @@
   // hotbar Platform tool. Only the ground floor remains so there's footing at spawn. (Three
   // identical entries are kept so layoutIndex/urlHash callers still resolve.)
   const STAGE_LAYOUTS = [
-    [ { x: 0, y: 648, w: 5120, h: 70 } ],
-    [ { x: 0, y: 648, w: 5120, h: 70 } ],
+    [ { x: 0, y: 648, w: 15360, h: 70 } ],
+    [ { x: 0, y: 648, w: 15360, h: 70 } ],
     [ { x: 0, y: 648, w: 5120, h: 70 } ]
   ];
 
