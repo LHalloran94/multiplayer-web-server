@@ -1929,6 +1929,7 @@ io.on('connection', (socket) => {
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               pair: (typeof data.pair === 'string' && data.pair.length <= 64) ? data.pair : id,
               entry: data.entry !== false, oneWay: data.oneWay === true,
+              hue: clampN(data.hue, 0, 360, 275),     // user-chosen pair colour (round-trips; both ends share it)
               hp: data.breakable === false ? null : 2 };
     } else {
       // Unified PLATFORM: a solid one-way bar with optional rotation, modifiers, and a motion path.
