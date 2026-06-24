@@ -955,7 +955,7 @@ function roomOwnerId(roomId) { const r = _avRoomLookup.get(roomId); return r ? r
 // carries a role default `mode` ('all' = anyone, today's behavior; 'host' = only owner + granted users) plus
 // per-user boolean overrides (in-memory, ephemeral, broadcast on change). Modes persist in perms.features.
 // Page/URL rooms (no DB row) are NEVER restricted. Honored cooperatively client-side; chat is also hard-gated.
-const FEATURE_KEYS = ['chat', 'voice', 'cursors', 'soundboard', 'stamps', 'annotations', 'highlights', 'drawing', 'canvas', 'combat', 'ghost'];
+const FEATURE_KEYS = ['chat', 'voice', 'video', 'cursors', 'reactions', 'soundboard', 'stamps', 'annotations', 'highlights', 'drawing', 'canvas', 'combat', 'ghost'];
 const MARKUP_KEYS = ['stamps', 'annotations', 'highlights', 'drawing', 'canvas'];   // legacy 'markup' fans out to these
 // Per-(feature,levelIndex) locks for the Levels tab — currently combat/ghost (build has its own levelLock in roomBuild).
 // A locked Level blocks that feature for non-owners while they are on that Level. Persists in perms.featureLevelLock.
