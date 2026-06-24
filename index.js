@@ -940,6 +940,9 @@ function persistRoomPerms(roomId) {                   // write build mode + leve
   const features = {};
   for (const k of FEATURE_KEYS) if (rf.modes[k] === 'host') features[k] = 'host';   // store only non-default (host-only)
   if (Object.keys(features).length) out.features = features;
+  const featureLevelLock = {};
+  for (const k of FEATURE_KEYS) { const s = rf.levelLock.get(k); if (s && s.size) featureLevelLock[k] = [...s]; }
+  if (Object.keys(featureLevelLock).length) out.featureLevelLock = featureLevelLock;
   try { _roomPermsSet.run(JSON.stringify(out), roomId); } catch {}
 }
 function buildPermsPayload(roomId) {                  // wire shape sent to clients (over = [[did,bool],…], locked = [levelIndex,…])
@@ -952,31 +955,35 @@ function roomOwnerId(roomId) { const r = _avRoomLookup.get(roomId); return r ? r
 // carries a role default `mode` ('all' = anyone, today's behavior; 'host' = only owner + granted users) plus
 // per-user boolean overrides (in-memory, ephemeral, broadcast on change). Modes persist in perms.features.
 // Page/URL rooms (no DB row) are NEVER restricted. Honored cooperatively client-side; chat is also hard-gated.
-const FEATURE_KEYS = ['chat', 'voice', 'cursors', 'stamps', 'annotations', 'highlights', 'drawing', 'canvas', 'combat', 'ghost'];
+const FEATURE_KEYS = ['chat', 'voice', 'cursors', 'soundboard', 'stamps', 'annotations', 'highlights', 'drawing', 'canvas', 'combat', 'ghost'];
 const MARKUP_KEYS = ['stamps', 'annotations', 'highlights', 'drawing', 'canvas'];   // legacy 'markup' fans out to these
-const roomFeatures = new Map();                       // roomId -> { modes:{feat:'all'|'host'}, over:Map<feat,Map<did,bool>> }
+// Per-(feature,levelIndex) locks for the Levels tab — currently combat/ghost (build has its own levelLock in roomBuild).
+// A locked Level blocks that feature for non-owners while they are on that Level. Persists in perms.featureLevelLock.
+const roomFeatures = new Map();                       // roomId -> { modes:{feat:'all'|'host'}, over:Map<feat,Map<did,bool>>, levelLock:Map<feat,Set<levelIndex>> }
 function getRoomFeatures(roomId) {
   let rf = roomFeatures.get(roomId);
   if (!rf) {
-    const modes = {}; const over = new Map();
-    for (const k of FEATURE_KEYS) { modes[k] = 'all'; over.set(k, new Map()); }
+    const modes = {}; const over = new Map(); const levelLock = new Map();
+    for (const k of FEATURE_KEYS) { modes[k] = 'all'; over.set(k, new Map()); levelLock.set(k, new Set()); }
     try { const row = _roomPermsGet.get(roomId); if (row && row.perms) { const p = JSON.parse(row.perms);
       if (p && p.features) {
         for (const k of FEATURE_KEYS) if (p.features[k] === 'host') modes[k] = 'host';
         if (p.features.markup === 'host') for (const k of MARKUP_KEYS) modes[k] = 'host';   // legacy single markup perm
       }
+      if (p && p.featureLevelLock) for (const k in p.featureLevelLock) if (levelLock.has(k) && Array.isArray(p.featureLevelLock[k]))
+        for (const i of p.featureLevelLock[k]) if (Number.isInteger(i) && i >= 0) levelLock.get(k).add(i);
     } } catch {}
-    rf = { modes, over };
+    rf = { modes, over, levelLock };
     roomFeatures.set(roomId, rf);
   }
   return rf;
 }
-function featurePermsPayload(roomId) {                 // wire shape sent to clients (over[feat] = [[did,bool],…])
-  if (!roomId) return { roomId: null, modes: null, over: null };   // page room → no policy (client treats as all-open)
+function featurePermsPayload(roomId) {                 // wire shape sent to clients (over[feat] = [[did,bool],…], levelLock[feat] = [levelIndex,…])
+  if (!roomId) return { roomId: null, modes: null, over: null, levelLock: null };   // page room → no policy (client treats as all-open)
   const rf = getRoomFeatures(roomId);
-  const over = {};
-  for (const k of FEATURE_KEYS) over[k] = [...rf.over.get(k).entries()];
-  return { roomId, modes: { ...rf.modes }, over };
+  const over = {}; const levelLock = {};
+  for (const k of FEATURE_KEYS) { over[k] = [...rf.over.get(k).entries()]; levelLock[k] = [...rf.levelLock.get(k)]; }
+  return { roomId, modes: { ...rf.modes }, over, levelLock };
 }
 function featureAllowedFor(roomId, feature, did) {     // server-side hard check (used for chat); page room → open
   if (!roomId) return true;
@@ -2118,6 +2125,17 @@ io.on('connection', (socket) => {
     const m = getRoomFeatures(roomId).over.get(feature);
     if (allow === null || allow === undefined) m.delete(target);
     else m.set(target, !!allow);
+    io.to('pg:' + roomId).emit('feature-perms', featurePermsPayload(roomId));
+    socket.emit('room-perms', roomPermsPayload(roomId));
+  });
+  // Phase 4-REORG: owner locks/unlocks one feature (e.g. combat/ghost) on one Level — the Levels tab.
+  socket.on('feature-level-lock-set', ({ roomId, feature, levelIndex, locked }) => {
+    if (!roomId || !FEATURE_KEYS.includes(feature) || !Number.isInteger(levelIndex) || levelIndex < 0) return;
+    const did = socketToDiscordId[socket.id];
+    if (!did || roomOwnerId(roomId) !== did) return;     // owner only
+    const s = getRoomFeatures(roomId).levelLock.get(feature);
+    if (locked) s.add(levelIndex); else s.delete(levelIndex);
+    persistRoomPerms(roomId);
     io.to('pg:' + roomId).emit('feature-perms', featurePermsPayload(roomId));
     socket.emit('room-perms', roomPermsPayload(roomId));
   });
