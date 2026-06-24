@@ -373,7 +373,7 @@ function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { retu
 app.post('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, description, public: isPublic, scope, url, env_spec } = req.body;
+  const { name, description, public: isPublic, scope, url, env_spec, build } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   try {
     const id = generateRoomCode();
@@ -385,7 +385,10 @@ app.post('/rooms', (req, res) => {
     const roomScope = (isPublic && !roomUrl && scope) ? scope.trim().slice(0, 253) : null;
     const spec = sanitizeEnvSpec(env_spec);                // null = a plain chat room (no World)
     const kind = spec ? 'world' : null;
-    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, url, description, kind, env_spec) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null);
+    // Phase 3: a World room may set its default build policy at creation ('host' = only owner + granted
+    // users; 'all' = everyone present, the default). Stored in the perms column; the host can change it later.
+    const perms = (spec && build === 'host') ? JSON.stringify({ build: 'host' }) : null;
+    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, url, description, kind, env_spec, perms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null, perms);
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(id, user.sub);
     res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, url: roomUrl, description: trimmedDesc, kind, env_spec: spec });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
@@ -909,21 +912,30 @@ const _avRoomMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? A
 // restricted — they keep today's open-build behavior. Built lazily on first access from the perms column.
 const _roomPermsGet = db.prepare('SELECT perms FROM rooms WHERE id = ?');
 const _roomPermsSet = db.prepare('UPDATE rooms SET perms = ? WHERE id = ?');
-const roomBuild = new Map();                          // roomId -> { mode:'all'|'host', over:Map<discordId,bool> }
+// `locked` = Set of levelIndexes where building is disabled for non-owners (the per-Level checkbox;
+// default = unlocked/buildable). Persists in perms.levelLock alongside perms.build.
+const roomBuild = new Map();                          // roomId -> { mode:'all'|'host', over:Map<discordId,bool>, locked:Set<levelIndex> }
 function getRoomBuild(roomId) {
   let rb = roomBuild.get(roomId);
   if (!rb) {
-    let mode = 'all';
-    try { const row = _roomPermsGet.get(roomId); if (row && row.perms) { const p = JSON.parse(row.perms); if (p && p.build === 'host') mode = 'host'; } } catch {}
-    rb = { mode, over: new Map() };
+    let mode = 'all'; const locked = new Set();
+    try { const row = _roomPermsGet.get(roomId); if (row && row.perms) { const p = JSON.parse(row.perms);
+      if (p && p.build === 'host') mode = 'host';
+      if (p && Array.isArray(p.levelLock)) for (const i of p.levelLock) if (Number.isInteger(i) && i >= 0) locked.add(i);
+    } } catch {}
+    rb = { mode, over: new Map(), locked };
     roomBuild.set(roomId, rb);
   }
   return rb;
 }
-function buildPermsPayload(roomId) {                  // wire shape sent to clients (over = [[did,bool],…])
-  if (!roomId) return { roomId: null, mode: 'all', over: [] };
+function persistRoomPerms(roomId) {                   // write both mode + level locks back to the perms column
   const rb = getRoomBuild(roomId);
-  return { roomId, mode: rb.mode, over: [...rb.over.entries()] };
+  try { _roomPermsSet.run(JSON.stringify({ build: rb.mode, levelLock: [...rb.locked] }), roomId); } catch {}
+}
+function buildPermsPayload(roomId) {                  // wire shape sent to clients (over = [[did,bool],…], locked = [levelIndex,…])
+  if (!roomId) return { roomId: null, mode: 'all', over: [], locked: [] };
+  const rb = getRoomBuild(roomId);
+  return { roomId, mode: rb.mode, over: [...rb.over.entries()], locked: [...rb.locked] };
 }
 function roomOwnerId(roomId) { const r = _avRoomLookup.get(roomId); return r ? r.owner_id : null; }
 function resolveAvRoomId(clientRoomId, currentRoom, socketId) {
@@ -1291,13 +1303,16 @@ io.on('connection', (socket) => {
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
   let currentAvBuildRoomId = null; // Phase 3: real roomId for L2 build-perm checks (null = page/URL room → open build)
   let currentAvOwnerId = null;     // owner_id of that room (null for the page/URL room)
-  // May this socket mutate the current avatar World? Page/URL room → always. Owner → always. Else the
-  // room's per-user override, falling back to the role default. Read live so grant changes apply at once.
+  let currentAvLevelIndex = 0;     // this socket's current Level index within the room's World (for per-Level locks)
+  // May this socket mutate the current avatar World? Page/URL room → always. Owner → always. A locked
+  // Level blocks everyone but the owner. Else the room's per-user override, falling back to the role
+  // default. Read live so grant/lock changes apply at once.
   function canBuild() {
     if (!currentAvBuildRoomId) return true;
     const did = socketToDiscordId[socket.id];
     if (did && currentAvOwnerId && did === currentAvOwnerId) return true;
     const rb = getRoomBuild(currentAvBuildRoomId);
+    if (rb.locked.has(currentAvLevelIndex)) return false;          // this Level is build-locked for non-owners
     if (did && rb.over.has(did)) return rb.over.get(did);
     return rb.mode === 'all';
   }
@@ -1724,6 +1739,7 @@ io.on('connection', (socket) => {
     // levelIndex selects the Level within the room's World; default the per-URL room's [sandbox=0, life=1].
     const levelIndex = (data && Number.isInteger(data.levelIndex) && data.levelIndex >= 0) ? data.levelIndex : (type === 'world' ? 1 : 0);
     const avRoom = avatarRoomKey(roomId, levelIndex);
+    currentAvLevelIndex = levelIndex;                              // Phase 3: per-Level build lock keys on this
     // Leave any previous avatar room (Level switch without an explicit avt-leave).
     if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
       socket.leave(currentAvatarRoom);
@@ -1991,7 +2007,18 @@ io.on('connection', (socket) => {
     const did = socketToDiscordId[socket.id];
     if (!did || roomOwnerId(roomId) !== did) return;     // owner only
     const rb = getRoomBuild(roomId); rb.mode = mode;
-    try { _roomPermsSet.run(JSON.stringify({ build: mode }), roomId); } catch {}
+    persistRoomPerms(roomId);                            // preserve level locks alongside the mode
+    io.to('pg:' + roomId).emit('build-perms', buildPermsPayload(roomId));
+  });
+  // Per-Level build lock (owner-only): the checkbox next to each Level. locked=true disables building
+  // in that Level for everyone but the owner; default (absent) = buildable.
+  socket.on('build-level-lock-set', ({ roomId, levelIndex, locked }) => {
+    if (!roomId || !Number.isInteger(levelIndex) || levelIndex < 0) return;
+    const did = socketToDiscordId[socket.id];
+    if (!did || roomOwnerId(roomId) !== did) return;     // owner only
+    const rb = getRoomBuild(roomId);
+    if (locked) rb.locked.add(levelIndex); else rb.locked.delete(levelIndex);
+    persistRoomPerms(roomId);
     io.to('pg:' + roomId).emit('build-perms', buildPermsPayload(roomId));
   });
   socket.on('build-perm-set', ({ roomId, target, allow }) => {
