@@ -347,8 +347,9 @@ app.delete('/blocks', (req, res) => {
 });
 
 // ---- Room avatar-World spec (Stage 6 Phase 2b) ----
-const ROOM_LEVEL_CAP = 8;                                  // max Levels in a room's World (v1 cap)
+const ROOM_LEVEL_CAP = 12;                                 // max Levels in a room's World (Phase 6 cap)
 const LEVEL_TYPES = new Set(['sandbox', 'life', 'stage']); // Level type tokens (life == generated; stage == host-authored)
+const LEVEL_SIZES = new Set(['tiny', 'small', 'medium', 'large']);  // Phase 6 world size presets (mirror SIZE_PRESETS client-side)
 // env_spec stores the World's ordered Level list (type + display name) + nav mode. Terrain/object CONTENT
 // stays host-local in v1 (hydrated live on entry), so the spec is public-safe metadata only.
 function sanitizeEnvSpec(raw) {
@@ -357,6 +358,7 @@ function sanitizeEnvSpec(raw) {
     const out = {
       type: (l && LEVEL_TYPES.has(l.type)) ? l.type : 'sandbox',
       name: (l && typeof l.name === 'string' && l.name.trim()) ? l.name.trim().slice(0, 40) : ('Level ' + (i + 1)),
+      size: (l && LEVEL_SIZES.has(l.size)) ? l.size : 'large',   // Phase 6 size preset (default = full world)
     };
     // Optional host-local content reference (Phase 2b follow-up): a pointer into the host's own
     // mw_levels store, NOT a terrain blob — members can't resolve it, so it stays public-safe metadata.
