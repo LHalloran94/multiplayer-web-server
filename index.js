@@ -933,9 +933,14 @@ function getRoomBuild(roomId) {
   }
   return rb;
 }
-function persistRoomPerms(roomId) {                   // write both mode + level locks back to the perms column
+function persistRoomPerms(roomId) {                   // write build mode + level locks + feature modes back to perms
   const rb = getRoomBuild(roomId);
-  try { _roomPermsSet.run(JSON.stringify({ build: rb.mode, levelLock: [...rb.locked] }), roomId); } catch {}
+  const rf = getRoomFeatures(roomId);
+  const out = { build: rb.mode, levelLock: [...rb.locked] };
+  const features = {};
+  for (const k of FEATURE_KEYS) if (rf.modes[k] === 'host') features[k] = 'host';   // store only non-default (host-only)
+  if (Object.keys(features).length) out.features = features;
+  try { _roomPermsSet.run(JSON.stringify(out), roomId); } catch {}
 }
 function buildPermsPayload(roomId) {                  // wire shape sent to clients (over = [[did,bool],…], locked = [levelIndex,…])
   if (!roomId) return { roomId: null, mode: 'all', over: [], locked: [] };
@@ -943,6 +948,40 @@ function buildPermsPayload(roomId) {                  // wire shape sent to clie
   return { roomId, mode: rb.mode, over: [...rb.over.entries()], locked: [...rb.locked] };
 }
 function roomOwnerId(roomId) { const r = _avRoomLookup.get(roomId); return r ? r.owner_id : null; }
+// Stage 6 Phase 4 — L1 feature + combat/ghost permissions, PER-ROOM, mirroring the build model. Each feature
+// carries a role default `mode` ('all' = anyone, today's behavior; 'host' = only owner + granted users) plus
+// per-user boolean overrides (in-memory, ephemeral, broadcast on change). Modes persist in perms.features.
+// Page/URL rooms (no DB row) are NEVER restricted. Honored cooperatively client-side; chat is also hard-gated.
+const FEATURE_KEYS = ['chat', 'voice', 'cursors', 'markup', 'combat', 'ghost'];
+const roomFeatures = new Map();                       // roomId -> { modes:{feat:'all'|'host'}, over:Map<feat,Map<did,bool>> }
+function getRoomFeatures(roomId) {
+  let rf = roomFeatures.get(roomId);
+  if (!rf) {
+    const modes = {}; const over = new Map();
+    for (const k of FEATURE_KEYS) { modes[k] = 'all'; over.set(k, new Map()); }
+    try { const row = _roomPermsGet.get(roomId); if (row && row.perms) { const p = JSON.parse(row.perms);
+      if (p && p.features) for (const k of FEATURE_KEYS) if (p.features[k] === 'host') modes[k] = 'host';
+    } } catch {}
+    rf = { modes, over };
+    roomFeatures.set(roomId, rf);
+  }
+  return rf;
+}
+function featurePermsPayload(roomId) {                 // wire shape sent to clients (over[feat] = [[did,bool],…])
+  if (!roomId) return { roomId: null, modes: null, over: null };   // page room → no policy (client treats as all-open)
+  const rf = getRoomFeatures(roomId);
+  const over = {};
+  for (const k of FEATURE_KEYS) over[k] = [...rf.over.get(k).entries()];
+  return { roomId, modes: { ...rf.modes }, over };
+}
+function featureAllowedFor(roomId, feature, did) {     // server-side hard check (used for chat); page room → open
+  if (!roomId) return true;
+  if (did && roomOwnerId(roomId) === did) return true;
+  const rf = getRoomFeatures(roomId);
+  const o = rf.over.get(feature);
+  if (o && did && o.has(did)) return o.get(did);
+  return rf.modes[feature] === 'all';
+}
 function resolveAvRoomId(clientRoomId, currentRoom, socketId) {
   if (!clientRoomId || typeof clientRoomId !== 'string') return currentRoom;
   const room = _avRoomLookup.get(clientRoomId);
@@ -1401,6 +1440,9 @@ io.on('connection', (socket) => {
     if (roomAvatars[currentRoom]) socket.emit('avatars-init', Object.values(roomAvatars[currentRoom]));
     if (roomVoice[currentRoom] && Object.keys(roomVoice[currentRoom]).length) socket.emit('voice-init', roomVoice[currentRoom]);
     broadcastPresence(currentPresenceRoom);
+    // Phase 4: seed the active Room's feature policy (null payload for the page-default Room = all open).
+    { const fr = resolveAvRoomId(ctxRoomId, currentRoom, socket.id);
+      socket.emit('feature-perms', featurePermsPayload(fr !== currentRoom ? fr : null)); }
     socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
     socket.to('user:' + username).emit('user-location', { url: userCurrentFullUrl[username] });
 
@@ -2036,6 +2078,26 @@ io.on('connection', (socket) => {
     else rb.over.set(target, !!allow);
     io.to('pg:' + roomId).emit('build-perms', buildPermsPayload(roomId));
   });
+  // Phase 4: owner sets a feature's room-wide mode ('all'|'host'). Persists in perms.features.
+  socket.on('feature-mode-set', ({ roomId, feature, mode }) => {
+    if (!roomId || !FEATURE_KEYS.includes(feature) || (mode !== 'all' && mode !== 'host')) return;
+    const did = socketToDiscordId[socket.id];
+    if (!did || roomOwnerId(roomId) !== did) return;     // owner only
+    getRoomFeatures(roomId).modes[feature] = mode;
+    persistRoomPerms(roomId);
+    io.to('pg:' + roomId).emit('feature-perms', featurePermsPayload(roomId));
+  });
+  // Phase 4: owner sets a per-user override for one feature (allow null/undefined clears it).
+  socket.on('feature-perm-set', ({ roomId, feature, target, allow }) => {
+    if (!roomId || !FEATURE_KEYS.includes(feature) || typeof target !== 'string' || !target) return;
+    const did = socketToDiscordId[socket.id];
+    if (!did || roomOwnerId(roomId) !== did) return;     // owner only
+    if (target === did) return;                          // owner is always allowed; never override self
+    const m = getRoomFeatures(roomId).over.get(feature);
+    if (allow === null || allow === undefined) m.delete(target);
+    else m.set(target, !!allow);
+    io.to('pg:' + roomId).emit('feature-perms', featurePermsPayload(roomId));
+  });
 
   socket.on('voice-join', ({ username, scope }) => {
     // Resolve the scope key: 'page' uses the URL room; otherwise use as-is (dm:X, room:X, group:X)
@@ -2176,6 +2238,7 @@ io.on('connection', (socket) => {
         const member = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(roomId, senderDiscordId);
         if (!member) return;
       }
+      if (!featureAllowedFor(roomId, 'chat', senderDiscordId)) return;   // Phase 4: host can mute room chat (hard-gated)
       let username = currentUsername;
       if (senderDiscordId) {
         const senderUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(senderDiscordId);
@@ -2339,6 +2402,9 @@ io.on('connection', (socket) => {
       if (roomAnnotations[currentPageRoom]) socket.emit('annotations-init', roomAnnotations[currentPageRoom]);
       if (roomSprays[currentPageRoom]) socket.emit('sprays-init', roomSprays[currentPageRoom]);
     }
+    // ---- feature policy (Phase 4): re-seed for the new context Room (null = page room → all open) ----
+    { const fr = resolveAvRoomId(roomId, currentRoom, socket.id);
+      socket.emit('feature-perms', featurePermsPayload(fr !== currentRoom ? fr : null)); }
   });
 
   socket.on('disconnect', () => {
