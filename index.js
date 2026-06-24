@@ -834,7 +834,7 @@ const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel 
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
 const MAX_OBJECTS_PER_ROOM = 150;  // FIFO cap bounds clutter/memory (bigger world + generated scatter; destruction is the main limiter)
-const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'start']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/start = non-solid flags (respawn anchor / Level exit / Level entry)
+const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter)
 const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 
@@ -1911,14 +1911,24 @@ io.on('connection', (socket) => {
               stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
               hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
       if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
-    } else if (type === 'checkpoint' || type === 'goal' || type === 'start') {
+    } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
       // Non-solid flags (Phase 5). (x, y) is the pole BASE (ground level). No physics — pure triggers:
       //  checkpoint = interact (E) to make it your respawn anchor; goal = touch to advance the Level series;
-      //  start = builder-placed shared Level entry / fallback spawn. All erasable/destructible like other props.
+      //  spawn = host-placed shared Level entry / fallback spawn. All erasable/destructible like other props.
       if (!isFinite(data.x) || !isFinite(data.y)) return;
       obj = { id, type, ownerId: socket.id, owner: currentUsername || socket.id,
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               hp: data.breakable === false ? null : 2 };  // erasable/destructible like other props
+      if (type === 'goal' && isFinite(data.target)) obj.target = Math.max(-1, Math.min(63, data.target | 0));  // series destination Level (-1 = next; Phase 5b)
+    } else if (type === 'portal') {
+      // Paired teleporter (Phase 5). (x, y) is the pole BASE. `pair` links two portals; `entry` marks the
+      // one-way source; `oneWay` gates direction. Auto-paired client-side in placement order; round-trips generically.
+      if (!isFinite(data.x) || !isFinite(data.y)) return;
+      obj = { id, type, ownerId: socket.id, owner: currentUsername || socket.id,
+              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+              pair: (typeof data.pair === 'string' && data.pair.length <= 64) ? data.pair : id,
+              entry: data.entry !== false, oneWay: data.oneWay === true,
+              hp: data.breakable === false ? null : 2 };
     } else {
       // Unified PLATFORM: a solid one-way bar with optional rotation, modifiers, and a motion path.
       // Modifiers absorb the old props: bouncy (jump pad), boost (conveyor/booster/ramp — signed
@@ -1954,7 +1964,7 @@ io.on('connection', (socket) => {
           speed: clampN(data.path.speed, 0.02, 1.2, 0.18), phase: clampN(data.path.phase, 0, 1, 0) };
       }
     }
-    if (type !== 'checkpoint' && type !== 'goal' && type !== 'start') {  // no building solids on the spawn (world mode); non-solid flags → allowed
+    if (type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal') {  // no building solids on the spawn (world mode); non-solid flags → allowed
       const clear = spawnClearRect(currentAvatarRoom);
       if (clear) {
         let bx0, by0, bx1, by1;
