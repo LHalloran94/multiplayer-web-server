@@ -1827,14 +1827,15 @@ io.on('connection', (socket) => {
     const existingPeers = [...roomAvt[avRoom]];
     roomAvt[avRoom].add(socket.id);
     socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, spawn: (type === 'world') ? worldSpawnFor(avRoom) : null });
-    // Replay the current world objects to the new joiner (late-joiner sync).
-    socket.emit('avatar-objects-init', { objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
+    // Replay the current world objects to the new joiner (late-joiner sync). `levelIndex` lets the client
+    // drop a replay that arrives AFTER it has switched Levels again (rapid switching → stale cross-Level bleed).
+    socket.emit('avatar-objects-init', { levelIndex, objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
     // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
     const tg = roomTerrain[avRoom];
-    if (tg) socket.emit('terrain-init', { cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: roomTerrainHp[avRoom] ? terrainRLE(roomTerrainHp[avRoom]).runs : undefined });
+    if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: roomTerrainHp[avRoom] ? terrainRLE(roomTerrainHp[avRoom]).runs : undefined });
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
     const mm = roomMats[avRoom];
-    if (mm && Object.keys(mm).length) socket.emit('mats-init', { mats: mm });
+    if (mm && Object.keys(mm).length) socket.emit('mats-init', { levelIndex, mats: mm });
     // Auto host-hydration (Phase 2b follow-up): if the room OWNER joins a still-blank Level we haven't
     // hydrated yet this server lifetime, ask their client to apply its host-local saved content. Emitted
     // LAST (after the empty replay above) so the inits can't clobber what the host is about to apply.
