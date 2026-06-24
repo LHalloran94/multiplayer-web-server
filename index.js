@@ -952,7 +952,8 @@ function roomOwnerId(roomId) { const r = _avRoomLookup.get(roomId); return r ? r
 // carries a role default `mode` ('all' = anyone, today's behavior; 'host' = only owner + granted users) plus
 // per-user boolean overrides (in-memory, ephemeral, broadcast on change). Modes persist in perms.features.
 // Page/URL rooms (no DB row) are NEVER restricted. Honored cooperatively client-side; chat is also hard-gated.
-const FEATURE_KEYS = ['chat', 'voice', 'cursors', 'markup', 'combat', 'ghost'];
+const FEATURE_KEYS = ['chat', 'voice', 'cursors', 'stamps', 'annotations', 'highlights', 'drawing', 'canvas', 'combat', 'ghost'];
+const MARKUP_KEYS = ['stamps', 'annotations', 'highlights', 'drawing', 'canvas'];   // legacy 'markup' fans out to these
 const roomFeatures = new Map();                       // roomId -> { modes:{feat:'all'|'host'}, over:Map<feat,Map<did,bool>> }
 function getRoomFeatures(roomId) {
   let rf = roomFeatures.get(roomId);
@@ -960,7 +961,10 @@ function getRoomFeatures(roomId) {
     const modes = {}; const over = new Map();
     for (const k of FEATURE_KEYS) { modes[k] = 'all'; over.set(k, new Map()); }
     try { const row = _roomPermsGet.get(roomId); if (row && row.perms) { const p = JSON.parse(row.perms);
-      if (p && p.features) for (const k of FEATURE_KEYS) if (p.features[k] === 'host') modes[k] = 'host';
+      if (p && p.features) {
+        for (const k of FEATURE_KEYS) if (p.features[k] === 'host') modes[k] = 'host';
+        if (p.features.markup === 'host') for (const k of MARKUP_KEYS) modes[k] = 'host';   // legacy single markup perm
+      }
     } } catch {}
     rf = { modes, over };
     roomFeatures.set(roomId, rf);
@@ -981,6 +985,13 @@ function featureAllowedFor(roomId, feature, did) {     // server-side hard check
   const o = rf.over.get(feature);
   if (o && did && o.has(did)) return o.get(did);
   return rf.modes[feature] === 'all';
+}
+// Combined build+feature snapshot for the Rooms-tab perms hub, where the owner may edit a room they are NOT
+// currently in (so they are not in that room's presence bucket and won't receive the bucket broadcasts). This
+// is echoed back to the editing socket on every owner-only setter so the hub stays live regardless of membership.
+function roomPermsPayload(roomId) {
+  if (!roomId) return null;
+  return { roomId, build: buildPermsPayload(roomId), features: featurePermsPayload(roomId) };
 }
 function resolveAvRoomId(clientRoomId, currentRoom, socketId) {
   if (!clientRoomId || typeof clientRoomId !== 'string') return currentRoom;
@@ -2049,6 +2060,13 @@ io.on('connection', (socket) => {
   // persists in rooms.perms; per-user overrides are in-memory. Both broadcast to the room's presence
   // bucket ('pg:'+roomId — every member building in any Level of the room is in it) so each client
   // recomputes its own build access and the host panel re-renders. Page/URL rooms have no roomId here.
+  // Rooms-tab perms hub: owner requests a snapshot of any room they own (even one they're not currently in).
+  socket.on('room-perms-get', ({ roomId }) => {
+    if (!roomId) return;
+    const did = socketToDiscordId[socket.id];
+    if (!did || roomOwnerId(roomId) !== did) return;     // owner only
+    socket.emit('room-perms', roomPermsPayload(roomId));
+  });
   socket.on('build-mode-set', ({ roomId, mode }) => {
     if (!roomId || (mode !== 'all' && mode !== 'host')) return;
     const did = socketToDiscordId[socket.id];
@@ -2056,6 +2074,7 @@ io.on('connection', (socket) => {
     const rb = getRoomBuild(roomId); rb.mode = mode;
     persistRoomPerms(roomId);                            // preserve level locks alongside the mode
     io.to('pg:' + roomId).emit('build-perms', buildPermsPayload(roomId));
+    socket.emit('room-perms', roomPermsPayload(roomId));  // keep the hub live for a non-member owner
   });
   // Per-Level build lock (owner-only): the checkbox next to each Level. locked=true disables building
   // in that Level for everyone but the owner; default (absent) = buildable.
@@ -2067,6 +2086,7 @@ io.on('connection', (socket) => {
     if (locked) rb.locked.add(levelIndex); else rb.locked.delete(levelIndex);
     persistRoomPerms(roomId);
     io.to('pg:' + roomId).emit('build-perms', buildPermsPayload(roomId));
+    socket.emit('room-perms', roomPermsPayload(roomId));
   });
   socket.on('build-perm-set', ({ roomId, target, allow }) => {
     if (!roomId || typeof target !== 'string' || !target) return;
@@ -2077,6 +2097,7 @@ io.on('connection', (socket) => {
     if (allow === null || allow === undefined) rb.over.delete(target);
     else rb.over.set(target, !!allow);
     io.to('pg:' + roomId).emit('build-perms', buildPermsPayload(roomId));
+    socket.emit('room-perms', roomPermsPayload(roomId));
   });
   // Phase 4: owner sets a feature's room-wide mode ('all'|'host'). Persists in perms.features.
   socket.on('feature-mode-set', ({ roomId, feature, mode }) => {
@@ -2086,6 +2107,7 @@ io.on('connection', (socket) => {
     getRoomFeatures(roomId).modes[feature] = mode;
     persistRoomPerms(roomId);
     io.to('pg:' + roomId).emit('feature-perms', featurePermsPayload(roomId));
+    socket.emit('room-perms', roomPermsPayload(roomId));
   });
   // Phase 4: owner sets a per-user override for one feature (allow null/undefined clears it).
   socket.on('feature-perm-set', ({ roomId, feature, target, allow }) => {
@@ -2097,6 +2119,7 @@ io.on('connection', (socket) => {
     if (allow === null || allow === undefined) m.delete(target);
     else m.set(target, !!allow);
     io.to('pg:' + roomId).emit('feature-perms', featurePermsPayload(roomId));
+    socket.emit('room-perms', roomPermsPayload(roomId));
   });
 
   socket.on('voice-join', ({ username, scope }) => {
