@@ -902,6 +902,30 @@ function avatarRoomKey(roomId, levelIndex) { return 'av:' + roomId + ':' + (leve
 // `rooms.id` (it's not a generated code), so a malicious URL-as-roomId just resolves to itself.
 const _avRoomLookup = db.prepare('SELECT public, owner_id FROM rooms WHERE id = ?');
 const _avRoomMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?');
+// Stage 6 Phase 3 — L2 build permissions, PER-ROOM (covers every Level in the room's World). A role
+// default `mode` ('all' = anyone present can build, today's behavior; 'host' = only the owner + granted
+// users) plus per-user boolean overrides. Overrides are in-memory (authoritative, ephemeral, broadcast
+// on change); `mode` persists in the rooms.perms JSON {build}. Page/URL rooms (no DB row) are NEVER
+// restricted — they keep today's open-build behavior. Built lazily on first access from the perms column.
+const _roomPermsGet = db.prepare('SELECT perms FROM rooms WHERE id = ?');
+const _roomPermsSet = db.prepare('UPDATE rooms SET perms = ? WHERE id = ?');
+const roomBuild = new Map();                          // roomId -> { mode:'all'|'host', over:Map<discordId,bool> }
+function getRoomBuild(roomId) {
+  let rb = roomBuild.get(roomId);
+  if (!rb) {
+    let mode = 'all';
+    try { const row = _roomPermsGet.get(roomId); if (row && row.perms) { const p = JSON.parse(row.perms); if (p && p.build === 'host') mode = 'host'; } } catch {}
+    rb = { mode, over: new Map() };
+    roomBuild.set(roomId, rb);
+  }
+  return rb;
+}
+function buildPermsPayload(roomId) {                  // wire shape sent to clients (over = [[did,bool],…])
+  if (!roomId) return { roomId: null, mode: 'all', over: [] };
+  const rb = getRoomBuild(roomId);
+  return { roomId, mode: rb.mode, over: [...rb.over.entries()] };
+}
+function roomOwnerId(roomId) { const r = _avRoomLookup.get(roomId); return r ? r.owner_id : null; }
 function resolveAvRoomId(clientRoomId, currentRoom, socketId) {
   if (!clientRoomId || typeof clientRoomId !== 'string') return currentRoom;
   const room = _avRoomLookup.get(clientRoomId);
@@ -1265,6 +1289,18 @@ io.on('connection', (socket) => {
   let currentPresenceRoom = null; // this socket's who-list bucket: URL room by default, or 'pg:'+ctxRoomId when in a context Room
   let currentPageRoom = null;     // this socket's page-bound bucket (cursors/sprays/annotations/highlights): URL room, or 'pb:'+ctxRoomId+'|'+url in a context Room
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
+  let currentAvBuildRoomId = null; // Phase 3: real roomId for L2 build-perm checks (null = page/URL room → open build)
+  let currentAvOwnerId = null;     // owner_id of that room (null for the page/URL room)
+  // May this socket mutate the current avatar World? Page/URL room → always. Owner → always. Else the
+  // room's per-user override, falling back to the role default. Read live so grant changes apply at once.
+  function canBuild() {
+    if (!currentAvBuildRoomId) return true;
+    const did = socketToDiscordId[socket.id];
+    if (did && currentAvOwnerId && did === currentAvOwnerId) return true;
+    const rb = getRoomBuild(currentAvBuildRoomId);
+    if (did && rb.over.has(did)) return rb.over.get(did);
+    return rb.mode === 'all';
+  }
 
   socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId }) => {
     let verified = false;
@@ -1682,6 +1718,9 @@ io.on('connection', (socket) => {
     // Owner-of-a-real-user-room? (the URL page room has no DB row / owner → never hydrates)
     const rinfo = (roomId !== currentRoom) ? _avRoomLookup.get(roomId) : null;
     const isRoomOwner = !!(rinfo && socketToDiscordId[socket.id] && rinfo.owner_id === socketToDiscordId[socket.id]);
+    // Phase 3: only a real user-room is build-permission-gated; the page/URL room (no DB row) stays open.
+    currentAvBuildRoomId = rinfo ? roomId : null;
+    currentAvOwnerId = rinfo ? rinfo.owner_id : null;
     // levelIndex selects the Level within the room's World; default the per-URL room's [sandbox=0, life=1].
     const levelIndex = (data && Number.isInteger(data.levelIndex) && data.levelIndex >= 0) ? data.levelIndex : (type === 'world' ? 1 : 0);
     const avRoom = avatarRoomKey(roomId, levelIndex);
@@ -1714,6 +1753,8 @@ io.on('connection', (socket) => {
       hydratedAvRooms.add(avRoom);
       socket.emit('avt-hydrate', { levelIndex });
     }
+    // Phase 3: seed the joiner with this room's build permissions (page/URL room → open).
+    socket.emit('build-perms', buildPermsPayload(currentAvBuildRoomId));
   });
   socket.on('avt-leave', () => {
     if (currentAvatarRoom && roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) {
@@ -1730,6 +1771,7 @@ io.on('connection', (socket) => {
   // socket.io; physics response is applied locally on each client. Persist till restart.
   socket.on('avatar-object-spawn', (data) => {
     if (!currentAvatarRoom || !data || !OBJ_TYPES.has(data.type)) return;
+    if (!canBuild()) return;                                // Phase 3: L2 build permission
     const type = data.type;
     // Client supplies the id (for optimistic local placement). Require it to be namespaced to
     // this socket (anti-spoof); otherwise mint a fallback. Echoing the same id back means the
@@ -1845,6 +1887,7 @@ io.on('connection', (socket) => {
   // destroying anyone's object goes through avatar-object-hit, which is unrestricted.)
   socket.on('avatar-object-remove', ({ id }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
+    if (!canBuild()) return;                                // Phase 3: L2 build permission (erase is a build op)
     const obj = roomObjects[currentAvatarRoom].get(id);
     // Owner by stable username (survives reconnect/new socket.id) OR the live socket.id.
     if (!obj || !(obj.ownerId === socket.id || (obj.owner && obj.owner === currentUsername))) return;
@@ -1855,6 +1898,7 @@ io.on('connection', (socket) => {
   // like the single mouse-eraser, but in one round-trip.
   socket.on('avatar-objects-remove-mine', () => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
+    if (!canBuild()) return;                                // Phase 3: also wipes terrain → a build op
     const map = roomObjects[currentAvatarRoom], ids = [];
     for (const [id, o] of map) if (o.ownerId === socket.id || (o.owner && o.owner === currentUsername)) ids.push(id);
     for (const id of ids) map.delete(id);
@@ -1865,6 +1909,7 @@ io.on('connection', (socket) => {
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   socket.on('avatar-objects-clear-all', () => {
     if (!currentAvatarRoom) return;
+    if (!canBuild()) return;                                // Phase 3: full wipe → a build op
     if (roomObjects[currentAvatarRoom]) {
       const map = roomObjects[currentAvatarRoom], ids = [...map.keys()];
       map.clear();
@@ -1878,6 +1923,7 @@ io.on('connection', (socket) => {
   // client rasterizes it identically (client also applies optimistically). Only echoes on a real change.
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard }) => {
     if (!currentAvatarRoom || (op !== 'paint' && op !== 'carve')) return;
+    if (!canBuild()) return;                                // Phase 3: L2 build permission
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
     const cx = Math.max(0, Math.min(MWSim.C.WORLD_W, x)), cy = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
     const rr = Math.max(8, Math.min(160, r));
@@ -1895,6 +1941,7 @@ io.on('connection', (socket) => {
   // Owner-agnostic (terrain isn't owner-tracked), but bounded and rebroadcast so all clients stay in sync.
   socket.on('terrain-set', ({ cells }) => {
     if (!currentAvatarRoom || !Array.isArray(cells) || cells.length > 16384) return;
+    if (!canBuild()) return;                                // Phase 3: L2 build permission
     const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
     const clear = spawnClearRect(currentAvatarRoom);     // null in sandbox; clamps any spawn-box fill back to empty (kept consistent on rebroadcast)
     let changed = false;
@@ -1913,6 +1960,7 @@ io.on('connection', (socket) => {
   // assigns the next free id (16..255), stores per-room + broadcasts so every client can render/paint it. Acks {id, def}.
   socket.on('mat-define', (raw, ack) => {
     if (!currentAvatarRoom) { if (typeof ack === 'function') ack(null); return; }
+    if (!canBuild()) { if (typeof ack === 'function') ack(null); return; }   // Phase 3: L2 build permission
     const def = sanitizeMatDef(raw);
     if (!def) { if (typeof ack === 'function') ack(null); return; }
     const mats = ensureMats(currentAvatarRoom), sig = matSig(def);
@@ -1932,6 +1980,29 @@ io.on('connection', (socket) => {
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
     if (obj.hp <= 0) { roomObjects[currentAvatarRoom].delete(id); io.to(currentAvatarRoom).emit('avatar-object-removed', { id }); }
     else io.to(currentAvatarRoom).emit('avatar-object-update', { id, hp: obj.hp });
+  });
+
+  // Phase 3: the host manages L2 build permissions live (owner-only). `mode` is the role default and
+  // persists in rooms.perms; per-user overrides are in-memory. Both broadcast to the room's presence
+  // bucket ('pg:'+roomId — every member building in any Level of the room is in it) so each client
+  // recomputes its own build access and the host panel re-renders. Page/URL rooms have no roomId here.
+  socket.on('build-mode-set', ({ roomId, mode }) => {
+    if (!roomId || (mode !== 'all' && mode !== 'host')) return;
+    const did = socketToDiscordId[socket.id];
+    if (!did || roomOwnerId(roomId) !== did) return;     // owner only
+    const rb = getRoomBuild(roomId); rb.mode = mode;
+    try { _roomPermsSet.run(JSON.stringify({ build: mode }), roomId); } catch {}
+    io.to('pg:' + roomId).emit('build-perms', buildPermsPayload(roomId));
+  });
+  socket.on('build-perm-set', ({ roomId, target, allow }) => {
+    if (!roomId || typeof target !== 'string' || !target) return;
+    const did = socketToDiscordId[socket.id];
+    if (!did || roomOwnerId(roomId) !== did) return;     // owner only
+    if (target === did) return;                          // owner is always allowed; never override self
+    const rb = getRoomBuild(roomId);
+    if (allow === null || allow === undefined) rb.over.delete(target);
+    else rb.over.set(target, !!allow);
+    io.to('pg:' + roomId).emit('build-perms', buildPermsPayload(roomId));
   });
 
   socket.on('voice-join', ({ username, scope }) => {
