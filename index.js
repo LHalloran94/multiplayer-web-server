@@ -373,7 +373,7 @@ function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { retu
 app.post('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, description, public: isPublic, scope, url, env_spec, levelLock } = req.body;
+  const { name, description, public: isPublic, scope, url, env_spec, levelLock, features } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   try {
     const id = generateRoomCode();
@@ -388,11 +388,20 @@ app.post('/rooms', (req, res) => {
     // Phase 3: a World room sets per-Level build access at creation via `levelLock` (array of level
     // indices where building is disabled for non-owners; default = every Level buildable). The room-wide
     // `build` mode stays 'all' and the host can still flip it / grant individuals later. Stored in perms.
-    let perms = null;
+    let permsObj = null;
     if (spec && Array.isArray(levelLock)) {
       const lock = [...new Set(levelLock.filter(i => Number.isInteger(i) && i >= 0))];
-      if (lock.length) perms = JSON.stringify({ build: 'all', levelLock: lock });
+      if (lock.length) permsObj = { build: 'all', levelLock: lock };
     }
+    // Phase 4b: feature defaults chosen at creation — an array of feature keys restricted to host-only
+    // before anyone joins. Hydrated lazily by getRoomFeatures() from perms.features (same shape as the
+    // perms hub persists). Owner can still flip any of these later.
+    if (Array.isArray(features) && features.length) {
+      const feats = {};
+      for (const k of features) if (FEATURE_KEYS.includes(k)) feats[k] = 'host';
+      if (Object.keys(feats).length) { permsObj = permsObj || {}; permsObj.features = feats; }
+    }
+    const perms = permsObj ? JSON.stringify(permsObj) : null;
     db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, url, description, kind, env_spec, perms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null, perms);
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(id, user.sub);
     res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, url: roomUrl, description: trimmedDesc, kind, env_spec: spec });
