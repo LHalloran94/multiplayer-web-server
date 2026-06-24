@@ -350,6 +350,10 @@ app.delete('/blocks', (req, res) => {
 const ROOM_LEVEL_CAP = 12;                                 // max Levels in a room's World (Phase 6 cap)
 const LEVEL_TYPES = new Set(['sandbox', 'life', 'stage']); // Level type tokens (life == generated; stage == host-authored)
 const LEVEL_SIZES = new Set(['tiny', 'small', 'medium', 'large']);  // Phase 6 world size presets (mirror SIZE_PRESETS client-side)
+// Playable WIDTH per preset (mirror of SIZE_PRESETS.w client-side; 'large' = full world). Generation is
+// confined to this band (centred) + a margin so a small Level doesn't gen/save terrain it can't reach.
+const SIZE_PRESET_W = { tiny: 1920, small: 3840, medium: 7680, large: MWSim.C.WORLD_W };
+const GEN_MARGIN = 1800;                              // px of decorative terrain generated beyond each wall
 // env_spec stores the World's ordered Level list (type + display name) + nav mode. Terrain/object CONTENT
 // stays host-local in v1 (hydrated live on entry), so the spec is public-safe metadata only.
 function sanitizeEnvSpec(raw) {
@@ -835,7 +839,7 @@ const roomAvatars = {}; // legacy (old position-broadcast model; kept for back-c
 const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel mesh (Stage 6 pivot)
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
-const MAX_OBJECTS_PER_ROOM = 150;  // FIFO cap bounds clutter/memory (bigger world + generated scatter; destruction is the main limiter)
+const MAX_OBJECTS_PER_ROOM = 150;  // Phase 6: per-Level cap on USER-placed objects (generated 'world-' scatter exempt); mirrors client OBJECT_CAP. Over-cap spawns are rejected.
 const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter)
 const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
@@ -1084,9 +1088,14 @@ function mulberry32(a) {                              // tiny deterministic PRNG
 // (Water; Lava in occasional deep bands) → surface scatter (rock mounds in terrain; trees + floating
 // platforms as 'world'-owned objects, protected from the FIFO cap). Deterministic from the seed.
 const MAT = { EARTH: 1, STONE: 2, SAND: 3, SNOW: 8, WATER: 9, LAVA: 11 };
-function generateWorld(avatarRoom, seed) {
+function generateWorld(avatarRoom, seed, band) {
   const grid = ensureTerrain(avatarRoom), hp = ensureTerrainHp(avatarRoom);
   grid.fill(0); hp.fill(0);
+  // Phase 6: confine generation to the playable band + margin (null band = full world). Terrain/scatter
+  // outside [genC0, genC1] is skipped so a small Level doesn't gen (or save) ground it can't reach.
+  const genC0 = band ? Math.max(0, band.c0) : 0;
+  const genC1 = band ? Math.min(TERRAIN_COLS - 1, band.c1) : TERRAIN_COLS - 1;
+  const inBand = (c) => c >= genC0 && c <= genC1;
   const rng = mulberry32(seed);
   const set = (c, r, v) => { if (c < 0 || c >= TERRAIN_COLS || r < 0 || r >= TERRAIN_ROWS) return; const i = r * TERRAIN_COLS + c; grid[i] = v; hp[i] = v ? matStrengthSrv({}, v) : 0; };
   const bottomRow = Math.ceil(FLOOR_TOP / TERRAIN_CELL) - 1;            // last terrain row resting on the floor
@@ -1107,6 +1116,7 @@ function generateWorld(avatarRoom, seed) {
   for (let c = 0; c < TERRAIN_COLS; c++) surf[c] = (Math.abs(c - centerCol) <= plateauHalf) ? plateauSurf : heightAt(c);
   // Soil crust (biome material, top ~5 rows) over Stone.
   for (let c = 0; c < TERRAIN_COLS; c++) {
+    if (!inBand(c)) continue;
     const biome = (Math.abs(c - centerCol) <= plateauHalf) ? 'grass' : biomeAt(c);
     const s = surf[c];
     for (let r = s; r <= bottomRow; r++) {
@@ -1118,6 +1128,7 @@ function generateWorld(avatarRoom, seed) {
   // Caves: carve winding tunnels through the stone (keep the soil crust + the surface intact); wider deeper.
   const cp0 = rng() * Math.PI * 2, cp1 = rng() * Math.PI * 2, cp2 = rng() * Math.PI * 2;
   for (let c = 0; c < TERRAIN_COLS; c++) {
+    if (!inBand(c)) continue;
     const top = surf[c] + 5;
     for (let r = top; r <= bottomRow; r++) {
       const i = r * TERRAIN_COLS + c;
@@ -1128,9 +1139,9 @@ function generateWorld(avatarRoom, seed) {
     }
   }
   // Lakes: flood valley air below sea level with Water; occasional Lava bands at the cave floor.
-  for (let c = 0; c < TERRAIN_COLS; c++) if (surf[c] > seaRow) for (let r = seaRow; r < surf[c]; r++) set(c, r, MAT.WATER);
+  for (let c = 0; c < TERRAIN_COLS; c++) if (inBand(c) && surf[c] > seaRow) for (let r = seaRow; r < surf[c]; r++) set(c, r, MAT.WATER);
   const lp = rng() * Math.PI * 2;
-  for (let c = 0; c < TERRAIN_COLS; c++) if (Math.sin(c * 0.008 + lp) > 0.6) for (let r = bottomRow; r > bottomRow - 2; r--) { if (grid[r * TERRAIN_COLS + c] === 0) set(c, r, MAT.LAVA); }
+  for (let c = 0; c < TERRAIN_COLS; c++) if (inBand(c) && Math.sin(c * 0.008 + lp) > 0.6) for (let r = bottomRow; r > bottomRow - 2; r--) { if (grid[r * TERRAIN_COLS + c] === 0) set(c, r, MAT.LAVA); }
   // Surface scatter: rock mounds (terrain), then trees + floating platforms ('world'-owned objects).
   if (!roomObjects[avatarRoom]) roomObjects[avatarRoom] = new Map();
   const objs = roomObjects[avatarRoom];
@@ -1139,21 +1150,22 @@ function generateWorld(avatarRoom, seed) {
   const outsideSpawn = (wx) => wx < clearX0 || wx > clearX1;
   const treeFor = { grass: '🌳', desert: '🌴', snow: '🌲' };
   let wn = 0;
-  for (let c = 8; c < TERRAIN_COLS - 8; c += 6) {                       // rock mounds
+  for (let c = Math.max(8, genC0); c < Math.min(TERRAIN_COLS - 8, genC1); c += 6) {   // rock mounds
     if (rng() > 0.10 || !dryLand(c) || !outsideSpawn((c + 0.5) * TERRAIN_CELL)) continue;
     const hgt = 1 + (rng() * 2 | 0);
     for (let k = 0; k < hgt; k++) { set(c, surf[c] - 1 - k, MAT.STONE); if (rng() > 0.5) set(c + 1, surf[c + 1] - 1 - k, MAT.STONE); }
   }
-  for (let c = 5; c < TERRAIN_COLS - 5; c += 4) {                       // trees (narrow solid stamps)
+  for (let c = Math.max(5, genC0); c < Math.min(TERRAIN_COLS - 5, genC1); c += 4) {   // trees (narrow solid stamps)
     if (rng() > 0.16 || !dryLand(c) || !outsideSpawn((c + 0.5) * TERRAIN_CELL)) continue;
     const h = 58 + (rng() * 28 | 0), w = Math.round(h * 0.5);
     objs.set('world-' + wn, { id: 'world-' + wn, type: 'stamp', ownerId: 'world', owner: 'world',
       x: (c + 0.5) * TERRAIN_CELL, y: surf[c] * TERRAIN_CELL - h / 2, content: treeFor[biomeAt(c)] || '🌳', w, h, shape: 'rect', angle: 0, stretch: false, hp: 3 });
     wn++;
   }
-  const plats = 7 + (rng() * 5 | 0);                                    // floating platforms (indestructible) for traversal
+  const platLo = Math.max(10, genC0), platHi = Math.min(TERRAIN_COLS - 10, genC1);   // platform column range (band-confined)
+  const plats = platHi > platLo ? 7 + (rng() * 5 | 0) : 0;                            // floating platforms (indestructible) for traversal
   for (let k = 0; k < plats; k++) {
-    const c = 10 + (rng() * (TERRAIN_COLS - 20) | 0), wx = (c + 0.5) * TERRAIN_CELL;
+    const c = platLo + (rng() * (platHi - platLo) | 0), wx = (c + 0.5) * TERRAIN_CELL;
     const y = surf[c] * TERRAIN_CELL - (90 + rng() * 170);
     if (!outsideSpawn(wx) || y < TERRAIN_CELL * 3) continue;
     objs.set('world-' + wn, { id: 'world-' + wn, type: 'platform', ownerId: 'world', owner: 'world',
@@ -1161,11 +1173,27 @@ function generateWorld(avatarRoom, seed) {
     wn++;
   }
 }
+// Phase 6: generation column band for a Level's size preset (null = full world). Looks up the room's
+// env_spec; the page-default room (roomId = URL, no DB row) falls through to 'large' → full width.
+function genColBand(roomId, levelIndex) {
+  let size = 'large';
+  try {
+    const row = db.prepare('SELECT env_spec FROM rooms WHERE id = ?').get(roomId);
+    const spec = row ? parseEnvSpec(row.env_spec) : null;
+    const lvl = (spec && Array.isArray(spec.levels)) ? spec.levels[levelIndex | 0] : null;
+    if (lvl && LEVEL_SIZES.has(lvl.size)) size = lvl.size;
+  } catch {}
+  const pw = SIZE_PRESET_W[size] || MWSim.C.WORLD_W;
+  if (pw >= MWSim.C.WORLD_W) return null;                               // full world → no confinement
+  const half = pw / 2 + GEN_MARGIN;
+  const x0 = Math.max(0, MWSim.C.WORLD_W / 2 - half), x1 = Math.min(MWSim.C.WORLD_W, MWSim.C.WORLD_W / 2 + half);
+  return { c0: Math.floor(x0 / TERRAIN_CELL), c1: Math.ceil(x1 / TERRAIN_CELL) };
+}
 // Ensure a 'world'-mode room has its terrain generated exactly once per server lifetime.
-function ensureWorldGenerated(avatarRoom, url) {
+function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   if (worldGenerated.has(avatarRoom)) return;
   worldGenerated.add(avatarRoom);
-  generateWorld(avatarRoom, worldSeedFor(url));
+  generateWorld(avatarRoom, worldSeedFor(roomId), genColBand(roomId, levelIndex));
 }
 // Spawn point = world-centre column resting on the terrain SURFACE there (so a generated world
 // drops you on top of the ground, not buried in it). Falls back to the floor when that column is
@@ -1824,7 +1852,7 @@ io.on('connection', (socket) => {
     currentAvatarRoom = avRoom;
     socketToAvatarRoom[socket.id] = avRoom;
     socket.join(avRoom);
-    if (type === 'world') ensureWorldGenerated(avRoom, roomId);   // seed keyed by roomId (=URL for the default room → identical worlds), once per server lifetime
+    if (type === 'world') ensureWorldGenerated(avRoom, roomId, levelIndex);   // seed keyed by roomId (=URL for the default room → identical worlds), once per server lifetime; band from the Level's size preset
     if (!roomAvt[avRoom]) roomAvt[avRoom] = new Set();
     const existingPeers = [...roomAvt[avRoom]];
     roomAvt[avRoom].add(socket.id);
@@ -1980,11 +2008,12 @@ io.on('connection', (socket) => {
         if (aabbHitsClear(clear, bx0, by0, bx1, by1)) return;
       }
     }
-    if (map.size >= MAX_OBJECTS_PER_ROOM) {                 // FIFO eviction (never the generated 'world-' scatter)
-      let victim = null;
-      for (const k of map.keys()) { if (!(typeof k === 'string' && k.startsWith('world-'))) { victim = k; break; } }
-      if (victim != null) { map.delete(victim); io.to(currentAvatarRoom).emit('avatar-object-removed', { id: victim }); }
-    }
+    // Phase 6: cap counts USER-placed objects only (generated 'world-' scatter is exempt — matches the
+    // client's userObjectCount). REJECT at the cap rather than FIFO-evicting, so an over-cap placement fails
+    // cleanly (the client already blocks + shows the hint) instead of silently deleting the oldest object.
+    let userObjs = 0;
+    for (const k of map.keys()) if (!(typeof k === 'string' && k.startsWith('world-'))) userObjs++;
+    if (userObjs >= MAX_OBJECTS_PER_ROOM) return;
     map.set(id, obj);
     io.to(currentAvatarRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
   });
