@@ -834,7 +834,7 @@ const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel 
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
 const MAX_OBJECTS_PER_ROOM = 150;  // FIFO cap bounds clutter/memory (bigger world + generated scatter; destruction is the main limiter)
-const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint = non-solid respawn flag
+const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'start']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/start = non-solid flags (respawn anchor / Level exit / Level entry)
 const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 
@@ -1911,11 +1911,12 @@ io.on('connection', (socket) => {
               stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
               hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
       if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
-    } else if (type === 'checkpoint') {
-      // Respawn flag (Inc 10b): non-solid, no physics. (x, y) is the pole BASE (ground level).
-      // Touching it client-side sets that player's local respawn point (broadcast via avatar-checkpoint).
+    } else if (type === 'checkpoint' || type === 'goal' || type === 'start') {
+      // Non-solid flags (Phase 5). (x, y) is the pole BASE (ground level). No physics — pure triggers:
+      //  checkpoint = interact (E) to make it your respawn anchor; goal = touch to advance the Level series;
+      //  start = builder-placed shared Level entry / fallback spawn. All erasable/destructible like other props.
       if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type: 'checkpoint', ownerId: socket.id, owner: currentUsername || socket.id,
+      obj = { id, type, ownerId: socket.id, owner: currentUsername || socket.id,
               x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
               hp: data.breakable === false ? null : 2 };  // erasable/destructible like other props
     } else {
@@ -1953,7 +1954,7 @@ io.on('connection', (socket) => {
           speed: clampN(data.path.speed, 0.02, 1.2, 0.18), phase: clampN(data.path.phase, 0, 1, 0) };
       }
     }
-    if (type !== 'checkpoint') {                            // no building solids on the spawn (world mode); flags are non-solid → allowed
+    if (type !== 'checkpoint' && type !== 'goal' && type !== 'start') {  // no building solids on the spawn (world mode); non-solid flags → allowed
       const clear = spawnClearRect(currentAvatarRoom);
       if (clear) {
         let bx0, by0, bx1, by1;
