@@ -2159,6 +2159,21 @@ io.on('connection', (socket) => {
     io.to('pg:' + roomId).emit('feature-perms', featurePermsPayload(roomId));
     socket.emit('room-perms', roomPermsPayload(roomId));
   });
+  // Phase 5: owner toggles the World's nav mode live ('free' | 'series'). Persists in env_spec.nav and
+  // broadcasts to the room's presence bucket so every member's modeBtn/series gating updates immediately.
+  socket.on('nav-set', ({ roomId, nav }) => {
+    if (!roomId || (nav !== 'free' && nav !== 'series')) return;
+    const did = socketToDiscordId[socket.id];
+    if (!did || roomOwnerId(roomId) !== did) return;     // owner only
+    const row = db.prepare('SELECT env_spec FROM rooms WHERE id = ?').get(roomId);
+    if (!row) return;
+    const spec = parseEnvSpec(row.env_spec);
+    if (!spec) return;                                   // a plain chat room (no World) — nothing to set
+    spec.nav = nav;
+    db.prepare('UPDATE rooms SET env_spec = ? WHERE id = ?').run(JSON.stringify(spec), roomId);
+    io.to('pg:' + roomId).emit('room-nav', { roomId, nav });
+    socket.emit('room-nav', { roomId, nav });            // echo for a non-member owner editing from the hub
+  });
 
   socket.on('voice-join', ({ username, scope }) => {
     // Resolve the scope key: 'page' uses the URL room; otherwise use as-is (dm:X, room:X, group:X)
