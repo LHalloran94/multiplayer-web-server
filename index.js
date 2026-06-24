@@ -106,6 +106,9 @@ try { db.exec('ALTER TABLE rooms ADD COLUMN kind TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN env_spec TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN perms TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN meta TEXT'); } catch {}
+// Stage 6 Active-Room launcher — a public room may be bound to a specific page URL (the client's
+// `currentURL` = hostname+pathname+search, same key the page-bound layer uses). Null = not URL-bound.
+try { db.exec('ALTER TABLE rooms ADD COLUMN url TEXT'); } catch {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS follows (
@@ -370,32 +373,42 @@ function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { retu
 app.post('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, description, public: isPublic, scope, env_spec } = req.body;
+  const { name, description, public: isPublic, scope, url, env_spec } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   try {
     const id = generateRoomCode();
     const trimmedName = name.trim().slice(0, 40);
     const trimmedDesc = (description || '').trim().slice(0, 100) || null;
     const pub = isPublic ? 1 : 0;
-    const roomScope = (isPublic && scope) ? scope.trim().slice(0, 253) : null;
+    // A public room is bound to EITHER a page URL OR a site scope OR nothing (global) — mutually exclusive.
+    const roomUrl = (isPublic && url) ? url.trim().slice(0, 500) : null;
+    const roomScope = (isPublic && !roomUrl && scope) ? scope.trim().slice(0, 253) : null;
     const spec = sanitizeEnvSpec(env_spec);                // null = a plain chat room (no World)
     const kind = spec ? 'world' : null;
-    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, description, kind, env_spec) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, trimmedDesc, kind, spec ? JSON.stringify(spec) : null);
+    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, url, description, kind, env_spec) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null);
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(id, user.sub);
-    res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, description: trimmedDesc, kind, env_spec: spec });
+    res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, url: roomUrl, description: trimmedDesc, kind, env_spec: spec });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
 app.get('/rooms/public', (req, res) => {
   const hostname = (req.query.hostname || '').trim().toLowerCase();
+  const url = (req.query.url || '').trim();
   try {
+    // Return every public room relevant to THIS page in one shot — bound to this exact URL, OR to this
+    // site (scope=hostname, not URL-bound), OR global (no binding). The client buckets these into the
+    // launcher's "This page" / "This site" / "Public" sub-tabs.
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.scope, r.description, r.kind, r.env_spec,
+      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count
       FROM rooms r
-      WHERE r.public = 1 AND (r.scope IS NULL OR r.scope = ?)
-      ORDER BY r.created_at DESC LIMIT 50
-    `).all(hostname || '');
+      WHERE r.public = 1 AND (
+        r.url = ? OR
+        (r.url IS NULL AND r.scope = ?) OR
+        (r.url IS NULL AND r.scope IS NULL)
+      )
+      ORDER BY r.created_at DESC LIMIT 80
+    `).all(url || '\x00', hostname || '');
     res.json(rows.map(r => ({ ...r, env_spec: parseEnvSpec(r.env_spec) })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
