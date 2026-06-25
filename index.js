@@ -218,10 +218,25 @@ function roomSocial(roomId, callerId) {
   return out;
 }
 
+// Compact "what can non-hosts do here" summary derived from a room's perms JSON. `build` defaults to
+// 'all'; any feature whose room-wide mode is 'host' is host-only. Returns { build:'all'|'host',
+// restricted:[featureKey,...] } — small enough to ship inside list reads (we never leak raw per-user perms).
+function roomFeatureAvail(permsStr) {
+  const out = { build: 'all', restricted: [] };
+  if (!permsStr) return out;
+  try {
+    const p = JSON.parse(permsStr);
+    if (p && p.build === 'host') out.build = 'host';
+    const modes = p && p.features && p.features.modes;
+    if (modes && typeof modes === 'object') for (const k in modes) if (modes[k] === 'host') out.restricted.push(k);
+  } catch {}
+  return out;
+}
+
 // Coerce a room row that carries social subquery columns into the client-facing shape (booleans, numbers,
 // parsed env_spec). Used by the list endpoints that compute aggregates inline.
 function normalizeRoomSocial(r) {
-  return {
+  const out = {
     ...r,
     env_spec: parseEnvSpec(r.env_spec),
     like_count: r.like_count || 0,
@@ -230,7 +245,10 @@ function normalizeRoomSocial(r) {
     favourited: !!r.favourited,
     liked: !!r.liked,
     my_rating: r.my_rating || 0,
+    feature_avail: roomFeatureAvail(r.perms),
   };
+  delete out.perms;   // ship only the compact feature_avail, not the raw perms blob
+  return out;
 }
 
 // ---- Discord OAuth endpoint ----
@@ -496,7 +514,7 @@ app.get('/rooms/public', (req, res) => {
     // site (scope=hostname, not URL-bound), OR global (no binding). The client buckets these into the
     // launcher's "This page" / "This site" / "Public" sub-tabs.
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon,
+      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -522,7 +540,7 @@ app.get('/rooms', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description, r.kind, r.env_spec, r.icon,
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description, r.kind, r.env_spec, r.icon, r.perms,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -547,7 +565,7 @@ app.get('/rooms/favourites', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon,
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -712,12 +730,27 @@ app.post('/worlds', (req, res) => {
 // Gallery list (public): metadata only, no content blob. play_count is the lifetime enter count;
 // players_now is the live presence in the backing room (its 'pg:'+roomId bucket — see resolvePresenceRoom).
 app.get('/worlds', (req, res) => {
+  const caller = verifyToken(req);                       // optional — lets us include the caller's own state
+  const me = caller ? caller.sub : '\x00';
   try {
-    const rows = db.prepare(`SELECT w.id, w.owner_id, w.room_id, w.name, w.author, w.description, w.thumb, w.level_count, w.allow_remix, w.durability, w.play_count, w.updated_at, r.env_spec
-      FROM published_worlds w LEFT JOIN rooms r ON r.id = w.room_id ORDER BY w.updated_at DESC LIMIT 120`).all();
+    // Published Worlds are backed by a public rooms row (kind='published'), so the same room_likes /
+    // room_ratings / room_favourites tables (keyed by room_id) drive their social signals, and r.perms
+    // drives the per-Layer "features for non-hosts" summary.
+    const rows = db.prepare(`SELECT w.id, w.owner_id, w.room_id, w.name, w.author, w.description, w.thumb, w.level_count, w.allow_remix, w.durability, w.play_count, w.updated_at, r.env_spec, r.perms,
+        (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = w.room_id) as like_count,
+        (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = w.room_id) as rating_count,
+        (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = w.room_id) as rating_avg,
+        (SELECT 1 FROM room_favourites rf WHERE rf.room_id = w.room_id AND rf.discord_id = ?) as favourited,
+        (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = w.room_id AND rl2.discord_id = ?) as liked,
+        (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = w.room_id AND rr2.discord_id = ?) as my_rating
+      FROM published_worlds w LEFT JOIN rooms r ON r.id = w.room_id ORDER BY w.updated_at DESC LIMIT 120`).all(me, me, me);
     res.json(rows.map(r => ({
       ...r, allow_remix: !!r.allow_remix, env_spec: parseEnvSpec(r.env_spec),
       players_now: (io.sockets.adapter.rooms.get('pg:' + r.room_id) || { size: 0 }).size,
+      like_count: r.like_count || 0, rating_count: r.rating_count || 0,
+      rating_avg: r.rating_avg ? +(+r.rating_avg).toFixed(2) : 0,
+      favourited: !!r.favourited, liked: !!r.liked, my_rating: r.my_rating || 0,
+      feature_avail: roomFeatureAvail(r.perms), perms: undefined,
     })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
