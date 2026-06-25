@@ -497,6 +497,7 @@ app.get('/rooms/public', (req, res) => {
     // launcher's "This page" / "This site" / "Public" sub-tabs.
     const rows = db.prepare(`
       SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon,
+             (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
              (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
@@ -522,6 +523,7 @@ app.get('/rooms', (req, res) => {
   try {
     const rows = db.prepare(`
       SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description, r.kind, r.env_spec, r.icon,
+             (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
              (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
@@ -546,6 +548,7 @@ app.get('/rooms/favourites', (req, res) => {
   try {
     const rows = db.prepare(`
       SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon,
+             (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
              (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
