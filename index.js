@@ -542,12 +542,41 @@ app.post('/worlds', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
-// Gallery list (public): metadata only, no content blob. play_count is the lifetime enter count.
+// Gallery list (public): metadata only, no content blob. play_count is the lifetime enter count;
+// players_now is the live presence in the backing room (its 'pg:'+roomId bucket — see resolvePresenceRoom).
 app.get('/worlds', (req, res) => {
   try {
     const rows = db.prepare(`SELECT w.id, w.owner_id, w.room_id, w.name, w.author, w.description, w.thumb, w.level_count, w.allow_remix, w.durability, w.play_count, w.updated_at, r.env_spec
       FROM published_worlds w LEFT JOIN rooms r ON r.id = w.room_id ORDER BY w.updated_at DESC LIMIT 120`).all();
-    res.json(rows.map(r => ({ ...r, allow_remix: !!r.allow_remix, env_spec: parseEnvSpec(r.env_spec) })));
+    res.json(rows.map(r => ({
+      ...r, allow_remix: !!r.allow_remix, env_spec: parseEnvSpec(r.env_spec),
+      players_now: (io.sockets.adapter.rooms.get('pg:' + r.room_id) || { size: 0 }).size,
+    })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Lifetime enter counter — public (entering a World needs no login). Best-effort; ignores unknown ids.
+app.post('/worlds/:id/play', (req, res) => {
+  try { db.prepare('UPDATE published_worlds SET play_count = play_count + 1 WHERE id = ?').run(req.params.id); } catch (e) {}
+  res.json({ ok: true });
+});
+
+// Owner-only flag update (allow_remix / durability) without re-uploading content. Switching to Showcase
+// drops any saved live_state so the World reverts to its published baseline on the next hydrate.
+app.post('/worlds/:id/flags', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const w = db.prepare('SELECT owner_id FROM published_worlds WHERE id = ?').get(req.params.id);
+    if (!w) return res.status(404).json({ error: 'Not found' });
+    if (w.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+    const { allow_remix, durability } = req.body || {};
+    if (allow_remix !== undefined) db.prepare('UPDATE published_worlds SET allow_remix = ? WHERE id = ?').run(allow_remix ? 1 : 0, req.params.id);
+    if (durability !== undefined) {
+      const dura = (durability === 'persistent') ? 'persistent' : 'showcase';
+      db.prepare('UPDATE published_worlds SET durability = ?' + (dura === 'showcase' ? ', live_state = NULL' : '') + ' WHERE id = ?').run(dura, req.params.id);
+    }
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
