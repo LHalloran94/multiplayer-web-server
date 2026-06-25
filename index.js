@@ -113,6 +113,33 @@ try { db.exec('ALTER TABLE rooms ADD COLUMN url TEXT'); } catch {}
 // open-rooms hotbar / list rows distinguish rooms at a glance. Null = fall back to the binding glyph.
 try { db.exec('ALTER TABLE rooms ADD COLUMN icon TEXT'); } catch {}
 
+// Phase 3 — room social signals. Personal favourite (private bookmark, drives the Favourites sub-tab),
+// public like (one per user), and a 1–5 star rating (one vote per user; avg/count computed on read).
+db.exec(`
+  CREATE TABLE IF NOT EXISTS room_favourites (
+    discord_id TEXT NOT NULL,
+    room_id    TEXT NOT NULL,
+    created_at INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (discord_id, room_id)
+  );
+  CREATE TABLE IF NOT EXISTS room_likes (
+    discord_id TEXT NOT NULL,
+    room_id    TEXT NOT NULL,
+    created_at INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (discord_id, room_id)
+  );
+  CREATE TABLE IF NOT EXISTS room_ratings (
+    discord_id TEXT NOT NULL,
+    room_id    TEXT NOT NULL,
+    stars      INTEGER NOT NULL,
+    updated_at INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (discord_id, room_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_room_likes_room   ON room_likes(room_id);
+  CREATE INDEX IF NOT EXISTS idx_room_ratings_room ON room_ratings(room_id);
+  CREATE INDEX IF NOT EXISTS idx_room_favs_user    ON room_favourites(discord_id);
+`);
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS follows (
     follower_id  TEXT NOT NULL,
@@ -170,6 +197,40 @@ function generateGroupCode() {
     code = Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   } while (db.prepare('SELECT 1 FROM groups WHERE id = ?').get(code));
   return code;
+}
+
+// Phase 3 — compute a room's social aggregates (+ the caller's own state, if logged in).
+function roomSocial(roomId, callerId) {
+  const likes = db.prepare('SELECT COUNT(*) AS c FROM room_likes WHERE room_id = ?').get(roomId).c;
+  const rt = db.prepare('SELECT COUNT(*) AS c, COALESCE(SUM(stars), 0) AS s FROM room_ratings WHERE room_id = ?').get(roomId);
+  const out = {
+    like_count: likes,
+    rating_count: rt.c,
+    rating_avg: rt.c ? +(rt.s / rt.c).toFixed(2) : 0,
+    favourited: false, liked: false, my_rating: 0,
+  };
+  if (callerId) {
+    out.favourited = !!db.prepare('SELECT 1 FROM room_favourites WHERE discord_id = ? AND room_id = ?').get(callerId, roomId);
+    out.liked = !!db.prepare('SELECT 1 FROM room_likes WHERE discord_id = ? AND room_id = ?').get(callerId, roomId);
+    const r = db.prepare('SELECT stars FROM room_ratings WHERE discord_id = ? AND room_id = ?').get(callerId, roomId);
+    out.my_rating = r ? r.stars : 0;
+  }
+  return out;
+}
+
+// Coerce a room row that carries social subquery columns into the client-facing shape (booleans, numbers,
+// parsed env_spec). Used by the list endpoints that compute aggregates inline.
+function normalizeRoomSocial(r) {
+  return {
+    ...r,
+    env_spec: parseEnvSpec(r.env_spec),
+    like_count: r.like_count || 0,
+    rating_count: r.rating_count || 0,
+    rating_avg: r.rating_avg ? +(+r.rating_avg).toFixed(2) : 0,
+    favourited: !!r.favourited,
+    liked: !!r.liked,
+    my_rating: r.my_rating || 0,
+  };
 }
 
 // ---- Discord OAuth endpoint ----
@@ -428,13 +489,21 @@ app.post('/rooms', (req, res) => {
 app.get('/rooms/public', (req, res) => {
   const hostname = (req.query.hostname || '').trim().toLowerCase();
   const url = (req.query.url || '').trim();
+  const caller = verifyToken(req);                       // optional — lets us include the caller's own state
+  const me = caller ? caller.sub : '\x00';
   try {
     // Return every public room relevant to THIS page in one shot — bound to this exact URL, OR to this
     // site (scope=hostname, not URL-bound), OR global (no binding). The client buckets these into the
     // launcher's "This page" / "This site" / "Public" sub-tabs.
     const rows = db.prepare(`
       SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon,
-             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count
+             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
+             (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
+             (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
+             (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_avg,
+             (SELECT 1 FROM room_favourites rf WHERE rf.room_id = r.id AND rf.discord_id = ?) as favourited,
+             (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = r.id AND rl2.discord_id = ?) as liked,
+             (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
       FROM rooms r
       WHERE r.public = 1 AND (r.kind IS NULL OR r.kind != 'published') AND (
         r.url = ? OR
@@ -442,8 +511,8 @@ app.get('/rooms/public', (req, res) => {
         (r.url IS NULL AND r.scope IS NULL)
       )
       ORDER BY r.created_at DESC LIMIT 80
-    `).all(url || '\x00', hostname || '');
-    res.json(rows.map(r => ({ ...r, env_spec: parseEnvSpec(r.env_spec) })));
+    `).all(me, me, me, url || '\x00', hostname || '');
+    res.json(rows.map(normalizeRoomSocial));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -453,13 +522,43 @@ app.get('/rooms', (req, res) => {
   try {
     const rows = db.prepare(`
       SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description, r.kind, r.env_spec, r.icon,
-             (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count
+             (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count,
+             (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
+             (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
+             (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_avg,
+             (SELECT 1 FROM room_favourites rf WHERE rf.room_id = r.id AND rf.discord_id = ?) as favourited,
+             (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = r.id AND rl2.discord_id = ?) as liked,
+             (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
       FROM rooms r
       JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
       WHERE r.kind IS NULL OR r.kind != 'published'
       ORDER BY r.created_at ASC
-    `).all(user.sub);
-    res.json(rows.map(r => ({ ...r, env_spec: parseEnvSpec(r.env_spec) })));
+    `).all(user.sub, user.sub, user.sub, user.sub);
+    res.json(rows.map(normalizeRoomSocial));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Phase 3 — the caller's favourited rooms (full room objects, so the Favourites sub-tab can show rooms
+// even when the user hasn't joined them). Same social columns as the other list reads.
+app.get('/rooms/favourites', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(`
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon,
+             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
+             (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
+             (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
+             (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_avg,
+             1 as favourited,
+             (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = r.id AND rl2.discord_id = ?) as liked,
+             (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
+      FROM rooms r
+      JOIN room_favourites fav ON fav.room_id = r.id AND fav.discord_id = ?
+      WHERE r.kind IS NULL OR r.kind != 'published'
+      ORDER BY fav.created_at DESC
+    `).all(user.sub, user.sub, user.sub);
+    res.json(rows.map(normalizeRoomSocial));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -504,6 +603,64 @@ app.delete('/rooms/:id', (req, res) => {
     db.prepare('DELETE FROM room_members WHERE room_id = ?').run(id);
     db.prepare('DELETE FROM rooms WHERE id = ?').run(id);
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ---- Phase 3: room social signals (favourite / like / rating) ----
+// All return the room's fresh aggregates + the caller's own state via roomSocial().
+function requireRoom(req, res) {
+  const user = verifyToken(req);
+  if (!user) { res.status(401).json({ error: 'Unauthorized' }); return null; }
+  const room = db.prepare('SELECT id FROM rooms WHERE id = ?').get(req.params.id);
+  if (!room) { res.status(404).json({ error: 'Room not found' }); return null; }
+  return user;
+}
+
+app.post('/rooms/:id/favourite', (req, res) => {
+  const user = requireRoom(req, res); if (!user) return;
+  try {
+    db.prepare('INSERT OR IGNORE INTO room_favourites (discord_id, room_id) VALUES (?, ?)').run(user.sub, req.params.id);
+    res.json(roomSocial(req.params.id, user.sub));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+app.delete('/rooms/:id/favourite', (req, res) => {
+  const user = requireRoom(req, res); if (!user) return;
+  try {
+    db.prepare('DELETE FROM room_favourites WHERE discord_id = ? AND room_id = ?').run(user.sub, req.params.id);
+    res.json(roomSocial(req.params.id, user.sub));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/rooms/:id/like', (req, res) => {
+  const user = requireRoom(req, res); if (!user) return;
+  try {
+    db.prepare('INSERT OR IGNORE INTO room_likes (discord_id, room_id) VALUES (?, ?)').run(user.sub, req.params.id);
+    res.json(roomSocial(req.params.id, user.sub));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+app.delete('/rooms/:id/like', (req, res) => {
+  const user = requireRoom(req, res); if (!user) return;
+  try {
+    db.prepare('DELETE FROM room_likes WHERE discord_id = ? AND room_id = ?').run(user.sub, req.params.id);
+    res.json(roomSocial(req.params.id, user.sub));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.post('/rooms/:id/rating', (req, res) => {
+  const user = requireRoom(req, res); if (!user) return;
+  const stars = Math.round(Number(req.body && req.body.stars));
+  if (!(stars >= 1 && stars <= 5)) return res.status(400).json({ error: 'stars must be 1–5' });
+  try {
+    db.prepare('INSERT INTO room_ratings (discord_id, room_id, stars, updated_at) VALUES (?, ?, ?, unixepoch()) ON CONFLICT(discord_id, room_id) DO UPDATE SET stars = excluded.stars, updated_at = excluded.updated_at')
+      .run(user.sub, req.params.id, stars);
+    res.json(roomSocial(req.params.id, user.sub));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+app.delete('/rooms/:id/rating', (req, res) => {
+  const user = requireRoom(req, res); if (!user) return;
+  try {
+    db.prepare('DELETE FROM room_ratings WHERE discord_id = ? AND room_id = ?').run(user.sub, req.params.id);
+    res.json(roomSocial(req.params.id, user.sub));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
