@@ -449,6 +449,7 @@ app.get('/rooms', (req, res) => {
              (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count
       FROM rooms r
       JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
+      WHERE r.kind IS NULL OR r.kind != 'published'
       ORDER BY r.created_at ASC
     `).all(user.sub);
     res.json(rows.map(r => ({ ...r, env_spec: parseEnvSpec(r.env_spec) })));
@@ -525,7 +526,7 @@ app.post('/worlds', (req, res) => {
       db.prepare(`UPDATE published_worlds SET name=?, author=?, description=?, thumb=?, content=?, level_count=?, size_bytes=?, allow_remix=?, durability=?, live_state=NULL, updated_at=unixepoch() WHERE id=?`)
         .run(trimmedName, trimmedAuthor, trimmedDesc, thumbStr, contentStr, levels.length, contentStr.length, remix, dura, existing.id);
       db.prepare('UPDATE rooms SET name=?, env_spec=? WHERE id=?').run(trimmedName, JSON.stringify(spec), existing.room_id);
-      return res.json({ worldId: existing.id, roomId: existing.room_id, level_count: levels.length });
+      return res.json({ worldId: existing.id, roomId: existing.room_id, level_count: levels.length, env_spec: spec });
     }
     // ---- new publish: enforce per-user cap, mint ids, create the backing room ----
     const count = db.prepare('SELECT COUNT(*) as c FROM published_worlds WHERE owner_id = ?').get(user.sub).c;
@@ -537,16 +538,16 @@ app.post('/worlds', (req, res) => {
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(roomId, user.sub);
     db.prepare(`INSERT INTO published_worlds (id, owner_id, room_id, name, author, description, thumb, content, level_count, size_bytes, allow_remix, durability) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(id, user.sub, roomId, trimmedName, trimmedAuthor, trimmedDesc, thumbStr, contentStr, levels.length, contentStr.length, remix, dura);
-    res.json({ worldId: id, roomId, level_count: levels.length });
+    res.json({ worldId: id, roomId, level_count: levels.length, env_spec: spec });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
 // Gallery list (public): metadata only, no content blob. play_count is the lifetime enter count.
 app.get('/worlds', (req, res) => {
   try {
-    const rows = db.prepare(`SELECT id, owner_id, room_id, name, author, description, thumb, level_count, allow_remix, durability, play_count, updated_at
-      FROM published_worlds ORDER BY updated_at DESC LIMIT 120`).all();
-    res.json(rows.map(r => ({ ...r, allow_remix: !!r.allow_remix })));
+    const rows = db.prepare(`SELECT w.id, w.owner_id, w.room_id, w.name, w.author, w.description, w.thumb, w.level_count, w.allow_remix, w.durability, w.play_count, w.updated_at, r.env_spec
+      FROM published_worlds w LEFT JOIN rooms r ON r.id = w.room_id ORDER BY w.updated_at DESC LIMIT 120`).all();
+    res.json(rows.map(r => ({ ...r, allow_remix: !!r.allow_remix, env_spec: parseEnvSpec(r.env_spec) })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -1575,6 +1576,200 @@ function emitSnapshotToFollower(followeeId, followeeUsername, socketId) {
   if (snap) io.to(socketId).emit('followee-tabs', snap);
 }
 
+// Build a validated world object from a client/stored descriptor. Shared by the live `avatar-object-spawn`
+// handler AND server-side published-World hydration (7b), so both apply identical clamps/validation.
+// Returns the obj (anchor clamped to world bounds) or null if invalid. The CALLER handles id-dedup,
+// band-clamp, spawn-clear, the object cap, and broadcast.
+function buildWorldObject(type, data, id, ownerId, ownerName) {
+  const WW = MWSim.C.WORLD_W, WH = MWSim.C.WORLD_H;
+  let obj;
+  if (type === 'stroke') {
+    if (!Array.isArray(data.pts)) return null;
+    const pts = [];
+    for (const p of data.pts) {
+      if (!p || !isFinite(p.x) || !isFinite(p.y)) continue;
+      pts.push({ x: Math.max(0, Math.min(WW, p.x)), y: Math.max(0, Math.min(WH, p.y)) });
+      if (pts.length >= 200) break;                       // per-stroke point cap
+    }
+    if (pts.length < 2) return null;
+    let sx = 0, sy = 0; for (const p of pts) { sx += p.x; sy += p.y; }
+    obj = { id, type, ownerId, owner: ownerName, x: sx / pts.length, y: sy / pts.length, pts,
+            w: clampN(data.w, 2, 40, 8),
+            color: (typeof data.color === 'string' && data.color.length <= 32) ? data.color : '#22c55e',
+            hp: data.breakable === false ? null : 3 };   // indestructible when breakable:false (matches stamps/platforms)
+    {                                                        // any stroke can carry a modifier (same clamps as platforms)
+      const boost = clampN(data.boost, -48, 48, 0), updraft = clampN(data.updraft, 0, 30, 0);
+      if (data.bouncy) obj.bouncy = 1;
+      else if (boost) obj.boost = boost;
+      else if (updraft) { obj.updraft = updraft; obj.fanLen = clampN(data.fanLen, 0.3, 3, 1);
+        obj.fanMode = ['push', 'pull', 'pulse', 'pulsepush', 'pulsepull', 'alt'].includes(data.fanMode) ? data.fanMode : 'push';
+        obj.fanPeriod = clampN(data.fanPeriod, 0.5, 6, 2); }
+      if (obj.bouncy || obj.boost || obj.updraft) obj.side = (data.side === -1) ? -1 : 1;   // open-stroke active side
+      if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;     // contact-property surface modifier
+    }
+  } else if (type === 'stamp') {
+    if (typeof data.content !== 'string' || !data.content || data.content.length > 8192) return null;
+    if (!isFinite(data.x) || !isFinite(data.y)) return null;
+    obj = { id, type, ownerId, owner: ownerName,
+            x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+            content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64),
+            shape: (data.shape === 'ellipse' || data.shape === 'tri') ? data.shape : 'rect',
+            angle: clampN(data.angle, -Math.PI, Math.PI, 0),
+            stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
+            hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
+    if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
+  } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
+    if (!isFinite(data.x) || !isFinite(data.y)) return null;
+    obj = { id, type, ownerId, owner: ownerName,
+            x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+            hp: data.breakable === false ? null : 2 };  // erasable/destructible like other props
+    if (type === 'goal' && isFinite(data.target)) obj.target = Math.max(-1, Math.min(63, data.target | 0));  // series destination Level (-1 = next; Phase 5b)
+  } else if (type === 'portal') {
+    if (!isFinite(data.x) || !isFinite(data.y)) return null;
+    obj = { id, type, ownerId, owner: ownerName,
+            x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+            pair: (typeof data.pair === 'string' && data.pair.length <= 64) ? data.pair : id,
+            entry: data.entry !== false, oneWay: data.oneWay === true,
+            hue: clampN(data.hue, 0, 360, 275),     // user-chosen pair colour (round-trips; both ends share it)
+            hp: data.breakable === false ? null : 2 };
+  } else {
+    if (!isFinite(data.x) || !isFinite(data.y)) return null;
+    obj = { id, type: 'platform', ownerId, owner: ownerName,
+            x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+            w: clampN(data.w, 24, 400, 96), h: clampN(data.h, 8, 60, 16),
+            angle: clampN(data.angle, -Math.PI, Math.PI, 0),
+            spin: clampN(data.spin, -0.012, 0.012, 0),     // continuous rotation (rad/ms; 0 = static)
+            boost: clampN(data.boost, -48, 48, 0), updraft: clampN(data.updraft, 0, 30, 0),
+            fanLen: clampN(data.fanLen, 0.3, 3, 1),        // fan effective-distance multiplier (× base column height)
+            fanMode: ['push', 'pull', 'pulse', 'pulsepush', 'pulsepull', 'alt'].includes(data.fanMode) ? data.fanMode : 'push',
+            fanPeriod: clampN(data.fanPeriod, 0.5, 6, 2),  // pulse/alt cycle length (seconds)
+            hp: data.breakable === false ? null : 2 };     // indestructible when breakable:false
+    if (data.bouncy) obj.bouncy = 1;
+    if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
+    if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // rotate around an edge
+    if (data.osc && typeof data.osc === 'object' && isFinite(data.osc.w) && isFinite(data.osc.amp)) {
+      obj.osc = { w: clampN(data.osc.w, -0.25, 0.25, 0),   // oscillating rotation (sweep an arc, no full spin)
+                  amp: clampN(data.osc.amp, 0, Math.PI, 0),
+                  phase: clampN(data.osc.phase, 0, Math.PI * 2, 0) };
+    }
+    if (data.path && Array.isArray(data.path.pts) && data.path.pts.length >= 2) {
+      const pts = [];
+      for (const p of data.path.pts) {
+        if (!p || !isFinite(p.x) || !isFinite(p.y)) continue;
+        pts.push({ x: Math.max(0, Math.min(WW, p.x)), y: Math.max(0, Math.min(WH, p.y)) });
+        if (pts.length >= 64) break;
+      }
+      if (pts.length >= 2) obj.path = { pts, loop: !!data.path.loop,
+        speed: clampN(data.path.speed, 0.02, 1.2, 0.18), phase: clampN(data.path.phase, 0, 1, 0) };
+    }
+  }
+  return obj;
+}
+// ---- Phase 7b: server-side hydration of a PUBLISHED World room (no host present) ----
+// Twin of the client `applyLevel`: load a stored Lvl blob (terrain RLE + mats + objects) directly into the
+// in-memory room state. Runs once per av-room per server lifetime, before the avt-join replay, so every
+// joiner (incl. the first) gets the content. Re-runs after a restart → robust unattended rooms.
+function hydrateRoomFromBlob(avRoom, blob) {
+  if (!blob || !blob.terrain) return;
+  const terr = blob.terrain;
+  if ((terr.cols | 0) !== TERRAIN_COLS || (terr.rows | 0) !== TERRAIN_ROWS) return;   // foreign world size — skip
+  const mats = ensureMats(avRoom);
+  if (blob.mats && typeof blob.mats === 'object') {
+    for (const k in blob.mats) { const d = sanitizeMatDef(blob.mats[k]); if (d) mats[k] = d; }
+  }
+  const grid = ensureTerrain(avRoom), hp = ensureTerrainHp(avRoom);
+  grid.fill(0); hp.fill(0);
+  let i = 0;
+  for (const run of terr.runs || []) {
+    const v = run[0] | 0, n = run[1] | 0;
+    for (let k = 0; k < n && i < grid.length; k++, i++) { if (v) { grid[i] = v; hp[i] = matStrengthSrv(mats, v); } }
+  }
+  if (Array.isArray(terr.hpRuns)) {                       // preserve partial damage where present
+    let j = 0;
+    for (const run of terr.hpRuns) { const val = run[0] | 0, n = run[1] | 0; for (let k = 0; k < n && j < hp.length; k++, j++) if (grid[j] && val) hp[j] = val; }
+  }
+  const map = roomObjects[avRoom] || (roomObjects[avRoom] = new Map());
+  let placed = 0;
+  for (const src of blob.objects || []) {
+    if (placed >= MAX_OBJECTS_PER_ROOM) break;
+    if (!src || !OBJ_TYPES.has(src.type)) continue;
+    const id = 'pub-' + (++objSeq);
+    const obj = buildWorldObject(src.type, src, id, id, 'world');   // server-owned (ownerId = its own id → not user-evictable)
+    if (obj) { map.set(id, obj); placed++; }
+  }
+}
+const _roomKindSpec = db.prepare('SELECT kind, env_spec FROM rooms WHERE id = ?');
+const _pubWorldGet  = db.prepare('SELECT content, durability, live_state FROM published_worlds WHERE id = ?');
+// Resolve a published room+Level → the Lvl blob to hydrate from (durability-aware). null if not a published
+// room or the Level has no `pub` ref. Persistent → the saved live-state for that Level, else the baseline.
+function publishedHydrationFor(roomId, levelIndex) {
+  let row; try { row = _roomKindSpec.get(roomId); } catch { return null; }
+  if (!row || row.kind !== 'published' || !row.env_spec) return null;
+  let spec; try { spec = JSON.parse(row.env_spec); } catch { return null; }
+  const lvl = (spec && Array.isArray(spec.levels)) ? spec.levels[levelIndex | 0] : null;
+  const pub = lvl && lvl.pub;
+  if (!pub || !pub.world) return null;
+  let w; try { w = _pubWorldGet.get(pub.world); } catch { return null; }
+  if (!w) return null;
+  const li = Number.isInteger(pub.lvl) ? pub.lvl : (levelIndex | 0);
+  let content = null, live = null;
+  try { content = JSON.parse(w.content); } catch { return null; }
+  if (w.live_state) { try { live = JSON.parse(w.live_state); } catch {} }
+  const baseBlob = (Array.isArray(content) && content[li]) || null;
+  const liveBlob = (live && live[li]) || null;
+  return { worldId: pub.world, durability: w.durability, blob: (w.durability === 'persistent' && liveBlob) ? liveBlob : baseBlob };
+}
+// One-shot hydration on avt-join. Marks the av-room as hydrated (shares `hydratedAvRooms` with the host
+// path, so the owner's avt-hydrate won't double-fire). No-op for non-published rooms.
+function maybeHydratePublished(avRoom, roomId, levelIndex) {
+  if (hydratedAvRooms.has(avRoom)) return false;
+  const h = publishedHydrationFor(roomId, levelIndex);
+  if (!h) return false;
+  hydratedAvRooms.add(avRoom);
+  if (h.blob) hydrateRoomFromBlob(avRoom, h.blob);
+  return true;
+}
+// ---- Phase 7b: Persistent durability — periodically snapshot a published room's live state back to the DB
+// so it survives a server restart (Showcase worlds skip this and always reload the baseline). ----
+function snapshotObjSrv(o) {                            // server twin of the client snapshotObj (drop ids/owner/hp; hp:null → breakable:false)
+  const obj = {};
+  for (const k in o) { if (k === 'id' || k === 'ownerId' || k === 'owner' || k === 'hp') continue; obj[k] = o[k]; }
+  if (o.hp === null) obj.breakable = false;
+  return obj;
+}
+function captureRoomBlob(avRoom) {                      // → a Lvl blob (terrain RLE + used mats + objects), or null if empty
+  const grid = roomTerrain[avRoom], objs = roomObjects[avRoom];
+  const hasTerr = grid && grid.some(v => v), hasObj = objs && objs.size;
+  if (!hasTerr && !hasObj) return null;
+  const g = grid || ensureTerrain(avRoom);
+  const mats = {}, mm = roomMats[avRoom] || {};
+  if (hasTerr) { const used = new Set(); for (let i = 0; i < g.length; i++) { const v = g[i]; if (v >= CUSTOM_MAT_MIN) used.add(v); } for (const v of used) if (mm[v]) mats[v] = mm[v]; }
+  return {
+    terrain: { cols: TERRAIN_COLS, rows: TERRAIN_ROWS, cell: TERRAIN_CELL, runs: terrainRLE(g).runs, hpRuns: roomTerrainHp[avRoom] ? terrainRLE(roomTerrainHp[avRoom]).runs : undefined },
+    mats,
+    objects: objs ? [...objs.values()].filter(o => !(typeof o.id === 'string' && o.id.startsWith('world-'))).map(snapshotObjSrv) : [],
+  };
+}
+const _persistentWorlds = db.prepare("SELECT id, room_id, content FROM published_worlds WHERE durability = 'persistent'");
+const _setLiveState = db.prepare('UPDATE published_worlds SET live_state = ? WHERE id = ?');
+const _liveStateHash = new Map();                       // worldId → last written JSON (skip unchanged writes)
+function autosavePersistentWorlds() {
+  let rows; try { rows = _persistentWorlds.all(); } catch { return; }
+  for (const w of rows) {
+    let content; try { content = JSON.parse(w.content); } catch { continue; }
+    const n = Array.isArray(content) ? content.length : 0;
+    const live = {}; let any = false;
+    for (let li = 0; li < n; li++) { const blob = captureRoomBlob(avatarRoomKey(w.room_id, li)); if (blob) { live[li] = blob; any = true; } }
+    if (!any) continue;                                  // room never visited this lifetime → don't clobber stored live-state
+    const s = JSON.stringify(live);
+    if (s.length > PUBLISHED_MAX_BYTES * 3) continue;    // safety bound
+    if (_liveStateHash.get(w.id) === s) continue;        // nothing changed since the last write
+    _liveStateHash.set(w.id, s);
+    try { _setLiveState.run(s, w.id); } catch {}
+  }
+}
+setInterval(autosavePersistentWorlds, 30000);
+
 io.on('connection', (socket) => {
   let currentRoom = null;
   let currentUsername = null;
@@ -2048,6 +2243,7 @@ io.on('connection', (socket) => {
     socketToAvatarRoom[socket.id] = avRoom;
     socket.join(avRoom);
     if (type === 'world') ensureWorldGenerated(avRoom, roomId, levelIndex);   // seed keyed by roomId (=URL for the default room → identical worlds), once per server lifetime; band from the Level's size preset
+    maybeHydratePublished(avRoom, roomId, levelIndex);   // Phase 7b: server-load a published World's content (no host needed); runs before the replay below
     if (!roomAvt[avRoom]) roomAvt[avRoom] = new Set();
     const existingPeers = [...roomAvt[avRoom]];
     roomAvt[avRoom].add(socket.id);
@@ -2097,100 +2293,8 @@ io.on('connection', (socket) => {
     if (!roomObjects[currentAvatarRoom]) roomObjects[currentAvatarRoom] = new Map();
     const map = roomObjects[currentAvatarRoom];
     if (map.has(id)) return;                                // ignore duplicate spawn for an existing id
-    const WW = MWSim.C.WORLD_W, WH = MWSim.C.WORLD_H;
-    let obj;
-    if (type === 'stroke') {
-      // Freehand solid terrain (Tier B): validate + clamp the world-coord point list.
-      if (!Array.isArray(data.pts)) return;
-      const pts = [];
-      for (const p of data.pts) {
-        if (!p || !isFinite(p.x) || !isFinite(p.y)) continue;
-        pts.push({ x: Math.max(0, Math.min(WW, p.x)), y: Math.max(0, Math.min(WH, p.y)) });
-        if (pts.length >= 200) break;                       // per-stroke point cap
-      }
-      if (pts.length < 2) return;
-      let sx = 0, sy = 0; for (const p of pts) { sx += p.x; sy += p.y; }
-      obj = { id, type, ownerId: socket.id, owner: currentUsername || socket.id, x: sx / pts.length, y: sy / pts.length, pts,
-              w: clampN(data.w, 2, 40, 8),
-              color: (typeof data.color === 'string' && data.color.length <= 32) ? data.color : '#22c55e',
-              hp: data.breakable === false ? null : 3 };   // indestructible when breakable:false (matches stamps/platforms)
-      {                                                        // any stroke can carry a modifier (same clamps as platforms)
-        const boost = clampN(data.boost, -48, 48, 0), updraft = clampN(data.updraft, 0, 30, 0);
-        if (data.bouncy) obj.bouncy = 1;
-        else if (boost) obj.boost = boost;
-        else if (updraft) { obj.updraft = updraft; obj.fanLen = clampN(data.fanLen, 0.3, 3, 1);
-          obj.fanMode = ['push', 'pull', 'pulse', 'pulsepush', 'pulsepull', 'alt'].includes(data.fanMode) ? data.fanMode : 'push';
-          obj.fanPeriod = clampN(data.fanPeriod, 0.5, 6, 2); }
-        if (obj.bouncy || obj.boost || obj.updraft) obj.side = (data.side === -1) ? -1 : 1;   // open-stroke active side
-        if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;     // contact-property surface modifier
-      }
-    } else if (type === 'stamp') {
-      // Solid, destructible textured box (Tier B): `content` is an emoji or image URL/data-URI.
-      // Now carries a shape (rect/ellipse/tri) + rotation angle.
-      if (typeof data.content !== 'string' || !data.content || data.content.length > 8192) return;
-      if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type, ownerId: socket.id, owner: currentUsername || socket.id,
-              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-              content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64),
-              shape: (data.shape === 'ellipse' || data.shape === 'tri') ? data.shape : 'rect',
-              angle: clampN(data.angle, -Math.PI, Math.PI, 0),
-              stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
-              hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
-      if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
-    } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
-      // Non-solid flags (Phase 5). (x, y) is the pole BASE (ground level). No physics — pure triggers:
-      //  checkpoint = interact (E) to make it your respawn anchor; goal = touch to advance the Level series;
-      //  spawn = host-placed shared Level entry / fallback spawn. All erasable/destructible like other props.
-      if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type, ownerId: socket.id, owner: currentUsername || socket.id,
-              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-              hp: data.breakable === false ? null : 2 };  // erasable/destructible like other props
-      if (type === 'goal' && isFinite(data.target)) obj.target = Math.max(-1, Math.min(63, data.target | 0));  // series destination Level (-1 = next; Phase 5b)
-    } else if (type === 'portal') {
-      // Paired teleporter (Phase 5). (x, y) is the pole BASE. `pair` links two portals; `entry` marks the
-      // one-way source; `oneWay` gates direction. Auto-paired client-side in placement order; round-trips generically.
-      if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type, ownerId: socket.id, owner: currentUsername || socket.id,
-              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-              pair: (typeof data.pair === 'string' && data.pair.length <= 64) ? data.pair : id,
-              entry: data.entry !== false, oneWay: data.oneWay === true,
-              hue: clampN(data.hue, 0, 360, 275),     // user-chosen pair colour (round-trips; both ends share it)
-              hp: data.breakable === false ? null : 2 };
-    } else {
-      // Unified PLATFORM: a solid one-way bar with optional rotation, modifiers, and a motion path.
-      // Modifiers absorb the old props: bouncy (jump pad), boost (conveyor/booster/ramp — signed
-      // strength), updraft (fan). A `path` makes it move; live position is derived client-side from
-      // the wall clock + a phase fraction, so only the static descriptor is stored/replayed.
-      if (!isFinite(data.x) || !isFinite(data.y)) return;
-      obj = { id, type: 'platform', ownerId: socket.id, owner: currentUsername || socket.id,
-              x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-              w: clampN(data.w, 24, 400, 96), h: clampN(data.h, 8, 60, 16),
-              angle: clampN(data.angle, -Math.PI, Math.PI, 0),
-              spin: clampN(data.spin, -0.012, 0.012, 0),     // continuous rotation (rad/ms; 0 = static)
-              boost: clampN(data.boost, -48, 48, 0), updraft: clampN(data.updraft, 0, 30, 0),
-              fanLen: clampN(data.fanLen, 0.3, 3, 1),        // fan effective-distance multiplier (× base column height)
-              fanMode: ['push', 'pull', 'pulse', 'pulsepush', 'pulsepull', 'alt'].includes(data.fanMode) ? data.fanMode : 'push',
-              fanPeriod: clampN(data.fanPeriod, 0.5, 6, 2),  // pulse/alt cycle length (seconds)
-              hp: data.breakable === false ? null : 2 };     // indestructible when breakable:false
-      if (data.bouncy) obj.bouncy = 1;
-      if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
-      if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // rotate around an edge
-      if (data.osc && typeof data.osc === 'object' && isFinite(data.osc.w) && isFinite(data.osc.amp)) {
-        obj.osc = { w: clampN(data.osc.w, -0.25, 0.25, 0),   // oscillating rotation (sweep an arc, no full spin)
-                    amp: clampN(data.osc.amp, 0, Math.PI, 0),
-                    phase: clampN(data.osc.phase, 0, Math.PI * 2, 0) };
-      }
-      if (data.path && Array.isArray(data.path.pts) && data.path.pts.length >= 2) {
-        const pts = [];
-        for (const p of data.path.pts) {
-          if (!p || !isFinite(p.x) || !isFinite(p.y)) continue;
-          pts.push({ x: Math.max(0, Math.min(WW, p.x)), y: Math.max(0, Math.min(WH, p.y)) });
-          if (pts.length >= 64) break;
-        }
-        if (pts.length >= 2) obj.path = { pts, loop: !!data.path.loop,
-          speed: clampN(data.path.speed, 0.02, 1.2, 0.18), phase: clampN(data.path.phase, 0, 1, 0) };
-      }
-    }
+    const obj = buildWorldObject(type, data, id, socket.id, currentUsername || socket.id);   // shared with 7b hydration
+    if (!obj) return;
     // Phase 6: clamp placement into the playable band (no-op at 'large'). Anti-cheat belt+suspenders — the
     // client is already confined by camera/walls; this keeps a crafted packet from landing objects in the
     // washed-out region outside the band. Clamps the anchor + any point lists (strokes, platform paths).
