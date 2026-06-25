@@ -919,6 +919,22 @@ const AVATAR_MODES = new Set(['sandbox', 'world']);   // Level TYPE tokens (gene
 // For the default per-URL room, roomId IS the URL, so a Level's key + its seed lookup stay byte-stable
 // across the migration. levelIndex selects a Level within a room's World ([sandbox=0, life=1] default).
 function avatarRoomKey(roomId, levelIndex) { return 'av:' + roomId + ':' + (levelIndex | 0); }
+// Other sockets of the SAME identity already live in an avatar room (a second tab/window entering the same
+// World). Excludes the same physical tab (a same-tab navigation reconnects as a new socket with the same
+// tabSession — that's a reconnect, not a genuine second instance, so it must not trip the takeover prompt).
+function sameUserAvSockets(avRoom, sid) {
+  const set = roomAvt[avRoom]; if (!set) return [];
+  const did = socketToDiscordId[sid], uname = socketToUsername[sid], myTab = socketToTabSession[sid];
+  const out = [];
+  for (const other of set) {
+    if (other === sid) continue;
+    if (myTab && socketToTabSession[other] === myTab) continue;
+    const match = did ? socketToDiscordId[other] === did
+                      : (!socketToDiscordId[other] && uname && socketToUsername[other] === uname);
+    if (match) out.push(other);
+  }
+  return out;
+}
 // 2b: a client may request a user-room's avatar World via `data.roomId` (a 6-char room code). We trust
 // it only after an access check — member of a private room, or any public room — else fall back to the
 // default per-URL room (currentRoom). Falsy/unknown id → the per-URL room. The page URL is never a valid
@@ -1333,6 +1349,7 @@ const socketVoiceScope = {}; // socketId → voice scope ('page' uses currentRoo
 const userCurrentFullUrl = {};
 const socketDmRooms = {};      // socketId → Set of DM roomIds
 const socketToDiscordId = {};  // socketId → discordId
+const socketToUsername = {};   // socketId → username (identity key for unverified users; dedup + avatar takeover)
 const discordIdToSocket = {};       // discordId → socketId (latest socket, for DMs/invites/etc.)
 const discordIdToFollowSockets = {}; // discordId → Set<socketId> (all active tabs, for followee-nav)
 const discordIdToFullUrl = {}; // discordId → current full URL (active tab)
@@ -1358,7 +1375,15 @@ const tabDisconnectTimers = {}; // `${discordId}:${tabSession}` → timerId
 const TAB_DISCONNECT_DEBOUNCE_MS = 1000;
 
 function broadcastPresence(room) {
-  const users = Object.values(roomUsers[room] || {});
+  // Collapse multiple sockets of the SAME user into one who-list entry — when locked into a context Room,
+  // every page you open auto-joins that Room's presence bucket, and two tabs on one page share a bucket too;
+  // either way one identity = one member. Keyed by discord_id (verified) or username (unverified).
+  const seen = new Set(), users = [];
+  for (const u of Object.values(roomUsers[room] || {})) {
+    const key = u.discord_id || ('u:' + u.username);
+    if (seen.has(key)) continue;
+    seen.add(key); users.push(u);
+  }
   io.to(room).emit('presence', { count: users.length, users });
 }
 
@@ -1457,6 +1482,7 @@ io.on('connection', (socket) => {
 
     currentRoom = url;
     currentUsername = username;
+    socketToUsername[socket.id] = username;
     currentAvatarRoom = avatarRoomKey(url, 0);   // default Level 0 (sandbox) until avt-join picks a Level
     socket.join(currentRoom);
     socket.join('user:' + username);
@@ -1843,6 +1869,19 @@ io.on('connection', (socket) => {
     // levelIndex selects the Level within the room's World; default the per-URL room's [sandbox=0, life=1].
     const levelIndex = (data && Number.isInteger(data.levelIndex) && data.levelIndex >= 0) ? data.levelIndex : (type === 'world' ? 1 : 0);
     const avRoom = avatarRoomKey(roomId, levelIndex);
+    // Duplicate-instance guard: if THIS identity is already live in this avatar World from another tab/window,
+    // don't silently spawn a second blob. Ask the joiner to confirm a takeover (avt-dup); they re-send with
+    // force:true, and we evict the other instance(s) here. (No-op at the common single-instance case.)
+    const dupSockets = sameUserAvSockets(avRoom, socket.id);
+    if (dupSockets.length && !(data && data.force)) { socket.emit('avt-dup', { levelIndex }); return; }
+    if (dupSockets.length) {
+      for (const other of dupSockets) {
+        if (roomAvt[avRoom] && roomAvt[avRoom].delete(other)) socket.to(avRoom).emit('avt-peer-left', { id: other });
+        if (socketToAvatarRoom[other] === avRoom) delete socketToAvatarRoom[other];
+        try { io.sockets.sockets.get(other)?.leave(avRoom); } catch {}
+        io.to(other).emit('avt-evicted', { levelIndex });
+      }
+    }
     currentAvLevelIndex = levelIndex;                              // Phase 3: per-Level build lock keys on this
     // Leave any previous avatar room (Level switch without an explicit avt-leave).
     if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
@@ -2543,6 +2582,7 @@ io.on('connection', (socket) => {
       }
       delete socketDmRooms[socket.id];
     }
+    delete socketToUsername[socket.id];
     // Friends: notify accepted friends this user went offline
     const dId = socketToDiscordId[socket.id];
     if (dId) {
