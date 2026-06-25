@@ -109,6 +109,9 @@ try { db.exec('ALTER TABLE rooms ADD COLUMN meta TEXT'); } catch {}
 // Stage 6 Active-Room launcher — a public room may be bound to a specific page URL (the client's
 // `currentURL` = hostname+pathname+search, same key the page-bound layer uses). Null = not URL-bound.
 try { db.exec('ALTER TABLE rooms ADD COLUMN url TEXT'); } catch {}
+// Phase 2 (hotbar): a room may carry a visual icon — either a single emoji or an image URL. Lets the
+// open-rooms hotbar / list rows distinguish rooms at a glance. Null = fall back to the binding glyph.
+try { db.exec('ALTER TABLE rooms ADD COLUMN icon TEXT'); } catch {}
 
 db.exec(`
   CREATE TABLE IF NOT EXISTS follows (
@@ -383,12 +386,16 @@ function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { retu
 app.post('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, description, public: isPublic, scope, url, env_spec, levelLock, features } = req.body;
+  const { name, description, public: isPublic, scope, url, env_spec, levelLock, features, icon } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   try {
     const id = generateRoomCode();
     const trimmedName = name.trim().slice(0, 40);
     const trimmedDesc = (description || '').trim().slice(0, 100) || null;
+    // icon = emoji (short) OR image URL (longer); cap to keep the column small (no data: URLs).
+    let roomIcon = (typeof icon === 'string' ? icon.trim() : '');
+    if (/^data:/i.test(roomIcon)) roomIcon = '';        // reject inline data URLs (too big)
+    roomIcon = roomIcon.slice(0, 512) || null;
     const pub = isPublic ? 1 : 0;
     // A public room is bound to EITHER a page URL OR a site scope OR nothing (global) — mutually exclusive.
     const roomUrl = (isPublic && url) ? url.trim().slice(0, 500) : null;
@@ -412,9 +419,9 @@ app.post('/rooms', (req, res) => {
       if (Object.keys(feats).length) { permsObj = permsObj || {}; permsObj.features = feats; }
     }
     const perms = permsObj ? JSON.stringify(permsObj) : null;
-    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, url, description, kind, env_spec, perms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null, perms);
+    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, url, description, kind, env_spec, perms, icon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null, perms, roomIcon);
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(id, user.sub);
-    res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, url: roomUrl, description: trimmedDesc, kind, env_spec: spec });
+    res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, url: roomUrl, description: trimmedDesc, kind, env_spec: spec, icon: roomIcon });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -426,7 +433,7 @@ app.get('/rooms/public', (req, res) => {
     // site (scope=hostname, not URL-bound), OR global (no binding). The client buckets these into the
     // launcher's "This page" / "This site" / "Public" sub-tabs.
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec,
+      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count
       FROM rooms r
       WHERE r.public = 1 AND (r.kind IS NULL OR r.kind != 'published') AND (
@@ -445,7 +452,7 @@ app.get('/rooms', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description, r.kind, r.env_spec,
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description, r.kind, r.env_spec, r.icon,
              (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count
       FROM rooms r
       JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
@@ -462,7 +469,7 @@ app.post('/rooms/join', (req, res) => {
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
   try {
-    const room = db.prepare('SELECT id, name, owner_id, public, scope, description, kind, env_spec FROM rooms WHERE id = ?').get(code.toUpperCase().trim());
+    const room = db.prepare('SELECT id, name, owner_id, public, scope, description, kind, env_spec, icon FROM rooms WHERE id = ?').get(code.toUpperCase().trim());
     if (!room) return res.status(404).json({ error: 'Room not found' });
     db.prepare('INSERT OR IGNORE INTO room_members (room_id, discord_id) VALUES (?, ?)').run(room.id, user.sub);
     const memberCount = db.prepare('SELECT COUNT(*) as c FROM room_members WHERE room_id = ?').get(room.id).c;
