@@ -429,7 +429,7 @@ app.get('/rooms/public', (req, res) => {
       SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count
       FROM rooms r
-      WHERE r.public = 1 AND (
+      WHERE r.public = 1 AND (r.kind IS NULL OR r.kind != 'published') AND (
         r.url = ? OR
         (r.url IS NULL AND r.scope = ?) OR
         (r.url IS NULL AND r.scope IS NULL)
@@ -495,6 +495,86 @@ app.delete('/rooms/:id', (req, res) => {
     db.prepare('DELETE FROM room_messages WHERE room_id = ?').run(id);
     db.prepare('DELETE FROM room_members WHERE room_id = ?').run(id);
     db.prepare('DELETE FROM rooms WHERE id = ?').run(id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ---- Phase 7: published Worlds (gallery + publish/update/remix/unpublish) ----
+// Publish a new World or update an existing one (re-publish). Backed by a public room (kind='published')
+// that's hidden from the launcher and surfaced only in the gallery.
+app.post('/worlds', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { worldId, name, description, author, content, thumb, allow_remix, durability } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
+  const levels = validatePublishContent(content);
+  if (!levels) return res.status(400).json({ error: 'Invalid World content' });
+  const contentStr = JSON.stringify(levels);
+  if (contentStr.length > PUBLISHED_MAX_BYTES) return res.status(413).json({ error: 'World too large to publish' });
+  const trimmedName = name.trim().slice(0, 40);
+  const trimmedDesc = (description || '').trim().slice(0, 200) || null;
+  const trimmedAuthor = (author || '').trim().slice(0, 40) || null;
+  const thumbStr = (typeof thumb === 'string' && thumb.length <= PUBLISHED_THUMB_MAX) ? thumb : null;
+  const remix = allow_remix ? 1 : 0;
+  const dura = (durability === 'persistent') ? 'persistent' : 'showcase';
+  try {
+    const existing = worldId ? db.prepare('SELECT * FROM published_worlds WHERE id = ?').get(worldId) : null;
+    if (existing) {                                                  // ---- update / re-publish ----
+      if (existing.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+      const spec = derivePubEnvSpec(levels, existing.id);
+      db.prepare(`UPDATE published_worlds SET name=?, author=?, description=?, thumb=?, content=?, level_count=?, size_bytes=?, allow_remix=?, durability=?, live_state=NULL, updated_at=unixepoch() WHERE id=?`)
+        .run(trimmedName, trimmedAuthor, trimmedDesc, thumbStr, contentStr, levels.length, contentStr.length, remix, dura, existing.id);
+      db.prepare('UPDATE rooms SET name=?, env_spec=? WHERE id=?').run(trimmedName, JSON.stringify(spec), existing.room_id);
+      return res.json({ worldId: existing.id, roomId: existing.room_id, level_count: levels.length });
+    }
+    // ---- new publish: enforce per-user cap, mint ids, create the backing room ----
+    const count = db.prepare('SELECT COUNT(*) as c FROM published_worlds WHERE owner_id = ?').get(user.sub).c;
+    if (count >= PUBLISHED_PER_USER) return res.status(409).json({ error: 'Published-World limit reached (' + PUBLISHED_PER_USER + ')' });
+    const id = genWorldId();
+    const roomId = generateRoomCode();
+    const spec = derivePubEnvSpec(levels, id);
+    db.prepare('INSERT INTO rooms (id, name, owner_id, public, kind, env_spec) VALUES (?, ?, ?, 1, \'published\', ?)').run(roomId, trimmedName, user.sub, JSON.stringify(spec));
+    db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(roomId, user.sub);
+    db.prepare(`INSERT INTO published_worlds (id, owner_id, room_id, name, author, description, thumb, content, level_count, size_bytes, allow_remix, durability) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, user.sub, roomId, trimmedName, trimmedAuthor, trimmedDesc, thumbStr, contentStr, levels.length, contentStr.length, remix, dura);
+    res.json({ worldId: id, roomId, level_count: levels.length });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Gallery list (public): metadata only, no content blob. play_count is the lifetime enter count.
+app.get('/worlds', (req, res) => {
+  try {
+    const rows = db.prepare(`SELECT id, owner_id, room_id, name, author, description, thumb, level_count, allow_remix, durability, play_count, updated_at
+      FROM published_worlds ORDER BY updated_at DESC LIMIT 120`).all();
+    res.json(rows.map(r => ({ ...r, allow_remix: !!r.allow_remix })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Full content for a remix download — gated by allow_remix unless the requester owns it.
+app.get('/worlds/:id', (req, res) => {
+  try {
+    const w = db.prepare('SELECT * FROM published_worlds WHERE id = ?').get(req.params.id);
+    if (!w) return res.status(404).json({ error: 'Not found' });
+    const user = verifyToken(req);
+    const isOwner = !!(user && user.sub === w.owner_id);
+    if (!w.allow_remix && !isOwner) return res.status(403).json({ error: 'Remix not allowed' });
+    res.json({ id: w.id, name: w.name, author: w.author, description: w.description, level_count: w.level_count,
+               allow_remix: !!w.allow_remix, durability: w.durability, content: JSON.parse(w.content) });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Unpublish — owner only. Drops the content + tears down the backing room.
+app.delete('/worlds/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const w = db.prepare('SELECT owner_id, room_id FROM published_worlds WHERE id = ?').get(req.params.id);
+    if (!w) return res.status(404).json({ error: 'Not found' });
+    if (w.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+    db.prepare('DELETE FROM published_worlds WHERE id = ?').run(req.params.id);
+    db.prepare('DELETE FROM room_members WHERE room_id = ?').run(w.room_id);
+    db.prepare('DELETE FROM room_messages WHERE room_id = ?').run(w.room_id);
+    db.prepare('DELETE FROM rooms WHERE id = ?').run(w.room_id);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -1093,6 +1173,59 @@ function worldSeedFor(url) {
   const seed = (Math.random() * 0xFFFFFFFF) >>> 0;
   _insWorldSeed.run(url, seed);
   return seed;
+}
+// ---- Phase 7: published Worlds (server-side persistence + gallery + unattended hydration) ----------
+// A published World stores its full content blobs (terrain RLE + objects + mats per Level) on the server,
+// backed by a public `rooms` row (kind='published') so it reuses the context-room/avt-join/presence/perms
+// plumbing. The room's env_spec Levels carry a server-resolvable `pub:{world,lvl}` ref so the SERVER can
+// hydrate the room with no host present (7b). `content` = the Saved World's Lvl array (captureLevel shape).
+db.exec(`CREATE TABLE IF NOT EXISTS published_worlds (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  room_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  author TEXT,
+  description TEXT,
+  thumb TEXT,
+  content TEXT NOT NULL,
+  level_count INTEGER DEFAULT 1,
+  size_bytes INTEGER DEFAULT 0,
+  allow_remix INTEGER DEFAULT 0,
+  durability TEXT DEFAULT 'showcase',
+  live_state TEXT,
+  play_count INTEGER DEFAULT 0,
+  created_at INTEGER DEFAULT (unixepoch()),
+  updated_at INTEGER DEFAULT (unixepoch())
+)`);
+const PUBLISHED_MAX_BYTES = 2_000_000;                // content blob cap per World (~2 MB)
+const PUBLISHED_PER_USER = 12;                        // how many Worlds one user may have published at once
+const PUBLISHED_THUMB_MAX = 60_000;                   // thumbnail data-URI cap (chars)
+function genWorldId() {
+  let id;
+  do { id = 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  while (db.prepare('SELECT 1 FROM published_worlds WHERE id = ?').get(id));
+  return id;
+}
+// Light structural validation of a publish payload. The Lvl blobs stay opaque here (re-validated cell-by-cell
+// when the server hydrates them in 7b); we just enforce the array shape, terrain grid dims, and Level count.
+function validatePublishContent(levels) {
+  if (!Array.isArray(levels) || !levels.length || levels.length > ROOM_LEVEL_CAP) return null;
+  for (const l of levels) {
+    if (!l || typeof l !== 'object' || !l.terrain || typeof l.terrain !== 'object') return null;
+    if ((l.terrain.cols | 0) !== TERRAIN_COLS || (l.terrain.rows | 0) !== TERRAIN_ROWS) return null;  // foreign world size
+  }
+  return levels;
+}
+// Public, server-resolvable env_spec for a published World's backing room. Each Level points back at the
+// stored content via `pub:{world,lvl}` (server hydrates from it); 'world'-type content maps to 'life'.
+function derivePubEnvSpec(content, worldId) {
+  const levels = content.map((l, i) => {
+    const type = (l && (l.type === 'world' || l.type === 'life')) ? 'life' : 'sandbox';
+    const o = { type, name: 'Level ' + (i + 1), size: 'large', pub: { world: worldId, lvl: i } };
+    if (Number.isInteger(l && l.bg) && l.bg >= 0 && l.bg <= 3) o.bg = l.bg;
+    return o;
+  });
+  return { levels, nav: 'free' };
 }
 function mulberry32(a) {                              // tiny deterministic PRNG (same family the client could mirror)
   return function () {
