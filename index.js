@@ -353,6 +353,7 @@ const LEVEL_SIZES = new Set(['tiny', 'small', 'medium', 'large']);  // Phase 6 w
 // Playable WIDTH per preset (mirror of SIZE_PRESETS.w client-side; 'large' = full world). Generation is
 // confined to this band (centred) + a margin so a small Level doesn't gen/save terrain it can't reach.
 const SIZE_PRESET_W = { tiny: 1920, small: 3840, medium: 7680, large: MWSim.C.WORLD_W };
+const SIZE_PRESET_H = { tiny: 1080, small: 1440, medium: 2160, large: MWSim.C.WORLD_H };   // mirror of SIZE_PRESETS.h client-side
 const GEN_MARGIN = 1800;                              // px of decorative terrain generated beyond each wall
 // env_spec stores the World's ordered Level list (type + display name) + nav mode. Terrain/object CONTENT
 // stays host-local in v1 (hydrated live on entry), so the spec is public-safe metadata only.
@@ -369,6 +370,9 @@ function sanitizeEnvSpec(raw) {
     if (l && l.src && typeof l.src.id === 'string' && l.src.id && Number.isInteger(l.src.lvl) && l.src.lvl >= 0) {
       out.src = { id: l.src.id.slice(0, 40), lvl: l.src.lvl };
     }
+    // Optional saved background mode (0=Page,1=Canvas,2=Canvas-clear,3=Sky): travels in the public spec so
+    // NON-host viewers of a saved Level get the right bg too (the host-local blob bg never reaches them).
+    if (l && Number.isInteger(l.bg) && l.bg >= 0 && l.bg <= 3) out.bg = l.bg;
     return out;
   });
   return { levels, nav: (raw.nav === 'series') ? 'series' : 'free' };
@@ -1191,19 +1195,36 @@ function generateWorld(avatarRoom, seed, band) {
 }
 // Phase 6: generation column band for a Level's size preset (null = full world). Looks up the room's
 // env_spec; the page-default room (roomId = URL, no DB row) falls through to 'large' → full width.
-function genColBand(roomId, levelIndex) {
-  let size = 'large';
+// Resolve a Level's size preset key from the room's stored env_spec (page/URL room or missing → 'large').
+function levelSizeFor(roomId, levelIndex) {
   try {
     const row = db.prepare('SELECT env_spec FROM rooms WHERE id = ?').get(roomId);
     const spec = row ? parseEnvSpec(row.env_spec) : null;
     const lvl = (spec && Array.isArray(spec.levels)) ? spec.levels[levelIndex | 0] : null;
-    if (lvl && LEVEL_SIZES.has(lvl.size)) size = lvl.size;
+    if (lvl && LEVEL_SIZES.has(lvl.size)) return lvl.size;
   } catch {}
-  const pw = SIZE_PRESET_W[size] || MWSim.C.WORLD_W;
+  return 'large';
+}
+function genColBand(roomId, levelIndex) {
+  const pw = SIZE_PRESET_W[levelSizeFor(roomId, levelIndex)] || MWSim.C.WORLD_W;
   if (pw >= MWSim.C.WORLD_W) return null;                               // full world → no confinement
   const half = pw / 2 + GEN_MARGIN;
   const x0 = Math.max(0, MWSim.C.WORLD_W / 2 - half), x1 = Math.min(MWSim.C.WORLD_W, MWSim.C.WORLD_W / 2 + half);
   return { c0: Math.floor(x0 / TERRAIN_CELL), c1: Math.ceil(x1 / TERRAIN_CELL) };
+}
+// Phase 6: the playable band rectangle (world px) for a Level — centred horizontally, anchored to the floor.
+// Drives the server-side object-position clamp (belt+suspenders vs client camera/wall confinement). null = full world.
+function playBand(roomId, levelIndex) {
+  const size = levelSizeFor(roomId, levelIndex);
+  const pw = SIZE_PRESET_W[size] || MWSim.C.WORLD_W, ph = SIZE_PRESET_H[size] || MWSim.C.WORLD_H;
+  if (pw >= MWSim.C.WORLD_W && ph >= MWSim.C.WORLD_H) return null;      // full world → no confinement
+  const x0 = Math.floor((MWSim.C.WORLD_W - pw) / 2);
+  return { x0, x1: x0 + pw, y0: MWSim.C.WORLD_H - ph, y1: MWSim.C.WORLD_H };
+}
+// Clamp a world point into the playable band (no-op when band is null).
+function clampToBand(band, x, y) {
+  if (!band) return { x, y };
+  return { x: Math.max(band.x0, Math.min(band.x1, x)), y: Math.max(band.y0, Math.min(band.y1, y)) };
 }
 // Ensure a 'world'-mode room has its terrain generated exactly once per server lifetime.
 function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
@@ -1430,6 +1451,7 @@ io.on('connection', (socket) => {
   let currentAvBuildRoomId = null; // Phase 3: real roomId for L2 build-perm checks (null = page/URL room → open build)
   let currentAvOwnerId = null;     // owner_id of that room (null for the page/URL room)
   let currentAvLevelIndex = 0;     // this socket's current Level index within the room's World (for per-Level locks)
+  let currentAvBand = null;        // Phase 6: this socket's playable band rect (world px) — server-clamps object placement; null = full world
   // May this socket mutate the current avatar World? Page/URL room → always. Owner → always. A locked
   // Level blocks everyone but the owner. Else the room's per-user override, falling back to the role
   // default. Read live so grant/lock changes apply at once.
@@ -1883,6 +1905,7 @@ io.on('connection', (socket) => {
       }
     }
     currentAvLevelIndex = levelIndex;                              // Phase 3: per-Level build lock keys on this
+    currentAvBand = playBand(roomId, levelIndex);                  // Phase 6: clamp this socket's object placement to the Level's band
     // Leave any previous avatar room (Level switch without an explicit avt-leave).
     if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
       socket.leave(currentAvatarRoom);
@@ -2034,6 +2057,15 @@ io.on('connection', (socket) => {
         if (pts.length >= 2) obj.path = { pts, loop: !!data.path.loop,
           speed: clampN(data.path.speed, 0.02, 1.2, 0.18), phase: clampN(data.path.phase, 0, 1, 0) };
       }
+    }
+    // Phase 6: clamp placement into the playable band (no-op at 'large'). Anti-cheat belt+suspenders — the
+    // client is already confined by camera/walls; this keeps a crafted packet from landing objects in the
+    // washed-out region outside the band. Clamps the anchor + any point lists (strokes, platform paths).
+    if (currentAvBand) {
+      const b = currentAvBand;
+      const a = clampToBand(b, obj.x, obj.y); obj.x = a.x; obj.y = a.y;
+      if (Array.isArray(obj.pts)) for (const p of obj.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
+      if (obj.path && Array.isArray(obj.path.pts)) for (const p of obj.path.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
     }
     if (type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal') {  // no building solids on the spawn (world mode); non-solid flags → allowed
       const clear = spawnClearRect(currentAvatarRoom);
