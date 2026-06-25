@@ -251,6 +251,28 @@ function normalizeRoomSocial(r) {
   return out;
 }
 
+// Coerce a published_worlds row (joined to its backing room for env_spec/perms + social subqueries) into
+// the client-facing gallery shape. Shared by GET /worlds and the favourited-Worlds half of /rooms/favourites.
+function mapWorldRow(r) {
+  return {
+    ...r, allow_remix: !!r.allow_remix, env_spec: parseEnvSpec(r.env_spec),
+    players_now: (io.sockets.adapter.rooms.get('pg:' + r.room_id) || { size: 0 }).size,
+    like_count: r.like_count || 0, rating_count: r.rating_count || 0,
+    rating_avg: r.rating_avg ? +(+r.rating_avg).toFixed(2) : 0,
+    favourited: !!r.favourited, liked: !!r.liked, my_rating: r.my_rating || 0,
+    feature_avail: roomFeatureAvail(r.perms), perms: undefined,
+  };
+}
+// SELECT column list shared by the two World reads (GET /worlds + favourited Worlds). `?` placeholders:
+// favourited, liked, my_rating (each binds the caller's id). For the favourites query the favourited
+// subquery is replaced by a literal `1` (the JOIN already restricts to the caller's favourites).
+const WORLD_SOCIAL_COLS = `w.id, w.owner_id, w.room_id, w.name, w.author, w.description, w.thumb, w.level_count, w.allow_remix, w.durability, w.play_count, w.updated_at, r.env_spec, r.perms,
+    (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = w.room_id) as like_count,
+    (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = w.room_id) as rating_count,
+    (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = w.room_id) as rating_avg,
+    (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = w.room_id AND rl2.discord_id = ?) as liked,
+    (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = w.room_id AND rr2.discord_id = ?) as my_rating`;
+
 // ---- Discord OAuth endpoint ----
 app.post('/auth/discord', async (req, res) => {
   const { code, redirectUri } = req.body;
@@ -579,7 +601,14 @@ app.get('/rooms/favourites', (req, res) => {
       WHERE r.kind IS NULL OR r.kind != 'published'
       ORDER BY fav.created_at DESC
     `).all(user.sub, user.sub, user.sub);
-    res.json(rows.map(normalizeRoomSocial));
+    // Favourited published Worlds (kind='published') are excluded above; fetch them in gallery shape so
+    // the Faves tab can render a separate "Worlds" section alongside the "Rooms" section.
+    const worlds = db.prepare(`SELECT ${WORLD_SOCIAL_COLS}, 1 as favourited
+      FROM published_worlds w
+      JOIN room_favourites fav ON fav.room_id = w.room_id AND fav.discord_id = ?
+      LEFT JOIN rooms r ON r.id = w.room_id
+      ORDER BY fav.created_at DESC`).all(user.sub, user.sub, user.sub);
+    res.json({ rooms: rows.map(normalizeRoomSocial), worlds: worlds.map(mapWorldRow) });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -736,22 +765,10 @@ app.get('/worlds', (req, res) => {
     // Published Worlds are backed by a public rooms row (kind='published'), so the same room_likes /
     // room_ratings / room_favourites tables (keyed by room_id) drive their social signals, and r.perms
     // drives the per-Layer "features for non-hosts" summary.
-    const rows = db.prepare(`SELECT w.id, w.owner_id, w.room_id, w.name, w.author, w.description, w.thumb, w.level_count, w.allow_remix, w.durability, w.play_count, w.updated_at, r.env_spec, r.perms,
-        (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = w.room_id) as like_count,
-        (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = w.room_id) as rating_count,
-        (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = w.room_id) as rating_avg,
-        (SELECT 1 FROM room_favourites rf WHERE rf.room_id = w.room_id AND rf.discord_id = ?) as favourited,
-        (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = w.room_id AND rl2.discord_id = ?) as liked,
-        (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = w.room_id AND rr2.discord_id = ?) as my_rating
+    const rows = db.prepare(`SELECT ${WORLD_SOCIAL_COLS},
+        (SELECT 1 FROM room_favourites rf WHERE rf.room_id = w.room_id AND rf.discord_id = ?) as favourited
       FROM published_worlds w LEFT JOIN rooms r ON r.id = w.room_id ORDER BY w.updated_at DESC LIMIT 120`).all(me, me, me);
-    res.json(rows.map(r => ({
-      ...r, allow_remix: !!r.allow_remix, env_spec: parseEnvSpec(r.env_spec),
-      players_now: (io.sockets.adapter.rooms.get('pg:' + r.room_id) || { size: 0 }).size,
-      like_count: r.like_count || 0, rating_count: r.rating_count || 0,
-      rating_avg: r.rating_avg ? +(+r.rating_avg).toFixed(2) : 0,
-      favourited: !!r.favourited, liked: !!r.liked, my_rating: r.my_rating || 0,
-      feature_avail: roomFeatureAvail(r.perms), perms: undefined,
-    })));
+    res.json(rows.map(mapWorldRow));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
