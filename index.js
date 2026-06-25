@@ -942,6 +942,10 @@ app.get('/dms', (req, res) => {
 });
 
 const roomUsers = {};       // roomId → { socketId: { username, verified, avatar, discord_id } }
+// People on a PAGE regardless of which context Room they're in. Keyed by the bare URL room
+// (every page socket joins that room) so we can show a page-wide headcount alongside the
+// room-scoped presence (roomUsers, which follows the context Room bucket).
+const pageUsers = {};       // bareUrlRoom → { socketId: { username, discord_id } }
 const roomHistory = {};
 const roomMsgReactions = {}; // roomId → { msgId → { emoji → [username] } }
 const roomAnnotations = {};
@@ -1571,6 +1575,16 @@ function broadcastPresence(room) {
   io.to(room).emit('presence', { count: users.length, users });
 }
 
+// Headcount of distinct identities on a page (bare URL room), independent of context Room.
+function broadcastPagePresence(room) {
+  const seen = new Set();
+  for (const u of Object.values(pageUsers[room] || {})) {
+    const key = u.discord_id || ('u:' + u.username);
+    seen.add(key);
+  }
+  io.to(room).emit('page-presence', { count: seen.size });
+}
+
 function buildTabSnapshot(discordId, username) {
   const tabsMap = leaderTabs[discordId];
   if (!tabsMap || tabsMap.size === 0) return null;
@@ -1879,10 +1893,12 @@ io.on('connection', (socket) => {
     // Evict any prior socket in THIS room carrying the same tabSession (same tab) so the rejoin
     // cleanly replaces it instead of waiting for the timeout. (Distinct real tabs have distinct
     // tabSessions, so this never collapses two genuine tabs.)
+    if (!pageUsers[currentRoom]) pageUsers[currentRoom] = {};
     if (tabSession) {
       for (const oldSid of Object.keys(roomUsers[currentPresenceRoom])) {
         if (oldSid === socket.id || socketToTabSession[oldSid] !== tabSession) continue;
         delete roomUsers[currentPresenceRoom][oldSid];
+        delete (pageUsers[currentRoom] || {})[oldSid];
         if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][oldSid];
         removeSimAvatar(currentRoom, oldSid);
         const oldAv = socketToAvatarRoom[oldSid];   // the evicted socket's avatar-world room (mode-scoped, may differ from this one)
@@ -1894,6 +1910,7 @@ io.on('connection', (socket) => {
       }
     }
     roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId };
+    pageUsers[currentRoom][socket.id] = { username, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
     if (roomAnnotations[currentPageRoom]) socket.emit('annotations-init', roomAnnotations[currentPageRoom]);
@@ -1902,6 +1919,7 @@ io.on('connection', (socket) => {
     if (roomAvatars[currentRoom]) socket.emit('avatars-init', Object.values(roomAvatars[currentRoom]));
     if (roomVoice[currentRoom] && Object.keys(roomVoice[currentRoom]).length) socket.emit('voice-init', roomVoice[currentRoom]);
     broadcastPresence(currentPresenceRoom);
+    broadcastPagePresence(currentRoom);
     // Phase 4: seed the active Room's feature policy (null payload for the page-default Room = all open).
     { const fr = resolveAvRoomId(ctxRoomId, currentRoom, socket.id);
       socket.emit('feature-perms', featurePermsPayload(fr !== currentRoom ? fr : null)); }
@@ -2870,7 +2888,9 @@ io.on('connection', (socket) => {
         socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
       }
       delete socketToAvatarRoom[socket.id];
+      if (pageUsers[currentRoom]) delete pageUsers[currentRoom][socket.id];
       broadcastPresence(currentPresenceRoom);
+      broadcastPagePresence(currentRoom);
       io.to(currentPageRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
     }
