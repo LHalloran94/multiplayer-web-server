@@ -112,6 +112,10 @@ try { db.exec('ALTER TABLE rooms ADD COLUMN url TEXT'); } catch {}
 // Phase 2 (hotbar): a room may carry a visual icon — either a single emoji or an image URL. Lets the
 // open-rooms hotbar / list rows distinguish rooms at a glance. Null = fall back to the binding glyph.
 try { db.exec('ALTER TABLE rooms ADD COLUMN icon TEXT'); } catch {}
+// Friends-only rooms: not public (won't appear in public listings) but any accepted friend of the owner
+// can discover (via GET /rooms/friends) and join without an explicit invite/code. friends_only=1 implies
+// public=0. Saves making a private room and inviting each friend by hand.
+try { db.exec('ALTER TABLE rooms ADD COLUMN friends_only INTEGER DEFAULT 0'); } catch {}
 
 // Phase 3 — room social signals. Personal favourite (private bookmark, drives the Favourites sub-tab),
 // public like (one per user), and a 1–5 star rating (one vote per user; avg/count computed on read).
@@ -250,6 +254,10 @@ function normalizeRoomSocial(r) {
   delete out.perms;   // ship only the compact feature_avail, not the raw perms blob
   return out;
 }
+
+// True if a and b are accepted friends (either direction). Used to gate friends-only room access.
+const _friendStmt = db.prepare(`SELECT 1 FROM friends WHERE ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND status='accepted'`);
+function areFriends(a, b) { return a && b && a !== b && !!_friendStmt.get(a, b, b, a); }
 
 // Coerce a published_worlds row (joined to its backing room for env_spec/perms + social subqueries) into
 // the client-facing gallery shape. Shared by GET /worlds and the favourited-Worlds half of /rooms/favourites.
@@ -487,7 +495,7 @@ function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { retu
 app.post('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, description, public: isPublic, scope, url, env_spec, levelLock, features, icon } = req.body;
+  const { name, description, public: isPublic, friendsOnly, scope, url, env_spec, levelLock, features, icon } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   try {
     const id = generateRoomCode();
@@ -498,6 +506,8 @@ app.post('/rooms', (req, res) => {
     if (/^data:/i.test(roomIcon)) roomIcon = '';        // reject inline data URLs (too big)
     roomIcon = roomIcon.slice(0, 512) || null;
     const pub = isPublic ? 1 : 0;
+    // Friends-only is a non-public mode: visible/joinable to the owner's accepted friends, never listed publicly.
+    const fr = (!isPublic && friendsOnly) ? 1 : 0;
     // A public room is bound to EITHER a page URL OR a site scope OR nothing (global) — mutually exclusive.
     const roomUrl = (isPublic && url) ? url.trim().slice(0, 500) : null;
     const roomScope = (isPublic && !roomUrl && scope) ? scope.trim().slice(0, 253) : null;
@@ -522,9 +532,9 @@ app.post('/rooms', (req, res) => {
       if (Object.keys(feats).length) { permsObj = permsObj || {}; permsObj.features = feats; }
     }
     const perms = permsObj ? JSON.stringify(permsObj) : null;
-    db.prepare('INSERT INTO rooms (id, name, owner_id, public, scope, url, description, kind, env_spec, perms, icon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null, perms, roomIcon);
+    db.prepare('INSERT INTO rooms (id, name, owner_id, public, friends_only, scope, url, description, kind, env_spec, perms, icon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, fr, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null, perms, roomIcon);
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(id, user.sub);
-    res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, scope: roomScope, url: roomUrl, description: trimmedDesc, kind, env_spec: spec, icon: roomIcon });
+    res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, friends_only: fr, scope: roomScope, url: roomUrl, description: trimmedDesc, kind, env_spec: spec, icon: roomIcon });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -596,7 +606,7 @@ app.get('/rooms', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.description, r.kind, r.env_spec, r.icon, r.perms,
+      SELECT r.id, r.name, r.owner_id, r.public, r.friends_only, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -646,14 +656,50 @@ app.get('/rooms/favourites', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// Friends-only rooms the caller can access: ones they own, OR whose owner is an accepted friend. These
+// never appear in the public listings — this is the only discovery path for them (drives the Friends sub-tab).
+app.get('/rooms/friends', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(`
+      SELECT r.id, r.name, r.owner_id, r.public, r.friends_only, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+             (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
+             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
+             (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
+             (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
+             (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_avg,
+             (SELECT 1 FROM room_favourites rf WHERE rf.room_id = r.id AND rf.discord_id = ?) as favourited,
+             (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = r.id AND rl2.discord_id = ?) as liked,
+             (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
+      FROM rooms r
+      WHERE r.friends_only = 1 AND (
+        r.owner_id = ? OR
+        r.owner_id IN (
+          SELECT CASE WHEN from_id = ? THEN to_id ELSE from_id END
+          FROM friends WHERE (from_id = ? OR to_id = ?) AND status='accepted'
+        )
+      )
+      ORDER BY r.created_at DESC LIMIT 80
+    `).all(user.sub, user.sub, user.sub, user.sub, user.sub, user.sub, user.sub);
+    res.json(rows.map(normalizeRoomSocial));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 app.post('/rooms/join', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   const { code } = req.body;
   if (!code) return res.status(400).json({ error: 'Code required' });
   try {
-    const room = db.prepare('SELECT id, name, owner_id, public, scope, description, kind, env_spec, icon FROM rooms WHERE id = ?').get(code.toUpperCase().trim());
+    const room = db.prepare('SELECT id, name, owner_id, public, friends_only, scope, description, kind, env_spec, icon FROM rooms WHERE id = ?').get(code.toUpperCase().trim());
     if (!room) return res.status(404).json({ error: 'Room not found' });
+    // A friends-only room may only be joined by the owner or an accepted friend of the owner (this also
+    // protects against someone guessing the code). Public/private-by-code rooms are unaffected.
+    if (room.friends_only && room.owner_id !== user.sub && !areFriends(user.sub, room.owner_id)) {
+      const alreadyMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(room.id, user.sub);
+      if (!alreadyMember) return res.status(403).json({ error: 'friends_only' });
+    }
     db.prepare('INSERT OR IGNORE INTO room_members (room_id, discord_id) VALUES (?, ?)').run(room.id, user.sub);
     const memberCount = db.prepare('SELECT COUNT(*) as c FROM room_members WHERE room_id = ?').get(room.id).c;
     res.json({ ...room, env_spec: parseEnvSpec(room.env_spec), member_count: memberCount });
