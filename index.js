@@ -557,6 +557,38 @@ app.get('/rooms/public', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// 🔥 Popular: public rooms across ALL pages/sites, ranked by who's in them RIGHT NOW. Lets you discover
+// where on the web is active without visiting each URL (the binding URL/site comes back so the client
+// shows where each room lives). Live counts come from the socket adapter, so we sort in JS after the query.
+app.get('/rooms/popular', (req, res) => {
+  const caller = verifyToken(req);                       // optional — lets us include the caller's own state
+  const me = caller ? caller.sub : '\x00';
+  try {
+    const rows = db.prepare(`
+      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+             (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
+             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
+             (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
+             (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
+             (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_avg,
+             (SELECT 1 FROM room_favourites rf WHERE rf.room_id = r.id AND rf.discord_id = ?) as favourited,
+             (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = r.id AND rl2.discord_id = ?) as liked,
+             (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
+      FROM rooms r
+      WHERE r.public = 1 AND (r.kind IS NULL OR r.kind != 'published')
+      ORDER BY r.created_at DESC LIMIT 300
+    `).all(me, me, me);
+    const out = rows.map(r => {
+      const o = normalizeRoomSocial(r);
+      o.players_now = (io.sockets.adapter.rooms.get('pg:' + r.id) || { size: 0 }).size;
+      return o;
+    });
+    // Busiest first; ties broken by likes then membership. (Live presence is the headline signal.)
+    out.sort((a, b) => (b.players_now - a.players_now) || (b.like_count - a.like_count) || (b.member_count - a.member_count));
+    res.json(out.slice(0, 60));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 app.get('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
