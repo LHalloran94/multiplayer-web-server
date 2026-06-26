@@ -517,6 +517,8 @@ app.post('/rooms', (req, res) => {
     if (Array.isArray(features) && features.length) {
       const feats = {};
       for (const k of features) if (FEATURE_KEYS.includes(k)) feats[k] = 'host';
+      // 'build' is a Layer-2 feature stored on perms.build (not perms.features) — same as the perms hub.
+      if (features.includes('build')) { permsObj = permsObj || {}; permsObj.build = 'host'; }
       if (Object.keys(feats).length) { permsObj = permsObj || {}; permsObj.features = feats; }
     }
     const perms = permsObj ? JSON.stringify(permsObj) : null;
