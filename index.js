@@ -1872,6 +1872,21 @@ function broadcastPresence(room) {
   io.to(room).emit('presence', { count: users.length, users });
 }
 
+// Item 10 (#6 dedup): is the identity `key` (discord_id, or 'u:'+username) already present in `room`
+// via some OTHER socket? Used to suppress duplicate "joined"/"left" announcements when the same person
+// has the Room open in multiple tabs/instances. (The who-list count itself is already identity-deduped
+// in broadcastPresence above.)
+function identityPresent(room, key, exceptSocketId) {
+  const bucket = roomUsers[room];
+  if (!bucket) return false;
+  for (const sid in bucket) {
+    if (sid === exceptSocketId) continue;
+    const u = bucket[sid];
+    if ((u.discord_id || ('u:' + u.username)) === key) return true;
+  }
+  return false;
+}
+
 // Headcount of distinct identities on a page (bare URL room), independent of context Room.
 function broadcastPagePresence(room) {
   const seen = new Set();
@@ -2115,6 +2130,10 @@ io.on('connection', (socket) => {
   let currentUsername = null;
   let currentPresenceRoom = null; // this socket's who-list bucket: URL room by default, or 'pg:'+ctxRoomId when in a context Room
   let currentPageRoom = null;     // this socket's page-bound bucket (cursors/sprays/annotations/highlights): URL room, or 'pb:'+ctxRoomId+'|'+url in a context Room
+  // Item 10: has this socket ENTERED its presence Room (joined the who-list / become visible)? For the
+  // page-default Room a user browses un-entered (observes counts only) until a deliberate action; a
+  // custom/locked context Room is always entered. Drives whether we add to roomUsers + announce.
+  let currentEntered = false;
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
   let currentAvBuildRoomId = null; // Phase 3: real roomId for L2 build-perm checks (null = page/URL room → open build)
   let currentAvOwnerId = null;     // owner_id of that room (null for the page/URL room)
@@ -2133,7 +2152,7 @@ io.on('connection', (socket) => {
     return rb.mode === 'all';
   }
 
-  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId, color }) => {
+  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId, color, entered }) => {
     let verified = false;
     let avatar = null;
     let discordId = null;
@@ -2206,7 +2225,12 @@ io.on('connection', (socket) => {
         if (oldSock) oldSock.disconnect(true);   // force full cleanup of any zombie socket
       }
     }
-    roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId, color: color || null };
+    // Item 10: a custom/locked context Room (presence bucket diverges from the URL room) is always
+    // entered; the page-default Room is entered only when the client says so (a deliberate Chat/Avatar/
+    // Voice action). Un-entered = the socket observes the Room's count (it stays subscribed) but is NOT
+    // in roomUsers and announces nothing — general browsing isn't broadcast.
+    currentEntered = (currentPresenceRoom !== currentRoom) || !!entered;
+    if (currentEntered) roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId, color: color || null };
     pageUsers[currentRoom][socket.id] = { username, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
@@ -2220,7 +2244,11 @@ io.on('connection', (socket) => {
     // Phase 4: seed the active Room's feature policy (null payload for the page-default Room = all open).
     { const fr = resolveAvRoomId(ctxRoomId, currentRoom, socket.id);
       socket.emit('feature-perms', featurePermsPayload(fr !== currentRoom ? fr : null)); }
-    socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
+    // Item 10: only announce a join when actually entered, and only once per identity (#6 dedup —
+    // suppresses a second "joined" when the same person already has this Room open in another tab).
+    if (currentEntered && !identityPresent(currentPresenceRoom, discordId || ('u:' + username), socket.id)) {
+      socket.to(currentRoom).emit('message', { system: true, text: `${username} joined` });
+    }
     socket.to('user:' + username).emit('user-location', { url: userCurrentFullUrl[username] });
 
     // Friends: notify online friends + send friends list to joiner
@@ -3142,10 +3170,14 @@ io.on('connection', (socket) => {
   // 2c: the client switched its active context Room — move this socket's who-list bucket to match.
   // The bare URL socket.io room is untouched (chat/history keep flowing); presence (2c) AND the page-bound
   // layer (2d) migrate to the new context Room without a page reload.
-  socket.on('ctx-room', ({ roomId } = {}) => {
+  socket.on('ctx-room', ({ roomId, entered } = {}) => {
     if (!currentRoom) return;
     // ---- presence bucket (2c) ----
     const next = resolvePresenceRoom(roomId, currentRoom, socket.id);
+    // Item 10: a custom/locked bucket is always entered; the page-default bucket is entered only when the
+    // client says so (it passes its live isEntered() for the destination). Un-entered = subscribe for the
+    // count but stay out of roomUsers.
+    const nextEntered = (next !== currentRoom) || !!entered;
     if (next !== currentPresenceRoom) {
       const info = roomUsers[currentPresenceRoom] && roomUsers[currentPresenceRoom][socket.id];
       // leave old bucket (but never leave the bare URL room — chat/history live there)
@@ -3156,7 +3188,15 @@ io.on('connection', (socket) => {
       currentPresenceRoom = next;
       if (next !== currentRoom) socket.join(next);
       if (!roomUsers[next]) roomUsers[next] = {};
-      roomUsers[next][socket.id] = info || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null };
+      if (nextEntered) roomUsers[next][socket.id] = info || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null };
+      currentEntered = nextEntered;
+      broadcastPresence(next);
+    } else if (nextEntered !== currentEntered) {
+      // Same bucket, entered intent changed (e.g. explicit Leave/Enter on the page-default Room without
+      // a bucket switch) — fall through to room-presence semantics inline.
+      if (nextEntered) roomUsers[next][socket.id] = (roomUsers[next] && roomUsers[next][socket.id]) || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null };
+      else if (roomUsers[next]) delete roomUsers[next][socket.id];
+      currentEntered = nextEntered;
       broadcastPresence(next);
     }
     // ---- page-bound bucket (2d): cursors/sprays/highlights/annotations ----
@@ -3174,6 +3214,33 @@ io.on('connection', (socket) => {
     // ---- feature policy (Phase 4): re-seed for the new context Room (null = page room → all open) ----
     { const fr = resolveAvRoomId(roomId, currentRoom, socket.id);
       socket.emit('feature-perms', featurePermsPayload(fr !== currentRoom ? fr : null)); }
+  });
+
+  // Item 10: explicit enter/leave + tab-visibility withdraw/restore for the CURRENT presence bucket
+  // (no bucket switch — that's ctx-room's job). `announce` gates the "joined"/"left" chat message
+  // (true for deliberate Enter/Leave, false for background-tab withdraw so tab-switching is silent).
+  socket.on('room-presence', ({ active, announce } = {}) => {
+    if (!currentRoom || !currentPresenceRoom) return;
+    if (active) {
+      if (currentEntered) return;                 // already in — idempotent
+      if (!roomUsers[currentPresenceRoom]) roomUsers[currentPresenceRoom] = {};
+      const key = socketToDiscordId[socket.id] || ('u:' + currentUsername);
+      const wasPresent = identityPresent(currentPresenceRoom, key, socket.id);
+      roomUsers[currentPresenceRoom][socket.id] = { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null };
+      currentEntered = true;
+      broadcastPresence(currentPresenceRoom);
+      if (announce && !wasPresent) socket.to(currentRoom).emit('message', { system: true, text: `${currentUsername} joined` });
+    } else {
+      if (!currentEntered) return;
+      if (roomUsers[currentPresenceRoom]) delete roomUsers[currentPresenceRoom][socket.id];
+      currentEntered = false;
+      broadcastPresence(currentPresenceRoom);
+      // Drop our live cursor/avatar from peers (stay subscribed so we still see the count).
+      socket.to(currentPageRoom).emit('cursor-leave', { id: socket.id });
+      socket.to(currentRoom).emit('avatar-leave', { id: socket.id });
+      const key = socketToDiscordId[socket.id] || ('u:' + currentUsername);
+      if (announce && !identityPresent(currentPresenceRoom, key, socket.id)) socket.to(currentRoom).emit('message', { system: true, text: `${currentUsername} left` });
+    }
   });
 
   socket.on('disconnect', () => {
