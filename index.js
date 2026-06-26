@@ -2087,7 +2087,7 @@ io.on('connection', (socket) => {
     return rb.mode === 'all';
   }
 
-  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId }) => {
+  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId, color }) => {
     let verified = false;
     let avatar = null;
     let discordId = null;
@@ -2160,7 +2160,7 @@ io.on('connection', (socket) => {
         if (oldSock) oldSock.disconnect(true);   // force full cleanup of any zombie socket
       }
     }
-    roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId };
+    roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId, color: color || null };
     pageUsers[currentRoom][socket.id] = { username, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
@@ -2268,6 +2268,14 @@ io.on('connection', (socket) => {
     roomHistory[currentRoom].push(msg);
     if (roomHistory[currentRoom].length > MAX_HISTORY) roomHistory[currentRoom].shift();
     io.to(currentRoom).emit('message', msg);
+  });
+
+  // Live name-colour change — update this socket's presence entry and re-broadcast so peers recolour.
+  socket.on('set-name-color', ({ color }) => {
+    const entry = roomUsers[currentPresenceRoom] && roomUsers[currentPresenceRoom][socket.id];
+    if (!entry) return;
+    entry.color = color || null;
+    broadcastPresence(currentPresenceRoom);
   });
 
   socket.on('msg-react', ({ msgId, emoji, username }) => {
