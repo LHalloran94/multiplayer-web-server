@@ -2375,9 +2375,9 @@ io.on('connection', (socket) => {
     socket.to(currentPageRoom).emit('reaction', { emoji, x, y, username, source, scope });
   });
 
-  socket.on('cursor-emote', ({ username, scope, spec }) => {
+  socket.on('cursor-emote', ({ username, scope, spec, hold, stop }) => {
     if (!currentRoom) return;
-    socket.to(currentPageRoom).emit('cursor-emote', { username, scope, spec });
+    socket.to(currentPageRoom).emit('cursor-emote', { username, scope, spec, hold, stop });
   });
 
   socket.on('soundboard', ({ soundIndex, label, username, scope }) => {
