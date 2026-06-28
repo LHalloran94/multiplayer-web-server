@@ -2360,9 +2360,9 @@ io.on('connection', (socket) => {
   });
 
   // 2d: page-bound layer routes to currentPageRoom (== currentRoom for the page-default Room).
-  socket.on('cursor', ({ x, y, scrollPct, username, scope }) => {
+  socket.on('cursor', ({ x, y, scrollPct, username, scope, style }) => {
     if (!currentRoom) return;
-    socket.to(currentPageRoom).emit('cursor', { x, y, scrollPct, username, scope, id: socket.id });
+    socket.to(currentPageRoom).emit('cursor', { x, y, scrollPct, username, scope, style, id: socket.id });
   });
 
   socket.on('pointer-pulse', ({ x, y, username, scope }) => {
