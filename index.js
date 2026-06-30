@@ -19,6 +19,15 @@ const io = new Server(server, {
   pingTimeout: 60000
 });
 
+// Per-field payload guard: data-URL skins/sprays/emotes get relayed to a whole room, so one oversized
+// string field is a bandwidth-amplification vector. The 10 MB connection cap above only stops truly huge
+// frames; this drops/strips individual fields too big to be a legit small image (2 MB ≈ ~1.4 MB binary).
+const MAX_RELAY_FIELD = 2 * 1024 * 1024;
+function oversizedField(...vals) {
+  for (const v of vals) if (typeof v === 'string' && v.length > MAX_RELAY_FIELD) return true;
+  return false;
+}
+
 app.use(express.json());
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -2377,6 +2386,7 @@ io.on('connection', (socket) => {
 
   socket.on('cursor-emote', ({ username, scope, spec, hold, stop }) => {
     if (!currentRoom) return;
+    if (spec && oversizedField(spec.src)) return;
     socket.to(currentPageRoom).emit('cursor-emote', { username, scope, spec, hold, stop });
   });
 
@@ -2502,6 +2512,7 @@ io.on('connection', (socket) => {
 
   socket.on('spray-add', ({ id, content, size, docX, docY, relX, relY, surface, username, scope }) => {
     if (!currentRoom) return;
+    if (oversizedField(content)) return;
     const spray = { id, content, size, docX, docY, relX, relY, surface, username, scope, timestamp: Date.now() };
     if (!roomSprays[currentPageRoom]) roomSprays[currentPageRoom] = [];
     roomSprays[currentPageRoom].push(spray);
@@ -2511,6 +2522,7 @@ io.on('connection', (socket) => {
 
   socket.on('media-add', ({ id, url, username }) => {
     if (!currentRoom) return;
+    if (oversizedField(url)) return;
     const item = { id, url, username, timestamp: Date.now() };
     if (!roomMedia[currentRoom]) roomMedia[currentRoom] = [];
     roomMedia[currentRoom].push(item);
@@ -2530,6 +2542,7 @@ io.on('connection', (socket) => {
 
   socket.on('avatar-move', ({ x, y, t, username, facingLeft, onGround, fill }) => {
     if (!currentRoom) return;
+    if (oversizedField(fill)) fill = null;   // strip an abusive skin; keep relaying the move so the avatar still updates
     if (!roomAvatars[currentRoom]) roomAvatars[currentRoom] = {};
     roomAvatars[currentRoom][socket.id] = { id: socket.id, x, y, username, facingLeft, onGround, fill };
     socket.to(currentRoom).emit('avatar-move', { id: socket.id, x, y, t, username, facingLeft, onGround, fill });
