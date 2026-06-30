@@ -2380,6 +2380,13 @@ io.on('connection', (socket) => {
     socket.to(currentPageRoom).emit('cursor-emote', { username, scope, spec, hold, stop });
   });
 
+  // Cursor blob MORPHS (transient deformations / letters that ride your cursor). spec is either
+  // { kind:'deform', deform } or { kind:'text', text }; ms is the sender-chosen lifetime.
+  socket.on('cursor-morph', ({ username, scope, spec, ms }) => {
+    if (!currentRoom) return;
+    socket.to(currentPageRoom).emit('cursor-morph', { username, scope, spec, ms });
+  });
+
   socket.on('soundboard', ({ soundIndex, label, username, scope }) => {
     if (!currentRoom) return;
     socket.to(currentPageRoom).emit('soundboard', { soundIndex, label, username, scope });
