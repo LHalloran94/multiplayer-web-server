@@ -28,7 +28,7 @@ function oversizedField(...vals) {
   return false;
 }
 
-app.use(express.json());
+app.use(express.json({ limit: '4mb' }));   // covers 2MB World publishes + shared-animation specs (image/GIF fills)
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -916,6 +916,72 @@ app.delete('/worlds/:id', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ---- Shared animation library (custom animated emotes) ----
+// Upload or update one of the caller's shared animations. Body: { id?, title, author?, loop, segments }.
+app.post('/animations', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const body = req.body || {};
+  const v = validateAnimSpec(body);
+  if (!v) return res.status(400).json({ error: 'Invalid animation' });
+  const title = (body.title || '').trim().slice(0, 40) || 'Untitled';
+  const authorName = (body.author || '').trim().slice(0, 40) || null;
+  try {
+    const existing = body.id ? db.prepare('SELECT author_id FROM shared_animations WHERE id = ?').get(body.id) : null;
+    if (existing) {                                                  // ---- update an existing share ----
+      if (existing.author_id !== user.sub) return res.status(403).json({ error: 'Not author' });
+      db.prepare('UPDATE shared_animations SET title=?, author_name=?, spec=?, seg_count=?, has_image=?, size_bytes=? WHERE id=?')
+        .run(title, authorName, v.spec, v.segCount, v.hasImage, v.size, body.id);
+      return res.json({ id: body.id });
+    }
+    const count = db.prepare('SELECT COUNT(*) as c FROM shared_animations WHERE author_id = ?').get(user.sub).c;
+    if (count >= SHARED_ANIM_PER_USER) return res.status(409).json({ error: 'Shared-animation limit reached (' + SHARED_ANIM_PER_USER + ')' });
+    const id = genAnimId();
+    db.prepare('INSERT INTO shared_animations (id, author_id, author_name, title, spec, seg_count, has_image, size_bytes) VALUES (?,?,?,?,?,?,?,?)')
+      .run(id, user.sub, authorName, title, v.spec, v.segCount, v.hasImage, v.size);
+    res.json({ id });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Browse/search the library (public). Returns metadata + full spec — small enough to preview inline.
+app.get('/animations', (req, res) => {
+  const caller = verifyToken(req);
+  const me = caller ? caller.sub : '\x00';
+  const order = req.query.sort === 'popular' ? 'downloads DESC, created_at DESC' : 'created_at DESC';
+  const q = (req.query.q || '').toString().trim().slice(0, 40);
+  const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+  const PER = 30;
+  try {
+    const rows = q
+      ? db.prepare('SELECT id, author_id, author_name, title, spec, seg_count, has_image, downloads, created_at FROM shared_animations WHERE title LIKE ? ORDER BY ' + order + ' LIMIT ? OFFSET ?').all('%' + q + '%', PER, page * PER)
+      : db.prepare('SELECT id, author_id, author_name, title, spec, seg_count, has_image, downloads, created_at FROM shared_animations ORDER BY ' + order + ' LIMIT ? OFFSET ?').all(PER, page * PER);
+    res.json(rows.map(r => ({
+      id: r.id, title: r.title, author: r.author_name, mine: r.author_id === me,
+      seg_count: r.seg_count, has_image: !!r.has_image, downloads: r.downloads,
+      created_at: r.created_at, spec: JSON.parse(r.spec),
+    })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Bump the download counter (best-effort; called when a user adds a shared animation to their local library).
+app.post('/animations/:id/download', (req, res) => {
+  try { db.prepare('UPDATE shared_animations SET downloads = downloads + 1 WHERE id = ?').run(req.params.id); } catch (e) {}
+  res.json({ ok: true });
+});
+
+// Remove one of the caller's shared animations — author only.
+app.delete('/animations/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const a = db.prepare('SELECT author_id FROM shared_animations WHERE id = ?').get(req.params.id);
+    if (!a) return res.status(404).json({ error: 'Not found' });
+    if (a.author_id !== user.sub) return res.status(403).json({ error: 'Not author' });
+    db.prepare('DELETE FROM shared_animations WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 app.get('/rooms/:id/messages', (req, res) => {
   const { id } = req.params;
   try {
@@ -1567,6 +1633,53 @@ function derivePubEnvSpec(content, worldId) {
     return o;
   });
   return { levels, nav: 'free' };
+}
+// ---- Shared animation library (custom animated emotes — Stage 6 expressiveness) ----
+db.exec(`CREATE TABLE IF NOT EXISTS shared_animations (
+  id TEXT PRIMARY KEY,
+  author_id TEXT NOT NULL,
+  author_name TEXT,
+  title TEXT NOT NULL,
+  spec TEXT NOT NULL,
+  seg_count INTEGER DEFAULT 1,
+  has_image INTEGER DEFAULT 0,
+  size_bytes INTEGER DEFAULT 0,
+  downloads INTEGER DEFAULT 0,
+  created_at INTEGER DEFAULT (unixepoch())
+)`);
+const SHARED_ANIM_MAX_BYTES = 400_000;   // spec blob cap (allows a couple small image/GIF fills)
+const SHARED_ANIM_PER_USER  = 40;        // how many animations one user may share at once
+const SHARED_ANIM_SEG_CAP   = 40;        // segments per animation
+const SHARED_ANIM_COMBO_CAP = 8;         // item specs per segment
+function genAnimId() {
+  let id;
+  do { id = 'sa' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+  while (db.prepare('SELECT 1 FROM shared_animations WHERE id = ?').get(id));
+  return id;
+}
+// Structural validation of a shared-animation payload {loop, segments}. Item specs stay largely opaque
+// (the client re-normalizes on download); we enforce array shapes, counts, numeric knobs, size, and flag
+// image fills. Returns { spec, segCount, hasImage, size } or null.
+function validateAnimSpec(body) {
+  if (!body || !Array.isArray(body.segments) || !body.segments.length || body.segments.length > SHARED_ANIM_SEG_CAP) return null;
+  const loop = (body.loop === 'on' || body.loop === 'off' || body.loop === 'auto') ? body.loop : 'auto';
+  let hasImage = 0;
+  const segments = [];
+  for (const s of body.segments) {
+    if (!s || typeof s !== 'object' || !Array.isArray(s.combo) || s.combo.length > SHARED_ANIM_COMBO_CAP) return null;
+    const combo = [];
+    for (const it of s.combo) {
+      if (!it || typeof it !== 'object' || typeof it.kind !== 'string') return null;
+      if (it.kind === 'image') hasImage = 1;
+      combo.push(it);
+    }
+    const durMs = Math.max(120, Math.min(20000, Number(s.durMs) || 700));
+    const speed = Math.max(0.25, Math.min(4, Number(s.speed) || 1));
+    segments.push({ combo, durMs, speed });
+  }
+  const spec = JSON.stringify({ loop, segments });
+  if (spec.length > SHARED_ANIM_MAX_BYTES) return null;
+  return { spec, segCount: segments.length, hasImage, size: spec.length };
 }
 function mulberry32(a) {                              // tiny deterministic PRNG (same family the client could mirror)
   return function () {
