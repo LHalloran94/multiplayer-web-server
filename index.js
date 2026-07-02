@@ -2104,6 +2104,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName) {
             pair: (typeof data.pair === 'string' && data.pair.length <= 64) ? data.pair : id,
             entry: data.entry !== false, oneWay: data.oneWay === true,
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // scroll-set base rotation (round-trips like stamps)
+            oval: clampN(data.oval, 0, 1, 0),        // ovalness: 0 = circle → 1 = narrow (round-trips; both ends share it)
             hue: clampN(data.hue, 0, 360, 275),     // user-chosen pair colour (round-trips; both ends share it)
             hp: data.breakable === false ? null : 2 };
   } else {
