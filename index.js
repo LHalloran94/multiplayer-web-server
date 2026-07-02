@@ -1681,6 +1681,132 @@ function validateAnimSpec(body) {
   if (spec.length > SHARED_ANIM_MAX_BYTES) return null;
   return { spec, segCount: segments.length, hasImage, size: spec.length };
 }
+
+// ---- Generic shared libraries (emojis, sounds, Level templates, terrain blocks) ----
+// Mirrors the shared_animations pattern: upload/update (author-only + per-user cap), browse/search,
+// download counter, author-only delete, plus a lightweight report counter (we surface links, not host
+// bytes, so takedowns rely on author-delete + reports). Emojis/sounds store links only; templates/blocks
+// store a JSON content blob — the table shape is the same, the difference is entirely in validate/mapRow.
+// cfg: { path, table, cols:[{name,type}], searchCol, validate(body)->{col:val}|null, mapRow(row,me), perUser }
+function registerLibrary(cfg) {
+  const colNames = cfg.cols.map(c => c.name);
+  db.exec(`CREATE TABLE IF NOT EXISTS ${cfg.table} (
+    id TEXT PRIMARY KEY,
+    author_id TEXT NOT NULL,
+    author_name TEXT,
+    ${cfg.cols.map(c => c.name + ' ' + c.type).join(',\n    ')},
+    downloads INTEGER DEFAULT 0,
+    reports INTEGER DEFAULT 0,
+    created_at INTEGER DEFAULT (unixepoch())
+  )`);
+  const searchCol = cfg.searchCol || 'name';
+  function genId() {
+    let id;
+    do { id = cfg.table.slice(0, 2) + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+    while (db.prepare(`SELECT 1 FROM ${cfg.table} WHERE id = ?`).get(id));
+    return id;
+  }
+
+  app.post('/' + cfg.path, (req, res) => {
+    const user = verifyToken(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const body = req.body || {};
+    const vals = cfg.validate(body);
+    if (!vals) return res.status(400).json({ error: 'Invalid entry' });
+    const authorName = (body.author || '').trim().slice(0, 40) || null;
+    try {
+      const existing = body.id ? db.prepare(`SELECT author_id FROM ${cfg.table} WHERE id = ?`).get(body.id) : null;
+      if (existing) {                                                  // ---- update an existing share ----
+        if (existing.author_id !== user.sub) return res.status(403).json({ error: 'Not author' });
+        db.prepare(`UPDATE ${cfg.table} SET author_name=?, ${colNames.map(c => c + '=?').join(', ')} WHERE id=?`)
+          .run(authorName, ...colNames.map(c => vals[c]), body.id);
+        return res.json({ id: body.id });
+      }
+      const count = db.prepare(`SELECT COUNT(*) as c FROM ${cfg.table} WHERE author_id = ?`).get(user.sub).c;
+      if (count >= cfg.perUser) return res.status(409).json({ error: 'Library limit reached (' + cfg.perUser + ')' });
+      const id = genId();
+      const cols = ['id', 'author_id', 'author_name', ...colNames];
+      db.prepare(`INSERT INTO ${cfg.table} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
+        .run(id, user.sub, authorName, ...colNames.map(c => vals[c]));
+      res.json({ id });
+    } catch (e) { res.status(500).json({ error: 'DB error' }); }
+  });
+
+  app.get('/' + cfg.path, (req, res) => {
+    const caller = verifyToken(req);
+    const me = caller ? caller.sub : '\x00';
+    const order = req.query.sort === 'popular' ? 'downloads DESC, created_at DESC' : 'created_at DESC';
+    const q = (req.query.q || '').toString().trim().slice(0, 40);
+    const page = Math.max(0, parseInt(req.query.page, 10) || 0);
+    const PER = 30;
+    try {
+      const rows = q
+        ? db.prepare(`SELECT * FROM ${cfg.table} WHERE ${searchCol} LIKE ? ORDER BY ${order} LIMIT ? OFFSET ?`).all('%' + q + '%', PER, page * PER)
+        : db.prepare(`SELECT * FROM ${cfg.table} ORDER BY ${order} LIMIT ? OFFSET ?`).all(PER, page * PER);
+      res.json(rows.map(r => cfg.mapRow(r, me)));
+    } catch (e) { res.status(500).json({ error: 'DB error' }); }
+  });
+
+  app.post('/' + cfg.path + '/:id/download', (req, res) => {
+    try { db.prepare(`UPDATE ${cfg.table} SET downloads = downloads + 1 WHERE id = ?`).run(req.params.id); } catch (e) {}
+    res.json({ ok: true });
+  });
+
+  app.post('/' + cfg.path + '/:id/report', (req, res) => {
+    try { db.prepare(`UPDATE ${cfg.table} SET reports = reports + 1 WHERE id = ?`).run(req.params.id); } catch (e) {}
+    res.json({ ok: true });
+  });
+
+  app.delete('/' + cfg.path + '/:id', (req, res) => {
+    const user = verifyToken(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    try {
+      const row = db.prepare(`SELECT author_id FROM ${cfg.table} WHERE id = ?`).get(req.params.id);
+      if (!row) return res.status(404).json({ error: 'Not found' });
+      if (row.author_id !== user.sub) return res.status(403).json({ error: 'Not author' });
+      db.prepare(`DELETE FROM ${cfg.table} WHERE id = ?`).run(req.params.id);
+      res.json({ ok: true });
+    } catch (e) { res.status(500).json({ error: 'DB error' }); }
+  });
+}
+
+// Links-only: only http(s) URLs are accepted for the shared emoji/sound libraries (we store the link, not
+// the bytes) — this also rejects data: URIs so local file-uploads stay local.
+const LIB_URL_RE = /^https?:\/\/[^\s]{3,1500}$/i;
+
+// Emoji/image library — custom emoji are images/GIFs; each entry is an image link + a searchable name.
+registerLibrary({
+  path: 'emoji-lib', table: 'shared_emojis', perUser: 60, searchCol: 'name',
+  cols: [{ name: 'name', type: 'TEXT' }, { name: 'url', type: 'TEXT' }, { name: 'kind', type: 'TEXT' }, { name: 'tags', type: 'TEXT' }],
+  validate(body) {
+    const url = (body.url || '').toString().trim();
+    if (!LIB_URL_RE.test(url)) return null;
+    const name = (body.name || body.title || '').toString().trim().slice(0, 40) || 'emoji';
+    const kind = /\.gif(\?|$)/i.test(url) ? 'gif' : 'image';
+    const tags = (body.tags || '').toString().trim().slice(0, 120);
+    return { name, url, kind, tags };
+  },
+  mapRow(r, me) {
+    return { id: r.id, name: r.name, url: r.url, kind: r.kind, tags: r.tags, author: r.author_name, mine: r.author_id === me, downloads: r.downloads, created_at: r.created_at };
+  },
+});
+
+// Soundboard library — each entry is an audio link + a short label.
+registerLibrary({
+  path: 'sound-lib', table: 'shared_sounds', perUser: 40, searchCol: 'label',
+  cols: [{ name: 'label', type: 'TEXT' }, { name: 'url', type: 'TEXT' }, { name: 'tags', type: 'TEXT' }],
+  validate(body) {
+    const url = (body.url || '').toString().trim();
+    if (!LIB_URL_RE.test(url)) return null;
+    const label = (body.label || body.title || '').toString().trim().slice(0, 24) || 'sound';
+    const tags = (body.tags || '').toString().trim().slice(0, 120);
+    return { label, url, tags };
+  },
+  mapRow(r, me) {
+    return { id: r.id, label: r.label, url: r.url, tags: r.tags, author: r.author_name, mine: r.author_id === me, downloads: r.downloads, created_at: r.created_at };
+  },
+});
+
 function mulberry32(a) {                              // tiny deterministic PRNG (same family the client could mirror)
   return function () {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
