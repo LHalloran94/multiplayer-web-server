@@ -2094,6 +2094,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName) {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+            angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // scroll-set base rotation (round-trips like stamps)
             hp: data.breakable === false ? null : 2 };  // erasable/destructible like other props
     if (type === 'goal' && isFinite(data.target)) obj.target = Math.max(-1, Math.min(63, data.target | 0));  // series destination Level (-1 = next; Phase 5b)
   } else if (type === 'portal') {
@@ -2102,6 +2103,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName) {
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             pair: (typeof data.pair === 'string' && data.pair.length <= 64) ? data.pair : id,
             entry: data.entry !== false, oneWay: data.oneWay === true,
+            angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // scroll-set base rotation (round-trips like stamps)
             hue: clampN(data.hue, 0, 360, 275),     // user-chosen pair colour (round-trips; both ends share it)
             hp: data.breakable === false ? null : 2 };
   } else {
