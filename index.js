@@ -2121,6 +2121,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName) {
             hp: data.breakable === false ? null : 2 };     // indestructible when breakable:false
     if (data.bouncy) obj.bouncy = 1;
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
+    if (isFinite(data.topHue)) obj.topHue = clampN(data.topHue, 0, 360, 0);   // custom top-surface colour (round-trips)
+    if (isFinite(data.botHue)) obj.botHue = clampN(data.botHue, 0, 360, 0);   // custom body colour (round-trips)
     if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // rotate around an edge
     if (data.osc && typeof data.osc === 'object' && isFinite(data.osc.w) && isFinite(data.osc.amp)) {
       obj.osc = { w: clampN(data.osc.w, -0.25, 0.25, 0),   // oscillating rotation (sweep an arc, no full spin)
