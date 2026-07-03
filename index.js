@@ -1973,15 +1973,19 @@ function sanitizeTheme(t) {
         if (typeof txt === 'string' && txt.length <= 24) out.buttons.face[id] = { text: txt.replace(/[<>]/g, '') };
       }
     }
-    if (b.style && typeof b.style === 'object') {
-      const st = b.style, o = {};
-      const r = themeLen(st.radius); if (r) o.radius = r;
-      const bw = themeLen(st.borderWidth); if (bw) o.borderWidth = bw;
-      const bc = themeColor(st.borderColor); if (bc) o.borderColor = bc;
-      const bg = themeColor(st.bg); if (bg) o.bg = bg;
-      const col = themeColor(st.color); if (col) o.color = col;
-      if (st.styleAll === true) o.styleAll = true;
-      out.buttons.style = o;
+    if (b.custom && typeof b.custom === 'object') {
+      out.buttons.custom = {};
+      for (const id of Object.keys(b.custom).slice(0, 40)) {
+        if (!/^[a-z0-9-]{1,30}$/.test(id)) continue;
+        const c = b.custom[id]; if (!c || typeof c !== 'object') continue;
+        const o = {};
+        const r = themeLen(c.radius); if (r) o.radius = r;
+        const bw = themeLen(c.bw); if (bw) o.bw = bw;
+        const bc = themeColor(c.bc); if (bc) o.bc = bc;
+        const bg = themeColor(c.bg); if (bg) o.bg = bg;
+        const col = themeColor(c.color); if (col) o.color = col;
+        if (Object.keys(o).length) out.buttons.custom[id] = o;
+      }
     }
   }
   out.appearance = {};
