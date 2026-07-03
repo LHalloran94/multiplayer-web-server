@@ -1914,6 +1914,110 @@ registerLibrary({
   },
 });
 
+// ---- Overlay THEME library ----
+// A downloaded theme restyles the victim's overlay on EVERY site they visit, so the
+// blob is strictly whitelisted here (and again on the client at apply time). Only
+// known-shaped keys survive; colours must parse as colours, images must be https,
+// fonts are length/char-bounded, everything else is dropped.
+const THEME_COLOR_RE = /^(#[0-9a-f]{3,8}|rgb\(\s*[\d.,%\s]+\)|rgba\(\s*[\d.,%\s]+\)|hsl\(\s*[\d.,%\s]+\)|hsla\(\s*[\d.,%\s]+\)|transparent|inherit|[a-z]{3,20})$/i;
+const themeColor = v => (typeof v === 'string' && v.length <= 40 && THEME_COLOR_RE.test(v.trim())) ? v.trim() : null;
+const themeLen   = v => (typeof v === 'string' && /^\d{1,3}px$/.test(v.trim())) ? v.trim() : null;
+const themeHttps = v => (typeof v === 'string' && /^https:\/\/[^\s"'()<>\\]{5,1000}$/i.test(v.trim())) ? v.trim() : null;
+const themeFont  = v => (typeof v === 'string' && v.length <= 60 && !/[;{}<>]/.test(v)) ? v : null;
+function sanitizeTheme(t) {
+  if (!t || typeof t !== 'object') return null;
+  const out = { v: 1, name: (t.name || 'Theme').toString().slice(0, 40) };
+  out.tokens = {};
+  if (t.tokens && typeof t.tokens === 'object') {
+    for (const k of Object.keys(t.tokens).slice(0, 40)) {
+      if (!/^[a-zA-Z]{2,20}$/.test(k)) continue;
+      const c = themeColor(t.tokens[k]) || themeFont(t.tokens[k]) || themeLen(t.tokens[k]);
+      if (c) out.tokens[k] = c;
+    }
+  }
+  out.sections = {};
+  if (t.sections && typeof t.sections === 'object') {
+    for (const id of Object.keys(t.sections).slice(0, 40)) {
+      if (!/^mw-[a-z0-9-]{1,40}$/.test(id)) continue;
+      const s = t.sections[id]; if (!s || typeof s !== 'object') continue;
+      const o = {};
+      const bg = themeColor(s.bg); if (bg) o.bg = bg;
+      const tc = themeColor(s.text); if (tc) o.text = tc;
+      const img = themeHttps(s.bgImage); if (img) o.bgImage = img;
+      const f = themeFont(s.font); if (f) o.font = f;
+      if (Number.isInteger(s.fontSize) && s.fontSize >= 8 && s.fontSize <= 40) o.fontSize = s.fontSize;
+      if (s.bold === true) o.bold = true;
+      if (s.italic === true) o.italic = true;
+      if (s.underline === true) o.underline = true;
+      if (Object.keys(o).length) out.sections[id] = o;
+    }
+  }
+  out.buttons = {};
+  if (t.buttons && typeof t.buttons === 'object') {
+    const b = t.buttons;
+    if (b.bars && typeof b.bars === 'object') {
+      out.buttons.bars = {};
+      for (const key of ['header', 'tabs', 'features', 'message']) {
+        if (Array.isArray(b.bars[key])) out.buttons.bars[key] = b.bars[key].filter(x => typeof x === 'string' && /^[a-z0-9-]{1,30}$/.test(x)).slice(0, 40);
+      }
+    }
+    if (b.hidden && typeof b.hidden === 'object') {
+      out.buttons.hidden = {};
+      for (const id of Object.keys(b.hidden).slice(0, 40)) if (/^[a-z0-9-]{1,30}$/.test(id) && b.hidden[id]) out.buttons.hidden[id] = true;
+    }
+    if (b.face && typeof b.face === 'object') {
+      out.buttons.face = {};
+      for (const id of Object.keys(b.face).slice(0, 40)) {
+        if (!/^[a-z0-9-]{1,30}$/.test(id)) continue;
+        const txt = b.face[id] && b.face[id].text;
+        if (typeof txt === 'string' && txt.length <= 24) out.buttons.face[id] = { text: txt.replace(/[<>]/g, '') };
+      }
+    }
+    if (b.style && typeof b.style === 'object') {
+      const st = b.style, o = {};
+      const r = themeLen(st.radius); if (r) o.radius = r;
+      const bw = themeLen(st.borderWidth); if (bw) o.borderWidth = bw;
+      const bc = themeColor(st.borderColor); if (bc) o.borderColor = bc;
+      const bg = themeColor(st.bg); if (bg) o.bg = bg;
+      const col = themeColor(st.color); if (col) o.color = col;
+      if (st.styleAll === true) o.styleAll = true;
+      out.buttons.style = o;
+    }
+  }
+  out.appearance = {};
+  if (t.appearance && typeof t.appearance === 'object') {
+    const a = t.appearance;
+    if (typeof a.darkMode === 'boolean') out.appearance.darkMode = a.darkMode;
+    if (Number.isInteger(a.compactLevel) && a.compactLevel >= 0 && a.compactLevel <= 100) out.appearance.compactLevel = a.compactLevel;
+    if (a.panelOpacity && typeof a.panelOpacity === 'object') {
+      const p = {};
+      for (const k of ['chat', 'hud', 'banners']) if (Number.isInteger(a.panelOpacity[k]) && a.panelOpacity[k] >= 0 && a.panelOpacity[k] <= 100) p[k] = a.panelOpacity[k];
+      out.appearance.panelOpacity = p;
+    }
+  }
+  return out;
+}
+registerLibrary({
+  path: 'theme-lib', table: 'shared_themes', perUser: 40, searchCol: 'name', descCol: 'descr', facetCol: 'facets',
+  cols: [{ name: 'name', type: 'TEXT' }, { name: 'descr', type: 'TEXT' }, { name: 'content', type: 'TEXT' }, { name: 'facets', type: 'TEXT' }, { name: 'size_bytes', type: 'INTEGER' }],
+  validate(body) {
+    const name = (body.name || '').toString().trim().slice(0, 40) || 'Theme';
+    const descr = (body.desc || '').toString().trim().slice(0, 300);
+    let t;
+    try { t = typeof body.content === 'string' ? JSON.parse(body.content) : body.content; } catch (e) { return null; }
+    const clean = sanitizeTheme(t);
+    if (!clean) return null;
+    clean.name = name;
+    const content = JSON.stringify(clean);
+    if (content.length > 100_000) return null;
+    const facets = '|' + (clean.appearance && clean.appearance.darkMode ? 'dark' : 'light') + '|';
+    return { name, descr, content, facets, size_bytes: content.length };
+  },
+  mapRow(r, me) {
+    return { id: r.id, name: r.name, desc: r.descr || '', facets: r.facets || '', author: r.author_name, mine: r.author_id === me, content: r.content, likes: r.likes || 0, downloads: r.downloads, created_at: r.created_at };
+  },
+});
+
 function mulberry32(a) {                              // tiny deterministic PRNG (same family the client could mirror)
   return function () {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
