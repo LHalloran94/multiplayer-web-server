@@ -1753,11 +1753,15 @@ function registerLibrary(cfg) {
     const page = Math.max(0, parseInt(req.query.page, 10) || 0);
     const PER = 30;
     // Optional derived-quality filter (e.g. terrain blocks: solid/liquid/hazard/bouncy/…). Facets are
-    // stored as a delimited string like "|solid|breakable|"; a filter matches "|<facet>|".
-    const facet = (req.query.facet || '').toString().trim().toLowerCase().slice(0, 20);
+    // stored as a delimited string like "|solid|breakable|". `?facet=a,b,c` AND-matches every one.
+    const facets = (req.query.facet || '').toString().trim().toLowerCase().split(',')
+      .map(s => s.replace(/[^a-z0-9]/g, '').slice(0, 20)).filter(Boolean).slice(0, 12);
     const where = [], params = [];
-    if (q) { where.push(`${searchCol} LIKE ?`); params.push('%' + q + '%'); }
-    if (facet && cfg.facetCol) { where.push(`${cfg.facetCol} LIKE ?`); params.push('%|' + facet + '|%'); }
+    if (q) {
+      if (cfg.descCol) { where.push(`(${searchCol} LIKE ? OR ${cfg.descCol} LIKE ?)`); params.push('%' + q + '%', '%' + q + '%'); }
+      else { where.push(`${searchCol} LIKE ?`); params.push('%' + q + '%'); }
+    }
+    if (cfg.facetCol) for (const f of facets) { where.push(`${cfg.facetCol} LIKE ?`); params.push('%|' + f + '|%'); }
     const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
     try {
       const rows = db.prepare(`SELECT * FROM ${cfg.table} ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...params, PER, page * PER);
@@ -1855,10 +1859,11 @@ registerLibrary({
 // Layer-2 terrain-TEMPLATE library — a multi-cell terrain STAMP {name,w,h,cells} (the Select-tool
 // `terrainTemplates`), stored as a JSON content blob. (Whole Worlds share via upload+Remix, not here.)
 registerLibrary({
-  path: 'template-lib', table: 'shared_templates', perUser: 60, searchCol: 'title',
-  cols: [{ name: 'title', type: 'TEXT' }, { name: 'content', type: 'TEXT' }, { name: 'w', type: 'INTEGER' }, { name: 'h', type: 'INTEGER' }, { name: 'size_bytes', type: 'INTEGER' }],
+  path: 'template-lib', table: 'shared_templates', perUser: 60, searchCol: 'title', descCol: 'descr',
+  cols: [{ name: 'title', type: 'TEXT' }, { name: 'descr', type: 'TEXT' }, { name: 'content', type: 'TEXT' }, { name: 'w', type: 'INTEGER' }, { name: 'h', type: 'INTEGER' }, { name: 'size_bytes', type: 'INTEGER' }],
   validate(body) {
     const title = (body.title || '').toString().trim().slice(0, 60) || 'Template';
+    const descr = (body.desc || '').toString().trim().slice(0, 300);
     let t;
     try { t = typeof body.content === 'string' ? JSON.parse(body.content) : body.content; } catch (e) { return null; }
     if (!t || typeof t !== 'object') return null;
@@ -1866,22 +1871,26 @@ registerLibrary({
     if (w < 1 || h < 1 || w > 400 || h > 400) return null;
     if (!Array.isArray(t.cells) || t.cells.length !== w * h) return null;
     if (!t.cells.every(v => Number.isInteger(v) && v >= 0 && v <= 255)) return null;   // material ids
-    const content = JSON.stringify({ name: (t.name || title).toString().slice(0, 40), w, h, cells: t.cells });
-    if (content.length > 400_000) return null;
-    return { title, content, w, h, size_bytes: content.length };
+    // Optional non-terrain objects (props/markers) captured with the template, clip-relative (dx,dy).
+    let objs = [];
+    if (Array.isArray(t.objs)) { if (t.objs.length > 200) return null; objs = t.objs; }
+    const content = JSON.stringify({ name: (t.name || title).toString().slice(0, 40), w, h, cells: t.cells, objs });
+    if (content.length > 600_000) return null;
+    return { title, descr, content, w, h, size_bytes: content.length };
   },
   mapRow(r, me) {
-    return { id: r.id, title: r.title, author: r.author_name, mine: r.author_id === me, w: r.w, h: r.h, downloads: r.downloads, created_at: r.created_at, content: r.content };
+    return { id: r.id, title: r.title, desc: r.descr || '', author: r.author_name, mine: r.author_id === me, w: r.w, h: r.h, likes: r.likes || 0, downloads: r.downloads, created_at: r.created_at, content: r.content };
   },
 });
 
 // Terrain-block library — stores one custom-mat def JSON blob (fill/cap hex + behavior/skin fields),
 // plus a delimited `facets` string of derived qualities so the browser can filter by Solid/Liquid/etc.
 registerLibrary({
-  path: 'block-lib', table: 'shared_blocks', perUser: 60, searchCol: 'name', facetCol: 'facets',
-  cols: [{ name: 'name', type: 'TEXT' }, { name: 'def', type: 'TEXT' }, { name: 'facets', type: 'TEXT' }, { name: 'size_bytes', type: 'INTEGER' }],
+  path: 'block-lib', table: 'shared_blocks', perUser: 60, searchCol: 'name', facetCol: 'facets', descCol: 'descr',
+  cols: [{ name: 'name', type: 'TEXT' }, { name: 'descr', type: 'TEXT' }, { name: 'def', type: 'TEXT' }, { name: 'facets', type: 'TEXT' }, { name: 'size_bytes', type: 'INTEGER' }],
   validate(body) {
     const name = (body.name || '').toString().trim().slice(0, 24) || 'Block';
+    const descr = (body.desc || '').toString().trim().slice(0, 300);
     let def;
     try { def = typeof body.def === 'string' ? JSON.parse(body.def) : body.def; } catch (e) { return null; }
     if (!def || typeof def !== 'object') return null;
@@ -1898,10 +1907,10 @@ registerLibrary({
     if (def.conveyor) f.push('conveyor');
     if (def.breakable !== false) f.push('breakable');
     const facets = '|' + f.join('|') + '|';
-    return { name, def: json, facets, size_bytes: json.length };
+    return { name, descr, def: json, facets, size_bytes: json.length };
   },
   mapRow(r, me) {
-    return { id: r.id, name: r.name, author: r.author_name, mine: r.author_id === me, def: r.def, downloads: r.downloads, created_at: r.created_at };
+    return { id: r.id, name: r.name, desc: r.descr || '', facets: r.facets || '', author: r.author_name, mine: r.author_id === me, def: r.def, likes: r.likes || 0, downloads: r.downloads, created_at: r.created_at };
   },
 });
 
