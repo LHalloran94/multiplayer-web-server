@@ -1697,8 +1697,19 @@ function registerLibrary(cfg) {
     ${cfg.cols.map(c => c.name + ' ' + c.type).join(',\n    ')},
     downloads INTEGER DEFAULT 0,
     reports INTEGER DEFAULT 0,
+    likes INTEGER DEFAULT 0,
     created_at INTEGER DEFAULT (unixepoch())
   )`);
+  // One shared like ledger for every library, keyed by (lib path, item, user) so a like is per-user and
+  // toggleable. The per-row `likes` counter (above) is the denormalized total for cheap sorting/display.
+  db.exec(`CREATE TABLE IF NOT EXISTS shared_likes (
+    lib TEXT NOT NULL, item_id TEXT NOT NULL, user_id TEXT NOT NULL,
+    PRIMARY KEY (lib, item_id, user_id)
+  )`);
+  // Bring existing (pre-likes / newly-added-column) tables up to the current shape — ALTER throws if the
+  // column already exists, which we ignore. Covers `likes` and any col added to cfg.cols after first deploy.
+  cfg.cols.forEach(c => { try { db.exec(`ALTER TABLE ${cfg.table} ADD COLUMN ${c.name} ${c.type}`); } catch (e) {} });
+  try { db.exec(`ALTER TABLE ${cfg.table} ADD COLUMN likes INTEGER DEFAULT 0`); } catch (e) {}
   const searchCol = cfg.searchCol || 'name';
   function genId() {
     let id;
@@ -1735,15 +1746,48 @@ function registerLibrary(cfg) {
   app.get('/' + cfg.path, (req, res) => {
     const caller = verifyToken(req);
     const me = caller ? caller.sub : '\x00';
-    const order = req.query.sort === 'popular' ? 'downloads DESC, created_at DESC' : 'created_at DESC';
+    const order = req.query.sort === 'likes' ? 'likes DESC, downloads DESC, created_at DESC'
+                : req.query.sort === 'popular' ? 'downloads DESC, created_at DESC'
+                : 'created_at DESC';
     const q = (req.query.q || '').toString().trim().slice(0, 40);
     const page = Math.max(0, parseInt(req.query.page, 10) || 0);
     const PER = 30;
+    // Optional derived-quality filter (e.g. terrain blocks: solid/liquid/hazard/bouncy/…). Facets are
+    // stored as a delimited string like "|solid|breakable|"; a filter matches "|<facet>|".
+    const facet = (req.query.facet || '').toString().trim().toLowerCase().slice(0, 20);
+    const where = [], params = [];
+    if (q) { where.push(`${searchCol} LIKE ?`); params.push('%' + q + '%'); }
+    if (facet && cfg.facetCol) { where.push(`${cfg.facetCol} LIKE ?`); params.push('%|' + facet + '|%'); }
+    const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
     try {
-      const rows = q
-        ? db.prepare(`SELECT * FROM ${cfg.table} WHERE ${searchCol} LIKE ? ORDER BY ${order} LIMIT ? OFFSET ?`).all('%' + q + '%', PER, page * PER)
-        : db.prepare(`SELECT * FROM ${cfg.table} ORDER BY ${order} LIMIT ? OFFSET ?`).all(PER, page * PER);
-      res.json(rows.map(r => cfg.mapRow(r, me)));
+      const rows = db.prepare(`SELECT * FROM ${cfg.table} ${whereSql} ORDER BY ${order} LIMIT ? OFFSET ?`).all(...params, PER, page * PER);
+      let liked = new Set();
+      if (caller) liked = new Set(db.prepare('SELECT item_id FROM shared_likes WHERE lib = ? AND user_id = ?').all(cfg.path, me).map(x => x.item_id));
+      res.json(rows.map(r => { const o = cfg.mapRow(r, me); o.likes = r.likes || 0; o.liked = liked.has(r.id); return o; }));
+    } catch (e) { res.status(500).json({ error: 'DB error' }); }
+  });
+
+  // Per-user like toggle. Flips the caller's row in shared_likes and keeps the denormalized counter in
+  // sync; returns the new total + whether the caller now likes it.
+  app.post('/' + cfg.path + '/:id/like', (req, res) => {
+    const user = verifyToken(req);
+    if (!user) return res.status(401).json({ error: 'Unauthorized' });
+    const id = req.params.id;
+    try {
+      if (!db.prepare(`SELECT 1 FROM ${cfg.table} WHERE id = ?`).get(id)) return res.status(404).json({ error: 'Not found' });
+      const had = db.prepare('SELECT 1 FROM shared_likes WHERE lib = ? AND item_id = ? AND user_id = ?').get(cfg.path, id, user.sub);
+      let liked;
+      if (had) {
+        db.prepare('DELETE FROM shared_likes WHERE lib = ? AND item_id = ? AND user_id = ?').run(cfg.path, id, user.sub);
+        db.prepare(`UPDATE ${cfg.table} SET likes = MAX(0, likes - 1) WHERE id = ?`).run(id);
+        liked = false;
+      } else {
+        db.prepare('INSERT INTO shared_likes (lib, item_id, user_id) VALUES (?, ?, ?)').run(cfg.path, id, user.sub);
+        db.prepare(`UPDATE ${cfg.table} SET likes = likes + 1 WHERE id = ?`).run(id);
+        liked = true;
+      }
+      const row = db.prepare(`SELECT likes FROM ${cfg.table} WHERE id = ?`).get(id);
+      res.json({ likes: row ? row.likes : 0, liked });
     } catch (e) { res.status(500).json({ error: 'DB error' }); }
   });
 
@@ -1765,6 +1809,7 @@ function registerLibrary(cfg) {
       if (!row) return res.status(404).json({ error: 'Not found' });
       if (row.author_id !== user.sub) return res.status(403).json({ error: 'Not author' });
       db.prepare(`DELETE FROM ${cfg.table} WHERE id = ?`).run(req.params.id);
+      db.prepare('DELETE FROM shared_likes WHERE lib = ? AND item_id = ?').run(cfg.path, req.params.id);
       res.json({ ok: true });
     } catch (e) { res.status(500).json({ error: 'DB error' }); }
   });
@@ -1807,30 +1852,34 @@ registerLibrary({
   },
 });
 
-// Layer-2 Level/World template library — stores the JSON content blob directly (not a link), like
-// published_worlds. Content is the saved entry's `levels` array (each Level has a `terrain` field).
+// Layer-2 terrain-TEMPLATE library — a multi-cell terrain STAMP {name,w,h,cells} (the Select-tool
+// `terrainTemplates`), stored as a JSON content blob. (Whole Worlds share via upload+Remix, not here.)
 registerLibrary({
-  path: 'template-lib', table: 'shared_templates', perUser: 40, searchCol: 'title',
-  cols: [{ name: 'title', type: 'TEXT' }, { name: 'content', type: 'TEXT' }, { name: 'level_count', type: 'INTEGER' }, { name: 'size_bytes', type: 'INTEGER' }],
+  path: 'template-lib', table: 'shared_templates', perUser: 60, searchCol: 'title',
+  cols: [{ name: 'title', type: 'TEXT' }, { name: 'content', type: 'TEXT' }, { name: 'w', type: 'INTEGER' }, { name: 'h', type: 'INTEGER' }, { name: 'size_bytes', type: 'INTEGER' }],
   validate(body) {
-    const title = (body.title || '').toString().trim().slice(0, 60) || 'Untitled';
-    let arr;
-    try { arr = typeof body.content === 'string' ? JSON.parse(body.content) : body.content; } catch (e) { return null; }
-    if (!Array.isArray(arr) || !arr.length || arr.length > 40) return null;
-    if (!arr.every(l => l && typeof l === 'object' && l.terrain)) return null;   // must look like a Level array
-    const content = JSON.stringify(arr);
-    if (content.length > 600_000) return null;
-    return { title, content, level_count: arr.length, size_bytes: content.length };
+    const title = (body.title || '').toString().trim().slice(0, 60) || 'Template';
+    let t;
+    try { t = typeof body.content === 'string' ? JSON.parse(body.content) : body.content; } catch (e) { return null; }
+    if (!t || typeof t !== 'object') return null;
+    const w = t.w | 0, h = t.h | 0;
+    if (w < 1 || h < 1 || w > 400 || h > 400) return null;
+    if (!Array.isArray(t.cells) || t.cells.length !== w * h) return null;
+    if (!t.cells.every(v => Number.isInteger(v) && v >= 0 && v <= 255)) return null;   // material ids
+    const content = JSON.stringify({ name: (t.name || title).toString().slice(0, 40), w, h, cells: t.cells });
+    if (content.length > 400_000) return null;
+    return { title, content, w, h, size_bytes: content.length };
   },
   mapRow(r, me) {
-    return { id: r.id, title: r.title, author: r.author_name, mine: r.author_id === me, level_count: r.level_count, downloads: r.downloads, created_at: r.created_at, content: r.content };
+    return { id: r.id, title: r.title, author: r.author_name, mine: r.author_id === me, w: r.w, h: r.h, downloads: r.downloads, created_at: r.created_at, content: r.content };
   },
 });
 
-// Terrain-block library — stores one custom-mat def JSON blob (fill/cap hex + behavior/skin fields).
+// Terrain-block library — stores one custom-mat def JSON blob (fill/cap hex + behavior/skin fields),
+// plus a delimited `facets` string of derived qualities so the browser can filter by Solid/Liquid/etc.
 registerLibrary({
-  path: 'block-lib', table: 'shared_blocks', perUser: 60, searchCol: 'name',
-  cols: [{ name: 'name', type: 'TEXT' }, { name: 'def', type: 'TEXT' }, { name: 'size_bytes', type: 'INTEGER' }],
+  path: 'block-lib', table: 'shared_blocks', perUser: 60, searchCol: 'name', facetCol: 'facets',
+  cols: [{ name: 'name', type: 'TEXT' }, { name: 'def', type: 'TEXT' }, { name: 'facets', type: 'TEXT' }, { name: 'size_bytes', type: 'INTEGER' }],
   validate(body) {
     const name = (body.name || '').toString().trim().slice(0, 24) || 'Block';
     let def;
@@ -1839,7 +1888,17 @@ registerLibrary({
     if (!/^#[0-9a-f]{6}$/i.test(def.fill || '') || !/^#[0-9a-f]{6}$/i.test(def.cap || '')) return null;   // same shape the client stores
     const json = JSON.stringify(def);
     if (json.length > 200_000) return null;
-    return { name, def: json, size_bytes: json.length };
+    // Derive the searchable qualities from the def (mirrors the client's block modifiers).
+    const f = [];
+    if (def.behavior === 'fluid') f.push('liquid');
+    else if (def.behavior === 'hazard') f.push('hazard');
+    else f.push('solid');
+    if (['ice', 'mud', 'snow'].includes(def.surface)) f.push(def.surface);
+    if (def.bouncy) f.push('bouncy');
+    if (def.conveyor) f.push('conveyor');
+    if (def.breakable !== false) f.push('breakable');
+    const facets = '|' + f.join('|') + '|';
+    return { name, def: json, facets, size_bytes: json.length };
   },
   mapRow(r, me) {
     return { id: r.id, name: r.name, author: r.author_name, mine: r.author_id === me, def: r.def, downloads: r.downloads, created_at: r.created_at };
