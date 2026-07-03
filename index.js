@@ -1807,6 +1807,45 @@ registerLibrary({
   },
 });
 
+// Layer-2 Level/World template library — stores the JSON content blob directly (not a link), like
+// published_worlds. Content is the saved entry's `levels` array (each Level has a `terrain` field).
+registerLibrary({
+  path: 'template-lib', table: 'shared_templates', perUser: 40, searchCol: 'title',
+  cols: [{ name: 'title', type: 'TEXT' }, { name: 'content', type: 'TEXT' }, { name: 'level_count', type: 'INTEGER' }, { name: 'size_bytes', type: 'INTEGER' }],
+  validate(body) {
+    const title = (body.title || '').toString().trim().slice(0, 60) || 'Untitled';
+    let arr;
+    try { arr = typeof body.content === 'string' ? JSON.parse(body.content) : body.content; } catch (e) { return null; }
+    if (!Array.isArray(arr) || !arr.length || arr.length > 40) return null;
+    if (!arr.every(l => l && typeof l === 'object' && l.terrain)) return null;   // must look like a Level array
+    const content = JSON.stringify(arr);
+    if (content.length > 600_000) return null;
+    return { title, content, level_count: arr.length, size_bytes: content.length };
+  },
+  mapRow(r, me) {
+    return { id: r.id, title: r.title, author: r.author_name, mine: r.author_id === me, level_count: r.level_count, downloads: r.downloads, created_at: r.created_at, content: r.content };
+  },
+});
+
+// Terrain-block library — stores one custom-mat def JSON blob (fill/cap hex + behavior/skin fields).
+registerLibrary({
+  path: 'block-lib', table: 'shared_blocks', perUser: 60, searchCol: 'name',
+  cols: [{ name: 'name', type: 'TEXT' }, { name: 'def', type: 'TEXT' }, { name: 'size_bytes', type: 'INTEGER' }],
+  validate(body) {
+    const name = (body.name || '').toString().trim().slice(0, 24) || 'Block';
+    let def;
+    try { def = typeof body.def === 'string' ? JSON.parse(body.def) : body.def; } catch (e) { return null; }
+    if (!def || typeof def !== 'object') return null;
+    if (!/^#[0-9a-f]{6}$/i.test(def.fill || '') || !/^#[0-9a-f]{6}$/i.test(def.cap || '')) return null;   // same shape the client stores
+    const json = JSON.stringify(def);
+    if (json.length > 200_000) return null;
+    return { name, def: json, size_bytes: json.length };
+  },
+  mapRow(r, me) {
+    return { id: r.id, name: r.name, author: r.author_name, mine: r.author_id === me, def: r.def, downloads: r.downloads, created_at: r.created_at };
+  },
+});
+
 function mulberry32(a) {                              // tiny deterministic PRNG (same family the client could mirror)
   return function () {
     a |= 0; a = (a + 0x6D2B79F5) | 0;
