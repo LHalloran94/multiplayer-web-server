@@ -994,13 +994,13 @@ app.get('/rooms/:id/messages', (req, res) => {
       if (!member) return res.status(403).json({ error: 'Not a member' });
     }
     const rows = db.prepare(`
-      SELECT rm.from_discord_id, u.username, rm.text, rm.sent_at
+      SELECT rm.id, rm.from_discord_id, u.username, rm.text, rm.sent_at
       FROM room_messages rm
       LEFT JOIN users u ON u.discord_id = rm.from_discord_id
       WHERE rm.room_id = ?
       ORDER BY rm.sent_at ASC LIMIT 100
     `).all(id);
-    res.json(rows.map(r => ({ fromDiscordId: r.from_discord_id, username: r.username || 'Unknown', text: r.text, ts: r.sent_at })));
+    res.json(rows.map(r => ({ id: r.id, fromDiscordId: r.from_discord_id, username: r.username || 'Unknown', text: r.text, ts: r.sent_at })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -3507,7 +3507,7 @@ io.on('connection', (socket) => {
   socket.on('private-room-disconnect', ({ roomId }) => {
     socket.leave('proom:' + roomId);
   });
-  socket.on('private-room-message', ({ roomId, text }) => {
+  socket.on('private-room-message', ({ roomId, text, cid }) => {
     const senderDiscordId = socketToDiscordId[socket.id];
     if (!roomId || !text) return;
     try {
@@ -3526,9 +3526,32 @@ io.on('connection', (socket) => {
       }
       if (!username) return;
       const ts = Date.now();
-      db.prepare('INSERT INTO room_messages (room_id, from_discord_id, text, sent_at) VALUES (?, ?, ?, ?)').run(roomId, senderDiscordId || null, text.slice(0, 2000), ts);
-      socket.to('proom:' + roomId).emit('private-room-message', { roomId, from: username, fromDiscordId: senderDiscordId || null, text, timestamp: ts });
+      const info = db.prepare('INSERT INTO room_messages (room_id, from_discord_id, text, sent_at) VALUES (?, ?, ?, ?)').run(roomId, senderDiscordId || null, text.slice(0, 2000), ts);
+      const msgId = Number(info.lastInsertRowid);
+      socket.to('proom:' + roomId).emit('private-room-message', { roomId, from: username, fromDiscordId: senderDiscordId || null, text, timestamp: ts, id: msgId });
+      if (cid) socket.emit('private-room-message-ack', { cid, id: msgId });   // let the sender patch its optimistic message with the real id
     } catch (e) { console.error('[private-room-message]', e); }
+  });
+
+  // Delete YOUR OWN messages (author-only, verified by discord id / username).
+  socket.on('room-msg-delete', ({ roomId, id }) => {
+    const senderDiscordId = socketToDiscordId[socket.id];
+    if (!roomId || id == null || !senderDiscordId) return;
+    try {
+      const row = db.prepare('SELECT from_discord_id FROM room_messages WHERE id = ? AND room_id = ?').get(Number(id), roomId);
+      if (!row || row.from_discord_id !== senderDiscordId) return;   // only the author can delete
+      db.prepare('DELETE FROM room_messages WHERE id = ?').run(Number(id));
+      io.to('proom:' + roomId).emit('msg-removed', { id: Number(id) });
+    } catch (e) { console.error('[room-msg-delete]', e); }
+  });
+  socket.on('page-msg-delete', ({ id }) => {
+    if (!currentRoom || id == null) return;
+    const hist = roomHistory[currentRoom];
+    if (!hist) return;
+    const idx = hist.findIndex(m => m.id === id && m.username === currentUsername);   // page chat: author by username
+    if (idx === -1) return;
+    hist.splice(idx, 1);
+    io.to(currentRoom).emit('msg-removed', { id });
   });
 
   socket.on('group-connect',    ({ groupId }) => { socket.join('pgroup:' + groupId); });
