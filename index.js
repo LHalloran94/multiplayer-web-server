@@ -1958,7 +1958,7 @@ function sanitizeTheme(t) {
     if (b.bars && typeof b.bars === 'object') {
       out.buttons.bars = {};
       for (const key of Object.keys(b.bars).slice(0, 24)) {
-        if (!/^(header|tabs|features|message|f:[a-z0-9]{1,20})$/.test(key)) continue;
+        if (!/^(header|tabs|features|message|banner|f:[a-z0-9]{1,20})$/.test(key)) continue;
         if (Array.isArray(b.bars[key])) out.buttons.bars[key] = b.bars[key].filter(x => typeof x === 'string' && /^[a-z0-9-]{1,30}$/.test(x)).slice(0, 40);
       }
     }
