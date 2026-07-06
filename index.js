@@ -2920,7 +2920,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  socket.on('canvas-stroke-start', ({ id, scope, color, size, eraser, brush, opacity, x, y }) => {
+  socket.on('canvas-stroke-start', ({ id, scope, color, size, eraser, brush, opacity, x, y, shape }) => {
     if (!currentRoom) return;
     const key = currentRoom + ':' + (scope || 'page');
     if (!roomCanvases[key]) roomCanvases[key] = { strokes: new Map(), stamps: [] };
@@ -2930,8 +2930,11 @@ io.on('connection', (socket) => {
       data.strokes.delete(oldestId);
     }
     const bru = brush || 'brush', op = opacity != null ? opacity : 100;
-    data.strokes.set(id, { id, username: currentUsername, color, size, eraser: !!eraser, brush: bru, opacity: op, points: [{ x, y }] });
-    socket.to(currentRoom).emit('canvas-stroke-start', { id, scope, username: currentUsername, color, size, eraser: !!eraser, brush: bru, opacity: op, x, y });
+    const sh = (shape === 'line' || shape === 'rect' || shape === 'ellipse') ? shape : undefined;
+    const stroke = { id, username: currentUsername, color, size, eraser: !!eraser, brush: bru, opacity: op, points: [{ x, y }] };
+    if (sh) stroke.shape = sh;
+    data.strokes.set(id, stroke);
+    socket.to(currentRoom).emit('canvas-stroke-start', { id, scope, username: currentUsername, color, size, eraser: !!eraser, brush: bru, opacity: op, x, y, shape: sh });
   });
 
   socket.on('canvas-stroke-points', ({ id, scope, points }) => {
