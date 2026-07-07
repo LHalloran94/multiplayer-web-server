@@ -576,12 +576,12 @@ app.get('/rooms/public', (req, res) => {
   const caller = verifyToken(req);                       // optional — lets us include the caller's own state
   const me = caller ? caller.sub : '\x00';
   try {
-    if (hostname) { try { ensureSiteRoom(hostname); } catch (e) {} }   // auto-provision this site's default room
     // Return every public room relevant to THIS page in one shot — bound to this exact URL, OR to this
     // site (scope=hostname, not URL-bound), OR global (no binding). The client buckets these into the
-    // launcher's "This page" / "This site" / "Public" sub-tabs.
+    // launcher's "This page" / "This site" / "Public" sub-tabs. (The default Site room isn't provisioned
+    // here — it's created lazily on first ENTER via POST /rooms/site, so unused sites cost no storage.)
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -599,6 +599,32 @@ app.get('/rooms/public', (req, res) => {
       ORDER BY r.created_at DESC LIMIT 80
     `).all(me, me, me, url || '\x00', hostname || '');
     res.json(rows.map(normalizeRoomSocial));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Materialize + return this site's default room on first ENTER (create-on-enter — not on list — so unused
+// sites cost no storage). Idempotent: INSERT OR IGNORE keyed on the deterministic per-hostname id.
+app.post('/rooms/site', (req, res) => {
+  const hostname = ((req.body && req.body.hostname) || '').trim().toLowerCase();
+  if (!hostname) return res.status(400).json({ error: 'hostname required' });
+  const caller = verifyToken(req);
+  const me = caller ? caller.sub : '\x00';
+  try {
+    ensureSiteRoom(hostname);
+    const row = db.prepare(`
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+             (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
+             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
+             (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
+             (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
+             (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_avg,
+             (SELECT 1 FROM room_favourites rf WHERE rf.room_id = r.id AND rf.discord_id = ?) as favourited,
+             (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = r.id AND rl2.discord_id = ?) as liked,
+             (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
+      FROM rooms r WHERE r.id = ?
+    `).get(me, me, me, siteRoomId(hostname));
+    if (!row) return res.status(500).json({ error: 'create failed' });
+    res.json(normalizeRoomSocial(row));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -1065,6 +1091,31 @@ app.get('/groups/search', (req, res) => {
       ORDER BY member_count DESC LIMIT 20
     `).all('%' + q + '%');
     res.json(rows);
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Search users by (partial) username so you can add friends without sharing a room. Returns each match's
+// current friend relationship to the caller so the UI can show Add / Pending / Friends.
+app.get('/users/search', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const q = (req.query.q || '').trim();
+  if (q.length < 2) return res.json([]);
+  try {
+    const rows = db.prepare(`
+      SELECT discord_id, username, avatar,
+             (SELECT status FROM friends f WHERE (f.from_id=? AND f.to_id=users.discord_id) OR (f.to_id=? AND f.from_id=users.discord_id) LIMIT 1) as friend_status,
+             (SELECT from_id FROM friends f WHERE (f.from_id=? AND f.to_id=users.discord_id) OR (f.to_id=? AND f.from_id=users.discord_id) LIMIT 1) as friend_from
+      FROM users
+      WHERE username LIKE ? COLLATE NOCASE AND discord_id != ?
+      ORDER BY (username = ? COLLATE NOCASE) DESC, LENGTH(username) ASC
+      LIMIT 20
+    `).all(user.sub, user.sub, user.sub, user.sub, '%' + q + '%', user.sub, q);
+    res.json(rows.map(r => ({
+      discord_id: r.discord_id, username: r.username, avatar: r.avatar || null,
+      // 'friends' | 'pending-out' (I sent) | 'pending-in' (they sent) | null (none)
+      relation: !r.friend_status ? null : (r.friend_status === 'accepted' ? 'friends' : (r.friend_from === user.sub ? 'pending-out' : 'pending-in')),
+    })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
