@@ -125,6 +125,12 @@ try { db.exec('ALTER TABLE rooms ADD COLUMN icon TEXT'); } catch {}
 // can discover (via GET /rooms/friends) and join without an explicit invite/code. friends_only=1 implies
 // public=0. Saves making a private room and inviting each friend by hand.
 try { db.exec('ALTER TABLE rooms ADD COLUMN friends_only INTEGER DEFAULT 0'); } catch {}
+// last_active (Unix ms) — bumped on enter + on each message. Drives pruning of idle auto-provisioned Site
+// rooms (owner 'system'); user-created rooms are never swept.
+try { db.exec('ALTER TABLE rooms ADD COLUMN last_active INTEGER'); } catch {}
+// Discord mutuals: each authed user's guild (server) ids, refreshed on login (requires the OAuth 'guilds'
+// scope). Powers friend suggestions — extension users you share a Discord server with.
+try { db.exec('CREATE TABLE IF NOT EXISTS user_guilds (discord_id TEXT NOT NULL, guild_id TEXT NOT NULL, PRIMARY KEY (discord_id, guild_id))'); } catch {}
 
 // Phase 3 — room social signals. Personal favourite (private bookmark, drives the Favourites sub-tab),
 // public like (one per user), and a 1–5 star rating (one vote per user; avg/count computed on read).
@@ -326,6 +332,20 @@ app.post('/auth/discord', async (req, res) => {
       ? `https://cdn.discordapp.com/avatars/${user.id}/${user.avatar}.png`
       : null;
 
+    // Store this user's Discord guild ids for mutual-server friend suggestions. Needs the 'guilds' scope;
+    // silently skip if the token wasn't granted it (older logins) — suggestions just stay empty until re-auth.
+    try {
+      const gRes = await fetch('https://discord.com/api/users/@me/guilds', { headers: { Authorization: `Bearer ${tokenData.access_token}` } });
+      if (gRes.ok) {
+        const guilds = await gRes.json();
+        if (Array.isArray(guilds)) {
+          const del = db.prepare('DELETE FROM user_guilds WHERE discord_id = ?');
+          const ins = db.prepare('INSERT OR IGNORE INTO user_guilds (discord_id, guild_id) VALUES (?, ?)');
+          db.transaction(() => { del.run(user.id); for (const g of guilds.slice(0, 200)) if (g && g.id) ins.run(user.id, String(g.id)); })();
+        }
+      }
+    } catch (e) { /* guilds are best-effort */ }
+
     const token = jwt.sign(
       { sub: user.id, username: user.username, avatar: avatarUrl },
       JWT_SECRET,
@@ -352,6 +372,30 @@ app.get('/friends', (req, res) => {
       WHERE f.from_id = ? OR f.to_id = ?
     `).all(user.sub, user.sub, user.sub, user.sub);
     res.json(rows.map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id] })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// People you may know: extension users who share ≥1 Discord server with the caller and aren't already a
+// friend / pending. Ranked by number of shared servers. Empty until both parties logged in with the
+// 'guilds' scope (see /auth/discord).
+app.get('/friends/suggestions', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(`
+      SELECT u.discord_id, u.username, u.avatar, COUNT(DISTINCT ug2.guild_id) as shared
+      FROM user_guilds ug1
+      JOIN user_guilds ug2 ON ug2.guild_id = ug1.guild_id AND ug2.discord_id != ug1.discord_id
+      JOIN users u ON u.discord_id = ug2.discord_id
+      WHERE ug1.discord_id = ?
+        AND ug2.discord_id NOT IN (
+          SELECT CASE WHEN from_id = ? THEN to_id ELSE from_id END FROM friends WHERE from_id = ? OR to_id = ?
+        )
+      GROUP BY u.discord_id, u.username, u.avatar
+      ORDER BY shared DESC, u.username ASC
+      LIMIT 20
+    `).all(user.sub, user.sub, user.sub, user.sub);
+    res.json(rows.map(r => ({ discord_id: r.discord_id, username: r.username, avatar: r.avatar || null, shared_guilds: r.shared })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -565,10 +609,33 @@ function siteRoomId(hostname) {
 function ensureSiteRoom(hostname) {
   if (!hostname) return;
   const spec = JSON.stringify({ levels: [{ type: 'sandbox', name: 'Sandbox', size: 'large' }], nav: 'free' });
-  db.prepare(`INSERT OR IGNORE INTO rooms (id, name, owner_id, public, friends_only, scope, url, description, kind, env_spec, perms, icon)
-              VALUES (?, ?, 'system', 1, 0, ?, NULL, ?, NULL, ?, NULL, NULL)`)
-    .run(siteRoomId(hostname), hostname, hostname, 'Everyone browsing ' + hostname, spec);
+  db.prepare(`INSERT OR IGNORE INTO rooms (id, name, owner_id, public, friends_only, scope, url, description, kind, env_spec, perms, icon, last_active)
+              VALUES (?, ?, 'system', 1, 0, ?, NULL, ?, NULL, ?, NULL, NULL, ?)`)
+    .run(siteRoomId(hostname), hostname, hostname, 'Everyone browsing ' + hostname, spec, Date.now());
 }
+// Mark a room active now (bumped on enter + on each message) so idle Site rooms can be pruned by age.
+function bumpRoomActive(roomId) {
+  if (!roomId) return;
+  try { db.prepare('UPDATE rooms SET last_active = ? WHERE id = ?').run(Date.now(), roomId); } catch {}
+}
+// Sweep idle auto-provisioned Site rooms (owner 'system') with no activity for SITE_ROOM_TTL_MS, plus their
+// messages/members/social rows. User-created rooms are never touched.
+const SITE_ROOM_TTL_MS = 60 * 24 * 60 * 60 * 1000;   // 60 days
+function pruneIdleSiteRooms() {
+  try {
+    const cutoff = Date.now() - SITE_ROOM_TTL_MS;
+    const stale = db.prepare(`SELECT id FROM rooms WHERE owner_id = 'system' AND COALESCE(last_active, 0) < ?`).all(cutoff);
+    for (const { id } of stale) {
+      for (const t of ['room_messages', 'room_members', 'room_favourites', 'room_likes', 'room_ratings']) {
+        try { db.prepare(`DELETE FROM ${t} WHERE room_id = ?`).run(id); } catch {}
+      }
+      try { db.prepare('DELETE FROM rooms WHERE id = ?').run(id); } catch {}
+    }
+    if (stale.length) console.log('[prune] removed', stale.length, 'idle site rooms');
+  } catch (e) { console.error('[prune]', e); }
+}
+setInterval(pruneIdleSiteRooms, 6 * 60 * 60 * 1000);   // every 6h
+setTimeout(pruneIdleSiteRooms, 60 * 1000);             // once shortly after boot
 
 app.get('/rooms/public', (req, res) => {
   const hostname = (req.query.hostname || '').trim().toLowerCase();
@@ -611,6 +678,7 @@ app.post('/rooms/site', (req, res) => {
   const me = caller ? caller.sub : '\x00';
   try {
     ensureSiteRoom(hostname);
+    bumpRoomActive(siteRoomId(hostname));   // entering counts as activity → resets the idle-prune clock
     const row = db.prepare(`
       SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
@@ -3601,6 +3669,8 @@ io.on('connection', (socket) => {
       const ts = Date.now();
       const info = db.prepare('INSERT INTO room_messages (room_id, from_discord_id, text, sent_at) VALUES (?, ?, ?, ?)').run(roomId, senderDiscordId || null, text.slice(0, 2000), ts);
       const msgId = Number(info.lastInsertRowid);
+      bumpRoomActive(roomId);   // activity → keeps an idle Site room alive
+
       socket.to('proom:' + roomId).emit('private-room-message', { roomId, from: username, fromDiscordId: senderDiscordId || null, text, timestamp: ts, id: msgId });
       if (cid) socket.emit('private-room-message-ack', { cid, id: msgId });   // let the sender patch its optimistic message with the real id
     } catch (e) { console.error('[private-room-message]', e); }
