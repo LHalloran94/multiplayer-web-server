@@ -552,12 +552,31 @@ app.post('/rooms', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// Stable, collision-resistant room id derived from a hostname, so the auto-provisioned site room is a
+// single canonical row per site (INSERT OR IGNORE keys off the primary id → idempotent, race-safe).
+function siteRoomId(hostname) {
+  let h = 5381;
+  for (let i = 0; i < hostname.length; i++) h = ((h << 5) + h + hostname.charCodeAt(i)) >>> 0;
+  return 'SITE' + h.toString(36).toUpperCase();
+}
+// Ensure the system-owned default room for `hostname` exists. Owner 'system' has no users row, so no one
+// sees host/delete controls — it's undeletable and there's exactly one per site. It carries a default
+// one-Level World so it behaves like any other public room (World button, avatars).
+function ensureSiteRoom(hostname) {
+  if (!hostname) return;
+  const spec = JSON.stringify({ levels: [{ type: 'sandbox', name: 'Sandbox', size: 'large' }], nav: 'free' });
+  db.prepare(`INSERT OR IGNORE INTO rooms (id, name, owner_id, public, friends_only, scope, url, description, kind, env_spec, perms, icon)
+              VALUES (?, ?, 'system', 1, 0, ?, NULL, ?, NULL, ?, NULL, NULL)`)
+    .run(siteRoomId(hostname), hostname, hostname, 'Everyone browsing ' + hostname, spec);
+}
+
 app.get('/rooms/public', (req, res) => {
   const hostname = (req.query.hostname || '').trim().toLowerCase();
   const url = (req.query.url || '').trim();
   const caller = verifyToken(req);                       // optional — lets us include the caller's own state
   const me = caller ? caller.sub : '\x00';
   try {
+    if (hostname) { try { ensureSiteRoom(hostname); } catch (e) {} }   // auto-provision this site's default room
     // Return every public room relevant to THIS page in one shot — bound to this exact URL, OR to this
     // site (scope=hostname, not URL-bound), OR global (no binding). The client buckets these into the
     // launcher's "This page" / "This site" / "Public" sub-tabs.
