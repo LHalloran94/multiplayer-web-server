@@ -1588,7 +1588,8 @@ const liquidCfg = {
   //   CLEAR  a cell that can't fall has settled, so it is not a stream: drop the tag.
   // off = the old loose behaviour. Pure annotation either way: sd never gates mass.
   streamTag: true,
-  streamMix: true,       // a ledge spill draws its liquids PROPORTIONALLY (keeps the mixture) instead of heaviest-first. off = the lip oscillates water-rich/oil-rich each tick → the stream shows alternating slugs / pulsing sub-strip widths
+  streamMix: true,
+  streamNoSort: true,    // a tagged FALLING stream does NOT density-sort with the cell below (no buoyancy in free-fall). off = a lighter liquid climbs UP a falling stream of denser liquid (oil rises through water) + bubbles all the way down       // a ledge spill draws its liquids PROPORTIONALLY (keeps the mixture) instead of heaviest-first. off = the lip oscillates water-rich/oil-rich each tick → the stream shows alternating slugs / pulsing sub-strip widths
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
 };
@@ -1855,8 +1856,14 @@ function liquidTickRoom(room) {
       }
     }
     if (L <= 0) continue;
+    // NO BUOYANCY IN FREE-FALL. A tagged FALLING stream cell must not density-sort with the cell below: otherwise a lighter
+    // liquid in the pool it pours into climbs UP the stream cell by cell (oil rises through a falling water column, reaching
+    // the top, and the render draws sink/rise bubbles the whole way down — the reported bug). Gated on the sd tag (a reliable
+    // stream signal), NOT canFall — canFall catches settling pool cells too and gating THOSE broke pool stratification before.
+    // A resting pool (sd===0) still sorts normally, so layering is untouched.
+    const noSortStream = liquidCfg.streamNoSort && liquidCfg.streamTag && sd[i] !== 0;
     // (2) DENSITY sort with the cell BELOW: heaviest-above heavier than lightest-below → swap 1 unit (heavy sinks)
-    if (liquidCfg.densitySort && canDown && tot[i + COLS] > 0 && !isSolid(grid[i + COLS])) {
+    if (liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(grid[i + COLS])) {
       const j = i + COLS, hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); }
     }
@@ -1864,7 +1871,7 @@ function liquidTickRoom(room) {
     // lighter rises to me. This is what levels COMPOSITION horizontally: a dense liquid spreads along the bottom across
     // columns (flows under an adjacent lighter one to find its level) instead of standing beside it in a blocky strip.
     // Heavy drops a row → density-weighted PE strictly down → monotone, terminates.
-    if (liquidCfg.densitySort && canDown) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
+    if (liquidCfg.densitySort && !noSortStream && canDown) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
       const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
       const j = i + COLS + dc; if (isSolid(grid[j]) || tot[j] === 0) continue;
       const hi = floorRank(i), lo = ceilRank(j);
@@ -3439,7 +3446,7 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
