@@ -1588,8 +1588,9 @@ const liquidCfg = {
   //   CLEAR  a cell that can't fall has settled, so it is not a stream: drop the tag.
   // off = the old loose behaviour. Pure annotation either way: sd never gates mass.
   streamTag: true,
-  streamMix: true,
-  streamNoSort: true,    // a tagged FALLING stream does NOT density-sort with the cell below (no buoyancy in free-fall). off = a lighter liquid climbs UP a falling stream of denser liquid (oil rises through water) + bubbles all the way down       // a ledge spill draws its liquids PROPORTIONALLY (keeps the mixture) instead of heaviest-first. off = the lip oscillates water-rich/oil-rich each tick → the stream shows alternating slugs / pulsing sub-strip widths
+  streamMix: true,        // a ledge spill draws its liquids PROPORTIONALLY (keeps the mixture) instead of heaviest-first → the lip oscillates less. off = heaviest-first spill (alternating slugs / pulsing sub-strips)
+  streamNoSort: true,     // a tagged FALLING stream does NOT density-sort with the cell below (no buoyancy in free-fall). off = a lighter liquid climbs UP a denser stream (oil rises through water) + bubbles all the way down
+  streamFullClear: false, // (experimental) a brim-full cell drops its stream tag → renders as bands + re-enables density sorting (full = pool, not stream). off = full cells keep streaming / side-by-side. TRADEOFF: on makes full chutes + fat streams slice/stratify
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
 };
@@ -1856,6 +1857,12 @@ function liquidTickRoom(room) {
       }
     }
     if (L <= 0) continue;
+    // FULL CELL DROPS ITS TAG (experimental, user idea). A brim-full cell is packed, not really "streaming", so treat it as a
+    // pool: clear the tag → it renders as flush bands AND (because the no-buoyancy gate below keys off the tag) its density
+    // sort re-enables, so a full mixed cell stratifies instead of holding unmixed side-by-side. Cleared BEFORE the sort so it
+    // takes effect this tick. TRADEOFF: a genuinely full falling stream / full chute also reverts to bands+stratify (may
+    // slice / may flicker if the cell above re-tags it next tick). Toggle streamFullClear to compare.
+    if (liquidCfg.streamTag && liquidCfg.streamFullClear && sd[i] !== 0 && tot[i] >= cap) { sd[i] = 0; tagCleared.add(i); }
     // NO BUOYANCY IN FREE-FALL. A tagged FALLING stream cell must not density-sort with the cell below: otherwise a lighter
     // liquid in the pool it pours into climbs UP the stream cell by cell (oil rises through a falling water column, reaching
     // the top, and the render draws sink/rise bubbles the whole way down — the reported bug). Gated on the sd tag (a reliable
@@ -3446,7 +3453,7 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
