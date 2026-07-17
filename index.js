@@ -1579,8 +1579,15 @@ const liquidCfg = {
   cohesion: true,        // a fed falling cell keeps a 1-unit thread → continuous streams (no gap into the pool). off = streams can break up
   viscosity: false,      // per-liquid LEVEL_VISC throttle: denser liquids ooze flat slower. off = ALL liquids level at full speed
   reactions: true,       // lava+water→stone, acid dissolves terrain, water+snow→ice, oil burns, etc.
-  streamTagClear: true,  // a settled (can't-fall) cell drops its fallSide stream tag. off = the old behaviour: stale tags linger on brim-full pool cells forever
-  streamTagLedge: true,  // the fallSide tag is born ONLY on a spill off a genuine LEDGE (solid underfoot). off = the old behaviour: any diagonal spill tags, incl. liquid spreading across a pool surface (tags ~74% of a settling pool)
+  // ONE flag for the whole "make fallSide mean what it says" rule set (it is one idea; splitting it into
+  // separate toggles just produced broken half-states). On, the tag obeys three rules:
+  //   BIRTH  (1b) only a spill off a REAL ledge — solid underfoot. Blocked by full LIQUID = a pool surface
+  //               spreading sideways, not a fall (tagged ~74% of a settling pool).
+  //   WRITE  (1a/1b) only onto AIR or a cell that is already a stream. Never onto resting pool liquid —
+  //               that stamped the stream's tag onto the cell it LANDS in, which then drew sideways.
+  //   CLEAR  a cell that can't fall has settled, so it is not a stream: drop the tag.
+  // off = the old loose behaviour. Pure annotation either way: sd never gates mass.
+  streamTag: true,
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
 };
@@ -1861,7 +1868,11 @@ function liquidTickRoom(room) {
     // (1) TOTAL flow — proven single-liquid leveling on total[i], composition advected + STREAM COHESION
     const fedAbove = r > 0 && tot[i - COLS] > 0;
     // 1a straight down (cohesion: a fed fall cell keeps 1 unit → continuous stream, reaches pools with no gap)
-    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { let t = Math.min(L, room); if (liquidCfg.cohesion && fedAbove && t >= L && L >= 1) t = L - 1; if (t > 0) { moveBottom(i, j, t); sd[j] = sd[i]; L -= t; wakeN(i); } } }
+    // The tag CARRY rides along with the liquid — but only onto AIR or a cell that is already a stream. Writing it onto a cell
+    // that already holds untagged (resting) liquid stamped the stream's tag onto the pool cell it LANDS in, so that cell drew
+    // as a sideways strip instead of filling bottom-up with the incoming stream in its empty top ("cell = both"). It's exactly
+    // one cell — the landing cell — and it's only tagged WHILE liquid pours into it, so a tags-at-rest check can't see it.
+    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { let t = Math.min(L, room); if (liquidCfg.cohesion && fedAbove && t >= L && L >= 1) t = L - 1; if (t > 0) { const tagOk = !liquidCfg.streamTag || tot[j] === 0 || sd[j] !== 0; moveBottom(i, j, t); if (tagOk) sd[j] = sd[i]; L -= t; wakeN(i); } } }
     // DENSITY THROTTLE (reduced-amount). Streaming DOWN A SURFACE — the diagonal spill 1b (here) and the lateral leveling
     // 1c/1d (below) — moves a reduced amount per tick for denser liquids (rate lf = 1/(1+LEVEL_VISC[surface rank])), so a
     // dense liquid oozes DOWN A SLOPE at ~the same speed it spreads SIDEWAYS instead of racing down 1b-fast and heaping up at
@@ -1885,7 +1896,13 @@ function liquidTickRoom(room) {
       // draw as sideways-filling strips: a plain no-ledge basin peaked at 197 of 266 cells tagged mid-settle (0 with the gate).
       // Note `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream chute lane, which is MASS. Only sd is gated, so
       // physics is untouched (dam-break 728 ticks / 266 cells either way).
-      } else if (tot[j] + s2a[j] < cap) { const t = reduce(Math.min(L, cap - tot[j] - s2a[j])); if (t > 0) { moveBottom(i, j, t); if (!liquidCfg.streamTagLedge || isSolid(grid[i + COLS])) sd[j] = ns; spillSide.set(j, ns); L -= t; wakeN(i); } }
+      } else if (tot[j] + s2a[j] < cap) { const t = reduce(Math.min(L, cap - tot[j] - s2a[j]));
+        // BIRTH gate: a REAL ledge underfoot (1b also fires when full LIQUID blocks straight-down — that's a pool surface
+        // spreading sideways, not a fall), AND landing in air / an existing stream, never onto resting pool liquid.
+        // Computed BEFORE the move, since it reads tot[j]. `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream
+        // chute lane, which is MASS; only sd (annotation) is gated, so physics is byte-identical either way.
+        const tagOk = !liquidCfg.streamTag || (isSolid(grid[i + COLS]) && (tot[j] === 0 || sd[j] !== 0));
+        if (t > 0) { moveBottom(i, j, t); if (tagOk) sd[j] = ns; spillSide.set(j, ns); L -= t; wakeN(i); } }
     }
     // A FALLING stream must NOT level laterally, or it fans out into a pyramid as it falls. A cell "can fall" if the cell
     // below (or a diagonal-below) has ROOM (not solid, not full) — note: room, NOT empty, because a falling stream's below
@@ -1921,7 +1938,7 @@ function liquidTickRoom(room) {
       // (settled pools would never go quiet) and even a bare changedSet.add would trip the `changedSet.has(i) → wakeN(i)` at
       // the foot of this loop, perturbing activation order (it shifted DAM-BREAK by 2 ticks). PURE ANNOTATION: sd never gates
       // mass anywhere in this tick, so with the wake ripple avoided this cannot touch how pools flow, settle or stratify.
-      if (liquidCfg.streamTagClear && sd[i] !== 0) { sd[i] = 0; tagCleared.add(i); }
+      if (liquidCfg.streamTag && sd[i] !== 0) { sd[i] = 0; tagCleared.add(i); }
       // (2c) PER-LIQUID horizontal leveling: level each dense layer's own surface over the floor of what's denser (heavy ends
       // flat along the bottom) without disturbing the layers below. Cumulative depth C_t=Σ_{k≤t}; nudge rank t toward the
       // nearest strictly-lower-C_t neighbour, swap the nearest lighter back (total-preserving). Throttled by `reduce` too.
@@ -3404,7 +3421,7 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTagClear', 'streamTagLedge']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
