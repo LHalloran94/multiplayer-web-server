@@ -1588,6 +1588,7 @@ const liquidCfg = {
   //   CLEAR  a cell that can't fall has settled, so it is not a stream: drop the tag.
   // off = the old loose behaviour. Pure annotation either way: sd never gates mass.
   streamTag: true,
+  streamMix: true,       // a ledge spill draws its liquids PROPORTIONALLY (keeps the mixture) instead of heaviest-first. off = the lip oscillates water-rich/oil-rich each tick → the stream shows alternating slugs / pulsing sub-strip widths
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
 };
@@ -1730,6 +1731,13 @@ function liquidTickRoom(room) {
   const takeRank = (A, t, wantRk) => { const ba = A * T; let rk = (wantRk != null && amt[ba + wantRk] > 0) ? wantRk : floorRank(A); if (rk < 0) return [0, -1]; const a = amt[ba + rk], mv = a < t ? a : t; if (mv > 0) { amt[ba + rk] = a - mv; tot[A] -= mv; mark(A); } return [mv, rk]; };
   // move `t` units A→B taking from A's TOP (lightest) — surface flow
   const moveTop = (A, B, t) => { let need = t; const ba = A * T, bb = B * T; for (let rk = T - 1; rk >= 0 && need > 0; rk--) { const a = amt[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[ba + rk] = a - mv; amt[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
+  // move `t` units A→B taking every rank in PROPORTION to its share of A — a spill/fall keeps its MIXTURE instead of
+  // shedding heaviest-first (moveBottom), which is what makes a ledge lip oscillate water-rich/oil-rich every tick and sends
+  // period-2 slugs down the stream. Used only at the ledge spill under liquidCfg.streamMix; pools keep moveBottom (stratify).
+  const moveProp = (A, B, t) => { const ba = A * T, bb = B * T, TA = tot[A]; if (TA <= 0 || t <= 0) return 0; let need = t, moved = 0;
+    for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[ba + rk]; if (a <= 0) continue; let mv = Math.round(t * a / TA); if (mv > a) mv = a; if (mv > need) mv = need; if (mv <= 0) continue; amt[ba + rk] -= mv; amt[bb + rk] += mv; need -= mv; moved += mv; }
+    for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[ba + rk] -= mv; amt[bb + rk] += mv; need -= mv; moved += mv; }   // rounding remainder, heaviest-first
+    if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
   const floorRank = (j) => { const b = j * T; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) return rk; return -1; };
   const ceilRank = (j) => { const b = j * T; for (let rk = T - 1; rk >= 0; rk--) if (amt[b + rk] > 0) return rk; return -1; };
   let processed = 0;
@@ -1903,16 +1911,16 @@ function liquidTickRoom(room) {
       // Note `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream chute lane, which is MASS. Only sd is gated, so
       // physics is untouched (dam-break 728 ticks / 266 cells either way).
       } else if (tot[j] + s2a[j] < cap) { const t = reduce(Math.min(L, cap - tot[j] - s2a[j]));
-        // BIRTH gate: a REAL ledge underfoot (1b also fires when full LIQUID blocks straight-down — that's a pool surface
-        // spreading sideways, not a fall), AND landing in air / an existing stream, never onto resting pool liquid.
-        // Computed BEFORE the move, since it reads tot[j]. `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream
-        // chute lane, which is MASS; only sd (annotation) is gated, so physics is byte-identical either way.
         // BIRTH gate: a REAL ledge underfoot (1b also fires when full LIQUID blocks straight-down — a pool surface spreading
         // sideways, not a fall), AND landing in air OR a cell that is itself falling (fell.has(j) — the target is diagonally
-        // below, processed already this bottom-up tick). Admitting a falling cell that already holds untagged liquid is what
+        // below, already processed this bottom-up tick). Admitting a falling cell that already holds untagged liquid is what
         // lets a tag reach a chute fed from the side, where the mouth fills level-then-down (untagged) before the spill tags it.
+        // `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream chute lane (MASS); only sd (annotation) is gated.
         const tagOk = !liquidCfg.streamTag || (isSolid(grid[i + COLS]) && (tot[j] === 0 || fell.has(j)));
-        if (t > 0) { moveBottom(i, j, t); if (tagOk) sd[j] = ns; spillSide.set(j, ns); L -= t; wakeN(i); } }
+        // streamMix: a ledge spill draws PROPORTIONALLY (moveProp) so the lip keeps its mixture instead of shedding heaviest
+        // -first — that heaviest-first shedding is what makes the lip oscillate period-2 and sends alternating water/oil slugs
+        // down the stream (visible now as pulsing sub-strip widths). Pools are untouched: this is only the ledge-spill path.
+        if (t > 0) { (liquidCfg.streamMix ? moveProp : moveBottom)(i, j, t); if (tagOk) sd[j] = ns; spillSide.set(j, ns); L -= t; wakeN(i); } }
     }
     // A FALLING stream must NOT level laterally, or it fans out into a pyramid as it falls. A cell "can fall" if the cell
     // below (or a diagonal-below) has ROOM (not solid, not full) — note: room, NOT empty, because a falling stream's below
@@ -3431,7 +3439,7 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
