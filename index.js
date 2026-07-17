@@ -1,3 +1,13 @@
+// ============================================================================
+// server/index.js — TABLE OF CONTENTS  (grep the "// ---- <name> ----" marker to jump; line numbers drift, marker text does not)
+//   Setup (top → ~330):  express + socket.io + CORS init · SQLite open + ~20 CREATE TABLEs · JWT auth middleware · in-memory presence/relay maps (discordIdToSocket, leaderTabs, roomObjects, …)
+//   REST endpoints:      Discord OAuth · Friends · Profile · Block · Room avatar-World spec · Private rooms · Room social signals (favourite/like/rating) · Published Worlds (gallery/publish/remix/unpublish) · Shared animation library · Groups · Follow settings & follows
+//   Terrain / world:     Destructible terrain (Tier C) · Custom material registry · Avatar-world MODES (sandbox/world)
+//   Published Worlds:    server-side persistence + unattended hydration (hydrateRoomFromBlob) · Persistent durability snapshot sweep
+//   Shared libraries:    animation library (socket) · Generic shared libraries (emojis/sounds/templates/blocks) · Overlay THEME library
+//   Realtime core:       Authoritative avatar simulation (Stage 1b, 60Hz tick — legacy 'server' transport) · Follow per-leader tab snapshots (emitTabSnapshot)
+//   Totals: ~64 REST routes + ~84 socket.on handlers. Ephemeral state (cursors/sprays/drawing/chat/avatar objects) in-memory; users/friends/dm/blocks/rooms/groups/follows/published_worlds persisted in SQLite.
+// ============================================================================
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -33,6 +43,9 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  // Chrome Private Network Access: an https page reaching http://localhost sends a preflight
+  // with Access-Control-Request-Private-Network; it must be answered with this header or blocked.
+  res.header('Access-Control-Allow-Private-Network', 'true');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
@@ -1529,11 +1542,559 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard) {
   }
   return changed;
 }
-const TERRAIN_MAT_MAX = 15;                           // built-in material ids 1..15 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil); 0 = empty
+// ---- Server-authoritative LEVELED cellular LIQUID flow ---------------------------------------------------
+// Liquids ARE terrain cells (ids 9/10/11/12/14/15) with a parallel per-cell FILL LEVEL (1..LIQUID_MAX). Flow
+// is MASS TRANSFER — straight down → down-diagonal → lateral equalisation — so water compresses into low
+// spots, finds its level, and forms smooth (sub-cell) surfaces instead of blocky films. Broadcast as a
+// `liquid-cells` diff [i, matId(0=empty), level, …]; join replay = `liquid-init` (RLE of the level array).
+// Only "active" cells simulate (settled pools cost nothing). Per-liquid cadence = viscosity. Liquid never
+// descends past LIQUID_FLOOR_ROW → it rests on the world's bedrock floor instead of falling through it.
+const LIQUID_IDS = new Set([9, 10, 11, 12, 14, 15]);   // water, quicksand, lava, acid, brine, oil
+const isFluidId = (v) => LIQUID_IDS.has(v);
+const LIQUID_MAX = 64;                                // TOTAL fill units per cell (summed across all liquids in the cell)
+const LIQUID_LEVEL_SCAN = 28;                         // how far a surface cell looks along its row for a lower spot to level toward (flat-settle)
+// OPTION 2 — MULTI-LIQUID per cell. Each cell holds a density-sorted stack: roomLiquidAmt[i*LIQ_T + rank] = fine units of
+// the liquid whose density RANK is `rank` (0 heaviest=lava … 5 lightest=oil). The slot index IS the density order, so a
+// cell is ALWAYS sorted and can hold up to LIQ_T liquids at once. roomLiquidTotal[i] = Σ amt (cache). Flow (validated in
+// scratchpad/multiliquid_sim2.js, 15/15): TOTAL leveling (the proven single-liquid flow run on total[i]) + composition
+// advection (a fall drains the BOTTOM/heaviest, surface flow takes the TOP/lightest) + per-interface DENSITY SORT swaps +
+// STREAM COHESION (a fed fall cell keeps 1 unit → continuous streams, no pool gap). grid[i] holds a REPRESENTATIVE liquid
+// id (heaviest present) for collision/adjacency; the authoritative composition lives in amt. fallSide carried as before.
+const LIQ_RANK = { 11: 0, 10: 1, 14: 2, 12: 3, 9: 4, 15: 5 };   // 0 heaviest→5 lightest. ACID (12) is DENSER than water (9): acid=rank 3, water=rank 4 (water floats on acid).
+const LIQ_ID = [11, 10, 14, 12, 9, 15];               // rank → id
+const LIQ_T = 6;                                      // layers per cell (one slot per liquid type)
+// DENSITY → LEVELING SPEED (reduced-amount model). Per density rank (0 heaviest lava → 5 lightest oil): how much a liquid's
+// LEVELING is slowed — leveling moves a fraction rate = 1/(1+LEVEL_VISC[rank]) of full each tick, so heavier liquids ooze flat
+// slower while falls stay at gravity speed. MILD gradient (2026-07-15): surface smoothing is shelved, so values are kept low
+// enough that even lava settles in a reasonable time (~2.3× water, not ~12×) → the blocky-while-leveling phase stays brief. (Tunable.)
+const LEVEL_VISC = [1.5, 0.8, 0.4, 0.2, 0.1, 0];     // by rank: lava 1.5 · quicksand 0.8 · brine 0.4 · acid 0.2 · water 0.1 · oil 0
+// LIQUID DEBUG CONFIG — live-tunable behaviour switches for the sim, driven by the client "Liquid Debug" menu. GLOBAL
+// (affects every room/player) — it's a comparison/diagnosis tool. Each flag gates ONE feature so behaviours can be A/B'd
+// to pin down bugs. Defaults below = the shipping behaviour. Mirrored to clients (for the menu) via the 'liquid-cfg' event.
+const liquidCfg = {
+  densitySort: true,     // steps 2/2b: heavier liquids sink below lighter → the vertical density layering within a cell. off = liquids mix, never separate
+  ledgeSpill: true,      // step 1b: liquid spills DIAGONALLY over the edge of a ledge. off = it only falls straight down + spreads on flat ground
+  lateralLevel: true,    // steps 1c/1d: liquid flows SIDEWAYS to find a flat level. off = it piles up where it lands (no spreading)
+  perLiquidLevel: true,  // step 2c: each liquid flattens its OWN layer across columns (heavy ends flat along the bottom)
+  cohesion: true,        // a fed falling cell keeps a 1-unit thread → continuous streams (no gap into the pool). off = streams can break up
+  viscosity: false,      // per-liquid LEVEL_VISC throttle: denser liquids ooze flat slower. off = ALL liquids level at full speed
+  reactions: true,       // lava+water→stone, acid dissolves terrain, water+snow→ice, oil burns, etc.
+  sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
+  tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
+};
+const LIQUID_MS = 60;                                 // legacy default (the live rate is liquidCfg.tickMs)
+// (LIQUID_FLOOR_ROW is derived inside liquidTickRoom because FLOOR_TOP is declared later in the file.)
+const LIQUID_MAX_ACTIVE = 80000;                      // safety cap on tracked active cells per room
+const LIQUID_MAX_PER_TICK = 9000;                     // process at most this many cells/room/tick (rest carry over)
+const roomLiquidActive = {};                          // room → Set<cellIndex> of liquid cells worth simulating
+const roomLiquidAmt = {};                             // room → Uint8Array(cells * LIQ_T): per-rank units (the multi-liquid stack)
+const roomLiquidTotal = {};                           // room → Uint8Array(cells): Σ amt cache
+// FALL SIDE (per liquid cell): which edge a falling parcel spilled off — 0 none/settled · 1 hug LEFT · 2 hug RIGHT. Set
+// from the spill direction on a down-diagonal, CARRIED straight down on a vertical fall, cleared on settle/empty. History
+// the client render can't reconstruct from one frame → the sim owns it + broadcasts it. Pure annotation, never mass.
+const roomLiquidSide = {};
+const SIDE_LEFT = 1, SIDE_RIGHT = 2;
+// SECONDARY STREAM LANE (dual-stream chute): a 1-wide chute fed by streams from BOTH sides can't be one fall side, so a
+// cell may carry a SECOND falling stream alongside the main one — its own liquid id + amount, hugging the opposite side.
+// Only used for falling stream cells (rare); it falls independently and MERGES into the pool's main stack on landing.
+const roomStream2Amt = {};   // room → Uint8Array(cells): units in the secondary lane (0 = none)
+const roomStream2Id = {};    // room → Uint8Array(cells): the secondary lane's liquid id
+// SATURATION (terrain reactions): absorbent solids (earth/sand) soak up adjacent water into a per-cell accumulator (0..SAT_MAX).
+// Earth → Mud at saturation (cell-by-cell); saturated Sand → Quicksand once part of a wet CLUMP; Mud dries back to Earth as its
+// saturation decays away from water (instant under lava). Internal only — clients see the resulting grid changes, not the value.
+const roomSat = {};          // room → Uint8Array(cells): absorbed-water units per absorbent/wet solid cell
+// ACID NEUTRALISATION — SATURATION model (tuned in the harness): acid SOAKS UP water (consuming it) into a per-cell dilution
+// accumulator, and only once saturated (dilution ≥ acid·K) does the acid CONVERT to water — both rate-limited, so a drop can't
+// clear a pool and it's never instant. Water is consumed (volume drops), which is the accepted tradeoff for "limited water".
+const roomDilute = {};       // room → Float32Array(cells): water soaked into an acid cell, awaiting conversion (fractional → K can be non-integer)
+function ensureDilute(room) { return roomDilute[room] || (roomDilute[room] = new Float32Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+const ACID_K = 1.5;          // water soaked (consumed) to saturate + convert 1 acid unit
+const ACID_SOAK_TICKS = 2;   // soak 1 water into dilution every N ticks (rate ≈ 1/N ≈ 0.5/tick)
+const ACID_CONVERT_TICKS = 2;// convert 1 acid → water every N ticks once saturated (rate ≈ 0.5/tick)
+let liquidTickCount = 0;
+let liquidQuiet = false;                              // when true, the sim runs but suppresses broadcasts (used to pre-settle at gen time)
+function ensureLiquidAmt(room) { return roomLiquidAmt[room] || (roomLiquidAmt[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS * LIQ_T)); }
+function ensureLiquidTotal(room) { return roomLiquidTotal[room] || (roomLiquidTotal[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+function ensureLiquidSide(room) { return roomLiquidSide[room] || (roomLiquidSide[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+// Per-cell LEVELING carry (reduced-amount density throttle): holds the SUB-UNIT remainder of each throttled leveling move so
+// a fractional per-tick amount still adds up to whole units over time (see `reduce` in liquidTickRoom). Sub-unit (<1/LIQUID_MAX
+// of a cell) so it's never visible; seeded with a small per-cell phase so the invisible 1-unit fine steps don't all align.
+const roomLevelAcc = {};
+function ensureLevelAcc(room) { if (!roomLevelAcc[room]) { const a = new Float32Array(TERRAIN_COLS * TERRAIN_ROWS); for (let i = 0; i < a.length; i++) a[i] = ((Math.imul(i, 2654435761)) >>> 0) / 4294967296; roomLevelAcc[room] = a; } return roomLevelAcc[room]; }
+function ensureStream2Amt(room) { return roomStream2Amt[room] || (roomStream2Amt[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+function ensureStream2Id(room) { return roomStream2Id[room] || (roomStream2Id[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+function liquidSet(room) { return roomLiquidActive[room] || (roomLiquidActive[room] = new Set()); }
+function activateLiquidCell(room, i, grid) { if (i >= 0 && i < grid.length && isFluidId(grid[i])) { const s = liquidSet(room); if (s.size < LIQUID_MAX_ACTIVE) s.add(i); } }
+// ---- GRANULAR POWDER (sand 3, snow 8) — SOLID cells that fall + pile like a classic falling-sand CA, distinct from the
+// liquid-leveling flow. A grain moves DOWN or DOWN-DIAGONAL only (→ ~45° angle of repose / piling), NEVER sideways (so it
+// piles instead of leveling flat). Meeting a liquid cell = SWAP: the grain sinks a cell and that cell's whole liquid stack
+// bubbles up into the vacated cell → grains sink through liquid to the floor, mass-conserved for both. Powder cells stay
+// real solids (dig / collision / render unchanged); movement broadcasts over the existing `liquid-cells` wire (it already
+// carries arbitrary gridId changes — the client sets grid+hp from it). Only PLAYER edits (paint/dig) + cascades wake powder,
+// so generated worlds keep their designed shape until disturbed. Validated in scratchpad/powder_sim.js (18/18, fuzz 40/40).
+const isPowderId = (v) => v === 3 || v === 8;
+const roomPowderActive = {};                          // room → Set<cellIndex> of powder cells that might still move
+let powderTickCount = 0;                               // ticked in lockstep with the liquid sim → grains fall at the same gravity speed
+function powderSet(room) { return roomPowderActive[room] || (roomPowderActive[room] = new Set()); }
+// Wake powder in + just above a rect after a terrain edit: a dig removes support (grains above cascade down), a paint drops
+// unsupported grains. The r0-1 margin seeds the cascade — each moving grain then wakes the one above it.
+function activatePowderRect(room, grid, c0, r0, c1, r1) {
+  c0 = Math.max(0, c0); r0 = Math.max(0, r0 - 1); c1 = Math.min(TERRAIN_COLS - 1, c1); r1 = Math.min(TERRAIN_ROWS - 1, r1);
+  const s = powderSet(room);
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * TERRAIN_COLS + c; if (isPowderId(grid[i])) s.add(i); }
+  if (!s.size) delete roomPowderActive[room];
+}
+// SATURATION tuning (terrain reactions). SAT_MAX ≈ "a cell's worth" of water; ABSORB per absorb-tick; DRY per soil-tick when
+// away from water; a saturated sand cell needs ≥ CLUMP saturated-sand/quicksand neighbours to turn (keeps beach edges dry).
+const SAT_MAX = 12, SAT_ABSORB = 4, SAT_DRY = 1, SAT_CLUMP_MIN = 3;   // low SAT_MAX: earth saturates fast + absorbs little water → flow barely slowed, pre-gen lakes barely shrink
+function ensureSat(room) { return roomSat[room] || (roomSat[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+const roomSoilActive = {};                            // room → Set<cellIndex> of absorbent/wet solid cells worth ticking (earth/sand soaking, mud drying)
+function soilSet(room) { return roomSoilActive[room] || (roomSoilActive[room] = new Set()); }
+// Seed the soil set so soilTickRoom processes absorption/drying around water. Called on PAINT and at GEN (not just when a
+// water cell happens to be "active") → placement + pre-generated lakes reliably + consistently start absorbing.
+function seedSoilAround(room, grid, i) {
+  const nn = grid.length, COLS = TERRAIN_COLS, c = i % COLS, N = [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
+  const g = grid[i];
+  if (g === 9) { const ss = soilSet(room); for (const j of N) { if (j < 0 || j >= nn) continue; const gj = grid[j]; if (gj === 1 || gj === 3 || gj === 5) ss.add(j); } }         // water → seed absorbent neighbours
+  else if (g === 1 || g === 3 || g === 5) { for (const j of N) if (j >= 0 && j < nn && grid[j] === 9) { soilSet(room).add(i); return; } }                                        // absorbent solid placed by water → seed itself
+}
+// Set a cell to a single full-CAP liquid `id` (paint / gen / seed). Clears the other layers.
+function liqSetSingle(room, i, id) { const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), base = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[base + k] = 0; amt[base + LIQ_RANK[id]] = LIQUID_MAX; tot[i] = LIQUID_MAX; ensureStream2Amt(room)[i] = 0; ensureStream2Id(room)[i] = 0; }
+function liqClearCell(room, i) { const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), base = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[base + k] = 0; tot[i] = 0; ensureLiquidSide(room)[i] = 0; ensureStream2Amt(room)[i] = 0; ensureStream2Id(room)[i] = 0; }
+// Representative id (heaviest present) for grid[i], or 0 if the cell holds no liquid.
+function liqRepId(amt, i) { const base = i * LIQ_T; for (let rk = 0; rk < LIQ_T; rk++) if (amt[base + rk] > 0) return LIQ_ID[rk]; return 0; }
+// Wake + seed every cell in a rect after a terrain edit: a freshly PAINTED fluid becomes a full single-liquid stack, a
+// CARVED-away fluid is cleared, and any surviving fluid is re-activated so it can flow.
+function activateLiquidRect(room, grid, c0, r0, c1, r1) {
+  c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(TERRAIN_COLS - 1, c1); r1 = Math.min(TERRAIN_ROWS - 1, r1);
+  const s = liquidSet(room), tot = ensureLiquidTotal(room), amt = ensureLiquidAmt(room);
+  // Seed a painted fluid cell to a full single-liquid stack when it's empty OR its layers don't match the painted id
+  // (painting a NEW liquid over an existing pool must REPLACE it — otherwise grid says brine but the layers stay water and
+  // the tick syncs grid back to water: the placed liquid "turns to water" and sits inert). A same-liquid partial cell
+  // (layers already match grid) is left untouched so waking around an edit doesn't reset legitimate partial fills.
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * TERRAIN_COLS + c;
+    if (isFluidId(grid[i])) { if (!tot[i] || liqRepId(amt, i) !== grid[i]) liqSetSingle(room, i, grid[i]); if (s.size < LIQUID_MAX_ACTIVE) s.add(i); } else liqClearCell(room, i); }
+  // seed absorption around the edit (+1 margin so painting water beside earth, OR earth beside water, both start absorbing)
+  for (let r = Math.max(0, r0 - 1); r <= Math.min(TERRAIN_ROWS - 1, r1 + 1); r++) for (let c = Math.max(0, c0 - 1); c <= Math.min(TERRAIN_COLS - 1, c1 + 1); c++) seedSoilAround(room, grid, r * TERRAIN_COLS + c);
+}
+// After generation: every fluid grid cell becomes a full single-liquid stack + wakes (they settle in a few ticks).
+function seedLiquidActivity(room) {
+  const grid = roomTerrain[room]; if (!grid) return;
+  const s = liquidSet(room);
+  for (let i = 0; i < grid.length; i++) { if (isFluidId(grid[i])) { liqSetSingle(room, i, grid[i]); if (s.size < LIQUID_MAX_ACTIVE) s.add(i); } else liqClearCell(room, i); }
+  for (let i = 0; i < grid.length; i++) if (grid[i] === 9) seedSoilAround(room, grid, i);   // pre-generated lakes absorb just like poured water (no special-casing)
+  if (!s.size) delete roomLiquidActive[room];
+}
+// Join replay: the full multi-liquid state as a flat list (same mask encoding as the live liquid-cells wire, side 0) for
+// every cell that holds liquid. (Per-cell, not RLE — fine for the ~2k fluid cells a generated world has.)
+function buildLiquidInit(room) {
+  const amt = roomLiquidAmt[room], tot = roomLiquidTotal[room], grid = roomTerrain[room]; if (!amt || !tot || !grid) return [];
+  const s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room);
+  const cells = [];
+  for (let i = 0; i < tot.length; i++) { const hasS2 = s2a[i] > 0; if (tot[i] <= 0 && !hasS2) continue; const b = i * LIQ_T; let mask = 0; for (let rk = 0; rk < LIQ_T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk); cells.push(i, grid[i], hasS2 ? 0x80 : 0, mask); for (let rk = 0; rk < LIQ_T; rk++) if (mask & (1 << rk)) cells.push(amt[b + rk]); if (hasS2) cells.push(s2a[i], s2i[i]); }
+  return cells;
+}
+function liquidTickRoom(room) {
+  const grid = roomTerrain[room], hp = roomTerrainHp[room], active = roomLiquidActive[room];
+  const amt = roomLiquidAmt[room], tot = roomLiquidTotal[room];
+  if (!grid || !amt || !tot || !active || !active.size) { if (active && !active.size) delete roomLiquidActive[room]; return; }
+  const sd = ensureLiquidSide(room), s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room), lvlAcc = ensureLevelAcc(room);
+  const mats = roomMats[room] || {}, tick = liquidTickCount, cap = LIQUID_MAX, T = LIQ_T, COLS = TERRAIN_COLS;
+  const LIQUID_FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // liquid may not descend into this row or below (bedrock)
+  const isSolid = (v) => v !== 0 && !isFluidId(v);
+  const list = Array.from(active); active.clear();
+  // bottom-up (row descending) + emptiest-first within a row (see history) → primed edges, position-independent.
+  list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot[a], lb = tot[b]; if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
+  const changedSet = new Set();
+  const spillSide = new Map();   // cell → the fall side spilled onto it THIS tick; a spill from the OTHER side routes into the SECONDARY lane (dual-stream chute)
+  const neutralizedThisTick = new Set();   // acid cells that turned (partly) to water THIS tick — other acid must not chain off that fresh water in the same tick (else a whole blob neutralises instantly)
+  const fell = new Set();   // cells determined FALLING this tick (propagates up a full stream column, since we process bottom-up) → they don't level laterally
+  const wake = (j) => { if (j >= 0 && j < grid.length && !isSolid(grid[j]) && tot[j] > 0) active.add(j); };
+  const wakeN = (j) => { const x = j % COLS; wake(j - COLS); wake(j + COLS); if (x > 0) wake(j - 1); if (x < COLS - 1) wake(j + 1); };
+  const wakeD = (j) => { wakeN(j); const x = j % COLS; if (x > 0) { wake(j - COLS - 1); wake(j + COLS - 1); } if (x < COLS - 1) { wake(j - COLS + 1); wake(j + COLS + 1); } };   // 8-neighbourhood (density swaps propagate diagonally through a block)
+  const mark = (j) => { changedSet.add(j); active.add(j); };
+  const recomp = (j) => { let s = 0, b = j * T; for (let k = 0; k < T; k++) s += amt[b + k]; tot[j] = s; };
+  // move `t` units A→B taking from A's BOTTOM (heaviest) — a fall
+  const moveBottom = (A, B, t) => { let need = t; const ba = A * T, bb = B * T; for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[ba + rk] = a - mv; amt[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
+  // remove `t` units of a SINGLE rank from A's stack (nearest to `wantRk`, else its heaviest) — feeds the secondary lane, which is single-liquid. Returns [movedUnits, rankTaken].
+  const takeRank = (A, t, wantRk) => { const ba = A * T; let rk = (wantRk != null && amt[ba + wantRk] > 0) ? wantRk : floorRank(A); if (rk < 0) return [0, -1]; const a = amt[ba + rk], mv = a < t ? a : t; if (mv > 0) { amt[ba + rk] = a - mv; tot[A] -= mv; mark(A); } return [mv, rk]; };
+  // move `t` units A→B taking from A's TOP (lightest) — surface flow
+  const moveTop = (A, B, t) => { let need = t; const ba = A * T, bb = B * T; for (let rk = T - 1; rk >= 0 && need > 0; rk--) { const a = amt[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[ba + rk] = a - mv; amt[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
+  const floorRank = (j) => { const b = j * T; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) return rk; return -1; };
+  const ceilRank = (j) => { const b = j * T; for (let rk = T - 1; rk >= 0; rk--) if (amt[b + rk] > 0) return rk; return -1; };
+  let processed = 0;
+  for (const i of list) {
+    if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); continue; }
+    if (isSolid(grid[i])) continue;
+    const r = (i / COLS) | 0, c = i - r * COLS, canDown = r + 1 < LIQUID_FLOOR_ROW;
+    // SECONDARY LANE (dual-stream chute): fall it straight down independently of the main stream; when it can't fall
+    // further (solid or a full pool below), MERGE it into this cell's main stack so it joins the pool. Runs even when the
+    // cell has no main liquid (a lone secondary stream), so it's handled before the L<=0 skip below.
+    if (s2a[i] > 0) {
+      const belowI = i + COLS;
+      // fall straight down the secondary lane while there's shared-cap room below (keeps it a continuous stream)
+      const roomBelow = (canDown && !isSolid(grid[belowI]) && (s2a[belowI] === 0 || s2i[belowI] === s2i[i])) ? (cap - tot[belowI] - s2a[belowI]) : 0;
+      if (roomBelow > 0) { const mv = s2a[i] < roomBelow ? s2a[i] : roomBelow; s2a[belowI] += mv; s2i[belowI] = s2i[i]; s2a[i] -= mv; if (s2a[i] === 0) s2i[i] = 0; mark(i); mark(belowI); }
+      // remainder (can't fall = landed on a pool/solid) merges into THIS cell's main stack — combined cap guarantees it fits
+      if (s2a[i] > 0) { const rk = LIQ_RANK[s2i[i]]; if (rk !== undefined) { const add = (cap - tot[i]) < s2a[i] ? (cap - tot[i]) : s2a[i]; if (add > 0) { amt[i * T + rk] += add; tot[i] += add; s2a[i] -= add; if (s2a[i] === 0) s2i[i] = 0; mark(i); wakeN(i); } } if (s2a[i] > 0) active.add(i); }
+    }
+    let L = tot[i]; if (L <= 0) continue;
+    processed++;
+    const base = i * T, lava = amt[base + 0], acid = amt[base + 3], water = amt[base + 4], oil = amt[base + 5];   // ranks: lava0 quicksand1 brine2 ACID3 WATER4 oil5
+    // ---- REACTIONS (layer-aware; consume mass by design; client derives steam/fire/fizz FX from the transitions) ----
+    if (liquidCfg.reactions && (lava > 0 || oil > 0 || acid > 0 || water > 0)) {
+      const L4 = c > 0 ? i - 1 : -1, R4 = c < COLS - 1 ? i + 1 : -1, U4 = i - COLS, D4 = i + COLS, nn = grid.length;
+      const nbrRank = (rank) => { for (const j of [D4, L4, R4, U4]) if (j >= 0 && j < nn && amt[j * T + rank] > 0) return j; return -1; };
+      const nbrGrid = (id) => { for (const j of [D4, L4, R4, U4]) if (j >= 0 && j < nn && grid[j] === id) return j; return -1; };   // adjacent SOLID cell of material `id`
+      if (lava > 0) {                                   // LAVA + WATER → STONE (same cell, or lava beside water)
+        const wj = water > 0 ? i : nbrRank(4);   // water is rank 4
+        if (wj >= 0) {
+          if (Math.random() < 0.5) {
+            grid[i] = 2; hp[i] = matStrengthSrv(mats, 2); for (let k = 0; k < T; k++) amt[base + k] = 0; tot[i] = 0; sd[i] = 0; changedSet.add(i);   // crust to stone
+            if (wj !== i) { const wb = wj * T + 3, nl = amt[wb] - 20; amt[wb] = nl > 0 ? nl : 0; recomp(wj); mark(wj); }
+            continue;                                    // this cell is now stone → done
+          }
+          active.add(i);
+        }
+        // LAVA melts adjacent SNOW → Water (and the lava cools a little). The fresh water beside lava may then crust it to stone next tick.
+        const snj = nbrGrid(8);
+        if (snj >= 0 && Math.random() < 0.5) {
+          const sb = snj * T; for (let k = 0; k < T; k++) amt[sb + k] = 0; amt[sb + 4] = 40; tot[snj] = 40; sd[snj] = 0; s2a[snj] = 0; s2i[snj] = 0;   // water = rank 4
+          grid[snj] = 9; changedSet.add(snj); active.add(snj); wakeN(snj);
+          const nl = lava - 8; amt[base + 0] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
+          if (L <= 0) continue;
+        }
+        // LAVA bakes adjacent MUD → Earth (dries it out).
+        const mdj = nbrGrid(5);
+        if (mdj >= 0 && Math.random() < 0.5) {
+          grid[mdj] = 1; hp[mdj] = matStrengthSrv(mats, 1); if (roomSat[room]) roomSat[room][mdj] = 0; changedSet.add(mdj);
+          const nl = lava - 4; amt[base + 0] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
+          if (L <= 0) continue;
+        }
+        // LAVA fuses adjacent SAND → Glass.
+        const sgj = nbrGrid(3);
+        if (sgj >= 0 && Math.random() < 0.5) {
+          grid[sgj] = 16; hp[sgj] = matStrengthSrv(mats, 16); if (roomSat[room]) roomSat[room][sgj] = 0; changedSet.add(sgj);
+          const nl = lava - 4; amt[base + 0] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
+          if (L <= 0) continue;
+        }
+        // LAVA fuses QUICKSAND → Glass (mixed in this cell, or an adjacent quicksand cell).
+        const qj = amt[base + 1] > 0 ? i : nbrRank(1);
+        if (qj >= 0 && Math.random() < 0.5) {
+          const qb = qj * T; for (let k = 0; k < T; k++) amt[qb + k] = 0; tot[qj] = 0; sd[qj] = 0; s2a[qj] = 0; s2i[qj] = 0;
+          grid[qj] = 16; hp[qj] = matStrengthSrv(mats, 16); if (roomSat[room]) roomSat[room][qj] = 0; changedSet.add(qj);
+          if (qj === i) continue;                          // the lava cell itself fused → done
+          const nl = lava - 6; amt[base + 0] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
+          if (L <= 0) continue;
+        }
+      }
+      if (oil > 0) {                                    // OIL + LAVA → burns off (gradual → the client draws flame on lava-adjacent oil)
+        if (lava > 0 || nbrRank(0) >= 0) {
+          const nl = oil - 6; amt[base + 5] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
+          const oj = nbrRank(5); if (oj >= 0) active.add(oj);
+          if (amt[base + 5] > 0) active.add(i); else continue;
+        }
+      }
+      if (acid > 0) {
+        // ACID — SATURATION neutralise: SOAK water (consuming it) into this cell's dilution, and once saturated CONVERT acid→water,
+        // both rate-gated (see ACID_* consts). If there's NO water to react with, DISSOLVE an adjacent breakable solid instead.
+        const dil = ensureDilute(room);   // ranks: water = 4, acid = 3
+        let waterSrc = amt[base + 4] > 0 ? i : -1;        // in-cell water first, else an adjacent liquid cell holding water
+        if (waterSrc < 0) for (const j of [D4, L4, R4, U4]) { if (j >= 0 && j < nn && isFluidId(grid[j]) && amt[j * T + 4] > 0) { waterSrc = j; break; } }
+        if (waterSrc >= 0 || dil[i] >= ACID_K) {          // can soak, or is saturated enough to convert (else fall through to dissolving / idle)
+          if (waterSrc >= 0 && (tick % ACID_SOAK_TICKS) === 0 && dil[i] < acid * ACID_K) {   // SOAK 1 water → dilution (consumed)
+            amt[waterSrc * T + 4] -= 1; dil[i] += 1;
+            if (waterSrc !== i) { recomp(waterSrc); mark(waterSrc); wakeN(waterSrc); } else recomp(i);
+          }
+          if ((tick % ACID_CONVERT_TICKS) === 0 && dil[i] >= ACID_K && amt[base + 3] >= 1) {   // CONVERT 1 saturated acid → water
+            amt[base + 3] -= 1; amt[base + 4] += 1; dil[i] -= ACID_K; recomp(i); mark(i); wakeN(i);
+            if (amt[base + 3] <= 0) dil[i] = 0;            // fully neutralised → drop leftover dilution
+          }
+          L = tot[i]; active.add(i);                       // reaction in progress → keep simulating
+        } else {                                         // no liquid to neutralise with → dissolve an adjacent solid instead
+          let solidJ = -1;
+          for (const j of [D4, L4, R4, U4]) { if (j < 0 || j >= nn) continue; if ((j / COLS | 0) >= LIQUID_FLOOR_ROW) continue; if (isSolid(grid[j]) && hp[j] > 0 && grid[j] !== 16) { solidJ = j; break; } }   // never eats bedrock or Glass (acid-immune)
+          if (solidJ >= 0) {
+            active.add(i);                                // keep working every tick regardless of whether the acid can flow
+            if ((tick & 7) === 0) {                       // SLOW bite (~1/8 ticks) → time to spread between bites
+              if (hp[solidJ] > 1) hp[solidJ] -= 1; else { grid[solidJ] = 0; hp[solidJ] = 0; changedSet.add(solidJ); wakeN(solidJ); active.add(solidJ); }
+              const na = acid - 6; amt[base + 3] = na > 0 ? na : 0; recomp(i); L = tot[i]; mark(i);   // acid = rank 3
+              if (L <= 0) continue;
+            }
+          }
+        }
+      }
+      if (water > 0 && lava === 0 && (tick & 3) === 0) {   // WATER freezes to ICE where it touches Snow (cold). Lava-adjacent water melts/crusts instead, so it wins.
+        if (nbrGrid(8) >= 0 && Math.random() < 0.35) {
+          for (let k = 0; k < T; k++) amt[base + k] = 0; tot[i] = 0; sd[i] = 0; s2a[i] = 0; s2i[i] = 0;
+          grid[i] = 4; hp[i] = matStrengthSrv(mats, 4); changedSet.add(i);
+          continue;                                      // this cell is now ice → done
+        }
+      }
+      if (water > 0) {                                    // SEED (ungated): flag adjacent absorbent solids for the soil tick, which PULLS water into them once the pool has settled
+        const ss = soilSet(room);
+        for (const j of [D4, L4, R4, U4]) { if (j < 0 || j >= nn) continue; const g = grid[j]; if (g === 1 || g === 3 || g === 5) ss.add(j); }
+      }
+    }
+    if (L <= 0) continue;
+    // (2) DENSITY sort with the cell BELOW: heaviest-above heavier than lightest-below → swap 1 unit (heavy sinks)
+    if (liquidCfg.densitySort && canDown && tot[i + COLS] > 0 && !isSolid(grid[i + COLS])) {
+      const j = i + COLS, hi = floorRank(i), lo = ceilRank(j);
+      if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); }
+    }
+    // (2b) DIAGONAL density sort — my heaviest sinks into a DIAGONALLY-below cell that holds something lighter, and its
+    // lighter rises to me. This is what levels COMPOSITION horizontally: a dense liquid spreads along the bottom across
+    // columns (flows under an adjacent lighter one to find its level) instead of standing beside it in a blocky strip.
+    // Heavy drops a row → density-weighted PE strictly down → monotone, terminates.
+    if (liquidCfg.densitySort && canDown) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
+      const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
+      const j = i + COLS + dc; if (isSolid(grid[j]) || tot[j] === 0) continue;
+      const hi = floorRank(i), lo = ceilRank(j);
+      if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); break; }
+    }
+    // (Horizontal composition leveling is handled column-integrated AFTER this per-cell loop — see the COLUMN SWAP pass.
+    //  A per-cell horizontal move is PE-neutral (same row) so it can only shuffle, never settle; the column pass moves a
+    //  heavy unit from the taller-heavy column and a light unit back, which is total-preserving + strictly PE-decreasing.)
+    // (1) TOTAL flow — proven single-liquid leveling on total[i], composition advected + STREAM COHESION
+    const fedAbove = r > 0 && tot[i - COLS] > 0;
+    // 1a straight down (cohesion: a fed fall cell keeps 1 unit → continuous stream, reaches pools with no gap)
+    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { let t = Math.min(L, room); if (liquidCfg.cohesion && fedAbove && t >= L && L >= 1) t = L - 1; if (t > 0) { moveBottom(i, j, t); sd[j] = sd[i]; L -= t; wakeN(i); } } }
+    // DENSITY THROTTLE (reduced-amount). Streaming DOWN A SURFACE — the diagonal spill 1b (here) and the lateral leveling
+    // 1c/1d (below) — moves a reduced amount per tick for denser liquids (rate lf = 1/(1+LEVEL_VISC[surface rank])), so a
+    // dense liquid oozes DOWN A SLOPE at ~the same speed it spreads SIDEWAYS instead of racing down 1b-fast and heaping up at
+    // each terrace where it can only clear 1c-slow. Free-fall 1a stays UNGATED — gravity is uniform in open air. `reduce(want)`
+    // returns the throttled integer to move (carrying the sub-unit fraction in lvlAcc) and flags `pend` when it rounds to 0.
+    const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;   // lf=1 ⇒ `reduce` is a pass-through (full-speed leveling for every liquid)
+    let pend = false;
+    const reduce = (want) => { if (want <= 0) return 0; if (lf >= 1) return want; lvlAcc[i] += want * lf; let mv = lvlAcc[i] | 0; if (mv > want) mv = want; lvlAcc[i] -= mv; if (mv <= 0) pend = true; return mv; };
+    // 1b down-diagonals — ONLY when straight-down is BLOCKED (below solid or full) → a genuine spill over a ledge / down a
+    // slope (moving against a surface), so it's density-throttled like leveling. If straight-down has room the cell is a
+    // free-falling stream (1a handles it): do NOT spread it diagonally (that fanned streams into a pyramid).
+    if (liquidCfg.ledgeSpill && L > 0 && canDown && (isSolid(grid[i + COLS]) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(grid[j])) continue;
+      const ns = dc > 0 ? SIDE_LEFT : SIDE_RIGHT, ps = spillSide.get(j), srcId = liqRepId(amt, i);
+      const jc2 = j % COLS, chute = (jc2 === 0 || isSolid(grid[j - 1])) && (jc2 === COLS - 1 || isSolid(grid[j + 1]));   // a 1-wide channel (both horizontal neighbours solid) — only there do two spills become two lanes; a wide pool just mixes (else spurious lanes never drain)
+      if (chute && ps !== undefined && ps !== ns && srcId && (s2a[j] === 0 || s2i[j] === srcId)) {   // a SECOND stream from the OTHER side → secondary lane; the two lanes SHARE the cell's width (main+secondary ≤ cap) so it drains cleanly (two fat streams just each go thinner)
+        const room2 = cap - tot[j] - s2a[j], want = reduce(L < room2 ? L : room2); if (want > 0) { const [mv] = takeRank(i, want, LIQ_RANK[srcId]); if (mv > 0) { s2a[j] += mv; s2i[j] = srcId; L -= mv; mark(j); wakeN(i); } }
+      } else if (tot[j] + s2a[j] < cap) { const t = reduce(Math.min(L, cap - tot[j] - s2a[j])); if (t > 0) { moveBottom(i, j, t); sd[j] = ns; spillSide.set(j, ns); L -= t; wakeN(i); } }
+    }
+    // A FALLING stream must NOT level laterally, or it fans out into a pyramid as it falls. A cell "can fall" if the cell
+    // below (or a diagonal-below) has ROOM (not solid, not full) — note: room, NOT empty, because a falling stream's below
+    // holds the CONTINUING stream, so an empty-only test wrongly registered streams as settled. Lateral leveling (1c) +
+    // flat-settle (1d) apply only to cells that can't fall — settled/pool cells. Streams just fall (1a/1b).
+    const roomAt = (j) => !isSolid(grid[j]) && tot[j] < cap;
+    // "falling" = this cell can still descend: room straight/diagonally below, OR the cell DIRECTLY below is itself
+    // falling (this propagates up an entire full-to-the-brim stream column — we process bottom-up, so the below cell was
+    // already decided). A falling cell never levels laterally, so a stream stays a narrow column instead of fanning.
+    const canFall = canDown && (roomAt(i + COLS) || fell.has(i + COLS) || (c > 0 && roomAt(i + COLS - 1)) || (c < COLS - 1 && roomAt(i + COLS + 1)));
+    if (canFall) fell.add(i);
+    // (2c) PER-LIQUID horizontal leveling (POOLS ONLY — streams/mid-air fall via 1a/1b and are excluded by !canFall).
+    // The density sorts (2)/(2b) only erode a dense pile's EDGES (a heavy unit surrounded by the same heavy can't sink),
+    // so a tall pre-mixed pile leaves diagonal BANDS. This levels each DENSE liquid's own surface so it flows from a tall
+    // column to a short one like water finding its level — WITHOUT disturbing the denser layers below (user idea 2: settle
+    // densest-first over the floor of what's denser). For rank t (densest→lightest, skipping the lightest = the total,
+    // handled by 1c/1d), compare the cumulative depth C_t = Σ_{k≤t} along the row; if this cell's is higher, nudge 1 unit
+    // of rank t toward the nearest lower-C_t neighbour and swap a lighter unit back. TOTAL-PRESERVING (the total-flow sees
+    // nothing to undo), DIRECTIONAL by surface height (PE drops), scan for global reach, deadband to stop jitter. This is
+    // what makes different-density liquids never rest adjacent (user idea 1) — the heavy ends flat along the bottom.
+    // LATERAL LEVELING (pools only) — the sideways spread + flat-settle, density-throttled by the same `reduce` as 1b above
+    // (defined before 1b since streaming down a surface shares the throttle). 2c/1c/1d all move a reduced amount per tick.
+    if (!canFall) {
+      // (2c) PER-LIQUID horizontal leveling: level each dense layer's own surface over the floor of what's denser (heavy ends
+      // flat along the bottom) without disturbing the layers below. Cumulative depth C_t=Σ_{k≤t}; nudge rank t toward the
+      // nearest strictly-lower-C_t neighbour, swap the nearest lighter back (total-preserving). Throttled by `reduce` too.
+      const cumAt = (jj, tt) => { let s = 0; const bb = jj * T; for (let k = 0; k <= tt; k++) s += amt[bb + k]; return s; };
+      if (liquidCfg.perLiquidLevel) for (let t = 0; t < T - 1; t++) {
+        if (amt[i * T + t] <= 0) continue;                 // no rank-t here to shed (a lighter/absent layer)
+        const Ci = cumAt(i, t);
+        let dir = 0, best = Infinity;
+        for (const sdir of [-1, 1]) for (let d = 1; d <= LIQUID_LEVEL_SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d; if (isSolid(grid[j2])) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } }
+        if (dir === 0) continue;
+        const j = i + dir; if (isSolid(grid[j])) continue;
+        const Cj = cumAt(j, t);
+        if (Cj >= Ci) continue;                            // adjacent must be STRICTLY lower — a deficit propagates as a clean wave
+        let avail = 0; for (let k = t + 1; k < T; k++) avail += amt[j * T + k];   // lighter mass at j available to swap back
+        if (avail <= 0) continue;
+        // BULK amount (was a fixed 1-unit nudge). A SUBMERGED layer has no other leveling path — 1c/1d only ever read tot[],
+        // which a lighter layer resting on top holds flat, so they see nothing to do and 2c alone must flatten the interface.
+        // At 1 unit/tick that crawled: a 1-cell step (64 units) took ≥64 ticks to erase and propagated column by column, ~8×
+        // slower than the identical step at a free surface. Shed HALF the cumulative-depth difference instead, exactly as 1c
+        // does on totals — halving ⇒ no overshoot ⇒ still monotone + terminating. The floor of 1 keeps the old polish nudge
+        // for the last few units (a pure halving floors to 0 early and rests ~½-cell rough).
+        let n = (Ci - Cj) >> 1;
+        if (n > amt[i * T + t]) n = amt[i * T + t];
+        if (n > avail) n = avail;
+        if (n < 1) n = 1;
+        n = reduce(n);                                     // density throttle (carried this tick)
+        if (n <= 0) continue;
+        amt[i * T + t] -= n; amt[j * T + t] += n;          // rank t → j
+        let need = n; for (let q = t + 1; q < T && need > 0; q++) { const a = amt[j * T + q]; if (a <= 0) continue; const mv = a < need ? a : need; amt[j * T + q] -= mv; amt[i * T + q] += mv; need -= mv; }   // NEAREST lighter j → i (total-preserving)
+        mark(i); mark(j); wakeD(i); wakeD(j);
+      }
+      // 1c lateral equalise — surface flow (from the top/lightest); throttled REDUCED-AMOUNT (the visible bulk spread)
+      if (liquidCfg.lateralLevel && L > 1) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(grid[j])) continue; const nl = tot[j], room2 = cap - nl - s2a[j]; if (L - nl > 1 && room2 > 0) { const mv = reduce(Math.min((L - nl) >> 1, room2)); if (mv > 0) { moveTop(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
+      // 1d surface FLAT-SETTLE — nudge toward the nearest strictly-lower reachable spot in the row; throttled REDUCED-AMOUNT
+      if (liquidCfg.lateralLevel && L > 0) {
+        let dir = 0, best = Infinity;
+        for (const sdir of [-1, 1]) for (let d = 1; d <= LIQUID_LEVEL_SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d; if (isSolid(grid[j])) break; const jl = tot[j]; if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
+        if (dir !== 0) { const j = i + dir; if (tot[j] < L && tot[j] + s2a[j] < cap && reduce(1) > 0) { moveTop(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
+      }
+    }
+    if (pend) active.add(i);                               // throttled diagonal spill OR leveling still owed this tick → revisit
+    if (changedSet.has(i)) wakeN(i);
+  }
+  // sync grid[i]/hp to the representative (heaviest present) for every changed liquid cell (reaction-produced solids kept)
+  for (const j of changedSet) {
+    if (isSolid(grid[j])) continue;
+    const rep = liqRepId(amt, j);
+    if (rep === 0) { if (s2a[j] > 0) { grid[j] = s2i[j]; hp[j] = 0; } else { if (isFluidId(grid[j])) { grid[j] = 0; hp[j] = 0; } sd[j] = 0; } }   // lone secondary stream → show its liquid
+    else if (grid[j] !== rep) { grid[j] = rep; hp[j] = matStrengthSrv(mats, rep); }
+  }
+  // Wake settled POWDER above a cell that just emptied or turned to liquid (support drained/dissolved out from under it → it falls/sinks).
+  for (const j of changedSet) { const up = j - COLS; if (up >= 0 && isPowderId(grid[up]) && (grid[j] === 0 || isFluidId(grid[j]))) powderSet(room).add(up); }
+  if (changedSet.size && !liquidQuiet) {
+    // WIRE per changed cell: [index, gridId, fallSide, mask] then one amt for each set bit of `mask` (rank order). mask
+    // is a 6-bit set of which density ranks are present → compact (a single-liquid cell is 5 values). Chunked at cell
+    // boundaries. gridId carries reaction-produced solids (e.g. stone) the client can't derive from the amounts.
+    // A secondary lane (s2a>0) is flagged by the 0x80 bit on the fallSide byte; its [amt,id] follow the mask amts.
+    let arr = [], cells = 0;
+    for (const j of changedSet) {
+      const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
+      const hasS2 = s2a[j] > 0;
+      arr.push(j, grid[j], sd[j] | (hasS2 ? 0x80 : 0), mask);
+      for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(amt[b + rk]);
+      if (hasS2) arr.push(s2a[j], s2i[j]);
+      if (++cells >= 8192) { io.to(room).emit('liquid-cells', { cells: arr }); arr = []; cells = 0; }
+    }
+    if (cells) io.to(room).emit('liquid-cells', { cells: arr });
+  }
+  // prune woken cells that aren't liquid (neighbour-wakes can add solids/empties)
+  for (const j of Array.from(active)) { if (j < 0 || j >= grid.length) { active.delete(j); continue; } if (isSolid(grid[j]) || (tot[j] <= 0 && s2a[j] <= 0)) active.delete(j); }
+  if (!active.size) delete roomLiquidActive[room];
+}
+// GRANULAR POWDER tick (sand/snow). Falling-sand CA on grid[]: each active grain moves DOWN or DOWN-DIAGONAL only (piles at
+// ~45°, never levels), swapping with a liquid it enters (grain sinks, liquid rises). Broadcasts moved cells over liquid-cells.
+function powderTickRoom(room) {
+  const grid = roomTerrain[room], hp = roomTerrainHp[room], active = roomPowderActive[room];
+  if (!grid || !hp || !active || !active.size) { if (active && !active.size) delete roomPowderActive[room]; return; }
+  const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), sd = ensureLiquidSide(room), s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room);
+  const mats = roomMats[room] || {}, T = LIQ_T, COLS = TERRAIN_COLS, tick = powderTickCount, nn = grid.length;
+  const FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // grains may not enter the bedrock floor row (same as liquid)
+  const canDisplace = (j) => grid[j] === 0 || isFluidId(grid[j]);   // empty or liquid → a grain can fall into it
+  const list = Array.from(active); active.clear();
+  list.sort((a, b) => ((b / COLS) | 0) - ((a / COLS) | 0));   // bottom-up so a falling column cascades in a single pass
+  const changedSet = new Set();
+  const wakeAround = (i) => { const c = i % COLS; for (const j of [i - COLS, c > 0 ? i - COLS - 1 : -1, c < COLS - 1 ? i - COLS + 1 : -1]) if (j >= 0 && isPowderId(grid[j])) active.add(j); };   // wake grains above the vacated cell → column keeps falling
+  const swapMove = (src, dst) => {
+    const P = grid[src], hpP = hp[src];
+    if (grid[dst] === 0) { grid[dst] = P; hp[dst] = hpP; grid[src] = 0; hp[src] = 0; }
+    else {   // dst holds liquid → SWAP its whole stack up into src; the grain sinks into dst (mass-conserved for both)
+      const bs = src * T, bd = dst * T;
+      for (let k = 0; k < T; k++) { amt[bs + k] = amt[bd + k]; amt[bd + k] = 0; }   // src was solid (amt 0) → move dst's stack up, clear dst
+      tot[src] = tot[dst]; tot[dst] = 0;
+      sd[src] = 0; s2a[src] = 0; s2i[src] = 0; sd[dst] = 0; s2a[dst] = 0; s2i[dst] = 0;   // secondary lanes never live at a settling interface (negligible)
+      grid[dst] = P; hp[dst] = hpP;
+      grid[src] = liqRepId(amt, src); hp[src] = 0;
+      activateLiquidCell(room, src, grid);   // the displaced liquid, now above, may need to flow/settle
+      const sc = src % COLS; for (const j of [src - COLS, src + COLS, sc > 0 ? src - 1 : -1, sc < COLS - 1 ? src + 1 : -1]) if (j >= 0 && j < nn && isFluidId(grid[j]) && tot[j] > 0) liquidSet(room).add(j);
+    }
+    changedSet.add(src); changedSet.add(dst); active.add(dst); wakeAround(src);
+  };
+  for (const i of list) {
+    if (!isPowderId(grid[i])) continue;
+    const r = (i / COLS) | 0, c = i - r * COLS; if (r + 1 >= FLOOR_ROW) continue;
+    const below = i + COLS;
+    if (canDisplace(below)) { swapMove(i, below); continue; }
+    for (const dc of (((i + tick) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = below + dc; if (canDisplace(j)) { swapMove(i, j); break; } }
+    // couldn't fall or slide → rests (not re-added to active)
+  }
+  if (changedSet.size) {   // same wire encoding as liquidTickRoom: [i, gridId, side(|0x80 if s2), mask] + one amt per set rank + [s2amt,s2id]
+    let arr = [], cells = 0;
+    for (const j of changedSet) {
+      const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
+      const hasS2 = s2a[j] > 0;
+      arr.push(j, grid[j], sd[j] | (hasS2 ? 0x80 : 0), mask);
+      for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(amt[b + rk]);
+      if (hasS2) arr.push(s2a[j], s2i[j]);
+      if (++cells >= 8192) { io.to(room).emit('liquid-cells', { cells: arr }); arr = []; cells = 0; }
+    }
+    if (cells) io.to(room).emit('liquid-cells', { cells: arr });
+  }
+  if (!active.size) delete roomPowderActive[room];
+}
+// ---- SATURATION reactions: earth→mud (cell-by-cell), sand→quicksand (wet CLUMP only), mud dries→earth (instant under lava).
+// Runs INDEPENDENTLY of liquid activity (mud must keep drying after every pool has settled). Cells enter roomSoilActive via
+// absorption in liquidTickRoom; solid↔solid + sand→quicksand changes ride the same `liquid-cells` wire (it carries gridId).
+function soilTickRoom(room) {
+  const ss = roomSoilActive[room]; if (!ss || !ss.size) { if (ss) delete roomSoilActive[room]; return; }
+  const grid = roomTerrain[room], hp = roomTerrainHp[room];
+  if (!grid) { delete roomSoilActive[room]; return; }
+  const sat = ensureSat(room), mats = roomMats[room] || {}, COLS = TERRAIN_COLS, nn = grid.length, T = LIQ_T;
+  const lam = ensureLiquidAmt(room), ltot = ensureLiquidTotal(room), sd = ensureLiquidSide(room);
+  const changedSet = new Set();
+  const adj = (i, id) => { const c = i % COLS; if (i - COLS >= 0 && grid[i - COLS] === id) return true; if (i + COLS < nn && grid[i + COLS] === id) return true; if (c > 0 && grid[i - 1] === id) return true; if (c < COLS - 1 && grid[i + 1] === id) return true; return false; };
+  const adjWater = (i) => { const c = i % COLS; for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) { if (j < 0 || j >= nn) continue; if (grid[j] === 9 && lam[j * T + 4] > 0) return j; } return -1; };   // water = rank 4
+  const wakeLiq = (j) => { if (j >= 0 && j < nn && isFluidId(grid[j]) && ltot[j] > 0) liquidSet(room).add(j); };
+  for (const i of Array.from(ss)) {
+    const v = grid[i];
+    // ABSORPTION (pull): earth/sand draw water out of an adjacent pool into their saturation, draining it. Only pull from a
+    // SETTLED pool (wj not in the active/flowing set) → absorption never fights or slows the leveling of a still-flowing pool.
+    if ((v === 1 || v === 3) && sat[i] < SAT_MAX) {
+      const wj = adjWater(i);
+      if (wj >= 0) {                                     // absorb even while the pool is still flowing — SAT_MAX is small enough now that it barely dents leveling
+        const take = Math.min(SAT_ABSORB, SAT_MAX - sat[i], lam[wj * T + 4]);   // water = rank 4
+        if (take > 0) {
+          sat[i] += take; lam[wj * T + 4] -= take; ltot[wj] -= take; if (ltot[wj] <= 0) { grid[wj] = 0; sd[wj] = 0; }
+          changedSet.add(wj); activateLiquidCell(room, wj, grid);
+          const wc = wj % COLS; wakeLiq(wj - COLS); wakeLiq(wj + COLS); if (wc > 0) wakeLiq(wj - 1); if (wc < COLS - 1) wakeLiq(wj + 1);   // re-level: the column above falls into the drained space (no hovering slivers)
+        }
+      }
+    }
+    if (v === 1) {                                       // EARTH → MUD once it has soaked up a cell's worth of water
+      if (sat[i] >= SAT_MAX) { grid[i] = 5; hp[i] = matStrengthSrv(mats, 5); changedSet.add(i); }   // stays tracked (mud dries later)
+      else if (sat[i] === 0 && !adj(i, 9)) ss.delete(i);
+    } else if (v === 3) {                                // SAND → QUICKSAND, but only inside a wet CLUMP
+      if (sat[i] >= SAT_MAX) {
+        const r = (i / COLS) | 0, c = i - r * COLS; let clump = 0;
+        for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+          if (!dr && !dc) continue; const rr = r + dr, cc = c + dc; if (rr < 0 || cc < 0 || cc >= COLS) continue;
+          const j = rr * COLS + cc; if (j < 0 || j >= nn) continue; const g = grid[j];
+          if (g === 10 || (g === 3 && sat[j] >= SAT_MAX)) clump++;
+        }
+        if (clump >= SAT_CLUMP_MIN) { grid[i] = 10; liqSetSingle(room, i, 10); activateLiquidCell(room, i, grid); sat[i] = 0; changedSet.add(i); ss.delete(i); }
+      } else if (sat[i] === 0 && !adj(i, 9)) ss.delete(i);
+    } else if (v === 5) {                                // MUD: lava bakes it dry instantly; water keeps it wet; else it dries → earth
+      if (adj(i, 11)) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); sat[i] = 0; changedSet.add(i); ss.delete(i); }
+      else if (adj(i, 9)) sat[i] = SAT_MAX;
+      else { sat[i] = sat[i] > SAT_DRY ? sat[i] - SAT_DRY : 0; if (sat[i] === 0) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); changedSet.add(i); ss.delete(i); } }
+    } else { sat[i] = 0; ss.delete(i); }                 // cell dug/overwritten out from under us
+  }
+  if (changedSet.size && !liquidQuiet) {                 // same compact liquid-cells encoding as liquidTickRoom (solids → mask 0; quicksand/drained-water carry their stack)
+    const s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room);
+    let arr = [], cells = 0;
+    for (const j of changedSet) {
+      const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (lam[b + rk] > 0) mask |= (1 << rk);
+      const hasS2 = s2a[j] > 0;
+      arr.push(j, grid[j], sd[j] | (hasS2 ? 0x80 : 0), mask);
+      for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(lam[b + rk]);
+      if (hasS2) arr.push(s2a[j], s2i[j]);
+      if (++cells >= 8192) { io.to(room).emit('liquid-cells', { cells: arr }); arr = []; cells = 0; }
+    }
+    if (cells) io.to(room).emit('liquid-cells', { cells: arr });
+  }
+  if (!ss.size) delete roomSoilActive[room];
+}
+// ==LIQUID_SIM_BLOCK_END== (test harness slices the sim to this marker)
+// Restartable sim loop — the tick rate is liquidCfg.tickMs so the Liquid Debug menu can speed it up/slow it down live.
+let liquidTimer = null;
+const runLiquidTick = () => { liquidTickCount++; for (const room in roomLiquidActive) liquidTickRoom(room); powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room); if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) soilTickRoom(room); };   // powder runs in lockstep with liquid → consistent gravity
+function restartLiquidLoop() { if (liquidTimer) clearInterval(liquidTimer); liquidTimer = setInterval(runLiquidTick, Math.max(8, Math.min(500, liquidCfg.tickMs | 0))); }
+restartLiquidLoop();
+
+const TERRAIN_MAT_MAX = 16;                           // built-in material ids 1..16 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil/glass); 0 = empty
 const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → custom material ids live in 16..255
 // ---- Custom material registry (Stage 6 feature A): per-room map of custom mat id → opaque appearance/property def.
 // The server stores + dedups + assigns ids; it does NOT interpret the def physically (the client clones a base mat).
-const CUSTOM_MAT_MIN = 16, CUSTOM_MAT_CAP = 200;     // up to 200 custom mats per room
+const CUSTOM_MAT_MIN = 17, CUSTOM_MAT_CAP = 200;     // custom mat ids start at 17 (built-ins 1..16, incl. Glass=16); up to 200 custom mats per room
 const roomMats = {};                                 // room → { id: def }
 function ensureMats(room) { return roomMats[room] || (roomMats[room] = {}); }
 
@@ -2174,11 +2735,14 @@ function mulberry32(a) {                              // tiny deterministic PRNG
   };
 }
 // Seeded procedural WORLD generation written straight into the existing terrain grid + object map
-// (the terrain/object pipelines already render + collide all of it — no new client code). Phases:
-// heightmap hills → biomes (grass/desert/snow soil) → caves carved through the stone → valley lakes
-// (Water; Lava in occasional deep bands) → surface scatter (rock mounds in terrain; trees + floating
-// platforms as 'world'-owned objects, protected from the FIFO cap). Deterministic from the seed.
-const MAT = { EARTH: 1, STONE: 2, SAND: 3, SNOW: 8, WATER: 9, LAVA: 11 };
+// (the terrain/object pipelines already render + collide all of it — no new client code). The surface
+// sits near MID-HEIGHT, so there's open sky above and a deep, layered, biome-varied UNDERGROUND below.
+// Phases: heightmap → surface biomes (6) drive the crust → depth-layered underground fill with per-region
+// veins → cave carving (winding tunnels + broad deep chambers) → surface lakes + region-specific cave
+// pools → surface scatter (rock mounds, trees, sky platforms) → underground scatter (crystals, mushrooms,
+// bouncy fungus/crystal platforms, treasure). Deterministic from the seed. Client fog-of-war (16d) hides
+// unexplored underground until the player gets near.
+const MAT = { EARTH: 1, STONE: 2, SAND: 3, ICE: 4, MUD: 5, BOUNCY: 6, SNOW: 8, WATER: 9, QUICKSAND: 10, LAVA: 11, ACID: 12, BRINE: 14, OIL: 15 };
 function generateWorld(avatarRoom, seed, band) {
   const grid = ensureTerrain(avatarRoom), hp = ensureTerrainHp(avatarRoom);
   grid.fill(0); hp.fill(0);
@@ -2189,81 +2753,144 @@ function generateWorld(avatarRoom, seed, band) {
   const inBand = (c) => c >= genC0 && c <= genC1;
   const rng = mulberry32(seed);
   const set = (c, r, v) => { if (c < 0 || c >= TERRAIN_COLS || r < 0 || r >= TERRAIN_ROWS) return; const i = r * TERRAIN_COLS + c; grid[i] = v; hp[i] = v ? matStrengthSrv({}, v) : 0; };
+  const at = (c, r) => (c < 0 || c >= TERRAIN_COLS || r < 0 || r >= TERRAIN_ROWS) ? 0 : grid[r * TERRAIN_COLS + c];
   const bottomRow = Math.ceil(FLOOR_TOP / TERRAIN_CELL) - 1;            // last terrain row resting on the floor
-  const baseRow = bottomRow - 16;                                       // mean surface row
+  const baseRow = Math.round(bottomRow * 0.47);                        // mean surface row ≈ mid-height (deep underground below)
+  const CRUST = 4;                                                     // biome soil crust thickness (rows)
   // Heightmap: 3 octaves, random phase + amplitude (tuned for the wide world).
   const p0 = rng() * Math.PI * 2, p1 = rng() * Math.PI * 2, p2 = rng() * Math.PI * 2;
-  const a0 = 6 + rng() * 5, a1 = 2.5 + rng() * 2.5, a2 = 1 + rng() * 1.5;
-  const heightAt = (c) => { const h = Math.sin(c * 0.018 + p0) * a0 + Math.sin(c * 0.052 + p1) * a1 + Math.sin(c * 0.13 + p2) * a2; const s = Math.round(baseRow - h); return s < 2 ? 2 : (s > bottomRow ? bottomRow : s); };
-  // Biomes: a slow field over the width → grass / desert / snow (drives the soil material).
-  const bp0 = rng() * Math.PI * 2, bp1 = rng() * Math.PI * 2;
-  const biomeAt = (c) => { const v = Math.sin(c * 0.013 + bp0) + 0.6 * Math.sin(c * 0.031 + bp1); return v > 0.85 ? 'snow' : (v < -0.85 ? 'desert' : 'grass'); };
-  const seaRow = baseRow + 7;                                           // valleys deeper than this flood with Water
+  const a0 = 7 + rng() * 7, a1 = 3 + rng() * 3, a2 = 1 + rng() * 2;
+  const heightAt = (c) => { const h = Math.sin(c * 0.016 + p0) * a0 + Math.sin(c * 0.05 + p1) * a1 + Math.sin(c * 0.12 + p2) * a2; const s = Math.round(baseRow - h); return s < 6 ? 6 : (s > bottomRow - 10 ? bottomRow - 10 : s); };
+  // Surface biomes: a slow field over the width → 6 biomes (drives crust material + trees + surface pools).
+  const bp0 = rng() * Math.PI * 2, bp1 = rng() * Math.PI * 2, bp2 = rng() * Math.PI * 2;
+  const surfBiome = (c) => { const v = Math.sin(c * 0.010 + bp0) + 0.5 * Math.sin(c * 0.023 + bp1) + 0.3 * Math.sin(c * 0.043 + bp2);
+    if (v > 1.05) return 'snow'; if (v > 0.35) return 'forest'; if (v < -1.05) return 'volcanic'; if (v < -0.5) return 'desert'; if (v < -0.1) return 'swamp'; return 'plains'; };
+  // Underground biome regions: an independent slow field → 6 depth-regions (veins, cave pool fluid, scatter).
+  const gp0 = rng() * Math.PI * 2, gp1 = rng() * Math.PI * 2;
+  const ugBiome = (c) => { const v = Math.sin(c * 0.0055 + gp0) + 0.6 * Math.sin(c * 0.015 + gp1);
+    if (v > 1.15) return 'frozen'; if (v > 0.4) return 'fungal'; if (v < -1.15) return 'molten'; if (v < -0.45) return 'crystal'; if (v < -0.05) return 'sandstone'; return 'caverns'; };
+  const seaRow = baseRow + 6;                                          // valleys deeper than this flood with Water
   // Flat spawn plateau, clamped above the water line so spawn is dry + level.
   const centerCol = Math.floor((MWSim.C.WORLD_W / 2) / TERRAIN_CELL);
-  const plateauHalf = Math.ceil(SPAWN_CLEAR_HALF_W / TERRAIN_CELL) + 2;
-  let plateauSurf = heightAt(centerCol); if (plateauSurf > seaRow - 3) plateauSurf = seaRow - 3; if (plateauSurf < 2) plateauSurf = 2;
+  const plateauHalf = Math.ceil(SPAWN_CLEAR_HALF_W / TERRAIN_CELL) + 3;
+  let plateauSurf = heightAt(centerCol); if (plateauSurf > seaRow - 3) plateauSurf = seaRow - 3; if (plateauSurf < 6) plateauSurf = 6;
   const surf = new Int16Array(TERRAIN_COLS);
   for (let c = 0; c < TERRAIN_COLS; c++) surf[c] = (Math.abs(c - centerCol) <= plateauHalf) ? plateauSurf : heightAt(c);
-  // Soil crust (biome material, top ~5 rows) over Stone.
+  const crustMat = (biome, r, s) => biome === 'desert' ? MAT.SAND : biome === 'snow' ? (r === s ? MAT.SNOW : MAT.EARTH) : biome === 'swamp' ? MAT.MUD : biome === 'volcanic' ? MAT.STONE : MAT.EARTH;
+  // ---- 1. Solid fill: biome crust over a depth-layered underground (dirt → stone+veins → deep) ----
   for (let c = 0; c < TERRAIN_COLS; c++) {
     if (!inBand(c)) continue;
-    const biome = (Math.abs(c - centerCol) <= plateauHalf) ? 'grass' : biomeAt(c);
+    const sB = (Math.abs(c - centerCol) <= plateauHalf) ? 'plains' : surfBiome(c);
+    const uB = ugBiome(c);
     const s = surf[c];
+    const dirtBot = s + CRUST + 8 + ((rng() * 5) | 0);                 // bottom of the loose-dirt band
+    const deepTop = bottomRow - 14 - ((rng() * 6) | 0);               // top of the deep band
     for (let r = s; r <= bottomRow; r++) {
-      let v = MAT.STONE;
-      if (r < s + 5) v = (biome === 'desert') ? MAT.SAND : (biome === 'snow' ? (r === s ? MAT.SNOW : MAT.EARTH) : MAT.EARTH);
+      let v;
+      if (r < s + CRUST) v = crustMat(sB, r, s);                       // biome crust
+      else if (r < dirtBot) v = (rng() < 0.12) ? MAT.STONE : MAT.EARTH; // dirt (occasional stone nodules)
+      else if (r < deepTop) {                                          // stone band with region veins
+        v = MAT.STONE; const q = rng();
+        if (uB === 'frozen' && q < 0.10) v = MAT.ICE;
+        else if (uB === 'crystal' && q < 0.08) v = MAT.ICE;
+        else if (uB === 'fungal' && q < 0.12) v = MAT.MUD;
+        else if (uB === 'sandstone' && q < 0.14) v = MAT.SAND;
+        else if (q < 0.05) v = MAT.EARTH;
+      } else v = (uB === 'sandstone' && rng() < 0.12) ? MAT.SAND : MAT.STONE;   // deep band
       set(c, r, v);
     }
   }
-  // Caves: carve winding tunnels through the stone (keep the soil crust + the surface intact); wider deeper.
-  const cp0 = rng() * Math.PI * 2, cp1 = rng() * Math.PI * 2, cp2 = rng() * Math.PI * 2;
+  // ---- 2. Caves: mostly NARROW winding passages with natural dead ends; occasional small chambers (deeper).
+  // The `worm` field carves thin tunnels wherever it dips near a ridge line; the small extra `chamber` term
+  // opens the rare wider pocket. Kept tight on purpose so the underground reads as tunnels to squeeze through,
+  // not one big open void. Biome crust is left intact. ----
+  const cp0 = rng() * Math.PI * 2, cp1 = rng() * Math.PI * 2, cp2 = rng() * Math.PI * 2, cp3 = rng() * Math.PI * 2, cp4 = rng() * Math.PI * 2;
   for (let c = 0; c < TERRAIN_COLS; c++) {
     if (!inBand(c)) continue;
-    const top = surf[c] + 5;
+    const top = surf[c] + CRUST + 1;
     for (let r = top; r <= bottomRow; r++) {
-      const i = r * TERRAIN_COLS + c;
-      if (grid[i] !== MAT.STONE) continue;
-      const worm = Math.abs(Math.sin(c * 0.05 + r * 0.028 + cp0) + Math.sin(c * 0.021 - r * 0.045 + cp1) + Math.sin((c + r) * 0.035 + cp2));
+      const i = r * TERRAIN_COLS + c; if (!grid[i]) continue;
       const depth = (r - top) / Math.max(1, bottomRow - top);
-      if (worm < 0.42 + depth * 0.22) { grid[i] = 0; hp[i] = 0; }
+      const worm = Math.abs(Math.sin(c * 0.06 + r * 0.033 + cp0) + Math.sin(c * 0.025 - r * 0.052 + cp1) + Math.sin((c + r) * 0.041 + cp2));
+      const chamber = Math.sin(c * 0.018 + r * 0.022 + cp3) + Math.sin(c * 0.034 - r * 0.013 + cp4);   // rare small pockets
+      if (worm < 0.24 + depth * 0.12 || chamber > 1.86 - depth * 0.26) { grid[i] = 0; hp[i] = 0; }     // narrow tunnels + occasional pocket
     }
   }
-  // Lakes: flood valley air below sea level with Water; occasional Lava bands at the cave floor.
+  // ---- 3a. Surface lakes: flood valley air below sea level with Water ----
   for (let c = 0; c < TERRAIN_COLS; c++) if (inBand(c) && surf[c] > seaRow) for (let r = seaRow; r < surf[c]; r++) set(c, r, MAT.WATER);
-  const lp = rng() * Math.PI * 2;
-  for (let c = 0; c < TERRAIN_COLS; c++) if (inBand(c) && Math.sin(c * 0.008 + lp) > 0.6) for (let r = bottomRow; r > bottomRow - 2; r--) { if (grid[r * TERRAIN_COLS + c] === 0) set(c, r, MAT.LAVA); }
-  // Surface scatter: rock mounds (terrain), then trees + floating platforms ('world'-owned objects).
+  // ---- 3b. Cave pools: shallow fluid resting on cave floors. ONE liquid per underground region (no random
+  // mixing) so each area reads coherently — molten→Lava, sandstone→Quicksand, fungal→Brine, everywhere
+  // else→Water. Patchy along the width via a wet field; molten always seeps at the very bottom. ----
+  const wp = rng() * Math.PI * 2, wp2 = rng() * Math.PI * 2, POOL_DEPTH = 4;
+  const regionFluid = { molten: MAT.LAVA, sandstone: MAT.QUICKSAND, fungal: MAT.BRINE, frozen: MAT.WATER, crystal: MAT.WATER, caverns: MAT.WATER };
+  for (let c = 0; c < TERRAIN_COLS; c++) {
+    if (!inBand(c)) continue;
+    const uB = ugBiome(c);
+    const fluid = regionFluid[uB] || MAT.WATER;
+    const wet = Math.sin(c * 0.02 + wp) + 0.5 * Math.sin(c * 0.061 + wp2);
+    const wetOK = uB === 'molten' ? true : wet > 0.25;                 // molten always seeps; others patchy
+    const tableRow = uB === 'molten' ? bottomRow - 10 : surf[c] + CRUST + 14;   // no cave pools too near the surface
+    if (!wetOK) continue;
+    for (let r = bottomRow; r >= tableRow;) {
+      if (grid[r * TERRAIN_COLS + c] !== 0) { r--; continue; }         // solid — skip
+      if (at(c, r + 1) === 0 && r < bottomRow) { r--; continue; }      // open with no floor below — air, skip
+      let d = 0;                                                       // fill a shallow pool up from the floor
+      while (r >= tableRow && grid[r * TERRAIN_COLS + c] === 0 && d < POOL_DEPTH) { set(c, r, fluid); r--; d++; }
+      while (r >= 0 && grid[r * TERRAIN_COLS + c] === 0) r--;          // skip the air gap above until the next solid
+    }
+  }
+  // ---- 4. Objects ('world'-owned, FIFO-exempt): surface trees/rocks + sky platforms, then underground scatter ----
   if (!roomObjects[avatarRoom]) roomObjects[avatarRoom] = new Map();
   const objs = roomObjects[avatarRoom];
+  const OBJ_CAP = 190;
   const clearX0 = MWSim.C.WORLD_W / 2 - SPAWN_CLEAR_HALF_W - 64, clearX1 = MWSim.C.WORLD_W / 2 + SPAWN_CLEAR_HALF_W + 64;
   const dryLand = (c) => surf[c] <= seaRow && !!grid[surf[c] * TERRAIN_COLS + c];   // solid, non-flooded surface
   const outsideSpawn = (wx) => wx < clearX0 || wx > clearX1;
-  const treeFor = { grass: '🌳', desert: '🌴', snow: '🌲' };
+  const treeFor = { plains: '🌳', forest: '🌲', desert: '🌵', snow: '🌲', swamp: '🌿', volcanic: '🪨' };
   let wn = 0;
-  for (let c = Math.max(8, genC0); c < Math.min(TERRAIN_COLS - 8, genC1); c += 6) {   // rock mounds
+  const addObj = (o) => { if (wn >= OBJ_CAP) return false; o.id = 'world-' + wn; o.ownerId = 'world'; o.owner = 'world'; objs.set(o.id, o); wn++; return true; };
+  for (let c = Math.max(8, genC0); c < Math.min(TERRAIN_COLS - 8, genC1); c += 6) {   // surface rock mounds (terrain)
     if (rng() > 0.10 || !dryLand(c) || !outsideSpawn((c + 0.5) * TERRAIN_CELL)) continue;
     const hgt = 1 + (rng() * 2 | 0);
     for (let k = 0; k < hgt; k++) { set(c, surf[c] - 1 - k, MAT.STONE); if (rng() > 0.5) set(c + 1, surf[c + 1] - 1 - k, MAT.STONE); }
   }
-  for (let c = Math.max(5, genC0); c < Math.min(TERRAIN_COLS - 5, genC1); c += 4) {   // trees (narrow solid stamps)
+  for (let c = Math.max(5, genC0); c < Math.min(TERRAIN_COLS - 5, genC1); c += 4) {   // surface trees (narrow solid stamps)
     if (rng() > 0.16 || !dryLand(c) || !outsideSpawn((c + 0.5) * TERRAIN_CELL)) continue;
     const h = 58 + (rng() * 28 | 0), w = Math.round(h * 0.5);
-    objs.set('world-' + wn, { id: 'world-' + wn, type: 'stamp', ownerId: 'world', owner: 'world',
-      x: (c + 0.5) * TERRAIN_CELL, y: surf[c] * TERRAIN_CELL - h / 2, content: treeFor[biomeAt(c)] || '🌳', w, h, shape: 'rect', angle: 0, stretch: false, hp: 3 });
-    wn++;
+    addObj({ type: 'stamp', x: (c + 0.5) * TERRAIN_CELL, y: surf[c] * TERRAIN_CELL - h / 2,
+      content: treeFor[surfBiome(c)] || '🌳', w, h, shape: 'rect', angle: 0, stretch: false, hp: 3 });
   }
-  const platLo = Math.max(10, genC0), platHi = Math.min(TERRAIN_COLS - 10, genC1);   // platform column range (band-confined)
-  const plats = platHi > platLo ? 7 + (rng() * 5 | 0) : 0;                            // floating platforms (indestructible) for traversal
+  const platLo = Math.max(10, genC0), platHi = Math.min(TERRAIN_COLS - 10, genC1);   // sky platforms (indestructible) for traversal
+  const plats = platHi > platLo ? 8 + (rng() * 6 | 0) : 0;
   for (let k = 0; k < plats; k++) {
     const c = platLo + (rng() * (platHi - platLo) | 0), wx = (c + 0.5) * TERRAIN_CELL;
-    const y = surf[c] * TERRAIN_CELL - (90 + rng() * 170);
+    const y = surf[c] * TERRAIN_CELL - (90 + rng() * 240);
     if (!outsideSpawn(wx) || y < TERRAIN_CELL * 3) continue;
-    objs.set('world-' + wn, { id: 'world-' + wn, type: 'platform', ownerId: 'world', owner: 'world',
-      x: wx, y, w: 110 + (rng() * 120 | 0), h: 16, angle: 0, spin: 0, boost: 0, updraft: 0, fanLen: 1, fanMode: 'push', fanPeriod: 2, hp: null });
-    wn++;
+    addObj({ type: 'platform', x: wx, y, w: 110 + (rng() * 120 | 0), h: 16, angle: 0, spin: 0, boost: 0, updraft: 0, fanLen: 1, fanMode: 'push', fanPeriod: 2, hp: null });
+  }
+  // Underground scatter: props + the occasional bouncy fungus/crystal platform, resting on cave floors.
+  const cryFor = { frozen: '❄️', crystal: '💎', fungal: '🍄', sandstone: '🪨', caverns: '💧', molten: '' };
+  for (let c = Math.max(4, genC0); c < Math.min(TERRAIN_COLS - 4, genC1); c += 3) {
+    if (wn >= OBJ_CAP) break;
+    const uB = ugBiome(c);
+    for (let r = surf[c] + CRUST + 6; r <= bottomRow - 1; r++) {
+      const here = grid[r * TERRAIN_COLS + c], below = at(c, r + 1);
+      if (here !== 0) continue;                                        // need an open cell…
+      if (below === 0 || TERRAIN_MATS_FLUID(below)) continue;         // …resting on a SOLID floor (not fluid/air)
+      const wx = (c + 0.5) * TERRAIN_CELL;
+      if (!outsideSpawn(wx)) continue;
+      if ((uB === 'fungal' || uB === 'crystal') && rng() < 0.05) {     // bouncy mushroom / crystal spring platform
+        if (addObj({ type: 'platform', x: wx, y: (r + 1) * TERRAIN_CELL - 10, w: 70 + (rng() * 40 | 0), h: 16, angle: 0, spin: 0, boost: 0, updraft: 0, fanLen: 1, fanMode: 'push', fanPeriod: 2, bouncy: 1, hp: null })) break;
+      } else if (rng() < 0.12) {                                       // decorative/breakable cave prop
+        const emoji = cryFor[uB] || '🪨'; if (!emoji) continue;
+        const sz = 30 + (rng() * 22 | 0);
+        if (addObj({ type: 'stamp', x: wx, y: (r + 1) * TERRAIN_CELL - sz / 2, content: emoji, w: sz, h: sz, shape: 'rect', angle: 0, stretch: false, hp: 2 })) break;
+      }
+    }
   }
 }
+// True when a built-in terrain material id behaves as a fluid (Water/Quicksand/Lava/Acid/Brine/Oil).
+function TERRAIN_MATS_FLUID(v) { return v === 9 || v === 10 || v === 11 || v === 12 || v === 14 || v === 15; }
 // Phase 6: generation column band for a Level's size preset (null = full world). Looks up the room's
 // env_spec; the page-default room (roomId = URL, no DB row) falls through to 'large' → full width.
 // Resolve a Level's size preset key from the room's stored env_spec (page/URL room or missing → 'large').
@@ -2302,6 +2929,13 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   if (worldGenerated.has(avatarRoom)) return;
   worldGenerated.add(avatarRoom);
   generateWorld(avatarRoom, worldSeedFor(roomId), genColBand(roomId, levelIndex));
+  seedLiquidActivity(avatarRoom);                    // give generated liquid its fill levels, then…
+  liquidQuiet = true;                                // …pre-settle it silently so joiners see it already at rest (no on-load sloshing / broadcast storm)
+  for (let s = 0; s < 3000 && roomLiquidActive[avatarRoom] && roomLiquidActive[avatarRoom].size; s++) { liquidTickCount++; liquidTickRoom(avatarRoom); }
+  liquidQuiet = false;
+  // Do NOT hard-freeze the active set. If the liquid fully settled, liquidTickRoom already cleared it. If a big field is
+  // still leveling after the cap, leave it ACTIVE so the live sim finishes the job (broadcasting diffs) — the old
+  // unconditional freeze left non-level pools + frozen mid-air stream slivers that never resolved once cut off mid-settle.
 }
 // Spawn point = world-centre column resting on the terrain SURFACE there (so a generated world
 // drops you on top of the ground, not buried in it). Falls back to the floor when that column is
@@ -2741,6 +3375,16 @@ io.on('connection', (socket) => {
   // custom/locked context Room is always entered. Drives whether we add to roomUsers + announce.
   let currentEntered = false;
   let currentColor = null;        // this socket's chosen name colour — tracked separately so every roomUsers entry we (re)build (join, room-presence, ctx-room) carries it
+  // ---- Liquid Debug config (GLOBAL, live-tunable sim switches driven by the client's Liquid Debug menu) ----
+  socket.emit('liquid-cfg', liquidCfg);                     // send current state so a joining client's menu reflects it
+  socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
+  socket.on('liquid-cfg', (patch) => {
+    if (!patch || typeof patch !== 'object') return;
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions']) if (k in patch) liquidCfg[k] = !!patch[k];
+    if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
+    if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
+    io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
+  });
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
   let currentAvBuildRoomId = null; // Phase 3: real roomId for L2 build-perm checks (null = page/URL room → open build)
   let currentAvOwnerId = null;     // owner_id of that room (null for the page/URL room)
@@ -3258,6 +3902,8 @@ io.on('connection', (socket) => {
     // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
     const tg = roomTerrain[avRoom];
     if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: roomTerrainHp[avRoom] ? terrainRLE(roomTerrainHp[avRoom]).runs : undefined });
+    // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
+    if (tg && roomLiquidTotal[avRoom]) { const cells = buildLiquidInit(avRoom); if (cells.length) socket.emit('liquid-init', { levelIndex, cells }); }
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
     const mm = roomMats[avRoom];
     if (mm && Object.keys(mm).length) socket.emit('mats-init', { levelIndex, mats: mm });
@@ -3350,7 +3996,7 @@ io.on('connection', (socket) => {
     for (const id of ids) map.delete(id);
     if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     // Terrain is unowned (and ephemeral / all player-placed), so "Remove all" wipes the whole grid too.
-    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); io.to(currentAvatarRoom).emit('terrain-cleared'); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); io.to(currentAvatarRoom).emit("terrain-cleared"); }
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   socket.on('avatar-objects-clear-all', () => {
@@ -3361,7 +4007,7 @@ io.on('connection', (socket) => {
       map.clear();
       if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     }
-    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); io.to(currentAvatarRoom).emit('terrain-cleared'); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); io.to(currentAvatarRoom).emit("terrain-cleared"); }
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
@@ -3380,8 +4026,12 @@ io.on('connection', (socket) => {
     const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
     // The sender already applied this op optimistically, so echo to OTHERS only — carve = hp decrement is
     // NOT idempotent, double-applying would desync the sender's per-cell hp from everyone else's.
-    if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd))
+    if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd)) {
+      // Wake any liquid in/around the edit so it flows into the freed space (dig-out) or spreads (poured).
+      activateLiquidRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);
+      activatePowderRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);   // dig removes support / paint drops grains
       socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd });
+    }
   });
   // Undo for placed terrain: restore an explicit list of cells to prior values. Flat [index, value, ...].
   // Owner-agnostic (terrain isn't owner-tracked), but bounded and rebroadcast so all clients stay in sync.
@@ -3399,6 +4049,13 @@ io.on('connection', (socket) => {
         if (aabbHitsClear(clear, cc, cr, cc, cr)) { v = 0; cells[k + 1] = 0; }
       }
       if (i >= 0 && i < grid.length) { if (grid[i] !== v) { grid[i] = v; changed = true; } hp[i] = v ? matStrengthSrv(mats, v) : 0; }
+    }
+    const tot = ensureLiquidTotal(currentAvatarRoom), lam = ensureLiquidAmt(currentAvatarRoom);    // keep the multi-liquid stacks in step with placed/cleared cells, then wake
+    for (let k = 0; k + 1 < cells.length; k += 2) {
+      const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
+      if (isFluidId(grid[i])) { if (!tot[i] || liqRepId(lam, i) !== grid[i]) liqSetSingle(currentAvatarRoom, i, grid[i]); activateLiquidCell(currentAvatarRoom, i, grid); } else liqClearCell(currentAvatarRoom, i);
+      const up = i - TERRAIN_COLS; if (up >= 0 && isFluidId(grid[up])) activateLiquidCell(currentAvatarRoom, up, grid);
+      if (isPowderId(grid[i])) powderSet(currentAvatarRoom).add(i); if (up >= 0 && isPowderId(grid[up])) powderSet(currentAvatarRoom).add(up);   // placed/undone powder + grains above a cleared cell may fall
     }
     if (changed) io.to(currentAvatarRoom).emit('terrain-set', { cells });
   });
