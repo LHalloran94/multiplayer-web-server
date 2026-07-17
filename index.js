@@ -1579,6 +1579,7 @@ const liquidCfg = {
   cohesion: true,        // a fed falling cell keeps a 1-unit thread → continuous streams (no gap into the pool). off = streams can break up
   viscosity: false,      // per-liquid LEVEL_VISC throttle: denser liquids ooze flat slower. off = ALL liquids level at full speed
   reactions: true,       // lava+water→stone, acid dissolves terrain, water+snow→ice, oil burns, etc.
+  streamTagClear: true,  // a settled (can't-fall) cell drops its fallSide stream tag. off = the old behaviour: stale tags linger on brim-full pool cells forever
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
 };
@@ -1709,6 +1710,7 @@ function liquidTickRoom(room) {
   const spillSide = new Map();   // cell → the fall side spilled onto it THIS tick; a spill from the OTHER side routes into the SECONDARY lane (dual-stream chute)
   const neutralizedThisTick = new Set();   // acid cells that turned (partly) to water THIS tick — other acid must not chain off that fresh water in the same tick (else a whole blob neutralises instantly)
   const fell = new Set();   // cells determined FALLING this tick (propagates up a full stream column, since we process bottom-up) → they don't level laterally
+  const tagCleared = new Set();   // cells that dropped a stale fallSide tag this tick — broadcast-only (merged into changedSet AFTER the loop, so it never wakes neighbours)
   const wake = (j) => { if (j >= 0 && j < grid.length && !isSolid(grid[j]) && tot[j] > 0) active.add(j); };
   const wakeN = (j) => { const x = j % COLS; wake(j - COLS); wake(j + COLS); if (x > 0) wake(j - 1); if (x < COLS - 1) wake(j + 1); };
   const wakeD = (j) => { wakeN(j); const x = j % COLS; if (x > 0) { wake(j - COLS - 1); wake(j + COLS - 1); } if (x < COLS - 1) { wake(j - COLS + 1); wake(j + COLS + 1); } };   // 8-neighbourhood (density swaps propagate diagonally through a block)
@@ -1899,6 +1901,19 @@ function liquidTickRoom(room) {
     // LATERAL LEVELING (pools only) — the sideways spread + flat-settle, density-throttled by the same `reduce` as 1b above
     // (defined before 1b since streaming down a surface shares the throttle). 2c/1c/1d all move a reduced amount per tick.
     if (!canFall) {
+      // STREAM TAG CLEAR. `sd` (fallSide) is meant to mean "this liquid spilled off an edge and hasn't landed yet" — it is
+      // born ONLY on a ledge spill (1b) and carried down by 1a. But it only ever CLEARED when a cell became the TARGET of
+      // someone else's lateral move (the sd[j]=0 in 1c/1d) or when it emptied — and a BRIM-FULL settled cell gets NEITHER
+      // (nothing can laterally move INTO a full cell, and it never empties), so it kept a stale tag forever. That's why the
+      // render can't trust the tag alone and has to AND in a room-below test — which then misfires on a brim-full stream and
+      // draws it as flush horizontal bands (the horizontal-slices bug). A cell that can't fall is settled/pooling, so it is
+      // by definition not a stream: drop the tag here, the other half of "carry it until it lands".
+      // Guarded on sd[i] !== 0 so it fires ONCE per cell (a no-op re-broadcast every tick would never let the room go quiet).
+      // Collected in its OWN set, merged into changedSet only for the post-loop broadcast: mark() would re-activate the cell
+      // (settled pools would never go quiet) and even a bare changedSet.add would trip the `changedSet.has(i) → wakeN(i)` at
+      // the foot of this loop, perturbing activation order (it shifted DAM-BREAK by 2 ticks). PURE ANNOTATION: sd never gates
+      // mass anywhere in this tick, so with the wake ripple avoided this cannot touch how pools flow, settle or stratify.
+      if (liquidCfg.streamTagClear && sd[i] !== 0) { sd[i] = 0; tagCleared.add(i); }
       // (2c) PER-LIQUID horizontal leveling: level each dense layer's own surface over the floor of what's denser (heavy ends
       // flat along the bottom) without disturbing the layers below. Cumulative depth C_t=Σ_{k≤t}; nudge rank t toward the
       // nearest strictly-lower-C_t neighbour, swap the nearest lighter back (total-preserving). Throttled by `reduce` too.
@@ -1942,6 +1957,7 @@ function liquidTickRoom(room) {
     if (pend) active.add(i);                               // throttled diagonal spill OR leveling still owed this tick → revisit
     if (changedSet.has(i)) wakeN(i);
   }
+  for (const j of tagCleared) changedSet.add(j);   // annotation-only changes join the broadcast here — too late to wake anything
   // sync grid[i]/hp to the representative (heaviest present) for every changed liquid cell (reaction-produced solids kept)
   for (const j of changedSet) {
     if (isSolid(grid[j])) continue;
@@ -3380,7 +3396,7 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTagClear']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
