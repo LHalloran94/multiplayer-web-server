@@ -1872,7 +1872,13 @@ function liquidTickRoom(room) {
     // that already holds untagged (resting) liquid stamped the stream's tag onto the pool cell it LANDS in, so that cell drew
     // as a sideways strip instead of filling bottom-up with the incoming stream in its empty top ("cell = both"). It's exactly
     // one cell — the landing cell — and it's only tagged WHILE liquid pours into it, so a tags-at-rest check can't see it.
-    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { let t = Math.min(L, room); if (liquidCfg.cohesion && fedAbove && t >= L && L >= 1) t = L - 1; if (t > 0) { const tagOk = !liquidCfg.streamTag || tot[j] === 0 || sd[j] !== 0 || fell.has(j); moveBottom(i, j, t); if (tagOk) sd[j] = sd[i]; L -= t; wakeN(i); } } }
+    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { let t = Math.min(L, room); if (liquidCfg.cohesion && fedAbove && t >= L && L >= 1) t = L - 1; if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t);
+      // TAG CARRY. streamTag off = the old unconditional copy. On: only PROPAGATE a real tag (sd[i]!==0 — never clobber a good
+      // tag with 0, which happens when an untagged mouth cell falls into a chute cell the side-spill already tagged), and only
+      // INTO a cell that is air OR itself falling (fell.has(j) — j is straight below, processed already this bottom-up tick).
+      // Not into settled liquid: that stamped the tag onto the POOL cell a stream lands in (the landing-cell sideways bug).
+      if (!liquidCfg.streamTag) sd[j] = sd[i]; else if (sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i];
+      L -= t; wakeN(i); } } }
     // DENSITY THROTTLE (reduced-amount). Streaming DOWN A SURFACE — the diagonal spill 1b (here) and the lateral leveling
     // 1c/1d (below) — moves a reduced amount per tick for denser liquids (rate lf = 1/(1+LEVEL_VISC[surface rank])), so a
     // dense liquid oozes DOWN A SLOPE at ~the same speed it spreads SIDEWAYS instead of racing down 1b-fast and heaping up at
@@ -1901,7 +1907,11 @@ function liquidTickRoom(room) {
         // spreading sideways, not a fall), AND landing in air / an existing stream, never onto resting pool liquid.
         // Computed BEFORE the move, since it reads tot[j]. `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream
         // chute lane, which is MASS; only sd (annotation) is gated, so physics is byte-identical either way.
-        const tagOk = !liquidCfg.streamTag || (isSolid(grid[i + COLS]) && (tot[j] === 0 || sd[j] !== 0));
+        // BIRTH gate: a REAL ledge underfoot (1b also fires when full LIQUID blocks straight-down — a pool surface spreading
+        // sideways, not a fall), AND landing in air OR a cell that is itself falling (fell.has(j) — the target is diagonally
+        // below, processed already this bottom-up tick). Admitting a falling cell that already holds untagged liquid is what
+        // lets a tag reach a chute fed from the side, where the mouth fills level-then-down (untagged) before the spill tags it.
+        const tagOk = !liquidCfg.streamTag || (isSolid(grid[i + COLS]) && (tot[j] === 0 || fell.has(j)));
         if (t > 0) { moveBottom(i, j, t); if (tagOk) sd[j] = ns; spillSide.set(j, ns); L -= t; wakeN(i); } }
     }
     // A FALLING stream must NOT level laterally, or it fans out into a pyramid as it falls. A cell "can fall" if the cell
