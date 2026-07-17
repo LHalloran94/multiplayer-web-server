@@ -1872,7 +1872,7 @@ function liquidTickRoom(room) {
     // that already holds untagged (resting) liquid stamped the stream's tag onto the pool cell it LANDS in, so that cell drew
     // as a sideways strip instead of filling bottom-up with the incoming stream in its empty top ("cell = both"). It's exactly
     // one cell — the landing cell — and it's only tagged WHILE liquid pours into it, so a tags-at-rest check can't see it.
-    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { let t = Math.min(L, room); if (liquidCfg.cohesion && fedAbove && t >= L && L >= 1) t = L - 1; if (t > 0) { const tagOk = !liquidCfg.streamTag || tot[j] === 0 || sd[j] !== 0; moveBottom(i, j, t); if (tagOk) sd[j] = sd[i]; L -= t; wakeN(i); } } }
+    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { let t = Math.min(L, room); if (liquidCfg.cohesion && fedAbove && t >= L && L >= 1) t = L - 1; if (t > 0) { const tagOk = !liquidCfg.streamTag || tot[j] === 0 || sd[j] !== 0 || fell.has(j); moveBottom(i, j, t); if (tagOk) sd[j] = sd[i]; L -= t; wakeN(i); } } }
     // DENSITY THROTTLE (reduced-amount). Streaming DOWN A SURFACE — the diagonal spill 1b (here) and the lateral leveling
     // 1c/1d (below) — moves a reduced amount per tick for denser liquids (rate lf = 1/(1+LEVEL_VISC[surface rank])), so a
     // dense liquid oozes DOWN A SLOPE at ~the same speed it spreads SIDEWAYS instead of racing down 1b-fast and heaping up at
