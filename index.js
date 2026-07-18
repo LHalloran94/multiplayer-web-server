@@ -1612,12 +1612,14 @@ const SIDE_LEFT = 1, SIDE_RIGHT = 2;
 // Only used for falling stream cells (rare); it falls independently and MERGES into the pool's main stack on landing.
 const roomStream2Amt = {};   // room → Uint8Array(cells): units in the secondary lane (0 = none)
 const roomStream2Id = {};    // room → Uint8Array(cells): the secondary lane's liquid id
-// FLOW (display-twice): per-cell units that FELL INTO this cell this tick (straight-down 1a, diagonal spill 1b, secondary
-// lane) — the INCOMING STREAM's thickness, a quantity DISTINCT from the pooled total. Reset at the start of each cell's
-// processing, accumulated by the cells above as they move down (bottom-up order → the reset happens before those inflows).
-// Pure annotation (never mass): lets a fed POOL cell draw a thin incoming stream strip whose width is the flow, not the fill.
-const roomLiquidFlow = {};
-function ensureLiquidFlow(room) { return roomLiquidFlow[room] || (roomLiquidFlow[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+// FLOW (display-twice): per-cell units that FELL INTO this cell this tick — the INCOMING STREAM's thickness, DISTINCT from the
+// pooled total. Tracked PER SIDE (flowL = liquid that arrived hugging the LEFT wall, flowR = the RIGHT), because a cell can be
+// fed from BOTH sides at once (a chute) and each lip/strip must match ONLY its own side's inflow, not the combined width. A
+// STRAIGHT-DOWN fall (fallSide 0) contributes to NEITHER — it just pools, no incoming strip (streams are only ever side-aligned,
+// never centred). Reset at the start of each cell's processing; cells above accumulate their inflow later (bottom-up). Never mass.
+const roomLiquidFlowL = {}, roomLiquidFlowR = {};
+function ensureLiquidFlowL(room) { return roomLiquidFlowL[room] || (roomLiquidFlowL[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+function ensureLiquidFlowR(room) { return roomLiquidFlowR[room] || (roomLiquidFlowR[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 // SATURATION (terrain reactions): absorbent solids (earth/sand) soak up adjacent water into a per-cell accumulator (0..SAT_MAX).
 // Earth → Mud at saturation (cell-by-cell); saturated Sand → Quicksand once part of a wet CLUMP; Mud dries back to Earth as its
 // saturation decays away from water (instant under lava). Internal only — clients see the resulting grid changes, not the value.
@@ -1679,7 +1681,7 @@ function seedSoilAround(room, grid, i) {
 }
 // Set a cell to a single full-CAP liquid `id` (paint / gen / seed). Clears the other layers.
 function liqSetSingle(room, i, id) { const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), base = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[base + k] = 0; amt[base + LIQ_RANK[id]] = LIQUID_MAX; tot[i] = LIQUID_MAX; ensureStream2Amt(room)[i] = 0; ensureStream2Id(room)[i] = 0; }
-function liqClearCell(room, i) { const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), base = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[base + k] = 0; tot[i] = 0; ensureLiquidSide(room)[i] = 0; ensureStream2Amt(room)[i] = 0; ensureStream2Id(room)[i] = 0; ensureLiquidFlow(room)[i] = 0; }
+function liqClearCell(room, i) { const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), base = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[base + k] = 0; tot[i] = 0; ensureLiquidSide(room)[i] = 0; ensureStream2Amt(room)[i] = 0; ensureStream2Id(room)[i] = 0; ensureLiquidFlowL(room)[i] = 0; ensureLiquidFlowR(room)[i] = 0; }
 // Representative id (heaviest present) for grid[i], or 0 if the cell holds no liquid.
 function liqRepId(amt, i) { const base = i * LIQ_T; for (let rk = 0; rk < LIQ_T; rk++) if (amt[base + rk] > 0) return LIQ_ID[rk]; return 0; }
 // Wake + seed every cell in a rect after a terrain edit: a freshly PAINTED fluid becomes a full single-liquid stack, a
@@ -1708,17 +1710,17 @@ function seedLiquidActivity(room) {
 // every cell that holds liquid. (Per-cell, not RLE — fine for the ~2k fluid cells a generated world has.)
 function buildLiquidInit(room) {
   const amt = roomLiquidAmt[room], tot = roomLiquidTotal[room], grid = roomTerrain[room]; if (!amt || !tot || !grid) return [];
-  const s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room), fl = ensureLiquidFlow(room);
+  const s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room), flL = ensureLiquidFlowL(room), flR = ensureLiquidFlowR(room);
   const cells = [];
-  for (let i = 0; i < tot.length; i++) { const hasS2 = s2a[i] > 0; if (tot[i] <= 0 && !hasS2) continue; const b = i * LIQ_T; let mask = 0; for (let rk = 0; rk < LIQ_T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk); const flow = fl[i]; cells.push(i, grid[i], (hasS2 ? 0x80 : 0) | (flow > 0 ? 0x40 : 0), mask); for (let rk = 0; rk < LIQ_T; rk++) if (mask & (1 << rk)) cells.push(amt[b + rk]); if (hasS2) cells.push(s2a[i], s2i[i]); if (flow > 0) cells.push(flow); }
+  for (let i = 0; i < tot.length; i++) { const hasS2 = s2a[i] > 0; if (tot[i] <= 0 && !hasS2) continue; const b = i * LIQ_T; let mask = 0; for (let rk = 0; rk < LIQ_T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk); const fL = flL[i], fR = flR[i]; cells.push(i, grid[i], (hasS2 ? 0x80 : 0) | (fL > 0 ? 0x40 : 0) | (fR > 0 ? 0x20 : 0), mask); for (let rk = 0; rk < LIQ_T; rk++) if (mask & (1 << rk)) cells.push(amt[b + rk]); if (hasS2) cells.push(s2a[i], s2i[i]); if (fL > 0) cells.push(fL); if (fR > 0) cells.push(fR); }
   return cells;
 }
 function liquidTickRoom(room) {
   const grid = roomTerrain[room], hp = roomTerrainHp[room], active = roomLiquidActive[room];
   const amt = roomLiquidAmt[room], tot = roomLiquidTotal[room];
   if (!grid || !amt || !tot || !active || !active.size) { if (active && !active.size) delete roomLiquidActive[room]; return; }
-  const sd = ensureLiquidSide(room), s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room), lvlAcc = ensureLevelAcc(room), fl = ensureLiquidFlow(room);
-  const flowCells = new Set();   // cells whose flow (incoming stream thickness) changed this tick → broadcast + wake
+  const sd = ensureLiquidSide(room), s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room), lvlAcc = ensureLevelAcc(room), flL = ensureLiquidFlowL(room), flR = ensureLiquidFlowR(room);
+  const flowCells = new Set();   // cells whose flow (incoming stream thickness) changed this tick → broadcast
   const mats = roomMats[room] || {}, tick = liquidTickCount, cap = LIQUID_MAX, T = LIQ_T, COLS = TERRAIN_COLS;
   const LIQUID_FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // liquid may not descend into this row or below (bedrock)
   const isSolid = (v) => v !== 0 && !isFluidId(v);
@@ -1750,14 +1752,15 @@ function liquidTickRoom(room) {
     if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
   const floorRank = (j) => { const b = j * T; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) return rk; return -1; };
   const ceilRank = (j) => { const b = j * T; for (let rk = T - 1; rk >= 0; rk--) if (amt[b + rk] > 0) return rk; return -1; };
-  // FLOW (display-twice): record that `t` units fell INTO cell j (from 1a/1b/secondary). j is below/diagonally-below i, so it
-  // was reset at the start of ITS processing earlier this bottom-up tick → this accumulates the current tick's inflow.
-  const addFlow = (j, t) => { if (!liquidCfg.streamFlow || t <= 0) return; const nv = fl[j] + t, v = nv > 255 ? 255 : nv; if (v !== fl[j]) { fl[j] = v; flowCells.add(j); } };
+  // FLOW (display-twice): record that `t` units fell INTO cell j on `side` (1 hug-left / 2 hug-right; 0 straight-down → ignored,
+  // straight falls just pool, no side-aligned strip). j is below/diagonally-below i → it was reset at the start of ITS
+  // processing earlier this bottom-up tick, so this accumulates the current tick's inflow. Pure annotation, never mass.
+  const addFlow = (j, t, side) => { if (!liquidCfg.streamFlow || t <= 0 || (side !== 1 && side !== 2)) return; const a = side === 1 ? flL : flR; const nv = a[j] + t, v = nv > 255 ? 255 : nv; if (v !== a[j]) { a[j] = v; flowCells.add(j); } };
   let processed = 0;
   for (const i of list) {
     if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); continue; }
     if (isSolid(grid[i])) continue;
-    if (liquidCfg.streamFlow && fl[i] !== 0) { fl[i] = 0; flowCells.add(i); }   // reset this cell's flow; the cells above add THIS tick's inflow later (bottom-up)
+    if (liquidCfg.streamFlow && (flL[i] !== 0 || flR[i] !== 0)) { flL[i] = 0; flR[i] = 0; flowCells.add(i); }   // reset this cell's flow; the cells above add THIS tick's inflow later (bottom-up)
     const r = (i / COLS) | 0, c = i - r * COLS, canDown = r + 1 < LIQUID_FLOOR_ROW;
     // SECONDARY LANE (dual-stream chute): fall it straight down independently of the main stream; when it can't fall
     // further (solid or a full pool below), MERGE it into this cell's main stack so it joins the pool. Runs even when the
@@ -1766,7 +1769,7 @@ function liquidTickRoom(room) {
       const belowI = i + COLS;
       // fall straight down the secondary lane while there's shared-cap room below (keeps it a continuous stream)
       const roomBelow = (canDown && !isSolid(grid[belowI]) && (s2a[belowI] === 0 || s2i[belowI] === s2i[i])) ? (cap - tot[belowI] - s2a[belowI]) : 0;
-      if (roomBelow > 0) { const mv = s2a[i] < roomBelow ? s2a[i] : roomBelow; s2a[belowI] += mv; s2i[belowI] = s2i[i]; s2a[i] -= mv; if (s2a[i] === 0) s2i[i] = 0; mark(i); mark(belowI); addFlow(belowI, mv); }
+      if (roomBelow > 0) { const mv = s2a[i] < roomBelow ? s2a[i] : roomBelow; s2a[belowI] += mv; s2i[belowI] = s2i[i]; s2a[i] -= mv; if (s2a[i] === 0) s2i[i] = 0; mark(i); mark(belowI); addFlow(belowI, mv, sd[i] === 1 ? 2 : 1); }   // secondary lane hugs the side OPPOSITE the main
       // remainder (can't fall = landed on a pool/solid) merges into THIS cell's main stack — combined cap guarantees it fits
       if (s2a[i] > 0) { const rk = LIQ_RANK[s2i[i]]; if (rk !== undefined) { const add = (cap - tot[i]) < s2a[i] ? (cap - tot[i]) : s2a[i]; if (add > 0) { amt[i * T + rk] += add; tot[i] += add; s2a[i] -= add; if (s2a[i] === 0) s2i[i] = 0; mark(i); wakeN(i); } } if (s2a[i] > 0) active.add(i); }
     }
@@ -1912,7 +1915,7 @@ function liquidTickRoom(room) {
       // INTO a cell that is air OR itself falling (fell.has(j) — j is straight below, processed already this bottom-up tick).
       // Not into settled liquid: that stamped the tag onto the POOL cell a stream lands in (the landing-cell sideways bug).
       if (!liquidCfg.streamTag) sd[j] = sd[i]; else if (sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i];
-      addFlow(j, t); L -= t; wakeN(i); } } }
+      addFlow(j, t, sd[i]); L -= t; wakeN(i); } } }   // side = the carried fall side (0 straight-down → no strip)
     // DENSITY THROTTLE (reduced-amount). Streaming DOWN A SURFACE — the diagonal spill 1b (here) and the lateral leveling
     // 1c/1d (below) — moves a reduced amount per tick for denser liquids (rate lf = 1/(1+LEVEL_VISC[surface rank])), so a
     // dense liquid oozes DOWN A SLOPE at ~the same speed it spreads SIDEWAYS instead of racing down 1b-fast and heaping up at
@@ -1928,7 +1931,7 @@ function liquidTickRoom(room) {
       const ns = dc > 0 ? SIDE_LEFT : SIDE_RIGHT, ps = spillSide.get(j), srcId = liqRepId(amt, i);
       const jc2 = j % COLS, chute = (jc2 === 0 || isSolid(grid[j - 1])) && (jc2 === COLS - 1 || isSolid(grid[j + 1]));   // a 1-wide channel (both horizontal neighbours solid) — only there do two spills become two lanes; a wide pool just mixes (else spurious lanes never drain)
       if (chute && ps !== undefined && ps !== ns && srcId && (s2a[j] === 0 || s2i[j] === srcId)) {   // a SECOND stream from the OTHER side → secondary lane; the two lanes SHARE the cell's width (main+secondary ≤ cap) so it drains cleanly (two fat streams just each go thinner)
-        const room2 = cap - tot[j] - s2a[j], want = reduce(L < room2 ? L : room2); if (want > 0) { const [mv] = takeRank(i, want, LIQ_RANK[srcId]); if (mv > 0) { s2a[j] += mv; s2i[j] = srcId; L -= mv; mark(j); wakeN(i); addFlow(j, mv); } }
+        const room2 = cap - tot[j] - s2a[j], want = reduce(L < room2 ? L : room2); if (want > 0) { const [mv] = takeRank(i, want, LIQ_RANK[srcId]); if (mv > 0) { s2a[j] += mv; s2i[j] = srcId; L -= mv; mark(j); wakeN(i); addFlow(j, mv, ns); } }   // secondary route: side = this spill's side ns (opposite the main)
       // LEDGE GATE on the tag. 1b fires when straight-down is blocked by SOLID *or* by FULL LIQUID — and only the first is a
       // ledge. The second is ordinary liquid spreading sideways across a POOL SURFACE, which happens all over any settling
       // pool, so tagging it made `sd` mean "moved diagonally-down recently" rather than "spilled off an edge". Harmless while
@@ -1946,7 +1949,7 @@ function liquidTickRoom(room) {
         // streamMix: a ledge spill draws PROPORTIONALLY (moveProp) so the lip keeps its mixture instead of shedding heaviest
         // -first — that heaviest-first shedding is what makes the lip oscillate period-2 and sends alternating water/oil slugs
         // down the stream (visible now as pulsing sub-strip widths). Pools are untouched: this is only the ledge-spill path.
-        if (t > 0) { (liquidCfg.streamMix ? moveProp : moveBottom)(i, j, t); if (tagOk) sd[j] = ns; spillSide.set(j, ns); addFlow(j, t); L -= t; wakeN(i); } }
+        if (t > 0) { (liquidCfg.streamMix ? moveProp : moveBottom)(i, j, t); if (tagOk) sd[j] = ns; spillSide.set(j, ns); addFlow(j, t, ns); L -= t; wakeN(i); } }   // main spill: side = ns
     }
     // A FALLING stream must NOT level laterally, or it fans out into a pyramid as it falls. A cell "can fall" if the cell
     // below (or a diagonal-below) has ROOM (not solid, not full) — note: room, NOT empty, because a falling stream's below
@@ -2041,16 +2044,17 @@ function liquidTickRoom(room) {
     // WIRE per changed cell: [index, gridId, fallSide, mask] then one amt for each set bit of `mask` (rank order). mask
     // is a 6-bit set of which density ranks are present → compact (a single-liquid cell is 5 values). Chunked at cell
     // boundaries. gridId carries reaction-produced solids (e.g. stone) the client can't derive from the amounts.
-    // A secondary lane (s2a>0) is flagged by the 0x80 bit on the fallSide byte; its [amt,id] follow the mask amts.
-    // FLOW (display-twice) is flagged by the 0x40 bit; its single byte follows the s2 pair (if any).
+    // Side byte: low 2 bits = fallSide (0/1/2). 0x80 = secondary lane [amt,id] follows the mask amts. 0x40 = flowL byte, 0x20
+    // = flowR byte (display-twice, per side) — those bytes follow the s2 pair (if any), flowL then flowR.
     let arr = [], cells = 0;
     for (const j of changedSet) {
       const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
-      const hasS2 = s2a[j] > 0, flow = fl[j];
-      arr.push(j, grid[j], sd[j] | (hasS2 ? 0x80 : 0) | (flow > 0 ? 0x40 : 0), mask);
+      const hasS2 = s2a[j] > 0, fL = flL[j], fR = flR[j];
+      arr.push(j, grid[j], (sd[j] & 0x03) | (hasS2 ? 0x80 : 0) | (fL > 0 ? 0x40 : 0) | (fR > 0 ? 0x20 : 0), mask);
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(amt[b + rk]);
       if (hasS2) arr.push(s2a[j], s2i[j]);
-      if (flow > 0) arr.push(flow);
+      if (fL > 0) arr.push(fL);
+      if (fR > 0) arr.push(fR);
       if (++cells >= 8192) { io.to(room).emit('liquid-cells', { cells: arr }); arr = []; cells = 0; }
     }
     if (cells) io.to(room).emit('liquid-cells', { cells: arr });
