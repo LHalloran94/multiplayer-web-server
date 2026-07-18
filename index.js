@@ -1597,8 +1597,9 @@ const liquidCfg = {
   // the blocky/stair surface near drops. A cell is genuinely a STREAM only if it is TAGGED (a ledge spill, carried down)
   // or has straight-down room (a vertical drop the tag never marks). 0 = old canFall · 1 = tagged-or-straight-down (fixes
   // the blocky edge; keeps waterfalls from fanning) · 2 = tagged-ONLY (experiment: simplest, but untagged vertical drops fan).
-  levelGate: 1,
-  symLevel: true,        // 1c surface flow sheds to BOTH lower neighbours from the SAME snapshot, aimed at the 3-cell average → no per-tick direction preference (kills the period-2 water/oil slosh + the alternating chunks down a stream) + no overshoot. off = the old alternating-direction sequential scan (sloshes)
+  levelGate: 2,   // default set to tag-only 2026-07-19: modes 0/1/2 were visually indistinguishable in-browser → canFall was NOT the blocky-edge culprit (revisit if needed)
+  symLevel: true,        // 1c surface flow sheds to BOTH lower neighbours from the SAME snapshot, aimed at the 3-cell average → no per-tick direction preference + no overshoot. off = the old alternating-direction sequential scan. (NOTE: this does NOT fix the oil/water slosh — that's levelMix below.)
+  levelMix: true,        // lateral leveling (1c/1d) moves the MIXTURE proportionally (moveProp) instead of skimming the lightest liquid off the top (moveTop). Skimming oil each tick oil-depletes→oil-replenishes a surface cell in a period-2 cycle = THE oil/water slosh (probe: swing 0.69→0.00). off = moveTop (skims the top, sloshes). Stratification is kept by the density sorts, not by skimming.
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
 };
@@ -2043,7 +2044,10 @@ function liquidTickRoom(room) {
         let need = n; for (let q = t + 1; q < T && need > 0; q++) { const a = amt[j * T + q]; if (a <= 0) continue; const mv = a < need ? a : need; amt[j * T + q] -= mv; amt[i * T + q] += mv; need -= mv; }   // NEAREST lighter j → i (total-preserving)
         mark(i); mark(j); wakeD(i); wakeD(j);
       }
-      // 1c lateral equalise — surface flow (sheds the TOP/lightest via moveTop). SYMMETRIC (symLevel): shed to BOTH lower
+      // levelMix: move the MIXTURE (moveProp) instead of skimming the lightest off the top (moveTop). Skimming oil each tick is
+      // the oil/water slosh pump; moving the mixture keeps a surface cell's ratio steady (the density sorts still re-stratify).
+      const lvlMove = liquidCfg.levelMix ? moveProp : moveTop;
+      // 1c lateral equalise — surface flow. SYMMETRIC (symLevel): shed to BOTH lower
       // neighbours from the SAME pre-shed snapshot, aimed at the 3-cell AVERAGE. No per-tick direction preference (the old
       // `(tick+i)&1` order + sequential `L -=` made whichever side went FIRST take more → the period-2 water/oil slosh that
       // streams replay as chunks) and no overshoot (two lower neighbours can't drain a cell below them: each lands on the avg).
@@ -2061,17 +2065,17 @@ function liquidTickRoom(room) {
             const denom = shedL + shedR, total = reduce(Math.floor(denom));   // throttle the TOTAL once (reduce carries a per-cell accumulator)
             if (total > 0 && denom > 0) {
               let mvL = Math.round(total * shedL / denom); if (mvL > total) mvL = total; const mvR = total - mvL;   // split by deficit; sum stays = total (conserved)
-              if (mvL > 0) { moveTop(i, jL, mvL); sd[jL] = 0; L -= mvL; wakeN(i); }
-              if (mvR > 0) { moveTop(i, jR, mvR); sd[jR] = 0; L -= mvR; wakeN(i); }
+              if (mvL > 0) { lvlMove(i, jL, mvL); sd[jL] = 0; L -= mvL; wakeN(i); }
+              if (mvR > 0) { lvlMove(i, jR, mvR); sd[jR] = 0; L -= mvR; wakeN(i); }
             }
           }
-        } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(grid[j])) continue; const nl = tot[j], room2 = cap - nl - s2a[j]; if (L - nl > 1 && room2 > 0) { const mv = reduce(Math.min((L - nl) >> 1, room2)); if (mv > 0) { moveTop(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
+        } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(grid[j])) continue; const nl = tot[j], room2 = cap - nl - s2a[j]; if (L - nl > 1 && room2 > 0) { const mv = reduce(Math.min((L - nl) >> 1, room2)); if (mv > 0) { lvlMove(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
       }
       // 1d surface FLAT-SETTLE — nudge toward the nearest strictly-lower reachable spot in the row; throttled REDUCED-AMOUNT
       if (liquidCfg.lateralLevel && L > 0) {
         let dir = 0, best = Infinity;
         for (const sdir of [-1, 1]) for (let d = 1; d <= LIQUID_LEVEL_SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d; if (isSolid(grid[j])) break; const jl = tot[j]; if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
-        if (dir !== 0) { const j = i + dir; if (tot[j] < L && tot[j] + s2a[j] < cap && reduce(1) > 0) { moveTop(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
+        if (dir !== 0) { const j = i + dir; if (tot[j] < L && tot[j] + s2a[j] < cap && reduce(1) > 0) { lvlMove(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
       }
     }
     if (pend) active.add(i);                               // throttled diagonal spill OR leveling still owed this tick → revisit
@@ -3521,7 +3525,7 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'streamFlow', 'symLevel']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'streamFlow', 'symLevel', 'levelMix']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
