@@ -1602,7 +1602,15 @@ const liquidCfg = {
   levelMix: true,        // lateral leveling (1c/1d) moves the MIXTURE proportionally (moveProp) instead of skimming the lightest liquid off the top (moveTop). Skimming oil each tick oil-depletes→oil-replenishes a surface cell in a period-2 cycle = THE oil/water slosh (probe: swing 0.69→0.00). off = moveTop (skims the top, sloshes). Stratification is kept by the density sorts, not by skimming.
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
+  perfLog: process.env.LIQ_PERF === '1',  // DEBUG: ~1×/s console line — active rooms/cells, sim ms/tick, emit KB/s. Enable via env LIQ_PERF=1 or a liquid-cfg patch (toggle-able live). Off = zero overhead.
 };
+// DEBUG perf accounting (only touched when liquidCfg.perfLog). `emitLiquidCells` centralises the `liquid-cells` emit so we
+// can size the wire payload; runLiquidTick tallies sim time + active cells and prints a rolling ~1s summary to the console.
+let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0 };
+function emitLiquidCells(room, arr) {
+  if (liquidCfg.perfLog && arr.length) liqPerf.bytes += JSON.stringify(arr).length + 24;   // +~socket.io per-message framing
+  emitLiquidCells(room, arr);
+}
 const LIQUID_MS = 60;                                 // legacy default (the live rate is liquidCfg.tickMs)
 // (LIQUID_FLOOR_ROW is derived inside liquidTickRoom because FLOOR_TOP is declared later in the file.)
 const LIQUID_MAX_ACTIVE = 80000;                      // safety cap on tracked active cells per room
@@ -2108,9 +2116,9 @@ function liquidTickRoom(room) {
       if (hasS2) arr.push(s2a[j], s2i[j]);
       if (mL) { arr.push(mL); for (let rk = 0; rk < T; rk++) if (mL & (1 << rk)) arr.push(flLc[b + rk]); }   // per-side flow composition: [mask, amts…]
       if (mR) { arr.push(mR); for (let rk = 0; rk < T; rk++) if (mR & (1 << rk)) arr.push(flRc[b + rk]); }
-      if (++cells >= 8192) { io.to(room).emit('liquid-cells', { cells: arr }); arr = []; cells = 0; }
+      if (++cells >= 8192) { emitLiquidCells(room, arr); arr = []; cells = 0; }
     }
-    if (cells) io.to(room).emit('liquid-cells', { cells: arr });
+    if (cells) emitLiquidCells(room, arr);
   }
   // prune woken cells that aren't liquid (neighbour-wakes can add solids/empties)
   for (const j of Array.from(active)) { if (j < 0 || j >= grid.length) { active.delete(j); continue; } if (isSolid(grid[j]) || (tot[j] <= 0 && s2a[j] <= 0)) active.delete(j); }
@@ -2160,9 +2168,9 @@ function powderTickRoom(room) {
       arr.push(j, grid[j], sd[j] | (hasS2 ? 0x80 : 0), mask);
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(amt[b + rk]);
       if (hasS2) arr.push(s2a[j], s2i[j]);
-      if (++cells >= 8192) { io.to(room).emit('liquid-cells', { cells: arr }); arr = []; cells = 0; }
+      if (++cells >= 8192) { emitLiquidCells(room, arr); arr = []; cells = 0; }
     }
-    if (cells) io.to(room).emit('liquid-cells', { cells: arr });
+    if (cells) emitLiquidCells(room, arr);
   }
   if (!active.size) delete roomPowderActive[room];
 }
@@ -2222,16 +2230,30 @@ function soilTickRoom(room) {
       arr.push(j, grid[j], sd[j] | (hasS2 ? 0x80 : 0), mask);
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(lam[b + rk]);
       if (hasS2) arr.push(s2a[j], s2i[j]);
-      if (++cells >= 8192) { io.to(room).emit('liquid-cells', { cells: arr }); arr = []; cells = 0; }
+      if (++cells >= 8192) { emitLiquidCells(room, arr); arr = []; cells = 0; }
     }
-    if (cells) io.to(room).emit('liquid-cells', { cells: arr });
+    if (cells) emitLiquidCells(room, arr);
   }
   if (!ss.size) delete roomSoilActive[room];
 }
 // ==LIQUID_SIM_BLOCK_END== (test harness slices the sim to this marker)
 // Restartable sim loop — the tick rate is liquidCfg.tickMs so the Liquid Debug menu can speed it up/slow it down live.
 let liquidTimer = null;
-const runLiquidTick = () => { liquidTickCount++; for (const room in roomLiquidActive) liquidTickRoom(room); powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room); if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) soilTickRoom(room); };   // powder runs in lockstep with liquid → consistent gravity
+const runLiquidTick = () => {
+  const _t0 = liquidCfg.perfLog ? performance.now() : 0; let _active = 0;
+  liquidTickCount++; for (const room in roomLiquidActive) { if (liquidCfg.perfLog) _active += roomLiquidActive[room].size; liquidTickRoom(room); }
+  powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room);   // powder runs in lockstep with liquid → consistent gravity
+  if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) soilTickRoom(room);
+  if (liquidCfg.perfLog) {
+    const _dt = performance.now() - _t0; liqPerf.simMs += _dt; if (_dt > liqPerf.simMsMax) liqPerf.simMsMax = _dt;
+    if (_active > liqPerf.active) liqPerf.active = _active; liqPerf.ticks++;
+    if (liqPerf.ticks >= Math.max(1, Math.round(1000 / liquidCfg.tickMs))) {   // ~once per real second
+      const _hz = 1000 / liquidCfg.tickMs, _rooms = Object.keys(roomLiquidActive).length;
+      console.log(`[liq-perf] rooms=${_rooms} active(peak)=${liqPerf.active} sim/tick avg=${(liqPerf.simMs / liqPerf.ticks).toFixed(2)}ms max=${liqPerf.simMsMax.toFixed(2)}ms  emit=${(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1)}KB/s (×clients-in-room = server upload; budget/tick=${liquidCfg.tickMs}ms)`);
+      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0 };
+    }
+  }
+};
 function restartLiquidLoop() { if (liquidTimer) clearInterval(liquidTimer); liquidTimer = setInterval(runLiquidTick, Math.max(8, Math.min(500, liquidCfg.tickMs | 0))); }
 restartLiquidLoop();
 
@@ -3525,7 +3547,7 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'streamFlow', 'symLevel', 'levelMix']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'streamFlow', 'symLevel', 'levelMix', 'perfLog']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
