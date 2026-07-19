@@ -1602,10 +1602,15 @@ const liquidCfg = {
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
   perfLog: process.env.LIQ_PERF === '1',  // DEBUG: ~1×/s console line — active rooms/cells, sim ms/tick, emit KB/s. Enable via env LIQ_PERF=1 or a liquid-cfg patch (toggle-able live). Off = zero overhead.
-  // FLUX LEVELLING — "global target, local transport". Replaces the 1c/1d local-diffusion levelling with a
-  // per-body equilibrium waterline + prefix-sum interface fluxes, moved at a bounded rate between ADJACENT
-  // cells only (so nothing teleports). Levelling goes O(N²) → O(N): measured 5×–15× faster and the gain grows
-  // with pool width (~27× extrapolated to the 214-column world). OFF by default = straight A/B vs today.
+  // FLUX LEVELLING — ⚠️ SHELVED 2026-07-20, left in behind this flag; DEFAULT OFF, do not enable by default.
+  // "Global target, local transport": per-body equilibrium waterline + prefix-sum interface fluxes, moved at a
+  // bounded rate between ADJACENT cells only (nothing teleports). Levelling goes O(N²) → O(N) and it is
+  // genuinely much faster on paper (flat/stepped basins reach dead level; a 100-wide pool NEVER converges with
+  // this off). BUT in-game it still reads wrong: the surface moves as sliding slabs rather than settling, and
+  // it does not finish levelling in real terrain. Root cause of the LOOK is inherent, not a bug: moving mass
+  // across a pool quickly is visible, and real water hides that in a gravity WAVE (sloshing). Making it look
+  // right therefore needs surface wave dynamics (shallow-water on the height field), which is a project in its
+  // own right. Today's local levelling looks fine and is only slow on very wide pools, so this is parked.
   fluxLevel: false,
   fluxRate: 32,          // max units crossing one column interface per tick. Higher = faster levelling, linearly (no instability window).
 };
