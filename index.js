@@ -1603,13 +1603,19 @@ const liquidCfg = {
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
   perfLog: process.env.LIQ_PERF === '1',  // DEBUG: ~1×/s console line — active rooms/cells, sim ms/tick, emit KB/s. Enable via env LIQ_PERF=1 or a liquid-cfg patch (toggle-able live). Off = zero overhead.
+  // FLUX LEVELLING — "global target, local transport". Replaces the 1c/1d local-diffusion levelling with a
+  // per-body equilibrium waterline + prefix-sum interface fluxes, moved at a bounded rate between ADJACENT
+  // cells only (so nothing teleports). Levelling goes O(N²) → O(N): measured 5×–15× faster and the gain grows
+  // with pool width (~27× extrapolated to the 214-column world). OFF by default = straight A/B vs today.
+  fluxLevel: false,
+  fluxRate: 32,          // max units crossing one column interface per tick. Higher = faster levelling, linearly (no instability window).
 };
 // DEBUG perf accounting (only touched when liquidCfg.perfLog). `emitLiquidCells` centralises the `liquid-cells` emit so we
 // can size the wire payload; runLiquidTick tallies sim time + active cells and prints a rolling ~1s summary to the console.
 let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0 };
 function emitLiquidCells(room, arr) {
   if (liquidCfg.perfLog && arr.length) liqPerf.bytes += JSON.stringify(arr).length + 24;   // +~socket.io per-message framing
-  emitLiquidCells(room, arr);
+  io.to(room).emit('liquid-cells', { cells: arr });
 }
 const LIQUID_MS = 60;                                 // legacy default (the live rate is liquidCfg.tickMs)
 // (LIQUID_FLOOR_ROW is derived inside liquidTickRoom because FLOOR_TOP is declared later in the file.)
@@ -1661,6 +1667,10 @@ function ensureLiquidSide(room) { return roomLiquidSide[room] || (roomLiquidSide
 // of a cell) so it's never visible; seeded with a small per-cell phase so the invisible 1-unit fine steps don't all align.
 const roomLevelAcc = {};
 function ensureLevelAcc(room) { if (!roomLevelAcc[room]) { const a = new Float32Array(TERRAIN_COLS * TERRAIN_ROWS); for (let i = 0; i < a.length; i++) a[i] = ((Math.imul(i, 2654435761)) >>> 0) / 4294967296; roomLevelAcc[room] = a; } return roomLevelAcc[room]; }
+// scratch for the flux-levelling flood fill (reused per room so the pass allocates nothing per tick)
+const roomFluxSeen = {}, roomFluxStack = {};
+function ensureFluxSeen(room) { return roomFluxSeen[room] || (roomFluxSeen[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+function ensureFluxStack(room) { return roomFluxStack[room] || (roomFluxStack[room] = new Int32Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 function ensureStream2Amt(room) { return roomStream2Amt[room] || (roomStream2Amt[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 function ensureStream2Id(room) { return roomStream2Id[room] || (roomStream2Id[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 function liquidSet(room) { return roomLiquidActive[room] || (roomLiquidActive[room] = new Set()); }
@@ -2059,7 +2069,8 @@ function liquidTickRoom(room) {
       // neighbours from the SAME pre-shed snapshot, aimed at the 3-cell AVERAGE. No per-tick direction preference (the old
       // `(tick+i)&1` order + sequential `L -=` made whichever side went FIRST take more → the period-2 water/oil slosh that
       // streams replay as chunks) and no overshoot (two lower neighbours can't drain a cell below them: each lands on the avg).
-      if (liquidCfg.lateralLevel && L > 1) {
+      // fluxLevel takes over 1c/1d entirely (it solves the same job globally) — running both would double-move.
+      if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 1) {
         if (liquidCfg.symLevel) {
           const jL = c > 0 ? i - 1 : -1, jR = c < COLS - 1 ? i + 1 : -1;
           const okL = jL >= 0 && !isSolid(grid[jL]) && L - tot[jL] > 1;   // a strictly-lower non-solid neighbour that can receive
@@ -2080,7 +2091,7 @@ function liquidTickRoom(room) {
         } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(grid[j])) continue; const nl = tot[j], room2 = cap - nl - s2a[j]; if (L - nl > 1 && room2 > 0) { const mv = reduce(Math.min((L - nl) >> 1, room2)); if (mv > 0) { lvlMove(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
       }
       // 1d surface FLAT-SETTLE — nudge toward the nearest strictly-lower reachable spot in the row; throttled REDUCED-AMOUNT
-      if (liquidCfg.lateralLevel && L > 0) {
+      if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0) {
         let dir = 0, best = Infinity;
         for (const sdir of [-1, 1]) for (let d = 1; d <= LIQUID_LEVEL_SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d; if (isSolid(grid[j])) break; const jl = tot[j]; if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
         if (dir !== 0) { const j = i + dir; if (tot[j] < L && tot[j] + s2a[j] < cap && reduce(1) > 0) { lvlMove(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
@@ -2088,6 +2099,95 @@ function liquidTickRoom(room) {
     }
     if (pend) active.add(i);                               // throttled diagonal spill OR leveling still owed this tick → revisit
     if (changedSet.has(i)) wakeN(i);
+  }
+  // ═══ FLUX LEVELLING (liquidCfg.fluxLevel) — "global target, LOCAL transport" ═══════════════════════════
+  // The default 1c/1d levelling is pure local diffusion: a cell only knows its neighbours, so "which way is
+  // downhill" has to spread one cell per tick and a pool of width N takes O(N²) ticks to flatten.
+  // Here we instead (a) flood-fill each connected body, (b) solve its equilibrium waterline, (c) take the
+  // RUNNING SUM of (columnHeight − target) across the body's columns — that prefix sum IS exactly how much
+  // water must cross each column interface — and (d) move at most `fluxRate` units across each interface,
+  // BETWEEN ADJACENT CELLS ONLY. Transport stays local and continuous (nothing teleports, mass moves cell to
+  // cell through the existing moveProp/moveTop), but every interface already knows the correct direction and
+  // amount, so convergence is O(N). Measured on the probe (scratchpad/probe_scalar_leveling.js):
+  // N=42 1344→258 · N=60 3071→425 · N=90 8294→707 · N=120 15581→1029 ticks (5×→15×, and the win grows with N).
+  // Only the SETTLED run of each column (water resting on its floor) takes part, so falling streams are
+  // untouched and keep rendering as streams. Off by default → straight A/B against today's levelling.
+  if (liquidCfg.fluxLevel) {
+    const ROWS = TERRAIN_ROWS, NCELL = COLS * ROWS, RATE = liquidCfg.fluxRate | 0;
+    const lvlMove = liquidCfg.levelMix ? moveProp : moveTop;
+    const seen = ensureFluxSeen(room); seen.fill(0);
+    const stack = ensureFluxStack(room);
+    const cFloor = new Int32Array(COLS), cTop = new Int32Array(COLS), cH = new Float64Array(COLS);
+    for (let start = 0; start < NCELL; start++) {
+      if (seen[start] || isSolid(grid[start]) || tot[start] <= 0) continue;
+      let sp = 0; stack[sp++] = start; seen[start] = 1;
+      let minC = COLS, maxC = -1;
+      while (sp > 0) {                                        // flood the connected body (4-way, through liquid)
+        const j = stack[--sp], jc = j % COLS;
+        if (jc < minC) minC = jc; if (jc > maxC) maxC = jc;
+        const jr = (j / COLS) | 0;
+        if (jc > 0) { const k = j - 1; if (!seen[k] && !isSolid(grid[k]) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
+        if (jc < COLS - 1) { const k = j + 1; if (!seen[k] && !isSolid(grid[k]) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
+        if (jr > 0) { const k = j - COLS; if (!seen[k] && !isSolid(grid[k]) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
+        if (jr < ROWS - 1) { const k = j + COLS; if (!seen[k] && !isSolid(grid[k]) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
+      }
+      if (maxC <= minC) continue;                             // single column → nothing to level across
+      const cols = [];
+      for (let c = minC; c <= maxC; c++) {                    // per column: floor, settled run, headroom
+        let r = -1;                                           // lowest body row in this column
+        for (let rr = ROWS - 1; rr >= 0; rr--) { const j = rr * COLS + c; if (seen[j] && tot[j] > 0) { r = rr; break; } }
+        if (r < 0) continue;
+        while (r + 1 < ROWS && r + 1 < LIQUID_FLOOR_ROW && !isSolid(grid[(r + 1) * COLS + c])) r++;
+        const fl = r + 1;
+        // SETTLED RUN = the block of FULL cells resting on the floor, plus AT MOST ONE partial surface cell.
+        // A landing stream is contiguous with the pool it feeds, so a naive "walk up while there's liquid"
+        // climbs the whole falling column and the flux pass fans it sideways (PYRAMID spread 1 → 18 cols).
+        // A falling column is a run of PARTIAL cells, so stopping at the first non-full cell excludes it.
+        // (The stream tag can't be used for this: it is only born on a diagonal spill, so a straight-down
+        // pour carries no tag at all.)
+        let t = fl; while (t - 1 >= 0 && !isSolid(grid[(t - 1) * COLS + c]) && tot[(t - 1) * COLS + c] >= cap) t--;
+        if (t - 1 >= 0 && !isSolid(grid[(t - 1) * COLS + c])) {                      // one partial surface cell
+          const v = tot[(t - 1) * COLS + c];
+          if (v > 0 && v < cap && sd[(t - 1) * COLS + c] === 0) t--;
+        }
+        if (t >= fl) continue;                                                        // nothing actually resting here
+        let h = 0; for (let rr = t; rr < fl; rr++) h += tot[rr * COLS + c];
+        let cl = t; while (cl - 1 >= 0 && !isSolid(grid[(cl - 1) * COLS + c]) && tot[(cl - 1) * COLS + c] <= 0) cl--;
+        cFloor[c] = fl; cTop[c] = cl; cH[c] = h; cols.push(c);
+      }
+      if (cols.length < 2) continue;
+      let M = 0; for (const c of cols) M += cH[c];
+      const volAt = (L) => { let v = 0; for (const c of cols) { const mx = (cFloor[c] - cTop[c]) * cap; let hh = (cFloor[c] - L) * cap; if (hh < 0) hh = 0; if (hh > mx) hh = mx; v += hh; } return v; };
+      let loL = -1, hiL = ROWS + 1;                           // binary-search the equilibrium waterline
+      for (let it = 0; it < 32; it++) { const mid = (loL + hiL) / 2; if (volAt(mid) > M) loL = mid; else hiL = mid; }
+      const L = (loL + hiL) / 2;
+      let run = 0;
+      for (let k = 0; k < cols.length - 1; k++) {
+        const c = cols[k], mx = (cFloor[c] - cTop[c]) * cap;
+        let tgt = (cFloor[c] - L) * cap; if (tgt < 0) tgt = 0; if (tgt > mx) tgt = mx;
+        run += cH[c] - tgt;
+        if (cols[k + 1] !== c + 1) { run = 0; continue; }     // gap in the body → no interface to push across
+        let want = run > RATE ? RATE : run < -RATE ? -RATE : run;
+        if (want > -2 && want < 2) continue;                  // deadband → a level pool goes quiet (no endless churn)
+        const src = want > 0 ? c : c + 1, dst = want > 0 ? c + 1 : c;
+        // Take from the SOURCE's surface and deliver at the DESTINATION's surface — i.e. water runs over the
+        // top from the higher column into the lower one. Delivering at the source's ROW instead would drop
+        // water into unsupported cells in the neighbour, scattering mid-air liquid across the pool
+        // (that fanned PYRAMID's falling-cell spread out to 17 columns).
+        let need = Math.floor(Math.abs(want));
+        let sr = cTop[src], dr = cFloor[dst] - 1;
+        while (need > 0) {
+          while (sr < cFloor[src] && (isSolid(grid[sr * COLS + src]) || tot[sr * COLS + src] <= 0)) sr++;
+          if (sr >= cFloor[src]) break;
+          while (dr >= cTop[dst] && (isSolid(grid[dr * COLS + dst]) || cap - tot[dr * COLS + dst] - s2a[dr * COLS + dst] <= 0)) dr--;
+          if (dr < cTop[dst] || dr < sr) break;                 // no room left, or it would mean lifting water uphill
+          const a = sr * COLS + src, b = dr * COLS + dst; if (a === b) break;
+          const mv = Math.min(tot[a], cap - tot[b] - s2a[b], need); if (mv <= 0) break;
+          const did = lvlMove(a, b, mv); if (did <= 0) break;
+          sd[b] = 0; need -= did; wakeN(a); wakeN(b);
+        }
+      }
+    }
   }
   for (const j of tagCleared) changedSet.add(j);   // annotation-only changes join the broadcast here — too late to wake anything
   for (const j of flowCells) changedSet.add(j);     // flow (incoming-stream thickness) changes broadcast too, so the client can draw/clear the incoming strip
@@ -3547,9 +3647,10 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'streamFlow', 'symLevel', 'levelMix', 'perfLog']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'streamFlow', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
+    if ('fluxRate' in patch) liquidCfg.fluxRate = Math.max(1, Math.min(128, patch.fluxRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
   });
