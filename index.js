@@ -2122,7 +2122,13 @@ function liquidTickRoom(room) {
         if (jr < ROWS - 1) { const k = j + COLS; if (!seen[k] && !isSolid(grid[k]) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
       }
       if (maxC <= minC) continue;                             // single column → nothing to level across
-      const cols = [];
+      // A 4-connected body always occupies a CONTIGUOUS column range (you cannot reach column c+2 without
+      // passing through c+1), so walk minC..maxC and record which columns actually PARTICIPATE (have settled
+      // water). Non-participants — a column the body only passes through as a falling stream, say — are kept
+      // in the chain and simply pass the running flux along. Previously they were dropped and the chain was
+      // reset at each hole, which split one pool into segments that each levelled to their OWN waterline:
+      // that is the "doesn't level completely" seen on real terrain (flat test basins never hit it).
+      const cols = [], part = new Uint8Array(COLS);
       for (let c = minC; c <= maxC; c++) {                    // per column: floor, settled run, headroom
         let r = -1;                                           // lowest body row in this column
         for (let rr = ROWS - 1; rr >= 0; rr--) { const j = rr * COLS + c; if (seen[j] && tot[j] > 0) { r = rr; break; } }
@@ -2143,22 +2149,36 @@ function liquidTickRoom(room) {
         if (t >= fl) continue;                                                        // nothing actually resting here
         let h = 0; for (let rr = t; rr < fl; rr++) h += tot[rr * COLS + c];
         let cl = t; while (cl - 1 >= 0 && !isSolid(grid[(cl - 1) * COLS + c]) && tot[(cl - 1) * COLS + c] <= 0) cl--;
-        cFloor[c] = fl; cTop[c] = cl; cH[c] = h; cols.push(c);
+        cFloor[c] = fl; cTop[c] = cl; cH[c] = h; part[c] = 1; cols.push(c);
       }
       if (cols.length < 2) continue;
-      let M = 0; for (const c of cols) M += cH[c];
-      const volAt = (L) => { let v = 0; for (const c of cols) { const mx = (cFloor[c] - cTop[c]) * cap; let hh = (cFloor[c] - L) * cap; if (hh < 0) hh = 0; if (hh > mx) hh = mx; v += hh; } return v; };
-      let loL = -1, hiL = ROWS + 1;                           // binary-search the equilibrium waterline
-      for (let it = 0; it < 32; it++) { const mid = (loL + hiL) / 2; if (volAt(mid) > M) loL = mid; else hiL = mid; }
-      const L = (loL + hiL) / 2;
-      let run = 0;
-      for (let k = 0; k < cols.length - 1; k++) {
-        const c = cols[k], mx = (cFloor[c] - cTop[c]) * cap;
-        let tgt = (cFloor[c] - L) * cap; if (tgt < 0) tgt = 0; if (tgt > mx) tgt = mx;
-        run += cH[c] - tgt;
-        if (cols[k + 1] !== c + 1) { run = 0; continue; }     // gap in the body → no interface to push across
-        let want = run > RATE ? RATE : run < -RATE ? -RATE : run;
-        if (want > -2 && want < 2) continue;                  // deadband → a level pool goes quiet (no endless churn)
+      // BARRIER SPLIT. This sim has no upward transport — liquid only falls, spills and flows sideways. So a
+      // body joined ONLY through a submerged, ceiling-capped channel (two basins linked under a rock, a U-tube)
+      // can never actually equalise: water would have to climb the far side. Solving one waterline across such
+      // a body demands transport that can never happen, so the flux pushes at the barrier FOREVER — a permanent
+      // futile conveyor that both stalls short of level and shows as liquid endlessly sliding over the surface.
+      // A column that is full to a SOLID ceiling is exactly that barrier, so cut the body there and level each
+      // reachable stretch on its own. (Levelling across such a channel needs real pressure, which is a separate
+      // piece of work — note that today's non-flux levelling cannot do it either.)
+      const barrier = (c) => part[c] && cTop[c] > 0 && isSolid(grid[(cTop[c] - 1) * COLS + c]) && cH[c] >= (cFloor[c] - cTop[c]) * cap - 1;
+      const levelSegment = (a, b) => {
+        let n = 0, M = 0;
+        for (let c = a; c <= b; c++) if (part[c]) { n++; M += cH[c]; }
+        if (n < 2) return;
+        const volAt = (L) => { let v = 0; for (let c = a; c <= b; c++) if (part[c]) { const mx = (cFloor[c] - cTop[c]) * cap; let hh = (cFloor[c] - L) * cap; if (hh < 0) hh = 0; if (hh > mx) hh = mx; v += hh; } return v; };
+        let loL = -1, hiL = ROWS + 1;                         // binary-search the equilibrium waterline
+        for (let it = 0; it < 32; it++) { const mid = (loL + hiL) / 2; if (volAt(mid) > M) loL = mid; else hiL = mid; }
+        const L = (loL + hiL) / 2;
+        let run = 0;
+        for (let c = a; c < b; c++) {                         // walk the whole stretch; the run is never reset
+          if (part[c]) {
+            const mx = (cFloor[c] - cTop[c]) * cap;
+            let tgt = (cFloor[c] - L) * cap; if (tgt < 0) tgt = 0; if (tgt > mx) tgt = mx;
+            run += cH[c] - tgt;
+          }
+          if (!part[c] || !part[c + 1]) continue;             // can't transport here yet — but the run carries on
+          let want = run > RATE ? RATE : run < -RATE ? -RATE : run;
+          if (want > -1 && want < 1) continue;                // deadband → a level pool goes quiet (no endless churn)
         const src = want > 0 ? c : c + 1, dst = want > 0 ? c + 1 : c;
         // Take from the SOURCE's surface and deliver at the DESTINATION's surface — i.e. water runs over the
         // top from the higher column into the lower one. Delivering at the source's ROW instead would drop
@@ -2176,7 +2196,12 @@ function liquidTickRoom(room) {
           const did = lvlMove(a, b, mv); if (did <= 0) break;
           sd[b] = 0; need -= did; wakeN(a); wakeN(b);
         }
-      }
+        }
+      };
+      // Cut the body's column range at barriers; each reachable stretch levels on its own waterline.
+      let segA = minC;
+      for (let c = minC; c <= maxC; c++) if (barrier(c)) { if (c - 1 >= segA) levelSegment(segA, c - 1); segA = c + 1; }
+      if (maxC >= segA) levelSegment(segA, maxC);
     }
   }
   for (const j of tagCleared) changedSet.add(j);   // annotation-only changes join the broadcast here — too late to wake anything
@@ -2336,7 +2361,9 @@ const runLiquidTick = () => {
     if (_active > liqPerf.active) liqPerf.active = _active; liqPerf.ticks++;
     if (liqPerf.ticks >= Math.max(1, Math.round(1000 / liquidCfg.tickMs))) {   // ~once per real second
       const _hz = 1000 / liquidCfg.tickMs, _rooms = Object.keys(roomLiquidActive).length;
-      console.log(`[liq-perf] rooms=${_rooms} active(peak)=${liqPerf.active} sim/tick avg=${(liqPerf.simMs / liqPerf.ticks).toFixed(2)}ms max=${liqPerf.simMsMax.toFixed(2)}ms  emit=${(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1)}KB/s (×clients-in-room = server upload; budget/tick=${liquidCfg.tickMs}ms)`);
+      const _stat = { rooms: _rooms, active: liqPerf.active, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs };
+      console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
+      io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
       liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0 };
     }
   }
