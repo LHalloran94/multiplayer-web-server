@@ -2159,7 +2159,10 @@ function liquidTickRoom(room) {
       // tag with 0, which happens when an untagged mouth cell falls into a chute cell the side-spill already tagged), and only
       // INTO a cell that is air OR itself falling (fell.has(j) — j is straight below, processed already this bottom-up tick).
       // Not into settled liquid: that stamped the tag onto the POOL cell a stream lands in (the landing-cell sideways bug).
-      if (!liquidCfg.streamTag) sd[j] = sd[i]; else if (sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i];
+      // The tag exists only for the OLD stream render. With the cascade on nothing should ever carry one, so it is not
+      // written at all — a stale tag made the client draw phantom strips and kept the old code paths half-alive.
+      if (liquidCfg.droplets) { /* no tag under the cascade */ }
+      else if (!liquidCfg.streamTag) sd[j] = sd[i]; else if (sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i];
       L -= t; wakeN(i); } } }   // side = the carried fall side (0 straight-down → no strip)
     // DENSITY THROTTLE (reduced-amount). Streaming DOWN A SURFACE — the diagonal spill 1b (here) and the lateral leveling
     // 1c/1d (below) — moves a reduced amount per tick for denser liquids (rate lf = 1/(1+LEVEL_VISC[surface rank])), so a
@@ -2216,7 +2219,7 @@ function liquidTickRoom(room) {
         // below, already processed this bottom-up tick). Admitting a falling cell that already holds untagged liquid is what
         // lets a tag reach a chute fed from the side, where the mouth fills level-then-down (untagged) before the spill tags it.
         // `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream chute lane (MASS); only sd (annotation) is gated.
-        const tagOk = !liquidCfg.streamTag || (isSolid(grid[i + COLS]) && (tot[j] === 0 || fell.has(j)));
+        const tagOk = !liquidCfg.droplets && (!liquidCfg.streamTag || (isSolid(grid[i + COLS]) && (tot[j] === 0 || fell.has(j))));
         // streamMix: a ledge spill draws PROPORTIONALLY (moveProp) so the lip keeps its mixture instead of shedding heaviest
         // -first — that heaviest-first shedding is what makes the lip oscillate period-2 and sends alternating water/oil slugs
         // down the stream (visible now as pulsing sub-strip widths). Pools are untouched: this is only the ledge-spill path.
