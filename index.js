@@ -3447,7 +3447,35 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   generateWorld(avatarRoom, worldSeedFor(roomId), genColBand(roomId, levelIndex));
   seedLiquidActivity(avatarRoom);                    // give generated liquid its fill levels, then…
   liquidQuiet = true;                                // …pre-settle it silently so joiners see it already at rest (no on-load sloshing / broadcast storm)
-  for (let s = 0; s < 3000 && roomLiquidActive[avatarRoom] && roomLiquidActive[avatarRoom].size; s++) { liquidTickCount++; liquidTickRoom(avatarRoom); }
+  // Droplets must fly during the pre-settle too, or gen-time ledge spills leave mass airborne that suddenly rains down
+  // the moment the first player arrives. The loop also has to keep going while droplets are still in the air, since a
+  // room can have zero ACTIVE CELLS while all its moving liquid is mid-fall.
+  for (let s = 0; s < 3000; s++) {
+    const act = roomLiquidActive[avatarRoom], air = roomDroplets[avatarRoom];
+    if (!(act && act.size) && !(air && air.length)) break;
+    liquidTickCount++;
+    if (liquidCfg.droplets) dropletTickRoom(avatarRoom);
+    liquidTickRoom(avatarRoom);
+  }
+  // Anything still airborne after the cap is put back into the grid where it is, rather than being left to fall on the
+  // first joiner. Deposits downward from its own cell so it lands somewhere it could actually have reached.
+  const air = roomDroplets[avatarRoom];
+  if (air && air.length) {
+    const amt = ensureLiquidAmt(avatarRoom), tot = ensureLiquidTotal(avatarRoom), grid = roomTerrain[avatarRoom];
+    const FLOOR_ROW = Math.min(TERRAIN_ROWS, Math.floor(FLOOR_TOP / TERRAIN_CELL));
+    for (const d of air) {
+      let rem = d.amt, cc = Math.floor(d.x / TERRAIN_CELL), rr = Math.floor(d.y / TERRAIN_CELL);
+      if (cc < 0 || cc >= TERRAIN_COLS) continue;
+      for (; rr < FLOOR_ROW && rem > 0; rr++) {
+        const ci = rr * TERRAIN_COLS + cc;
+        if (isSolidCell(grid[ci])) break;
+        const free = LIQUID_MAX - tot[ci];
+        if (free >= 1) { const take = Math.min(free, rem); amt[ci * LIQ_T + d.rank] += take; tot[ci] += take; rem -= take; activateLiquidCell(avatarRoom, ci, grid); }
+      }
+    }
+    roomDroplets[avatarRoom] = [];
+  }
+  roomDropSpawns[avatarRoom] = [];                   // gen-time spawns are never broadcast — the world starts at rest
   liquidQuiet = false;
   // Do NOT hard-freeze the active set. If the liquid fully settled, liquidTickRoom already cleared it. If a big field is
   // still leveling after the cap, leave it ACTIVE so the live sim finishes the job (broadcasting diffs) — the old
@@ -3899,6 +3927,10 @@ io.on('connection', (socket) => {
     for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropHyst']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
+    // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
+    const dnum = { dropUnit: [1, 16], dropFall: [0.05, 4], dropSpawnH: [0, 1], dropSpread: [0.1, 1],
+                   dropLandSpread: [0, 5], dropTermFall: [1, 16], dropSpreadRef: [2, 40], dropImpactCurve: [0.2, 3] };
+    for (const k in dnum) if (k in patch) { const v = +patch[k]; if (!isNaN(v)) liquidCfg[k] = Math.max(dnum[k][0], Math.min(dnum[k][1], v)); }
     if ('fluxRate' in patch) liquidCfg.fluxRate = Math.max(1, Math.min(128, patch.fluxRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
@@ -4514,7 +4546,7 @@ io.on('connection', (socket) => {
     for (const id of ids) map.delete(id);
     if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     // Terrain is unowned (and ephemeral / all player-placed), so "Remove all" wipes the whole grid too.
-    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); io.to(currentAvatarRoom).emit("terrain-cleared"); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); clearDroplets(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   socket.on('avatar-objects-clear-all', () => {
@@ -4525,7 +4557,7 @@ io.on('connection', (socket) => {
       map.clear();
       if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     }
-    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); io.to(currentAvatarRoom).emit("terrain-cleared"); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); clearDroplets(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
