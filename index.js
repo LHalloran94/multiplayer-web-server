@@ -1807,9 +1807,11 @@ let dropStart = null;
 // ledge so the same liquid hugs it the whole way down; droplets are spaced evenly down the distance the stream covers
 // this tick so consecutive ticks tile instead of clumping into packets.
 function spawnDroplets(room, i, r, c, dc, took, taken) {
-  const drops = ensureDroplets(room), tot = ensureLiquidTotal(room);
+  const drops = ensureDroplets(room), tot = ensureLiquidTotal(room), amt = ensureLiquidAmt(room);
   const grid = roomTerrain[room], COLS = TERRAIN_COLS, CELL = TERRAIN_CELL, T = LIQ_T, cap = LIQUID_MAX;
-  if (drops.length > DROP_MAX) return;
+  // Every bail-out has to happen BEFORE the grid is touched. Removing the liquid first and then refusing to spawn is a
+  // silent mass leak, and at the droplet cap it would be a large one.
+  if (drops.length > DROP_MAX) return false;
   const fallPx = liquidCfg.dropFall * CELL, faceX = dc > 0 ? (c + 1) * CELL : c * CELL, dropCol = c + dc;
   // spawn at the surface of what REMAINS here, slid toward the drop by dropSpawnH
   const surfAfter = r + 1 - tot[i] / cap;
@@ -1823,7 +1825,8 @@ function spawnDroplets(room, i, r, c, dc, took, taken) {
   for (let rr = r; rr < FLOOR_ROW; rr++) if (isSolidCell(grid[rr * COLS + dropCol])) { solidY = rr * CELL; break; }
   let nTotal = 0;
   for (let k = 0; k < T; k++) if (took[k] >= 1) nTotal += Math.max(1, Math.round(took[k] / liquidCfg.dropUnit));
-  if (!nTotal) return;
+  if (!nTotal) return false;
+  for (let k = 0; k < T; k++) if (took[k] > 0) amt[i * T + k] -= took[k];   // committed: the droplets below WILL exist
   let idx = 0, cum = 0;
   const seq = roomDropSeq[room] || (roomDropSeq[room] = { n: 1 });
   const out = roomDropSpawns[room] || (roomDropSpawns[room] = []);
@@ -1850,6 +1853,7 @@ function spawnDroplets(room, i, r, c, dc, took, taken) {
       out.push(id, Math.round(px), Math.round(py), k, each, dc > 0 ? 1 : 0);
     }
   }
+  return true;
 }
 
 // Impact FORCE, not just mass. Fall speed is constant, so it carries no information about how far the water dropped, and
@@ -1930,7 +1934,29 @@ function dropletTickRoom(room) {
       if (!isSolidCell(grid[ci])) { const free = cap - tot[ci]; if (free > 0.001) { const take = Math.min(free, rem); amt[ci * T + d.rank] += take; recompCell(ci); rem -= take; changed.add(ci); active.add(ci); } }
     }
     impact[ci0] = force + (d.amt - rem) * dropImpactVel(d.dist);
-    if (rem > 0) { d.amt = rem; keep.push(d); }                 // nowhere to go -- wait, never invent or lose mass
+    if (rem > 0) {
+      // NOWHERE TO GO. Waking the landing cell is essential: a failed deposit used to activate nothing, so the grid went
+      // quiet, nothing drained, and the droplet stalled against a full pool for ever — the world never settled.
+      d.amt = rem;
+      active.add(ci0); changed.add(ci0);
+      if (rr0 + 1 < ROWS) active.add(ci0 + COLS);
+      if (cc > 0) active.add(ci0 - 1);
+      if (cc + 1 < COLS) active.add(ci0 + 1);
+      d.stall = (d.stall || 0) + 1;
+      if (d.stall > 40) {
+        // Still homeless after a while: the level here simply has to rise. Take the first cell above with room, which is
+        // where a filling pool would put it anyway, rather than leaving liquid hovering indefinitely.
+        for (let rr = rr0; rr >= 0 && rem > 0; rr--) {
+          const ci = rr * COLS + cc;
+          if (isSolidCell(grid[ci])) break;
+          const free = cap - tot[ci];
+          if (free >= 1) { const take = Math.min(free, rem); amt[ci * T + d.rank] += take; recompCell(ci); rem -= take; changed.add(ci); active.add(ci); }
+        }
+        if (rem <= 0) continue;
+        d.amt = rem;
+      }
+      keep.push(d);
+    }
   }
   roomDroplets[room] = keep;
   if (changed.size) dropletBroadcastCells(room, changed);
@@ -2149,7 +2175,7 @@ function liquidTickRoom(room) {
     if (liquidCfg.ledgeSpill && L > 0 && canDown && (isSolid(grid[i + COLS]) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(grid[j])) continue;
       const ns = dc > 0 ? SIDE_LEFT : SIDE_RIGHT, ps = spillSide.get(j), srcId = liqRepId(amt, i);
       const jc2 = j % COLS, chute = (jc2 === 0 || isSolid(grid[j - 1])) && (jc2 === COLS - 1 || isSolid(grid[j + 1]));   // a 1-wide channel (both horizontal neighbours solid) — only there do two spills become two lanes; a wide pool just mixes (else spurious lanes never drain)
-      if (chute && ps !== undefined && ps !== ns && srcId && (s2a[j] === 0 || s2i[j] === srcId)) {   // a SECOND stream from the OTHER side → secondary lane; the two lanes SHARE the cell's width (main+secondary ≤ cap) so it drains cleanly (two fat streams just each go thinner)
+      if (!liquidCfg.droplets && chute && ps !== undefined && ps !== ns && srcId && (s2a[j] === 0 || s2i[j] === srcId)) {   // a SECOND stream from the OTHER side → secondary lane; the two lanes SHARE the cell's width (main+secondary ≤ cap) so it drains cleanly (two fat streams just each go thinner)
         const room2 = cap - tot[j] - s2a[j], want = reduce(L < room2 ? L : room2); if (want > 0) { const [mv] = takeRank(i, want, LIQ_RANK[srcId]); if (mv > 0) { s2a[j] += mv; s2i[j] = srcId; L -= mv; mark(j); wakeN(i); } }   // secondary route (chute): side ns, ledge-gated
       // LEDGE GATE on the tag. 1b fires when straight-down is blocked by SOLID *or* by FULL LIQUID — and only the first is a
       // ledge. The second is ordinary liquid spreading sideways across a POOL SURFACE, which happens all over any settling
@@ -2158,13 +2184,12 @@ function liquidTickRoom(room) {
       // draw as sideways-filling strips: a plain no-ledge basin peaked at 197 of 266 cells tagged mid-settle (0 with the gate).
       // Note `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream chute lane, which is MASS. Only sd is gated, so
       // physics is untouched (dam-break 728 ticks / 266 cells either way).
-      } else if (liquidCfg.droplets && isSolid(grid[i + COLS])) {
+      } else if (liquidCfg.droplets && isSolid(grid[i + COLS]) && (r === 0 || tot[i - COLS] <= 0) && tot[j] + s2a[j] < cap) {
         // ── DROPLET CASCADE ── a real ledge (solid underfoot), so the liquid LEAVES THE GRID here and falls as droplets
         // that carry it. Nothing is tagged, nothing streams through cells: water in flight simply isn't in the grid.
         // A brim-full target has nothing to fall into, so that stays grid flow — unless this lip was shedding droplets a
         // moment ago, in which case it keeps doing so rather than flickering between the two modes every few ticks.
-        const hot = ensureSpillHot(room);
-        if (tot[j] + s2a[j] < cap || (liquidCfg.dropHyst && hot[i] > 0)) {
+        {
           // INTEGER units throughout: roomLiquidAmt is a Uint8Array, so anything fractional is truncated on write and
           // silently destroyed. (Measured: 3571 of 4220 units vanished before this was made integer-safe.)
           const budget = Math.floor(Math.min(L, dropStart[i] === undefined ? L : dropStart[i]));
@@ -2178,11 +2203,8 @@ function liquidTickRoom(room) {
               const q = Math.min(amt[i * T + rk], left);
               if (q >= 1) { took[rk] = q; taken += q; left -= q; }
             }
-            if (taken >= 1) {
-              for (let k = 0; k < T; k++) if (took[k] > 0) amt[i * T + k] -= took[k];
+            if (taken >= 1 && spawnDroplets(room, i, r, c, dc, took, taken)) {
               recomp(i); L = tot[i]; mark(i);
-              if (tot[j] + s2a[j] < cap) hot[i] = 12;      // only a spill into a target with real room may refresh it
-              spawnDroplets(room, i, r, c, dc, took, taken);
               if (L <= 0) break;
               continue;
             }
