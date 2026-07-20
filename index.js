@@ -1813,8 +1813,11 @@ function spawnDroplets(room, i, r, c, dc, took, taken) {
   // silent mass leak, and at the droplet cap it would be a large one.
   if (drops.length > DROP_MAX) return false;
   const fallPx = liquidCfg.dropFall * CELL, faceX = dc > 0 ? (c + 1) * CELL : c * CELL, dropCol = c + dc;
-  // spawn at the surface of what REMAINS here, slid toward the drop by dropSpawnH
-  const surfAfter = r + 1 - tot[i] / cap;
+  // Spawn at the surface of what REMAINS here, slid toward the drop by dropSpawnH. `tot[i]` is still the PRE-spill
+  // total at this point — only `amt[]` is decremented below, and the caller recomputes `tot` after we return — so the
+  // spill has to be subtracted by hand. Using the pre-spill surface put droplets ~4px above the liquid actually left
+  // behind, which is what made the top of a fall look detached from its source (measured in probe_drop_audit).
+  const surfAfter = r + 1 - Math.max(0, tot[i] - taken) / cap;
   const syTop = Math.max(r * CELL, Math.min((r + 1) * CELL - 0.5, surfAfter * CELL));
   const sy = syTop + liquidCfg.dropSpawnH * ((r + 1.5) * CELL - syTop);
   // the band only widens to a full cell on a strong spill, and never past the column we pour into
@@ -1883,19 +1886,24 @@ function dropletTickRoom(room) {
   const recompCell = (ci) => { const b = ci * T; let sum = 0; for (let k = 0; k < T; k++) sum += amt[b + k]; tot[ci] = sum; };
   const keep = [];
   for (const d of drops) {
-    const cc = Math.floor(d.x / CELL);
-    if (cc < 0 || cc >= COLS) continue;                        // off the side of the world
-    let landed = false, gone = false, hit = -1;
+    // CLAMPED, never skipped. A droplet always spawns inside the world, so this cannot bind — but `continue` here
+    // would drop the droplet and destroy the liquid it carries, and a silent mass leak is not worth leaving armed.
+    const cc = Math.min(COLS - 1, Math.max(0, Math.floor(d.x / CELL)));
+    let landed = false, hit = -1;
     for (let sIdx = 0; sIdx < sub && !landed; sIdx++) {
       const ny = d.y + step / sub, rr = Math.floor(ny / CELL);
-      if (rr >= ROWS) { gone = true; break; }
+      // THE WORLD FLOOR IS A GATE, NOT A SOLID: `grid[]` is air down there and the grid sim simply refuses to descend
+      // past it. So a droplet used to pass through the last legal row whenever it was empty and get discarded here —
+      // destroying its liquid, and destroying precisely the first arrivals that would have formed the pool to catch
+      // the rest. Measured: 98% of a cliff pour into the open bottom of the world vanished. Land on it instead, which
+      // is what the grid does, and the normal landing path below deposits into row ROWS-1.
+      if (rr >= ROWS) { landed = true; break; }
       if (rr < 0) { d.y = ny; d.dist += step / sub; continue; }
       const j = rr * COLS + cc;
       if (isSolidCell(grid[j])) { landed = true; break; }
       if (tot[j] > 0 && ny >= surfaceY(rr, j)) { landed = true; hit = j; break; }
       d.y = ny; d.dist += step / sub;
     }
-    if (gone) continue;
     if (!landed) { keep.push(d); continue; }
     const rr0 = hit >= 0 ? Math.floor(hit / COLS) : Math.max(0, Math.min(ROWS - 1, Math.floor(d.y / CELL)));
     const ci0 = rr0 * COLS + cc;
