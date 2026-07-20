@@ -1593,9 +1593,9 @@ const liquidCfg = {
   // ── DROPLET CASCADE (the streaming rewrite). ON = a ledge spill leaves the grid as droplets that carry the liquid and
   // deposit it on landing; OFF = the original fallSide tag / stream-strip path, kept intact for in-game comparison.
   // Tunings below are the values arrived at in the bench (scratchpad/liquid-droplet-stream.html).
-  // DEFAULT OFF until the CLIENT half lands: the server would shed liquid into droplets the client cannot draw yet,
-  // so water would appear to vanish at every ledge and reappear at the bottom. Flip to true with the client rebuild.
-  droplets: false,
+  // The client half has landed (16b parses 'liquid-drops' and replays the fall locally), so this is on by default.
+  // Turn it off to compare against the original fallSide/stream-strip path, which is untouched underneath.
+  droplets: true,
   dropUnit: 2,           // target droplet size in liquid units (of LIQUID_MAX per cell)
   dropFall: 0.4,         // constant fall speed, cells per tick
   dropSpread: 1.0,       // ceiling on the width of the band droplets appear in, in cells
