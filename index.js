@@ -1576,7 +1576,14 @@ const liquidCfg = {
   ledgeSpill: true,      // step 1b: liquid spills DIAGONALLY over the edge of a ledge. off = it only falls straight down + spreads on flat ground
   lateralLevel: true,    // steps 1c/1d: liquid flows SIDEWAYS to find a flat level. off = it piles up where it lands (no spreading)
   perLiquidLevel: true,  // step 2c: each liquid flattens its OWN layer across columns (heavy ends flat along the bottom)
-  cohesion: true,        // a fed falling cell keeps a 1-unit thread → continuous streams (no gap into the pool). off = streams can break up
+  // DEFAULT OFF since 2026-07-21. It leaves a 1-unit thread in any cell that has liquid above it, to keep a falling
+  // stream from breaking into packets. In a BLOCK of liquid falling through the air EVERY cell has liquid above it,
+  // so every cell shed a unit each tick and the block smeared itself into partial rows with a ragged top — the
+  // separation the user screenshotted. Measured (probe_fall_cohesion): 6x6 block, 15 partial cells and a top edge
+  // ragged by 3 with it on, versus 0/0/0 with it off. And it no longer buys the continuity it was written for:
+  // identical gap counts on a steady pour (0 either way) AND on intermittent trickles (18/24/28 either way), because
+  // the thread only survives the one tick before the cell above empties. The cascade carries ledge spills now.
+  cohesion: false,       // a fed falling cell keeps a 1-unit thread → continuous streams (no gap into the pool). off = streams can break up
   viscosity: false,      // per-liquid LEVEL_VISC throttle: denser liquids ooze flat slower. off = ALL liquids level at full speed
   reactions: true,       // lava+water→stone, acid dissolves terrain, water+snow→ice, oil burns, etc.
   // ONE flag for the whole "make fallSide mean what it says" rule set (it is one idea; splitting it into
@@ -2526,7 +2533,10 @@ function liquidTickRoom(room) {
     for (const j of changedSet) {
       const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
       const hasS2 = s2a[j] > 0;
-      arr.push(j, grid[j], (sd[j] & 0x03) | (hasS2 ? 0x80 : 0), mask);
+      // 0x40 = the sim classed this cell AIRBORNE this tick (it will not level sideways). Pure annotation for the
+      // Inspect overlay — nothing reads it back. It is the distinction behind most of the bugs found here, and it is
+      // invisible on screen: the mid-air spread was entirely cells being on the wrong side of it.
+      arr.push(j, grid[j], (sd[j] & 0x03) | (hasS2 ? 0x80 : 0) | (fellDown.has(j) ? 0x40 : 0), mask);
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(amt[b + rk]);
       if (hasS2) arr.push(s2a[j], s2i[j]);
       if (++cells >= 8192) { emitLiquidCells(room, arr); arr = []; cells = 0; }
