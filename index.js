@@ -1607,13 +1607,19 @@ const liquidCfg = {
   dropTermFall: 6,       // cells of fall to reach full impact force
   dropImpactCurve: 0.8,  // shape of the force build-up
   dropSpreadRef: 10,     // impact force needed per extra cell of spread
-  dropHyst: true,        // a lip keeps shedding through a BRIEFLY full target
+  // (there is no lip hysteresis any more: it was removed with the submerged-edge fix, since a spill now requires a free
+  //  surface AND a target with real room, which leaves nothing for it to bridge — and it was what let a submerged cell
+  //  re-arm for ever. The flag lingered afterwards as a debug checkbox nothing read.)
   streamFullClear: false, // (experimental) a brim-full cell drops its stream tag → renders as bands + re-enables density sorting (full = pool, not stream). off = full cells keep streaming / side-by-side. TRADEOFF: on makes full chutes + fat streams slice/stratify
   // LEVELLING GATE — which cells are excluded from lateral levelling (1c/1d/2c) as "still falling". The old test (canFall)
   // also counted a cell that could shed DIAGONALLY over a nearby edge, so pool cells sitting at an edge never levelled →
   // the blocky/stair surface near drops. A cell is genuinely a STREAM only if it is TAGGED (a ledge spill, carried down)
   // or has straight-down room (a vertical drop the tag never marks). 0 = old canFall · 1 = tagged-or-straight-down (fixes
   // the blocky edge; keeps waterfalls from fanning) · 2 = tagged-ONLY (experiment: simplest, but untagged vertical drops fan).
+  // ⚠️ MODE 2 IS INERT WHENEVER `droplets` IS ON: the cascade deliberately never writes a fall tag, so `sd[i] !== 0` is
+  // never true and NO cell is held back from lateral levelling. Measured harmless (a vertical pour stays one cell wide
+  // in all six droplets × levelGate combinations — scratchpad/probe_drop_levelgate.js), but it means this dial does
+  // nothing in the shipped config; use mode 1 if you want a live gate to A/B against the blocky edge.
   levelGate: 2,   // default set to tag-only 2026-07-19: modes 0/1/2 were visually indistinguishable in-browser → canFall was NOT the blocky-edge culprit (revisit if needed)
   symLevel: true,        // 1c surface flow sheds to BOTH lower neighbours from the SAME snapshot, aimed at the 3-cell average → no per-tick direction preference + no overshoot. off = the old alternating-direction sequential scan. (NOTE: this does NOT fix the oil/water slosh — that's levelMix below.)
   levelMix: true,        // lateral leveling (1c/1d) moves the MIXTURE proportionally (moveProp) instead of skimming the lightest liquid off the top (moveTop). Skimming oil each tick oil-depletes→oil-replenishes a surface cell in a period-2 cycle = THE oil/water slosh (probe: swing 0.69→0.00). off = moveTop (skims the top, sloshes). Stratification is kept by the density sorts, not by skimming.
@@ -1659,8 +1665,10 @@ const SIDE_LEFT = 1, SIDE_RIGHT = 2;
 const roomDroplets = {};     // room → array of {id,x,y,rank,amt,dist,dir,vy}
 const roomDropSeq = {};      // room → id counter
 const roomDropSpawns = {};   // room → spawn events queued for this tick's broadcast
-const roomImpact = {};       // room → Float32Array: decaying per-cell measure of how hard a spot is being rained on
-const roomSpillHot = {};     // room → Uint8Array: ticks a lip keeps shedding through a full target
+// room → Map(cell → decaying measure of how hard that spot is being rained on). A Map, not a full-grid array: only a
+// handful of cells are ever under a fall, but the decay has to touch every entry each tick, and sweeping all 86,400
+// cells for that cost 0.18ms/tick per room with any droplet in flight. The client already models it this way.
+const roomImpact = {};
 const roomStream2Amt = {};   // room → Uint8Array(cells): units in the secondary lane (0 = none)
 const roomStream2Id = {};    // room → Uint8Array(cells): the secondary lane's liquid id
 // FLOW (display-twice): per-cell units that FELL INTO this cell this tick — the INCOMING STREAM's thickness, DISTINCT from the
@@ -1720,9 +1728,8 @@ function dropletBroadcastCells(room, cells) {
   }
   if (n) emitLiquidCells(room, arr);
 }
-function ensureImpact(room) { return roomImpact[room] || (roomImpact[room] = new Float32Array(TERRAIN_COLS * TERRAIN_ROWS)); }
-function ensureSpillHot(room) { return roomSpillHot[room] || (roomSpillHot[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
-function clearDroplets(room) { roomDroplets[room] = []; if (roomImpact[room]) roomImpact[room].fill(0); if (roomSpillHot[room]) roomSpillHot[room].fill(0); }
+function ensureImpact(room) { return roomImpact[room] || (roomImpact[room] = new Map()); }
+function clearDroplets(room) { roomDroplets[room] = []; if (roomImpact[room]) roomImpact[room].clear(); }
 function ensureStream2Amt(room) { return roomStream2Amt[room] || (roomStream2Amt[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 function ensureStream2Id(room) { return roomStream2Id[room] || (roomStream2Id[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 function liquidSet(room) { return roomLiquidActive[room] || (roomLiquidActive[room] = new Set()); }
@@ -1879,7 +1886,7 @@ function dropletTickRoom(room) {
   // silently destroys liquid (caught by the fuzz mass check).
   const ROWS = Math.min(TERRAIN_ROWS, Math.floor(FLOOR_TOP / TERRAIN_CELL));
   const active = liquidSet(room), changed = new Set();
-  for (let n = 0; n < impact.length; n++) { if (impact[n] > 0.01) impact[n] *= 0.82; else if (impact[n]) impact[n] = 0; }
+  for (const [k, v] of impact) { const n = v * 0.82; if (n > 0.01) impact.set(k, n); else impact.delete(k); }
   const step = liquidCfg.dropFall * CELL;
   const sub = Math.max(1, Math.ceil(step / (CELL * 0.5)));
   const surfaceY = (rr, ci) => (rr + 1 - tot[ci] / cap) * CELL;
@@ -1907,7 +1914,7 @@ function dropletTickRoom(room) {
     if (!landed) { keep.push(d); continue; }
     const rr0 = hit >= 0 ? Math.floor(hit / COLS) : Math.max(0, Math.min(ROWS - 1, Math.floor(d.y / CELL)));
     const ci0 = rr0 * COLS + cc;
-    const force = impact[ci0] || 0;
+    const force = impact.get(ci0) || 0;
     const radius = Math.max(0, Math.min(liquidCfg.dropLandSpread | 0, Math.floor(force / liquidCfg.dropSpreadRef)));
     // Water arriving on a surface spreads across it. Candidates fan outward along the landing row and the row below,
     // stopping at any solid (never reaching through a wall) and never into an unsupported cell (so it cannot leave
@@ -1941,7 +1948,7 @@ function dropletTickRoom(room) {
       const ci = (rr0 - 1) * COLS + cc;
       if (!isSolidCell(grid[ci])) { const free = cap - tot[ci]; if (free > 0.001) { const take = Math.min(free, rem); amt[ci * T + d.rank] += take; recompCell(ci); rem -= take; changed.add(ci); active.add(ci); } }
     }
-    impact[ci0] = force + (d.amt - rem) * dropImpactVel(d.dist);
+    impact.set(ci0, force + (d.amt - rem) * dropImpactVel(d.dist));
     if (rem > 0) {
       // NOWHERE TO GO. Waking the landing cell is essential: a failed deposit used to activate nothing, so the grid went
       // quiet, nothing drained, and the droplet stalled against a full pool for ever — the world never settled.
@@ -3957,7 +3964,7 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropHyst']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
