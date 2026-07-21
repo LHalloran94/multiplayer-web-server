@@ -1620,7 +1620,7 @@ const liquidCfg = {
   // never true and NO cell is held back from lateral levelling. Measured harmless (a vertical pour stays one cell wide
   // in all six droplets × levelGate combinations — scratchpad/probe_drop_levelgate.js), but it means this dial does
   // nothing in the shipped config; use mode 1 if you want a live gate to A/B against the blocky edge.
-  levelGate: 2,   // default set to tag-only 2026-07-19: modes 0/1/2 were visually indistinguishable in-browser → canFall was NOT the blocky-edge culprit (revisit if needed)
+  levelGate: 3,   // (was 2) default set to tag-only 2026-07-19: modes 0/1/2 were visually indistinguishable in-browser → canFall was NOT the blocky-edge culprit (revisit if needed)
   symLevel: true,        // 1c surface flow sheds to BOTH lower neighbours from the SAME snapshot, aimed at the 3-cell average → no per-tick direction preference + no overshoot. off = the old alternating-direction sequential scan. (NOTE: this does NOT fix the oil/water slosh — that's levelMix below.)
   levelMix: true,        // lateral leveling (1c/1d) moves the MIXTURE proportionally (moveProp) instead of skimming the lightest liquid off the top (moveTop). Skimming oil each tick oil-depletes→oil-replenishes a surface cell in a period-2 cycle = THE oil/water slosh (probe: swing 0.69→0.00). off = moveTop (skims the top, sloshes). Stratification is kept by the density sorts, not by skimming.
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
@@ -1993,6 +1993,12 @@ function liquidTickRoom(room) {
   const spillSide = new Map();   // cell → the fall side spilled onto it THIS tick; a spill from the OTHER side routes into the SECONDARY lane (dual-stream chute)
   const neutralizedThisTick = new Set();   // acid cells that turned (partly) to water THIS tick — other acid must not chain off that fresh water in the same tick (else a whole blob neutralises instantly)
   const fell = new Set();   // cells determined FALLING this tick (propagates up a full stream column, since we process bottom-up) → they don't level laterally
+  // STRAIGHT-DOWN-only variant of `fell`, and the difference is the whole point. `fell` also counts a cell that could
+  // shed DIAGONALLY, which is true of any pool cell sitting next to a drop — that over-catching is what froze edge
+  // cells out of levelling and gave the blocky/stair surface. `fellDown` propagates only through straight-down room,
+  // so it means "this cell is part of a column that is genuinely airborne": a falling block is entirely in it, and a
+  // settled pool (bottom cell resting on solid, everything above brim-full and going nowhere) is entirely out of it.
+  const fellDown = new Set();
   const tagCleared = new Set();   // cells that dropped a stale fallSide tag this tick — broadcast-only (merged into changedSet AFTER the loop, so it never wakes neighbours)
   const wake = (j) => { if (j >= 0 && j < grid.length && !isSolid(grid[j]) && tot[j] > 0) active.add(j); };
   const wakeN = (j) => { const x = j % COLS; wake(j - COLS); wake(j + COLS); if (x > 0) wake(j - 1); if (x < COLS - 1) wake(j + 1); };
@@ -2191,6 +2197,19 @@ function liquidTickRoom(room) {
     // slope (moving against a surface), so it's density-throttled like leveling. If straight-down has room the cell is a
     // free-falling stream (1a handles it): do NOT spread it diagonally (that fanned streams into a pyramid).
     if (liquidCfg.ledgeSpill && L > 0 && canDown && (isSolid(grid[i + COLS]) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(grid[j])) continue;
+      // MID-AIR SPILL GUARD. 1b fires when straight-down is blocked by a SOLID *or* by FULL LIQUID. Only the first is a
+      // ledge; the second exists for a pool spreading sideways across its own surface. But a BLOCK OF LIQUID FALLING
+      // THROUGH THE AIR also has full liquid below it, so this spilled diagonally into open air and left liquid hanging
+      // there — the long-standing "placed liquid spreads out in mid-air" bug, and its odd signature (a 4x4 fans on the
+      // 1st and 3rd rows, a 5x5 on the 2nd and 4th) falls straight out of which rows still hold a full cell beneath
+      // them on a given tick. Measured: 268 mid-air 1b moves while one 4x4 block fell, every one with tot[below] = 64.
+      // So when the block below is LIQUID rather than solid, the target must have something under it. A pool surface
+      // passes (the pool continues beneath the target); mid-air does not. Real ledges are untouched.
+      if (!isSolid(grid[i + COLS])) {
+        const jb = j + COLS;
+        const jSupported = ((j / COLS) | 0) + 1 >= LIQUID_FLOOR_ROW || isSolid(grid[jb]) || tot[jb] > 0;
+        if (!jSupported) continue;
+      }
       const ns = dc > 0 ? SIDE_LEFT : SIDE_RIGHT, ps = spillSide.get(j), srcId = liqRepId(amt, i);
       const jc2 = j % COLS, chute = (jc2 === 0 || isSolid(grid[j - 1])) && (jc2 === COLS - 1 || isSolid(grid[j + 1]));   // a 1-wide channel (both horizontal neighbours solid) — only there do two spills become two lanes; a wide pool just mixes (else spurious lanes never drain)
       if (!liquidCfg.droplets && chute && ps !== undefined && ps !== ns && srcId && (s2a[j] === 0 || s2i[j] === srcId)) {   // a SECOND stream from the OTHER side → secondary lane; the two lanes SHARE the cell's width (main+secondary ≤ cap) so it drains cleanly (two fat streams just each go thinner)
@@ -2252,6 +2271,11 @@ function liquidTickRoom(room) {
     // already decided). A falling cell never levels laterally, so a stream stays a narrow column instead of fanning.
     const canFall = canDown && (roomAt(i + COLS) || fell.has(i + COLS) || (c > 0 && roomAt(i + COLS - 1)) || (c < COLS - 1 && roomAt(i + COLS + 1)));
     if (canFall) fell.add(i);
+    // AIRBORNE = straight-down room, or the cell directly below is itself airborne. No diagonal term, so a pool cell
+    // beside a drop is NOT airborne and still levels; a block of liquid falling through open air IS, top to bottom,
+    // even though every cell in it has a brim-full cell underneath.
+    const airborne = canDown && (roomAt(i + COLS) || fellDown.has(i + COLS));
+    if (airborne) fellDown.add(i);
     // (2c) PER-LIQUID horizontal leveling (POOLS ONLY — streams/mid-air fall via 1a/1b and are excluded by !canFall).
     // The density sorts (2)/(2b) only erode a dense pile's EDGES (a heavy unit surrounded by the same heavy can't sink),
     // so a tall pre-mixed pile leaves diagonal BANDS. This levels each DENSE liquid's own surface so it flows from a tall
@@ -2284,7 +2308,13 @@ function liquidTickRoom(room) {
     }
     // LEVELLING runs on NON-STREAM (settled/pool) cells. isStream read AFTER the tag clear so a just-settled cell can level this
     // tick. Mode 0 = old canFall (identical to before). Modes 1/2 drop the diagonal-below room that froze edge pools.
+    // Mode 3 (default) = AIRBORNE, the propagating straight-down test. Modes 1 and 2 both fail on a falling BLOCK of liquid:
+    // mode 2 keys off the tag, which the droplet cascade never writes, and mode 1 asks for straight-down ROOM, which a block
+    // never has because the cell under it is another full cell of the same block. So under the cascade nothing was held back
+    // and a placed block levelled itself sideways in mid-air. Mode 3 propagates the way `fell` does, without the diagonal
+    // term that over-caught pool edges — so a falling block is excluded top to bottom and a pool beside a drop still levels.
     const isStream = liquidCfg.levelGate === 0 ? canFall
+                   : liquidCfg.levelGate === 3 ? (sd[i] !== 0 || airborne)
                    : liquidCfg.levelGate === 2 ? (sd[i] !== 0)
                    : (sd[i] !== 0 || (canDown && roomAt(i + COLS)));
     if (!isStream) {
@@ -3965,7 +3995,7 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
     for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow']) if (k in patch) liquidCfg[k] = !!patch[k];
-    if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
+    if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
     const dnum = { dropUnit: [1, 16], dropFall: [0.05, 4], dropSpawnH: [0, 1], dropSpread: [0.1, 1],
