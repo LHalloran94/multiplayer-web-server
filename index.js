@@ -4012,6 +4012,15 @@ io.on('connection', (socket) => {
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
   // DEBUG single-step: advance the frozen sim by a few ticks. Only meaningful while paused; ignored otherwise, so a
   // stray press can never make the sim run fast.
+  // DEBUG resync: re-send this socket the FULL liquid state for the room it is in. The client compares it against its
+  // own mirror before applying, which settles "is that liquid really there, or has my copy drifted?" in one press --
+  // a question that has cost a lot of guessing, because the client's droplet replay lands on the client's mirror, so
+  // a stale cell there produces BOTH phantom liquid and droplets that stop early on it.
+  socket.on('liquid-resync', () => {
+    const room = currentAvatarRoom;
+    if (!room || !roomTerrain[room] || !roomLiquidTotal[room]) return;
+    socket.emit('liquid-init', { cells: buildLiquidInit(room), verify: true });
+  });
   socket.on('liquid-step', (n) => {
     if (!liquidCfg.paused) return;
     const k = Math.max(1, Math.min(120, (n | 0) || 1));
