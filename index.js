@@ -1500,7 +1500,7 @@ const roomTerrainHp = {}; // room → Uint8Array (per-cell remaining hits for mu
 function ensureTerrain(room) { return roomTerrain[room] || (roomTerrain[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 function ensureTerrainHp(room) { return roomTerrainHp[room] || (roomTerrainHp[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 // Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
-const BUILTIN_STRENGTH = { 2: 3, 4: 2, 5: 2 };         // stone tough, ice/mud middling (matches client TERRAIN_MATS); others 1
+const BUILTIN_STRENGTH = { 2: 3, 4: 2, 5: 2, 17: 2 };  // stone tough, ice/mud/drain middling (matches client TERRAIN_MATS); others 1
 function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return BUILTIN_STRENGTH[v] || 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
 const BUILTIN_UNBREAKABLE = new Set([7, 13]);          // built-in conveyor belts are unbreakable (matches client TERRAIN_MATS)
 function matBreakableSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return !BUILTIN_UNBREAKABLE.has(v); const d = mats[v]; return !d || d.breakable !== false; }
@@ -1551,6 +1551,26 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard) {
 // descends past LIQUID_FLOOR_ROW → it rests on the world's bedrock floor instead of falling through it.
 const LIQUID_IDS = new Set([9, 10, 11, 12, 14, 15]);   // water, quicksand, lava, acid, brine, oil
 const isFluidId = (v) => LIQUID_IDS.has(v);
+// ---- SOURCE + SINK (test/scene tooling, but real world features) ------------------------------------------------
+// SINK = material id 17 ("Drain"): an ordinary SOLID block that DESTROYS liquid touching it, at liquidCfg.sinkRate
+// units per tick per touching cell. Put a row of them under a pool instead of clearing it by hand.
+// SOURCE = a per-cell flag on a liquid cell (roomLiquidSrc), which tops that cell back up by liquidCfg.srcRate units
+// per tick. It is a flag rather than a material because the user asked for it as an OPTION on a liquid — the cell is
+// ordinary water/oil/lava that happens to refill.
+// ⚠️ MASS ACCOUNTING. A source CREATES mass and a sink DESTROYS it, so grid+air conservation — which the harness and
+// probe_drop_mass assert, and which has already caught two real leaks — would go blind if these were untracked. Both
+// therefore keep a LEDGER per liquid rank of every unit they invent/eat, so the invariant stays exact:
+//     grid + air + eaten − added  ==  initial
+// Anything that does not balance is still a real leak. Nothing else in the sim may touch these counters.
+const LIQ_SINK_ID = 17;
+const isSinkId = (v) => v === LIQ_SINK_ID;
+const roomLiquidSrc = {};    // room → Map(cell → rank) of source cells
+const roomSrcAdded = {};     // room → number[LIQ_T]: units this room's sources have created, per rank (ledger)
+const roomSinkEaten = {};    // room → number[LIQ_T]: units this room's sinks have destroyed, per rank (ledger)
+function ensureSrcMap(room) { return roomLiquidSrc[room] || (roomLiquidSrc[room] = new Map()); }
+function srcLedger(room) { return roomSrcAdded[room] || (roomSrcAdded[room] = new Array(LIQ_T).fill(0)); }
+function sinkLedger(room) { return roomSinkEaten[room] || (roomSinkEaten[room] = new Array(LIQ_T).fill(0)); }
+function clearLiquidSources(room) { if (roomLiquidSrc[room]) roomLiquidSrc[room].clear(); }
 const LIQUID_MAX = 64;                                // TOTAL fill units per cell (summed across all liquids in the cell)
 const LIQUID_LEVEL_SCAN = 28;                         // how far a surface cell looks along its row for a lower spot to level toward (flat-settle)
 // OPTION 2 — MULTI-LIQUID per cell. Each cell holds a density-sorted stack: roomLiquidAmt[i*LIQ_T + rank] = fine units of
@@ -1652,7 +1672,11 @@ const liquidCfg = {
   // right therefore needs surface wave dynamics (shallow-water on the height field), which is a project in its
   // own right. Today's local levelling looks fine and is only slow on very wide pools, so this is parked.
   fluxLevel: false,
-  fluxRate: 32,          // max units crossing one column interface per tick. Higher = faster levelling, linearly (no instability window).
+  // SOURCE / SINK rates (see the block above LIQ_SINK_ID). Units per tick, of the 64 that fill a cell — so at 25 ticks/s
+  // srcRate 8 refills a cell about three times a second. Both are ledgered, so they cannot hide a real mass leak.
+  srcRate: 8,            // units/tick a source cell tops itself back up by
+  sinkRate: 64,          // units/tick a drain block eats from each liquid cell touching it (64 = a full cell per tick)
+  fluxRate: 32,         // max units crossing one column interface per tick. Higher = faster levelling, linearly (no instability window).
 };
 // DEBUG perf accounting (only touched when liquidCfg.perfLog). `emitLiquidCells` centralises the `liquid-cells` emit so we
 // can size the wire payload; runLiquidTick tallies sim time + active cells and prints a rolling ~1s summary to the console.
@@ -1749,6 +1773,32 @@ function dropletBroadcastCells(room, cells) {
     if (++n >= 8192) { emitLiquidCells(room, arr); arr = []; n = 0; }
   }
   if (n) emitLiquidCells(room, arr);
+}
+// SOURCE PASS — top every source cell back up. Runs BEFORE the droplets and the grid each tick, so liquid a source
+// makes is ordinary pooled liquid by the time anything looks at it (it spends a tick in the cell like any other
+// arrival). A source cell whose grid square has been built over with a SOLID is deleted: that is how you remove one.
+// It does NOT require the cell to currently hold liquid — a fully drained source must still refill, and a drained
+// cell reads as air.
+function sourceTickRoom(room) {
+  const src = roomLiquidSrc[room]; if (!src || !src.size) return;
+  const grid = roomTerrain[room]; if (!grid) return;
+  const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), led = srcLedger(room);
+  const rate = Math.max(0, Math.min(LIQUID_MAX, liquidCfg.srcRate | 0));
+  const touched = [];
+  for (const [i, rank] of src) {
+    if (i < 0 || i >= grid.length || isSinkId(grid[i]) || isSolidCell(grid[i])) { src.delete(i); continue; }
+    if (!rate) continue;
+    const free = LIQUID_MAX - tot[i]; if (free <= 0) continue;
+    const add = free < rate ? free : rate;
+    amt[i * LIQ_T + rank] += add; tot[i] += add; led[rank] += add;
+    const rep = liqRepId(amt, i); if (rep && grid[i] !== rep) grid[i] = rep;
+    activateLiquidCell(room, i, grid);
+    touched.push(i);
+  }
+  if (!src.size) delete roomLiquidSrc[room];
+  // Broadcast here rather than leaving it to liquidTickRoom: a source feeding a cell that is already brim-full moves
+  // nothing, so the grid tick would have nothing to report and the client would never see the top-up.
+  if (touched.length && !liquidQuiet) dropletBroadcastCells(room, touched);
 }
 function ensureImpact(room) { return roomImpact[room] || (roomImpact[room] = new Map()); }
 function clearDroplets(room) { roomDroplets[room] = []; if (roomImpact[room]) roomImpact[room].clear(); }
@@ -2049,6 +2099,7 @@ function liquidTickRoom(room) {
   const mats = roomMats[room] || {}, tick = liquidTickCount, cap = LIQUID_MAX, T = LIQ_T, COLS = TERRAIN_COLS;
   const LIQUID_FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // liquid may not descend into this row or below (bedrock)
   const isSolid = (v) => v !== 0 && !isFluidId(v);
+  const sinkRate = Math.max(0, Math.min(LIQUID_MAX, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
   const list = Array.from(active); active.clear();
   // bottom-up (row descending) + emptiest-first within a row (see history) → primed edges, position-independent.
   list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot[a], lb = tot[b]; if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
@@ -2107,6 +2158,16 @@ function liquidTickRoom(room) {
       if (s2a[i] > 0) { const rk = LIQ_RANK[s2i[i]]; if (rk !== undefined) { const add = (cap - tot[i]) < s2a[i] ? (cap - tot[i]) : s2a[i]; if (add > 0) { amt[i * T + rk] += add; tot[i] += add; s2a[i] -= add; if (s2a[i] === 0) s2i[i] = 0; mark(i); wakeN(i); } } if (s2a[i] > 0) active.add(i); }
     }
     let L = tot[i]; if (L <= 0) continue;
+    // ---- SINK (drain block, id 17) — destroy liquid touching a drain, heaviest first (it is the bottom of the stack
+    // that is in contact). Ledgered into roomSinkEaten so grid+air conservation stays checkable: eaten units are
+    // accounted for, not merely missing. Neighbours are woken so the pool keeps feeding the drain instead of settling.
+    if (sinkRate > 0 && (isSinkId(grid[i + COLS]) || isSinkId(grid[i - COLS]) || (c > 0 && isSinkId(grid[i - 1])) || (c < COLS - 1 && isSinkId(grid[i + 1])))) {
+      let need = sinkRate < L ? sinkRate : L;
+      const sb = i * T;
+      for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[sb + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[sb + rk] = a - mv; sinkLed[rk] += mv; need -= mv; }
+      recomp(i); mark(i); wakeN(i);
+      L = tot[i]; if (L <= 0) continue;
+    }
     // LAND-THEN-POOL. Units a droplet put into this cell THIS tick. Droplets fly before the grid ticks, so without
     // this the cell passes fresh liquid straight on -- sideways via levelling, or back over the edge via the spill --
     // in the very tick it arrived, and water is never seen to land and pool. Declared here because BOTH the spill
@@ -2746,6 +2807,7 @@ const runLiquidTick = () => {
   liquidTickCount++;
   // Droplets fly BEFORE the grid ticks, so a droplet is broadcast at the position it spawned at rather than already a
   // fall-step below it, and so liquid that lands cannot also leave the cell in the same tick.
+  for (const room in roomLiquidSrc) sourceTickRoom(room);   // sources top up first, so their liquid is ordinary pooled liquid to everything below
   if (liquidCfg.droplets) for (const room in roomDroplets) dropletTickRoom(room);
   for (const room in roomLiquidActive) { if (liquidCfg.perfLog) _active += roomLiquidActive[room].size; liquidTickRoom(room); }
   powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room);   // powder runs in lockstep with liquid → consistent gravity
@@ -2765,11 +2827,11 @@ const runLiquidTick = () => {
 function restartLiquidLoop() { if (liquidTimer) clearInterval(liquidTimer); liquidTimer = setInterval(runLiquidTick, Math.max(8, Math.min(500, liquidCfg.tickMs | 0))); }
 restartLiquidLoop();
 
-const TERRAIN_MAT_MAX = 16;                           // built-in material ids 1..16 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil/glass); 0 = empty
+const TERRAIN_MAT_MAX = 17;                           // built-in material ids 1..17 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil/glass/drain); 0 = empty
 const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → custom material ids live in 16..255
 // ---- Custom material registry (Stage 6 feature A): per-room map of custom mat id → opaque appearance/property def.
 // The server stores + dedups + assigns ids; it does NOT interpret the def physically (the client clones a base mat).
-const CUSTOM_MAT_MIN = 17, CUSTOM_MAT_CAP = 200;     // custom mat ids start at 17 (built-ins 1..16, incl. Glass=16); up to 200 custom mats per room
+const CUSTOM_MAT_MIN = 18, CUSTOM_MAT_CAP = 200;     // custom mat ids start at 18 (built-ins 1..17: Glass=16, Drain=17 — the client's CUSTOM_MAT_FLOOR must match); up to 200 custom mats per room
 const roomMats = {};                                 // room → { id: def }
 function ensureMats(room) { return roomMats[room] || (roomMats[room] = {}); }
 
@@ -4092,6 +4154,26 @@ io.on('connection', (socket) => {
     if (!room || !roomTerrain[room] || !roomLiquidTotal[room]) return;
     socket.emit('liquid-init', { cells: buildLiquidInit(room), verify: true });
   });
+  // ---- LIQUID SOURCES: mark/unmark cells that keep refilling themselves. Sent by the build menu's "Source" option
+  // when a liquid is painted; the same cells are sent with on:false when the option is OFF, so painting normally over
+  // a source removes it. Rebroadcast so every client can draw the marker.
+  socket.on('liquid-src', ({ cells, id, on }) => {
+    const room = currentAvatarRoom;
+    if (!room || !Array.isArray(cells) || cells.length > 4096) return;
+    if (!canBuild()) return;
+    const grid = roomTerrain[room]; if (!grid) return;
+    const rank = LIQ_RANK[id | 0];
+    if (on && rank === undefined) return;                    // sources are built-in liquids only (custom liquids have no rank)
+    const src = ensureSrcMap(room);
+    const okCells = [];
+    for (const raw of cells) {
+      const i = raw | 0; if (i < 0 || i >= grid.length) continue;
+      if (on) { if (isSolidCell(grid[i])) continue; src.set(i, rank); } else if (!src.delete(i)) continue;
+      okCells.push(i);
+    }
+    if (!src.size) delete roomLiquidSrc[room];
+    if (okCells.length) io.to(room).emit('liquid-src', { cells: okCells, on: !!on });
+  });
   socket.on('liquid-step', (n) => {
     if (!liquidCfg.paused) return;
     const k = Math.max(1, Math.min(120, (n | 0) || 1));
@@ -4108,6 +4190,8 @@ io.on('connection', (socket) => {
                    dropLandSpread: [0, 5], dropTermFall: [1, 16], dropSpreadRef: [2, 40], dropImpactCurve: [0.2, 3] };
     for (const k in dnum) if (k in patch) { const v = +patch[k]; if (!isNaN(v)) liquidCfg[k] = Math.max(dnum[k][0], Math.min(dnum[k][1], v)); }
     if ('fluxRate' in patch) liquidCfg.fluxRate = Math.max(1, Math.min(128, patch.fluxRate | 0));
+    if ('srcRate' in patch) liquidCfg.srcRate = Math.max(0, Math.min(64, patch.srcRate | 0));
+    if ('sinkRate' in patch) liquidCfg.sinkRate = Math.max(0, Math.min(64, patch.sinkRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
   });
@@ -4630,6 +4714,7 @@ io.on('connection', (socket) => {
     if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: roomTerrainHp[avRoom] ? terrainRLE(roomTerrainHp[avRoom]).runs : undefined });
     // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
     if (tg && roomLiquidTotal[avRoom]) { const cells = buildLiquidInit(avRoom); if (cells.length) socket.emit('liquid-init', { levelIndex, cells }); }
+    if (roomLiquidSrc[avRoom] && roomLiquidSrc[avRoom].size) socket.emit('liquid-src', { cells: Array.from(roomLiquidSrc[avRoom].keys()), on: true, init: true });   // join replay: which cells are sources (marker only; the sim owns the behaviour)
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
     const mm = roomMats[avRoom];
     if (mm && Object.keys(mm).length) socket.emit('mats-init', { levelIndex, mats: mm });
@@ -4722,7 +4807,7 @@ io.on('connection', (socket) => {
     for (const id of ids) map.delete(id);
     if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     // Terrain is unowned (and ephemeral / all player-placed), so "Remove all" wipes the whole grid too.
-    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); clearDroplets(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); clearDroplets(currentAvatarRoom); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   socket.on('avatar-objects-clear-all', () => {
@@ -4733,7 +4818,7 @@ io.on('connection', (socket) => {
       map.clear();
       if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     }
-    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); clearDroplets(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); clearDroplets(currentAvatarRoom); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
