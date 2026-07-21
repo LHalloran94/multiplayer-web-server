@@ -1679,6 +1679,12 @@ const roomDropSpawns = {};   // room → spawn events queued for this tick's bro
 // room → Map(cell → decaying measure of how hard that spot is being rained on). A Map, not a full-grid array: only a
 // handful of cells are ever under a fall, but the decay has to touch every entry each tick, and sweeping all 86,400
 // cells for that cost 0.18ms/tick per room with any droplet in flight. The client already models it this way.
+// What each cell RECEIVED from droplets this tick (cell -> units). Cleared at the start of every droplet pass.
+// Liquid that has only just landed must spend a tick as a pool before it can flow onward: droplets fly BEFORE the
+// grid ticks, so without this the grid levels fresh liquid sideways in the very tick it arrives, and water is never
+// seen to land and pool -- it appears in the landing cell and its neighbours simultaneously. (The `dropStart` rule
+// below already says exactly this for the lip; it was simply never applied to levelling.)
+const roomDropLanded = {};
 const roomImpact = {};
 const roomStream2Amt = {};   // room → Uint8Array(cells): units in the secondary lane (0 = none)
 const roomStream2Id = {};    // room → Uint8Array(cells): the secondary lane's liquid id
@@ -1888,6 +1894,11 @@ function dropImpactVel(dist) {
 // then handles lava+water to stone, acid neutralising and the rest -- no reaction logic is duplicated here.
 function dropletTickRoom(room) {
   const drops = roomDroplets[room];
+  // Clear the just-landed record FIRST, before any early return. It gates levelling for one tick, so leaving stale
+  // entries in it when the droplets stop permanently freezes those cells out of levelling -- the landing cell sat at
+  // 45 units for ever while its neighbours held 4.
+  const landedPrev = roomDropLanded[room];
+  if (landedPrev && landedPrev.size) landedPrev.clear();
   if (!drops || !drops.length) return;
   const grid = roomTerrain[room]; if (!grid) { roomDroplets[room] = []; return; }
   const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), impact = ensureImpact(room);
@@ -1897,6 +1908,7 @@ function dropletTickRoom(room) {
   // silently destroys liquid (caught by the fuzz mass check).
   const ROWS = Math.min(TERRAIN_ROWS, Math.floor(FLOOR_TOP / TERRAIN_CELL));
   const active = liquidSet(room), changed = new Set();
+  const landed_ = roomDropLanded[room] || (roomDropLanded[room] = new Map());
   for (const [k, v] of impact) { const n = v * 0.82; if (n > 0.01) impact.set(k, n); else impact.delete(k); }
   const step = liquidCfg.dropFall * CELL;
   const sub = Math.max(1, Math.ceil(step / (CELL * 0.5)));
@@ -1958,13 +1970,13 @@ function dropletTickRoom(room) {
       for (const ci of open) {
         if (rem <= 0) break;
         const take = Math.min(cap - tot[ci], share, rem);
-        if (take >= 1) { amt[ci * T + d.rank] += take; recompCell(ci); rem -= take; changed.add(ci); active.add(ci); }
+        if (take >= 1) { amt[ci * T + d.rank] += take; recompCell(ci); rem -= take; changed.add(ci); active.add(ci); landed_.set(ci, (landed_.get(ci) || 0) + take); }
       }
     }
     // one cell of upward give (a filling pool does rise), then it WAITS rather than stacking a column of full cells
     if (rem > 0.001 && rr0 - 1 >= 0) {
       const ci = (rr0 - 1) * COLS + cc;
-      if (!isSolidCell(grid[ci])) { const free = cap - tot[ci]; if (free > 0.001) { const take = Math.min(free, rem); amt[ci * T + d.rank] += take; recompCell(ci); rem -= take; changed.add(ci); active.add(ci); } }
+      if (!isSolidCell(grid[ci])) { const free = cap - tot[ci]; if (free > 0.001) { const take = Math.min(free, rem); amt[ci * T + d.rank] += take; recompCell(ci); rem -= take; changed.add(ci); active.add(ci); landed_.set(ci, (landed_.get(ci) || 0) + take); } }
     }
     impact.set(ci0, force + (d.amt - rem) * dropImpactVel(d.dist));
     if (rem > 0) {
@@ -1983,7 +1995,7 @@ function dropletTickRoom(room) {
           const ci = rr * COLS + cc;
           if (isSolidCell(grid[ci])) break;
           const free = cap - tot[ci];
-          if (free >= 1) { const take = Math.min(free, rem); amt[ci * T + d.rank] += take; recompCell(ci); rem -= take; changed.add(ci); active.add(ci); }
+          if (free >= 1) { const take = Math.min(free, rem); amt[ci * T + d.rank] += take; recompCell(ci); rem -= take; changed.add(ci); active.add(ci); landed_.set(ci, (landed_.get(ci) || 0) + take); }
         }
         if (rem <= 0) continue;
         d.amt = rem;
@@ -2008,6 +2020,10 @@ function liquidTickRoom(room) {
   // bottom-up (row descending) + emptiest-first within a row (see history) → primed edges, position-independent.
   list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot[a], lb = tot[b]; if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
   const changedSet = new Set();
+  // Units each cell received from droplets THIS tick. A cell may not pass on liquid that has only just landed in it:
+  // it has to be water sitting in the cell for a tick first. Without this the landing and the spreading happen in the
+  // same tick and you never see it pool -- it appears in the landing cell and both neighbours at once.
+  const justLanded = (liquidCfg.droplets && roomDropLanded[room]) ? roomDropLanded[room] : null;
   const spillSide = new Map();   // cell → the fall side spilled onto it THIS tick; a spill from the OTHER side routes into the SECONDARY lane (dual-stream chute)
   const neutralizedThisTick = new Set();   // acid cells that turned (partly) to water THIS tick — other acid must not chain off that fresh water in the same tick (else a whole blob neutralises instantly)
   const fell = new Set();   // cells determined FALLING this tick (propagates up a full stream column, since we process bottom-up) → they don't level laterally
@@ -2335,6 +2351,9 @@ function liquidTickRoom(room) {
                    : liquidCfg.levelGate === 3 ? (sd[i] !== 0 || airborne)
                    : liquidCfg.levelGate === 2 ? (sd[i] !== 0)
                    : (sd[i] !== 0 || (canDown && roomAt(i + COLS)));
+    // How much of this cell may move on THIS tick: everything except what a droplet just put here.
+    const freshHere = justLanded ? (justLanded.get(i) || 0) : 0;
+    const shedCap = freshHere > 0 ? Math.max(0, L - freshHere) : L;
     if (!isStream) {
       // (2c) PER-LIQUID horizontal leveling: level each dense layer's own surface over the floor of what's denser (heavy ends
       // flat along the bottom) without disturbing the layers below. Cumulative depth C_t=Σ_{k≤t}; nudge rank t toward the
@@ -2386,20 +2405,21 @@ function liquidTickRoom(room) {
             let shedL = okL ? Math.min(avg - tot[jL], cap - tot[jL] - s2a[jL]) : 0;   // bring each lower neighbour UP to the avg (capped by its room)
             let shedR = okR ? Math.min(avg - tot[jR], cap - tot[jR] - s2a[jR]) : 0;
             if (shedL < 0) shedL = 0; if (shedR < 0) shedR = 0;
-            const denom = shedL + shedR, total = reduce(Math.floor(denom));   // throttle the TOTAL once (reduce carries a per-cell accumulator)
+            const denom = shedL + shedR; let total = reduce(Math.floor(denom));   // throttle the TOTAL once (reduce carries a per-cell accumulator)
+            if (total > shedCap) total = shedCap;                       // fresh droplet liquid waits a tick
             if (total > 0 && denom > 0) {
               let mvL = Math.round(total * shedL / denom); if (mvL > total) mvL = total; const mvR = total - mvL;   // split by deficit; sum stays = total (conserved)
               if (mvL > 0) { lvlMove(i, jL, mvL); sd[jL] = 0; L -= mvL; wakeN(i); }
               if (mvR > 0) { lvlMove(i, jR, mvR); sd[jR] = 0; L -= mvR; wakeN(i); }
             }
           }
-        } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(grid[j])) continue; const nl = tot[j], room2 = cap - nl - s2a[j]; if (L - nl > 1 && room2 > 0) { const mv = reduce(Math.min((L - nl) >> 1, room2)); if (mv > 0) { lvlMove(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
+        } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(grid[j])) continue; const nl = tot[j], room2 = cap - nl - s2a[j]; if (L - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((L - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
       }
       // 1d surface FLAT-SETTLE — nudge toward the nearest strictly-lower reachable spot in the row; throttled REDUCED-AMOUNT
       if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0) {
         let dir = 0, best = Infinity;
         for (const sdir of [-1, 1]) for (let d = 1; d <= LIQUID_LEVEL_SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d; if (isSolid(grid[j])) break; const jl = tot[j]; if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
-        if (dir !== 0) { const j = i + dir; if (tot[j] < L && tot[j] + s2a[j] < cap && reduce(1) > 0) { lvlMove(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
+        if (dir !== 0 && shedCap >= 1) { const j = i + dir; if (tot[j] < L && tot[j] + s2a[j] < cap && reduce(1) > 0) { lvlMove(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
       }
     }
     if (pend) active.add(i);                               // throttled diagonal spill OR leveling still owed this tick → revisit
