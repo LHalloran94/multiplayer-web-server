@@ -1596,14 +1596,6 @@ const liquidCfg = {
   ledgeSpill: true,      // step 1b: liquid spills DIAGONALLY over the edge of a ledge. off = it only falls straight down + spreads on flat ground
   lateralLevel: true,    // steps 1c/1d: liquid flows SIDEWAYS to find a flat level. off = it piles up where it lands (no spreading)
   perLiquidLevel: true,  // step 2c: each liquid flattens its OWN layer across columns (heavy ends flat along the bottom)
-  // DEFAULT OFF since 2026-07-21. It leaves a 1-unit thread in any cell that has liquid above it, to keep a falling
-  // stream from breaking into packets. In a BLOCK of liquid falling through the air EVERY cell has liquid above it,
-  // so every cell shed a unit each tick and the block smeared itself into partial rows with a ragged top — the
-  // separation the user screenshotted. Measured (probe_fall_cohesion): 6x6 block, 15 partial cells and a top edge
-  // ragged by 3 with it on, versus 0/0/0 with it off. And it no longer buys the continuity it was written for:
-  // identical gap counts on a steady pour (0 either way) AND on intermittent trickles (18/24/28 either way), because
-  // the thread only survives the one tick before the cell above empties. The cascade carries ledge spills now.
-  cohesion: false,       // a fed falling cell keeps a 1-unit thread → continuous streams (no gap into the pool). off = streams can break up
   viscosity: false,      // per-liquid LEVEL_VISC throttle: denser liquids ooze flat slower. off = ALL liquids level at full speed
   reactions: true,       // lava+water→stone, acid dissolves terrain, water+snow→ice, oil burns, etc.
   // ONE flag for the whole "make fallSide mean what it says" rule set (it is one idea; splitting it into
@@ -2303,13 +2295,14 @@ function liquidTickRoom(room) {
     //  A per-cell horizontal move is PE-neutral (same row) so it can only shuffle, never settle; the column pass moves a
     //  heavy unit from the taller-heavy column and a light unit back, which is total-preserving + strictly PE-decreasing.)
     // (1) TOTAL flow — proven single-liquid leveling on total[i], composition advected + STREAM COHESION
-    const fedAbove = r > 0 && tot[i - COLS] > 0;
-    // 1a straight down (cohesion: a fed fall cell keeps 1 unit → continuous stream, reaches pools with no gap)
+    // 1a straight down. (`cohesion` -- a fed falling cell held 1 unit back to keep a stream continuous -- was DELETED
+    // 2026-07-22: measured to buy nothing on steady pours or four trickle rates, while shredding a falling block into
+    // partial rows, since every cell in a falling block has liquid above it. The cascade carries ledge spills now.)
     // The tag CARRY rides along with the liquid — but only onto AIR or a cell that is already a stream. Writing it onto a cell
     // that already holds untagged (resting) liquid stamped the stream's tag onto the pool cell it LANDS in, so that cell drew
     // as a sideways strip instead of filling bottom-up with the incoming stream in its empty top ("cell = both"). It's exactly
     // one cell — the landing cell — and it's only tagged WHILE liquid pours into it, so a tags-at-rest check can't see it.
-    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { let t = Math.min(L, room); if (liquidCfg.cohesion && fedAbove && t >= L && L >= 1) t = L - 1; if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t);
+    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { const t = Math.min(L, room); if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t);
       // TAG CARRY. streamTag off = the old unconditional copy. On: only PROPAGATE a real tag (sd[i]!==0 — never clobber a good
       // tag with 0, which happens when an untagged mouth cell falls into a chute cell the side-spill already tagged), and only
       // INTO a cell that is air OR itself falling (fell.has(j) — j is straight below, processed already this bottom-up tick).
@@ -4182,7 +4175,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'paused']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'paused']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
