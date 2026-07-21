@@ -1564,13 +1564,25 @@ const isFluidId = (v) => LIQUID_IDS.has(v);
 // Anything that does not balance is still a real leak. Nothing else in the sim may touch these counters.
 const LIQ_SINK_ID = 17;
 const isSinkId = (v) => v === LIQ_SINK_ID;
-const roomLiquidSrc = {};    // room → Map(cell → rank) of source cells
+// room → Map(cell → {rank, rate}) of source cells. The RATE is per source, not global: feeding one pool fast and
+// another slowly is the whole point of having more than one. `rate` undefined falls back to liquidCfg.srcRate, which
+// is now only the DEFAULT stamped on new sources.
+const roomLiquidSrc = {};
 const roomSrcAdded = {};     // room → number[LIQ_T]: units this room's sources have created, per rank (ledger)
 const roomSinkEaten = {};    // room → number[LIQ_T]: units this room's sinks have destroyed, per rank (ledger)
 function ensureSrcMap(room) { return roomLiquidSrc[room] || (roomLiquidSrc[room] = new Map()); }
 function srcLedger(room) { return roomSrcAdded[room] || (roomSrcAdded[room] = new Array(LIQ_T).fill(0)); }
 function sinkLedger(room) { return roomSinkEaten[room] || (roomSinkEaten[room] = new Array(LIQ_T).fill(0)); }
 function clearLiquidSources(room) { if (roomLiquidSrc[room]) roomLiquidSrc[room].clear(); }
+function dropSource(room, i) { const s = roomLiquidSrc[room]; if (s && s.delete(i) && !s.size) delete roomLiquidSrc[room]; }
+function dropSourcesInRect(room, c0, r0, c1, r1) {
+  const s = roomLiquidSrc[room]; if (!s || !s.size) return;
+  const gone = [];
+  for (const i of s.keys()) { const r = (i / TERRAIN_COLS) | 0, c = i - r * TERRAIN_COLS; if (c >= c0 && c <= c1 && r >= r0 && r <= r1) gone.push(i); }
+  for (const i of gone) s.delete(i);
+  if (!s.size) delete roomLiquidSrc[room];
+  if (gone.length) io.to(room).emit('liquid-src', { cells: gone, on: false });
+}
 const LIQUID_MAX = 64;                                // TOTAL fill units per cell (summed across all liquids in the cell)
 const LIQUID_LEVEL_SCAN = 28;                         // how far a surface cell looks along its row for a lower spot to level toward (flat-settle)
 // OPTION 2 — MULTI-LIQUID per cell. Each cell holds a density-sorted stack: roomLiquidAmt[i*LIQ_T + rank] = fine units of
@@ -1775,10 +1787,11 @@ function sourceTickRoom(room) {
   const src = roomLiquidSrc[room]; if (!src || !src.size) return;
   const grid = roomTerrain[room]; if (!grid) return;
   const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), led = srcLedger(room);
-  const rate = Math.max(0, Math.min(LIQUID_MAX, liquidCfg.srcRate | 0));
   const touched = [];
-  for (const [i, rank] of src) {
+  for (const [i, s] of src) {
     if (i < 0 || i >= grid.length || isSinkId(grid[i]) || isSolidCell(grid[i])) { src.delete(i); continue; }
+    const rank = s.rank | 0;
+    const rate = Math.max(0, Math.min(LIQUID_MAX, (s.rate === undefined ? liquidCfg.srcRate : s.rate) | 0));
     if (!rate) continue;
     const free = LIQUID_MAX - tot[i]; if (free <= 0) continue;
     const add = free < rate ? free : rate;
@@ -4150,22 +4163,34 @@ io.on('connection', (socket) => {
   // ---- LIQUID SOURCES: mark/unmark cells that keep refilling themselves. Sent by the build menu's "Source" option
   // when a liquid is painted; the same cells are sent with on:false when the option is OFF, so painting normally over
   // a source removes it. Rebroadcast so every client can draw the marker.
-  socket.on('liquid-src', ({ cells, id, on }) => {
+  socket.on('liquid-src', ({ cells, id, on, rate }) => {
     const room = currentAvatarRoom;
     if (!room || !Array.isArray(cells) || cells.length > 4096) return;
     if (!canBuild()) return;
     const grid = roomTerrain[room]; if (!grid) return;
     const rank = LIQ_RANK[id | 0];
     if (on && rank === undefined) return;                    // sources are built-in liquids only (custom liquids have no rank)
+    const rt = rate === undefined ? undefined : Math.max(0, Math.min(64, rate | 0));
     const src = ensureSrcMap(room);
     const okCells = [];
     for (const raw of cells) {
       const i = raw | 0; if (i < 0 || i >= grid.length) continue;
-      if (on) { if (isSolidCell(grid[i])) continue; src.set(i, rank); } else if (!src.delete(i)) continue;
+      if (on) { if (isSolidCell(grid[i])) continue; src.set(i, { rank, rate: rt }); } else if (!src.delete(i)) continue;
       okCells.push(i);
     }
     if (!src.size) delete roomLiquidSrc[room];
     if (okCells.length) io.to(room).emit('liquid-src', { cells: okCells, on: !!on });
+  });
+  // Remove every source in the room at once. A source is invisible in the terrain data, so without this a stray one
+  // left running in a corner of a big world is genuinely hard to find and turn off.
+  socket.on('liquid-src-clear', () => {
+    const room = currentAvatarRoom;
+    if (!room || !canBuild()) return;
+    const src = roomLiquidSrc[room];
+    if (!src || !src.size) return;
+    const cells = Array.from(src.keys());
+    clearLiquidSources(room); delete roomLiquidSrc[room];
+    io.to(room).emit('liquid-src', { cells, on: false });
   });
   socket.on('liquid-step', (n) => {
     if (!liquidCfg.paused) return;
@@ -4835,6 +4860,10 @@ io.on('connection', (socket) => {
       activateLiquidRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);
       activatePowderRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);   // dig removes support / paint drops grains
       socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd });
+      // A CARVE removes any source in the dug-out area. Digging the cell out is the obvious way to get rid of a
+      // source, and without this it kept refilling the hole you had just made with no way to stop it -- a source is
+      // invisible in the terrain data, so there was nothing left to delete.
+      if (op === 'carve') dropSourcesInRect(currentAvatarRoom, Math.floor((cx - rr) / TERRAIN_CELL), Math.floor((cy - rr) / TERRAIN_CELL), Math.floor((cx + rr) / TERRAIN_CELL), Math.floor((cy + rr) / TERRAIN_CELL));
     }
   });
   // Undo for placed terrain: restore an explicit list of cells to prior values. Flat [index, value, ...].
@@ -4853,6 +4882,9 @@ io.on('connection', (socket) => {
         if (aabbHitsClear(clear, cc, cr, cc, cr)) { v = 0; cells[k + 1] = 0; }
       }
       if (i >= 0 && i < grid.length) { if (grid[i] !== v) { grid[i] = v; changed = true; } hp[i] = v ? matStrengthSrv(mats, v) : 0; }
+      // Same rule for an explicit cell write (undo / paste / a test scene): anything that is no longer the liquid it
+      // was drops its source flag. Only a cell that stays a liquid keeps refilling.
+      if (!isFluidId(v)) dropSource(currentAvatarRoom, i);
     }
     const tot = ensureLiquidTotal(currentAvatarRoom), lam = ensureLiquidAmt(currentAvatarRoom);    // keep the multi-liquid stacks in step with placed/cleared cells, then wake
     for (let k = 0; k + 1 < cells.length; k += 2) {
