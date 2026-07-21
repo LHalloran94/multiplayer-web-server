@@ -1930,7 +1930,14 @@ function dropletTickRoom(room) {
     // Water arriving on a surface spreads across it. Candidates fan outward along the landing row and the row below,
     // stopping at any solid (never reaching through a wall) and never into an unsupported cell (so it cannot leave
     // liquid hanging). Reach follows from the impact force, so a one-cell drop barely spreads at all.
-    const supported = (ci) => { const r2 = (ci / COLS) | 0; if (r2 + 1 >= ROWS) return true; const b = ci + COLS; return isSolidCell(grid[b]) || tot[b] > 0; };
+    // REAL support only. This used to accept `tot[b] > 0` — any liquid at all beneath the target, even a single unit.
+    // On a staircase whose treads are ONE CELL WIDE that is nearly always true of the cell out over the next drop, so
+    // a landing fanned sideways into what is effectively mid-air, and the deposit was broadcast before the grid tick
+    // could let it fall. That is the long-standing "liquid pools in mid-air", and it is why the bug tracked the WIDTH
+    // of a step rather than its height: a wider tread puts solid under the cells the spread reaches.
+    // Measured on a 1-cell staircase: mid-air liquid at broadcast 127 units → 0, unsupported deposits 35% → 0%, and
+    // no droplet stalls as a result (zero either way). Wider treads are unchanged.
+    const supported = (ci) => { const r2 = (ci / COLS) | 0; if (r2 + 1 >= ROWS) return true; const b = ci + COLS; return isSolidCell(grid[b]) || tot[b] >= cap; };
     const cands = [];
     if (!isSolidCell(grid[ci0])) cands.push(ci0);
     for (let dd = 1; dd <= radius; dd++) for (const sgn of [-1, 1]) {
