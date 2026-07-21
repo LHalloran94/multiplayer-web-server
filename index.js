@@ -1625,6 +1625,10 @@ const liquidCfg = {
   levelMix: true,        // lateral leveling (1c/1d) moves the MIXTURE proportionally (moveProp) instead of skimming the lightest liquid off the top (moveTop). Skimming oil each tick oil-depletes→oil-replenishes a surface cell in a period-2 cycle = THE oil/water slosh (probe: swing 0.69→0.00). off = moveTop (skims the top, sloshes). Stratification is kept by the density sorts, not by skimming.
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
+  // DEBUG: freeze the whole sim (liquid, droplets, powder, soil) where it stands, so behaviour can be inspected and
+  // screenshotted without it moving under you. `liquid-step` then advances it a fixed number of ticks. GLOBAL, like
+  // every other sim switch — it stops the world for everyone in the room, not just the person who pressed it.
+  paused: false,
   perfLog: process.env.LIQ_PERF === '1',  // DEBUG: ~1×/s console line — active rooms/cells, sim ms/tick, emit KB/s. Enable via env LIQ_PERF=1 or a liquid-cfg patch (toggle-able live). Off = zero overhead.
   // FLUX LEVELLING — ⚠️ SHELVED 2026-07-20, left in behind this flag; DEFAULT OFF, do not enable by default.
   // "Global target, local transport": per-body equilibrium waterline + prefix-sum interface fluxes, moved at a
@@ -2652,7 +2656,11 @@ function soilTickRoom(room) {
 // ==LIQUID_SIM_BLOCK_END== (test harness slices the sim to this marker)
 // Restartable sim loop — the tick rate is liquidCfg.tickMs so the Liquid Debug menu can speed it up/slow it down live.
 let liquidTimer = null;
+let liquidStepsPending = 0;                           // ticks the debug panel has asked for while paused
 const runLiquidTick = () => {
+  // FROZEN. Nothing advances — not the grid, not droplets in flight, not powder or soil — until either the pause is
+  // lifted or a step is requested, so what you are looking at is exactly what the sim last produced.
+  if (liquidCfg.paused) { if (liquidStepsPending <= 0) return; liquidStepsPending--; }
   const _t0 = liquidCfg.perfLog ? performance.now() : 0; let _active = 0;
   liquidTickCount++;
   // Droplets fly BEFORE the grid ticks, so a droplet is broadcast at the position it spawned at rather than already a
@@ -3992,9 +4000,16 @@ io.on('connection', (socket) => {
   // ---- Liquid Debug config (GLOBAL, live-tunable sim switches driven by the client's Liquid Debug menu) ----
   socket.emit('liquid-cfg', liquidCfg);                     // send current state so a joining client's menu reflects it
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
+  // DEBUG single-step: advance the frozen sim by a few ticks. Only meaningful while paused; ignored otherwise, so a
+  // stray press can never make the sim run fast.
+  socket.on('liquid-step', (n) => {
+    if (!liquidCfg.paused) return;
+    const k = Math.max(1, Math.min(120, (n | 0) || 1));
+    liquidStepsPending += k;
+  });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'cohesion', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'paused']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
