@@ -1643,6 +1643,13 @@ const liquidCfg = {
   // may not actually be harmful now: a target with nothing under it is handed to the CASCADE instead of being filled
   // in place, so the water falls from there as droplets exactly as it would off any other edge, rather than hanging.
   dropSpreadWide: false,
+  // ⚠️ RETRACTED, 2026-07-22. There WAS a `dropFullTarget` flag here, to let a lip keep shedding droplets when the
+  // cell it spills into is BRIM-FULL rather than dropping back to grid flow — because a lip was measured refusing on
+  // 42% of ticks on a one-cell step. THAT MEASUREMENT WAS WRONG: the probe scene had silted up, so the target was
+  // permanently full and the "refusals" were a full box, not a step. With a drain keeping the scene in steady flow the
+  // lip sheds on 100% of ticks, and the flag measured INERT on both a one-cell step (spawn cov 0.11 either way) and a
+  // staircase (0.29 vs 0.31) — while causing a real regression: a settled pool on uneven ground never came to rest,
+  // because the lip shed into a full cell for ever. Reverted whole. Don't re-derive it: run scenes with a DRAIN.
   // (there is no lip hysteresis any more: it was removed with the submerged-edge fix, since a spill now requires a free
   //  surface AND a target with real room, which leaves nothing for it to bridge — and it was what let a submerged cell
   //  re-arm for ever. The flag lingered afterwards as a debug checkbox nothing read.)
