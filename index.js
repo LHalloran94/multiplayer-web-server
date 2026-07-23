@@ -1631,7 +1631,7 @@ const liquidCfg = {
   dropFall: 0.4,         // constant fall speed, cells per tick
   dropSpread: 1.0,       // ceiling on the width of the band droplets appear in, in cells
   dropSpreadFlow: true,  // only reach that ceiling when the flow warrants it
-  dropSpawnH: 0.24,      // 0 = at the source liquid's surface · 1 = halfway down the cell diagonally below
+  dropSpawnH: 0,         // 0 = AT the source liquid's surface (default; the line then starts exactly at the pool) · 1 = halfway down the cell diagonally below
   dropWeir: true,        // spill from the SURFACE down (the top slice of the pool, so it carries the right mixture)
   dropStratify: true,    // space a tick's droplets evenly down the fall step rather than at random
   dropLandSpread: 2,     // CAP on how many cells either side a landing may fan across
