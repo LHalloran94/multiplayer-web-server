@@ -1643,6 +1643,10 @@ const liquidCfg = {
   // may not actually be harmful now: a target with nothing under it is handed to the CASCADE instead of being filled
   // in place, so the water falls from there as droplets exactly as it would off any other edge, rather than hanging.
   dropSpreadWide: false,
+  // Droplets pack into columns growing OUTWARD from the ledge (nearest first) instead of scattering at random across
+  // the band, so a trickle is single-file against the edge and the stream width reads its flow directly. See
+  // spawnDroplets. off = the old random-within-the-band placement.
+  dropEdgeFill: true,
   // ⚠️ RETRACTED, 2026-07-22. There WAS a `dropFullTarget` flag here, to let a lip keep shedding droplets when the
   // cell it spills into is BRIM-FULL rather than dropping back to grid flow — because a lip was measured refusing on
   // 42% of ticks on a one-cell step. THAT MEASUREMENT WAS WRONG: the probe scene had silted up, so the target was
@@ -1924,6 +1928,17 @@ function spawnDroplets(room, i, r, c, dc, took, taken) {
   let idx = 0, cum = 0;
   const seq = roomDropSeq[room] || (roomDropSeq[room] = { n: 1 });
   const out = roomDropSpawns[room] || (roomDropSpawns[room] = []);
+  // EDGE-FILL placement. Droplets pack into vertical COLUMNS that grow OUTWARD from the ledge face, nearest column
+  // filled first; a new column only opens once the near ones hold their share. So a trickle is a single file hugging
+  // the edge (continuous with the pool it left) and the stream WIDTH is a direct readout of the flow rate — no random
+  // horizontal scatter. Ranks are emitted heaviest-first, so the heaviest liquid takes the inner columns (hugs the
+  // ledge) and lighter liquids sit outside it. `dropEdgeFill` off = the old random-within-the-band placement.
+  const repSide = CELL * Math.sqrt(Math.max(1, liquidCfg.dropUnit) / cap);   // nominal droplet size, for column geometry
+  const ySpan0 = Math.max(repSide, Math.min(fallPx, solidY - sy - repSide));
+  const perCol = Math.max(1, Math.round(ySpan0 / Math.max(2, repSide)));     // droplets that stack down one column's fall step
+  const laneCols = Math.max(1, Math.floor(band / repSide) + 1);              // columns that fit in the allowed band
+  const colsUsed = Math.max(1, Math.min(laneCols, Math.ceil(nTotal / perCol)));
+  const perColD = Math.max(1, Math.ceil(nTotal / colsUsed));                 // droplets assigned to each column
   for (let k = 0; k < T; k++) {
     const a = took[k]; if (a < 1) continue;
     const nk = Math.max(1, Math.round(a / liquidCfg.dropUnit));
@@ -1937,10 +1952,20 @@ function spawnDroplets(room, i, r, c, dc, took, taken) {
       const side = CELL * Math.sqrt(each / cap);
       const lane = Math.max(0.1, Math.min(band, CELL - side));
       const yJit = Math.max(0, Math.min(fallPx, solidY - sy - side));
-      const f = f0 + Math.random() * (f1 - f0);
-      const slot = liquidCfg.dropStratify ? (idx + 0.5 + (Math.random() - 0.5) * 0.5) / nTotal : Math.random();
+      let px, py;
+      if (liquidCfg.dropEdgeFill) {
+        const col = Math.min(colsUsed - 1, Math.floor(idx / perColD));       // which column out from the edge
+        const vN = Math.min(perColD, nTotal - col * perColD);                // droplets actually in this column
+        const vs = idx - col * perColD;                                      // slot within it
+        const off = Math.min(lane, col * repSide);                           // clamp to the allowed band
+        const slot = liquidCfg.dropStratify ? (vs + 0.5) / vN : Math.random();
+        px = faceX + dc * (side * 0.5 + off); py = sy + slot * yJit;
+      } else {
+        const f = f0 + Math.random() * (f1 - f0);
+        const slot = liquidCfg.dropStratify ? (idx + 0.5 + (Math.random() - 0.5) * 0.5) / nTotal : Math.random();
+        px = faceX + dc * (side * 0.5 + f * lane); py = sy + slot * yJit;
+      }
       idx++;
-      const px = faceX + dc * (side * 0.5 + f * lane), py = sy + slot * yJit;
       const id = seq.n = (seq.n + 1) & 0xffff;
       drops.push({ id, x: px, y: py, rank: k, amt: each, dist: 0, dir: dc });
       // the spawn event is all a client needs: the fall is ballistic, so it replays the rest itself
@@ -4207,7 +4232,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'paused']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
