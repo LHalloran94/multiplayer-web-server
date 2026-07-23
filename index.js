@@ -1647,6 +1647,10 @@ const liquidCfg = {
   // the band, so a trickle is single-file against the edge and the stream width reads its flow directly. See
   // spawnDroplets. off = the old random-within-the-band placement.
   dropEdgeFill: true,
+  // Horizontal spacing between the columns droplets pack into, as a multiple of a droplet's own width. 1 = FLUSH
+  // (columns touch), which is the default; higher spreads them apart across the band. The innermost column is always
+  // flush with the wall the stream fell over regardless of this.
+  dropColSpace: 1,
   // ⚠️ RETRACTED, 2026-07-22. There WAS a `dropFullTarget` flag here, to let a lip keep shedding droplets when the
   // cell it spills into is BRIM-FULL rather than dropping back to grid flow — because a lip was measured refusing on
   // 42% of ticks on a one-cell step. THAT MEASUREMENT WAS WRONG: the probe scene had silted up, so the target was
@@ -1957,7 +1961,7 @@ function spawnDroplets(room, i, r, c, dc, took, taken) {
         const col = Math.min(colsUsed - 1, Math.floor(idx / perColD));       // which column out from the edge
         const vN = Math.min(perColD, nTotal - col * perColD);                // droplets actually in this column
         const vs = idx - col * perColD;                                      // slot within it
-        const off = Math.min(lane, col * repSide);                           // clamp to the allowed band
+        const off = Math.min(lane, col * repSide * Math.max(0, liquidCfg.dropColSpace));   // column pitch = width × spacing; clamp to the band
         const slot = liquidCfg.dropStratify ? (vs + 0.5) / vN : Math.random();
         px = faceX + dc * (side * 0.5 + off); py = sy + slot * yJit;
       } else {
@@ -4236,7 +4240,7 @@ io.on('connection', (socket) => {
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
-    const dnum = { dropUnit: [1, 16], dropFall: [0.05, 4], dropSpawnH: [0, 1], dropSpread: [0.1, 1],
+    const dnum = { dropUnit: [1, 16], dropFall: [0.05, 4], dropSpawnH: [0, 1], dropSpread: [0.1, 1], dropColSpace: [0, 4],
                    dropLandSpread: [0, 5], dropTermFall: [1, 16], dropSpreadRef: [2, 40], dropImpactCurve: [0.2, 3] };
     for (const k in dnum) if (k in patch) { const v = +patch[k]; if (!isNaN(v)) liquidCfg[k] = Math.max(dnum[k][0], Math.min(dnum[k][1], v)); }
     if ('fluxRate' in patch) liquidCfg.fluxRate = Math.max(1, Math.min(128, patch.fluxRate | 0));
