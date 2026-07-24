@@ -1800,6 +1800,9 @@ function fineSet(room) { return roomFineActive[room] || (roomFineActive[room] = 
 const roomFluxSeen = {}, roomFluxStack = {};
 function ensureFluxSeen(room) { return roomFluxSeen[room] || (roomFluxSeen[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 function ensureFluxStack(room) { return roomFluxStack[room] || (roomFluxStack[room] = new Int32Array(TERRAIN_COLS * TERRAIN_ROWS)); }
+const roomFineFluxSeen = {}, roomFineFluxStack = {};   // fine-sized scratch for the fine flux-levelling pass (9× the coarse)
+function ensureFineFluxSeen(room, cells) { const a = roomFineFluxSeen[room]; return (a && a.length === cells) ? a : (roomFineFluxSeen[room] = new Uint8Array(cells)); }
+function ensureFineFluxStack(room, cells) { const a = roomFineFluxStack[room]; return (a && a.length === cells) ? a : (roomFineFluxStack[room] = new Int32Array(cells)); }
 // `isSolid` inside liquidTickRoom is a closure over that call; the droplet functions run outside it and need their own.
 const isSolidCell = (v) => v !== 0 && !isFluidId(v);
 const DROP_MAX = 4000;       // hard ceiling on droplets in flight per room, so a pathological pour cannot run away
@@ -3023,6 +3026,80 @@ function fineLiquidTickRoom(room, SUB) {
     if (pend) active.add(i);
     if (changedSet.has(i)) wakeN(i);
   }
+  // ═══ FLUX LEVELLING (liquidCfg.fluxLevel) at fine res — "global target, LOCAL transport" (ported from the coarse sim).
+  // Off by default (1c/1d handle levelling); on = per-body equilibrium waterline + prefix-sum interface fluxes moved at a
+  // bounded rate BETWEEN ADJACENT cells only. Faster on wide pools; shelved for its sliding-slab look + it levels streams
+  // it absorbs. Behind the same toggle so it can be A/B'd on the fine grid. No secondary lane here (fine has none).
+  if (liquidCfg.fluxLevel) {
+    const ROWS = TERRAIN_ROWS * SUB, NCELL2 = COLS * ROWS, RATE = liquidCfg.fluxRate | 0;
+    const lvlMove = liquidCfg.levelMix ? moveProp : moveTop;
+    const seen = ensureFineFluxSeen(room, NCELL2); seen.fill(0);
+    const stack = ensureFineFluxStack(room, NCELL2);
+    const cFloor = new Int32Array(COLS), cTop = new Int32Array(COLS), cH = new Float64Array(COLS);
+    for (let start = 0; start < NCELL2; start++) {
+      if (seen[start] || isSolid(start) || tot[start] <= 0) continue;
+      let sp = 0; stack[sp++] = start; seen[start] = 1;
+      let minC = COLS, maxC = -1;
+      while (sp > 0) {
+        const j = stack[--sp], jc = j % COLS;
+        if (jc < minC) minC = jc; if (jc > maxC) maxC = jc;
+        const jr = (j / COLS) | 0;
+        if (jc > 0) { const k = j - 1; if (!seen[k] && !isSolid(k) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
+        if (jc < COLS - 1) { const k = j + 1; if (!seen[k] && !isSolid(k) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
+        if (jr > 0) { const k = j - COLS; if (!seen[k] && !isSolid(k) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
+        if (jr < ROWS - 1) { const k = j + COLS; if (!seen[k] && !isSolid(k) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
+      }
+      if (maxC <= minC) continue;
+      const cols = [], part = new Uint8Array(COLS);
+      for (let c = minC; c <= maxC; c++) {
+        let r = -1;
+        for (let rr = ROWS - 1; rr >= 0; rr--) { const j = rr * COLS + c; if (seen[j] && tot[j] > 0) { r = rr; break; } }
+        if (r < 0) continue;
+        while (r + 1 < ROWS && r + 1 < LIQUID_FLOOR_ROW && !isSolid((r + 1) * COLS + c)) r++;
+        const fl = r + 1;
+        let t = fl; while (t - 1 >= 0 && !isSolid((t - 1) * COLS + c) && tot[(t - 1) * COLS + c] >= cap) t--;
+        if (t - 1 >= 0 && !isSolid((t - 1) * COLS + c)) { const v = tot[(t - 1) * COLS + c]; if (v > 0 && v < cap && sd[(t - 1) * COLS + c] === 0) t--; }
+        if (t >= fl) continue;
+        let h = 0; for (let rr = t; rr < fl; rr++) h += tot[rr * COLS + c];
+        let cl = t; while (cl - 1 >= 0 && !isSolid((cl - 1) * COLS + c) && tot[(cl - 1) * COLS + c] <= 0) cl--;
+        cFloor[c] = fl; cTop[c] = cl; cH[c] = h; part[c] = 1; cols.push(c);
+      }
+      if (cols.length < 2) continue;
+      const barrier = (c) => part[c] && cTop[c] > 0 && isSolid((cTop[c] - 1) * COLS + c) && cH[c] >= (cFloor[c] - cTop[c]) * cap - 1;
+      const levelSegment = (a, b) => {
+        let n = 0, M = 0;
+        for (let c = a; c <= b; c++) if (part[c]) { n++; M += cH[c]; }
+        if (n < 2) return;
+        const volAt = (L) => { let v = 0; for (let c = a; c <= b; c++) if (part[c]) { const mx = (cFloor[c] - cTop[c]) * cap; let hh = (cFloor[c] - L) * cap; if (hh < 0) hh = 0; if (hh > mx) hh = mx; v += hh; } return v; };
+        let loL = -1, hiL = ROWS + 1;
+        for (let it = 0; it < 32; it++) { const mid = (loL + hiL) / 2; if (volAt(mid) > M) loL = mid; else hiL = mid; }
+        const L = (loL + hiL) / 2;
+        let run = 0;
+        for (let c = a; c < b; c++) {
+          if (part[c]) { const mx = (cFloor[c] - cTop[c]) * cap; let tgt = (cFloor[c] - L) * cap; if (tgt < 0) tgt = 0; if (tgt > mx) tgt = mx; run += cH[c] - tgt; }
+          if (!part[c] || !part[c + 1]) continue;
+          let want = run > RATE ? RATE : run < -RATE ? -RATE : run;
+          if (want > -1 && want < 1) continue;
+          const src = want > 0 ? c : c + 1, dst = want > 0 ? c + 1 : c;
+          let need = Math.floor(Math.abs(want));
+          let sr = cTop[src], dr = cFloor[dst] - 1;
+          while (need > 0) {
+            while (sr < cFloor[src] && (isSolid(sr * COLS + src) || tot[sr * COLS + src] <= 0)) sr++;
+            if (sr >= cFloor[src]) break;
+            while (dr >= cTop[dst] && (isSolid(dr * COLS + dst) || cap - tot[dr * COLS + dst] <= 0)) dr--;
+            if (dr < cTop[dst] || dr < sr) break;
+            const A = sr * COLS + src, B = dr * COLS + dst; if (A === B) break;
+            const mv = Math.min(tot[A], cap - tot[B], need); if (mv <= 0) break;
+            const did = lvlMove(A, B, mv); if (did <= 0) break;
+            sd[B] = 0; need -= did; wakeN(A); wakeN(B);
+          }
+        }
+      };
+      let segA = minC;
+      for (let c = minC; c <= maxC; c++) if (barrier(c)) { if (c - 1 >= segA) levelSegment(segA, c - 1); segA = c + 1; }
+      if (maxC >= segA) levelSegment(segA, maxC);
+    }
+  }
   for (const j of tagCleared) changedSet.add(j);
   if (changedSet.size && !liquidQuiet) {
     // WIRE (liquid-fine-cells): sub + cols so the client can decode fine indices, then per changed cell
@@ -3103,12 +3180,13 @@ function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back do
   let ex = ct - LIQUID_MAX; for (let k = LIQ_T - 1; k >= 0 && ex > 0; k--) { const d = Math.min(out[k], ex); out[k] -= d; ex -= d; }   // trim overflow from the lightest
   return out;
 }
-function upscaleRoomToFine(room, SUB) {   // convert this room's coarse liquid into the fine grid; coarse liquid is then cleared (fine owns it)
+function upscaleRoomToFine(room, SUB) {   // convert this room's coarse liquid into the fine grid; coarse liquid + grid fluid-ids are cleared (fine owns it). Returns [i,0,…] terrain cells to re-broadcast.
   ensureFineArrays(room, SUB);
   roomFineAmt[room].fill(0); roomFineTotal[room].fill(0); roomFineSide[room].fill(0); fineSet(room).clear();
-  const camt = roomLiquidAmt[room], ctot = roomLiquidTotal[room];
-  if (camt && ctot) for (let i = 0; i < ctot.length; i++) { if (ctot[i] <= 0) continue; const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0, ca = new Array(LIQ_T), b = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) ca[k] = camt[b + k]; fineSetBlock(room, SUB, cc, cr, ca); }
+  const camt = roomLiquidAmt[room], ctot = roomLiquidTotal[room], grid = roomTerrain[room], hp = roomTerrainHp[room], cleared = [];
+  if (camt && ctot) for (let i = 0; i < ctot.length; i++) { if (ctot[i] <= 0) continue; const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0, ca = new Array(LIQ_T), b = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) ca[k] = camt[b + k]; fineSetBlock(room, SUB, cc, cr, ca); if (grid && isFluidId(grid[i])) { grid[i] = 0; if (hp) hp[i] = 0; cleared.push(i, 0); } }   // decouple grid fluid-ids
   if (camt) camt.fill(0); if (ctot) ctot.fill(0); if (roomLiquidActive[room]) roomLiquidActive[room].clear();
+  return cleared;
 }
 function downscaleRoomToCoarse(room, SUB) {   // convert the fine grid back into coarse liquid; fine is then cleared
   const grid = roomTerrain[room]; if (!grid || !roomFineTotal[room]) return;
@@ -3164,6 +3242,14 @@ function sourceTickRoomFine(room, SUB) {
   }
   if (!src.size) delete roomLiquidSrc[room];
   if (touched.size) emitFineCells(room, Array.from(touched));
+}
+// Wake the fine liquid in a COARSE cell rect (after a terrain edit) so it flows into freed space — add to add, never seed
+// or clear (seeding/clearing is done explicitly by placement). Grid is decoupled in fine mode, so this reads only fine state.
+function fineWakeRect(room, c0, r0, c1, r1) {
+  const tot = roomFineTotal[room]; if (!tot) return;
+  const SUB = roomFineSub[room] || liquidCfg.sub, FCOLS = TERRAIN_COLS * SUB, FROWS = TERRAIN_ROWS * SUB, act = fineSet(room);
+  const fc0 = Math.max(0, c0 * SUB), fc1 = Math.min(FCOLS - 1, (c1 + 1) * SUB - 1), fr0 = Math.max(0, r0 * SUB), fr1 = Math.min(FROWS - 1, (r1 + 1) * SUB - 1);
+  for (let r = fr0; r <= fr1; r++) for (let c = fc0; c <= fc1; c++) { const i = r * FCOLS + c; if (tot[i] > 0) act.add(i); }
 }
 // Rescale every room's liquid (coarse + fine) from the current LIQUID_MAX to `newCap` so a full cell stays full when the
 // cell-capacity slider changes. Uint8-safe (clamped ≤255). Recomputes totals. Caller then sets LIQUID_MAX + re-broadcasts.
@@ -4554,7 +4640,7 @@ io.on('connection', (socket) => {
     // FINE-CELL resolution toggle. On change, CONVERT every room's liquid between the coarse and fine grids and push a
     // fresh init so the picture carries over. sub ∈ {1,3} for now (1 = coarse untouched, 3 = fine 3×3).
     if ('sub' in patch) { const nv = (patch.sub | 0) === 3 ? 3 : 1; if (nv !== liquidCfg.sub) { const old = liquidCfg.sub; liquidCfg.sub = nv;
-      if (nv > 1) { for (const room in roomLiquidTotal) { upscaleRoomToFine(room, nv); const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); } }
+      if (nv > 1) { for (const room in roomLiquidTotal) { const cleared = upscaleRoomToFine(room, nv); if (cleared.length) io.to(room).emit('terrain-set', { cells: cleared }); const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); } }
       else { for (const room in roomFineTotal) { downscaleRoomToCoarse(room, old); io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) }); io.to(room).emit('liquid-fine-init', { sub: 1, cols: TERRAIN_COLS, cells: [] }); } }
     } }
     // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
@@ -5212,6 +5298,21 @@ io.on('connection', (socket) => {
     // NOT idempotent, double-applying would desync the sender's per-cell hp from everyone else's.
     if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd)) {
       // Wake any liquid in/around the edit so it flows into the freed space (dig-out) or spreads (poured).
+      if (liquidCfg.sub > 1) {
+        // FINE mode: liquid is DECOUPLED from the grid. A fluid paint → seed the fine block + set the grid back to EMPTY
+        // (no fluid-id litter → no phantom FX / "can't place" / re-seed on the next edit). Solid-over-liquid + carve clear
+        // the fine block; surrounding fine liquid is only WOKEN, never re-seeded from the grid.
+        ensureFineArrays(currentAvatarRoom, liquidCfg.sub);
+        const bc0 = Math.max(0, Math.floor((cx - rr) / TERRAIN_CELL)), bc1 = Math.min(TERRAIN_COLS - 1, Math.floor((cx + rr) / TERRAIN_CELL));
+        const br0 = Math.max(0, Math.floor((cy - rr) / TERRAIN_CELL)), br1 = Math.min(TERRAIN_ROWS - 1, Math.floor((cy + rr) / TERRAIN_CELL));
+        const changedFine = [];
+        for (let r = br0; r <= br1; r++) for (let c = bc0; c <= bc1; c++) { const i = r * TERRAIN_COLS + c;
+          if (op === 'paint' && isFluidId(m) && grid[i] === m) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[m]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, liquidCfg.sub, c, r, ca)) changedFine.push(x); grid[i] = 0; hp[i] = 0; }
+          else if (op === 'carve' || (op === 'paint' && isSolidCell(grid[i]))) for (const x of fineClearBlock(currentAvatarRoom, liquidCfg.sub, c, r)) changedFine.push(x);
+        }
+        fineWakeRect(currentAvatarRoom, bc0 - 1, br0 - 1, bc1 + 1, br1 + 1);
+        emitFineCells(currentAvatarRoom, changedFine);
+      } else
       activateLiquidRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);
       activatePowderRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);   // dig removes support / paint drops grains
       socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd });
@@ -5248,7 +5349,7 @@ io.on('connection', (socket) => {
       for (let k = 0; k + 1 < cells.length; k += 2) {
         const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
         const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0;
-        if (isFluidId(grid[i])) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid[i]]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, liquidCfg.sub, cc, cr, ca)) changedFine.push(x); }
+        if (isFluidId(grid[i])) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid[i]]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, liquidCfg.sub, cc, cr, ca)) changedFine.push(x); grid[i] = 0; hp[i] = 0; cells[k + 1] = 0; changed = true; }   // decouple: liquid → fine grid, terrain stays empty
         else for (const x of fineClearBlock(currentAvatarRoom, liquidCfg.sub, cc, cr)) changedFine.push(x);   // a solid/empty coarse cell clears its fine block
         if (isPowderId(grid[i])) powderSet(currentAvatarRoom).add(i); const up = i - TERRAIN_COLS; if (up >= 0 && isPowderId(grid[up])) powderSet(currentAvatarRoom).add(up);
       }
