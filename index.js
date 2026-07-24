@@ -1705,6 +1705,10 @@ const liquidCfg = {
   // falling straight down (1a) next tick — same end state, one tick slower, no diagonal/geometry rule (a diagonal gap
   // between two solids is a sealed corner anyway). Fine-only so the coarse system is unaffected.
   fineLedge: true,
+  // FINE LEVELLING SUB-STEPS: run the LOCAL surface levelling (1c) this many extra times per tick. Same cascade look (local,
+  // symmetric, no teleport), just K× faster propagation — recovers the speed fine cells lose to being smaller (K=SUB=3
+  // matches coarse). Purely a speed dial; 1 = unchanged. Off when fluxLevel is on (that replaces 1c/1d wholesale).
+  fineLevelSteps: 1,
   // CELL CAPACITY = the number of vertical fill "slices" a cell holds (LIQUID_MAX). Higher = smoother/finer vertical fill;
   // must stay ≤255 (Uint8). Changing it RESCALES all existing liquid (a full cell stays full) + re-broadcasts. Global
   // (coarse + fine); at 64 the coarse system is unchanged. Stratification (sortRate units/tick) is proportionally slower higher.
@@ -2915,6 +2919,28 @@ function fineLiquidTickRoom(room, SUB) {
     if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
   const floorRank = (j) => { const b = j * T; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) return rk; return -1; };
   const ceilRank = (j) => { const b = j * T; for (let rk = T - 1; rk >= 0; rk--) if (amt[b + rk] > 0) return rk; return -1; };
+  // Extra LOCAL levelling sweeps (fineLevelSteps): symmetric 1c on POOL cells (below blocked), run K−1 more times/tick so the
+  // SAME cascade propagates faster. Same as the main-loop 1c; marks moved cells so they broadcast + stay active. No teleport.
+  const lvlMoveFn = liquidCfg.levelMix ? moveProp : moveTop;
+  const fineLevelSweep = () => {
+    for (const i of Array.from(active)) {
+      if (isSolid(i)) continue;
+      const r = (i / COLS) | 0, c = i - r * COLS, L = tot[i]; if (L <= 1) continue;
+      if (!((r + 1 >= LIQUID_FLOOR_ROW) || isSolid(i + COLS) || tot[i + COLS] >= cap)) continue;   // still falling → don't level
+      const jL = c > 0 ? i - 1 : -1, jR = c < COLS - 1 ? i + 1 : -1;
+      const okL = jL >= 0 && !isSolid(jL) && L - tot[jL] > 1, okR = jR >= 0 && !isSolid(jR) && L - tot[jR] > 1;
+      let sum = L, cnt = 1; if (okL) { sum += tot[jL]; cnt++; } if (okR) { sum += tot[jR]; cnt++; }
+      if (cnt < 2) continue;
+      const avg = sum / cnt;
+      let shedL = okL ? Math.min(avg - tot[jL], cap - tot[jL]) : 0, shedR = okR ? Math.min(avg - tot[jR], cap - tot[jR]) : 0;
+      if (shedL < 0) shedL = 0; if (shedR < 0) shedR = 0;
+      const denom = shedL + shedR, total = Math.floor(denom);
+      if (total <= 0 || denom <= 0) continue;
+      let mvL = Math.round(total * shedL / denom); if (mvL > total) mvL = total; const mvR = total - mvL;
+      if (mvL > 0) { lvlMoveFn(i, jL, mvL); sd[jL] = 0; }
+      if (mvR > 0) { lvlMoveFn(i, jR, mvR); sd[jR] = 0; }
+    }
+  };
   let processed = 0;
   for (const i of list) {
     if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); continue; }
@@ -3026,6 +3052,8 @@ function fineLiquidTickRoom(room, SUB) {
     if (pend) active.add(i);
     if (changedSet.has(i)) wakeN(i);
   }
+  // extra local levelling sweeps (speed dial; same cascade, faster). Off when flux is on (it replaces 1c/1d).
+  if (!liquidCfg.fluxLevel && liquidCfg.fineLevelSteps > 1) for (let s = 1; s < liquidCfg.fineLevelSteps; s++) fineLevelSweep();
   // ═══ FLUX LEVELLING (liquidCfg.fluxLevel) at fine res — "global target, LOCAL transport" (ported from the coarse sim).
   // Off by default (1c/1d handle levelling); on = per-body equilibrium waterline + prefix-sum interface fluxes moved at a
   // bounded rate BETWEEN ADJACENT cells only. Faster on wide pools; shelved for its sliding-slab look + it levels streams
@@ -4632,6 +4660,7 @@ io.on('connection', (socket) => {
     for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused', 'fineLedge']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
+    if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(8, patch.fineLevelSteps | 0));
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(8, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
       for (const room in roomLiquidTotal) io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) });
