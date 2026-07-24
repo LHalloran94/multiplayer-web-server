@@ -1583,7 +1583,7 @@ function dropSourcesInRect(room, c0, r0, c1, r1) {
   if (!s.size) delete roomLiquidSrc[room];
   if (gone.length) io.to(room).emit('liquid-src', { cells: gone, on: false });
 }
-const LIQUID_MAX = 64;                                // TOTAL fill units per cell (summed across all liquids in the cell)
+let LIQUID_MAX = 64;                                  // TOTAL fill units per cell (= vertical "slices"). Runtime-tunable via liquidCfg.cellCap (rescales existing liquid); MUST stay ≤255 (Uint8 arrays/wire).
 const LIQUID_LEVEL_SCAN = 28;                         // how far a surface cell looks along its row for a lower spot to level toward (flat-settle)
 // OPTION 2 — MULTI-LIQUID per cell. Each cell holds a density-sorted stack: roomLiquidAmt[i*LIQ_T + rank] = fine units of
 // the liquid whose density RANK is `rank` (0 heaviest=lava … 5 lightest=oil). The slot index IS the density order, so a
@@ -1701,6 +1701,14 @@ const liquidCfg = {
   // (fineLiquidTickRoom) in SEPARATE arrays, gated ON alongside the coarse one — same multi-liquid physics, smaller cells,
   // so thin streams get a real horizontal position. Inc 1 = pipeline (flow + wire + render); reactions/sources come next.
   sub: 1,
+  // FINE: use the diagonal ledge spill (1b). OFF ⇒ rely on lateral levelling (1c) moving liquid into the edge cell + it
+  // falling straight down (1a) next tick — same end state, one tick slower, no diagonal/geometry rule (a diagonal gap
+  // between two solids is a sealed corner anyway). Fine-only so the coarse system is unaffected.
+  fineLedge: true,
+  // CELL CAPACITY = the number of vertical fill "slices" a cell holds (LIQUID_MAX). Higher = smoother/finer vertical fill;
+  // must stay ≤255 (Uint8). Changing it RESCALES all existing liquid (a full cell stays full) + re-broadcasts. Global
+  // (coarse + fine); at 64 the coarse system is unchanged. Stratification (sortRate units/tick) is proportionally slower higher.
+  cellCap: 64,
 };
 // DEBUG perf accounting (only touched when liquidCfg.perfLog). `emitLiquidCells` centralises the `liquid-cells` emit so we
 // can size the wire payload; runLiquidTick tallies sim time + active cells and prints a rolling ~1s summary to the console.
@@ -1822,6 +1830,7 @@ function dropletBroadcastCells(room, cells) {
 // cell reads as air.
 function sourceTickRoom(room) {
   const src = roomLiquidSrc[room]; if (!src || !src.size) return;
+  if (liquidCfg.sub > 1) return sourceTickRoomFine(room, roomFineSub[room] || liquidCfg.sub);   // fine mode: top up the fine block
   const grid = roomTerrain[room]; if (!grid) return;
   const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), led = srcLedger(room);
   const touched = [];
@@ -2885,6 +2894,8 @@ function fineLiquidTickRoom(room, SUB) {
   const SCAN = LIQUID_LEVEL_SCAN * SUB;                                  // levelling scan reach in CELLS → scaled so PHYSICAL reach is unchanged
   const coarseOf = (k) => { const fr = (k / COLS) | 0, fc = k - fr * COLS; return ((fr / SUB) | 0) * TERRAIN_COLS + ((fc / SUB) | 0); };
   const isSolid = (k) => { if (k < 0 || k >= NCELL) return true; const v = grid[coarseOf(k)]; return v !== 0 && !isFluidId(v); };   // fine solid = the coarse terrain cell it sits in
+  const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; return isSinkId(grid[coarseOf(k)]); };   // a fine cell whose coarse cell is a DRAIN block
+  const sinkRate = Math.max(0, Math.min(cap, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
   const list = Array.from(active); active.clear();
   list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot[a], lb = tot[b]; if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
   const changedSet = new Set(), tagCleared = new Set(), fell = new Set(), fellDown = new Set();
@@ -2908,7 +2919,13 @@ function fineLiquidTickRoom(room, SUB) {
     const r = (i / COLS) | 0, c = i - r * COLS, canDown = r + 1 < LIQUID_FLOOR_ROW;
     let L = tot[i]; if (L <= 0) continue;
     processed++;
-    // (fine pipeline: no secondary lane, sink, reactions or droplets — inc 1)
+    // ---- SINK (drain block id 17): a fine cell touching a coarse drain block loses liquid, heaviest first (ledgered).
+    if (sinkRate > 0 && (isSinkF(i + COLS) || isSinkF(i - COLS) || (c > 0 && isSinkF(i - 1)) || (c < COLS - 1 && isSinkF(i + 1)))) {
+      let need = sinkRate < L ? sinkRate : L; const sb = i * T;
+      for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[sb + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[sb + rk] = a - mv; sinkLed[rk] += mv; need -= mv; }
+      recomp(i); mark(i); wakeN(i); L = tot[i]; if (L <= 0) continue;
+    }
+    // (fine pipeline: no secondary lane, reactions or droplets — inc 1)
     const noSortStream = liquidCfg.streamNoSort && liquidCfg.streamTag && sd[i] !== 0;
     const noSortNbr = liquidCfg.streamNoSortNbr && liquidCfg.streamTag;
     // (2) density sort with the cell BELOW
@@ -2930,8 +2947,9 @@ function fineLiquidTickRoom(room, SUB) {
     const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;
     let pend = false;
     const reduce = (want) => { if (want <= 0) return 0; if (lf >= 1) return want; lvlAcc[i] += want * lf; let mv = lvlAcc[i] | 0; if (mv > want) mv = want; lvlAcc[i] -= mv; if (mv <= 0) pend = true; return mv; };
-    // (1b) ledge spill — plain (no chute/secondary-lane, no droplet cascade), with the mid-air support guard
-    if (liquidCfg.ledgeSpill && L > 0 && canDown && (isSolid(i + COLS) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(j)) continue;
+    // (1b) ledge spill — plain (no chute/secondary-lane, no droplet cascade), with the mid-air support guard. Gated on
+    // fineLedge: OFF ⇒ skip it and let 1c move liquid into the edge cell + 1a drop it (same result, one tick slower).
+    if (liquidCfg.ledgeSpill && liquidCfg.fineLedge && L > 0 && canDown && (isSolid(i + COLS) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(j)) continue;
       if (!isSolid(i + COLS)) { const jb = j + COLS; const jSupported = ((j / COLS) | 0) + 1 >= LIQUID_FLOOR_ROW || isSolid(jb) || tot[jb] > 0; if (!jSupported) continue; }
       if (tot[j] < cap) { const t = reduce(Math.min(L, cap - tot[j])); const ns = dc > 0 ? SIDE_LEFT : SIDE_RIGHT;
         const tagOk = !liquidCfg.streamTag || (isSolid(i + COLS) && (tot[j] === 0 || fell.has(j)));
@@ -3126,6 +3144,35 @@ function fineActivateRect(room, grid, c0, r0, c1, r1) {   // placement in fine m
     else for (const x of fineClearBlock(room, SUB, c, r)) changed.push(x);
   }
   emitFineCells(room, changed);
+}
+// SOURCE tick for the fine grid: each source coarse cell tops up its SUB×SUB fine block (bottom-fill) by rate·SUB² units
+// of its rank per tick (rate·SUB² keeps the physical refill rate the same as the coarse source). Ledgered like the coarse one.
+function sourceTickRoomFine(room, SUB) {
+  const src = roomLiquidSrc[room]; if (!src || !src.size) return;
+  const grid = roomTerrain[room]; if (!grid) return;
+  ensureFineArrays(room, SUB);
+  const amt = roomFineAmt[room], tot = roomFineTotal[room], act = fineSet(room), led = srcLedger(room), FCOLS = TERRAIN_COLS * SUB, cap = LIQUID_MAX, touched = new Set();
+  for (const [ci, s] of src) {
+    if (ci < 0 || ci >= grid.length || isSinkId(grid[ci]) || isSolidCell(grid[ci])) { src.delete(ci); continue; }
+    const rank = s.rank | 0, rate = Math.max(0, Math.min(cap, (s.rate === undefined ? liquidCfg.srcRate : s.rate) | 0));
+    if (!rate) continue;
+    let toAdd = rate * SUB * SUB; const cc = ci % TERRAIN_COLS, cr = (ci / TERRAIN_COLS) | 0, fx0 = cc * SUB, fy0 = cr * SUB;
+    for (let dy = SUB - 1; dy >= 0 && toAdd > 0; dy--) for (let dx = 0; dx < SUB && toAdd > 0; dx++) {
+      const i = (fy0 + dy) * FCOLS + (fx0 + dx), free = cap - tot[i]; if (free <= 0) continue;
+      const add = free < toAdd ? free : toAdd; amt[i * LIQ_T + rank] += add; tot[i] += add; led[rank] += add; toAdd -= add; act.add(i); touched.add(i);
+    }
+  }
+  if (!src.size) delete roomLiquidSrc[room];
+  if (touched.size) emitFineCells(room, Array.from(touched));
+}
+// Rescale every room's liquid (coarse + fine) from the current LIQUID_MAX to `newCap` so a full cell stays full when the
+// cell-capacity slider changes. Uint8-safe (clamped ≤255). Recomputes totals. Caller then sets LIQUID_MAX + re-broadcasts.
+function rescaleAllLiquid(newCap) {
+  const oldCap = LIQUID_MAX; if (newCap === oldCap || oldCap <= 0) return;
+  const f = newCap / oldCap;
+  const doArr = (amtArr, totArr) => { if (!amtArr || !totArr) return; for (let i = 0; i < totArr.length; i++) { const b = i * LIQ_T; let s = 0; for (let k = 0; k < LIQ_T; k++) { let v = Math.round(amtArr[b + k] * f); if (v > 255) v = 255; amtArr[b + k] = v; s += v; } totArr[i] = s > 255 ? 255 : s; } };
+  for (const room in roomLiquidAmt) doArr(roomLiquidAmt[room], roomLiquidTotal[room]);
+  for (const room in roomFineAmt) doArr(roomFineAmt[room], roomFineTotal[room]);
 }
 
 const TERRAIN_MAT_MAX = 17;                           // built-in material ids 1..17 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil/glass/drain); 0 = empty
@@ -4496,9 +4543,14 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused', 'fineLedge']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
+    // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
+    if ('cellCap' in patch) { const nv = Math.max(8, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
+      for (const room in roomLiquidTotal) io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) });
+      if (liquidCfg.sub > 1) for (const room in roomFineTotal) { const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); }
+    } }
     // FINE-CELL resolution toggle. On change, CONVERT every room's liquid between the coarse and fine grids and push a
     // fresh init so the picture carries over. sub ∈ {1,3} for now (1 = coarse untouched, 3 = fine 3×3).
     if ('sub' in patch) { const nv = (patch.sub | 0) === 3 ? 3 : 1; if (nv !== liquidCfg.sub) { const old = liquidCfg.sub; liquidCfg.sub = nv;
