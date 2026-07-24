@@ -5241,12 +5241,26 @@ io.on('connection', (socket) => {
       // was drops its source flag. Only a cell that stays a liquid keeps refilling.
       if (!isFluidId(v)) dropSource(currentAvatarRoom, i);
     }
-    const tot = ensureLiquidTotal(currentAvatarRoom), lam = ensureLiquidAmt(currentAvatarRoom);    // keep the multi-liquid stacks in step with placed/cleared cells, then wake
-    for (let k = 0; k + 1 < cells.length; k += 2) {
-      const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
-      if (isFluidId(grid[i])) { if (!tot[i] || liqRepId(lam, i) !== grid[i]) liqSetSingle(currentAvatarRoom, i, grid[i]); activateLiquidCell(currentAvatarRoom, i, grid); } else liqClearCell(currentAvatarRoom, i);
-      const up = i - TERRAIN_COLS; if (up >= 0 && isFluidId(grid[up])) activateLiquidCell(currentAvatarRoom, up, grid);
-      if (isPowderId(grid[i])) powderSet(currentAvatarRoom).add(i); if (up >= 0 && isPowderId(grid[up])) powderSet(currentAvatarRoom).add(up);   // placed/undone powder + grains above a cleared cell may fall
+    if (liquidCfg.sub > 1) {
+      // FINE mode: route liquid placement into the FINE grid. The old inline coarse seed (below) would drop the liquid
+      // into the coarse sim, which the fine renderer skips → the "placed liquid is invisible / trapped mid-air" bug.
+      ensureFineArrays(currentAvatarRoom, liquidCfg.sub); const changedFine = [];
+      for (let k = 0; k + 1 < cells.length; k += 2) {
+        const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
+        const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0;
+        if (isFluidId(grid[i])) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid[i]]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, liquidCfg.sub, cc, cr, ca)) changedFine.push(x); }
+        else for (const x of fineClearBlock(currentAvatarRoom, liquidCfg.sub, cc, cr)) changedFine.push(x);   // a solid/empty coarse cell clears its fine block
+        if (isPowderId(grid[i])) powderSet(currentAvatarRoom).add(i); const up = i - TERRAIN_COLS; if (up >= 0 && isPowderId(grid[up])) powderSet(currentAvatarRoom).add(up);
+      }
+      emitFineCells(currentAvatarRoom, changedFine);
+    } else {
+      const tot = ensureLiquidTotal(currentAvatarRoom), lam = ensureLiquidAmt(currentAvatarRoom);    // keep the multi-liquid stacks in step with placed/cleared cells, then wake
+      for (let k = 0; k + 1 < cells.length; k += 2) {
+        const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
+        if (isFluidId(grid[i])) { if (!tot[i] || liqRepId(lam, i) !== grid[i]) liqSetSingle(currentAvatarRoom, i, grid[i]); activateLiquidCell(currentAvatarRoom, i, grid); } else liqClearCell(currentAvatarRoom, i);
+        const up = i - TERRAIN_COLS; if (up >= 0 && isFluidId(grid[up])) activateLiquidCell(currentAvatarRoom, up, grid);
+        if (isPowderId(grid[i])) powderSet(currentAvatarRoom).add(i); if (up >= 0 && isPowderId(grid[up])) powderSet(currentAvatarRoom).add(up);   // placed/undone powder + grains above a cleared cell may fall
+      }
     }
     if (changed) io.to(currentAvatarRoom).emit('terrain-set', { cells });
   });
