@@ -1889,6 +1889,7 @@ function liqRepId(amt, i) { const base = i * LIQ_T; for (let rk = 0; rk < LIQ_T;
 // Wake + seed every cell in a rect after a terrain edit: a freshly PAINTED fluid becomes a full single-liquid stack, a
 // CARVED-away fluid is cleared, and any surviving fluid is re-activated so it can flow.
 function activateLiquidRect(room, grid, c0, r0, c1, r1) {
+  if (liquidCfg.sub > 1) { fineActivateRect(room, grid, c0, r0, c1, r1); return; }   // fine mode: seed the fine grid, not the coarse one
   c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(TERRAIN_COLS - 1, c1); r1 = Math.min(TERRAIN_ROWS - 1, r1);
   const s = liquidSet(room), tot = ensureLiquidTotal(room), amt = ensureLiquidAmt(room);
   // Seed a painted fluid cell to a full single-liquid stack when it's empty OR its layers don't match the painted id
@@ -1907,6 +1908,7 @@ function seedLiquidActivity(room) {
   for (let i = 0; i < grid.length; i++) { if (isFluidId(grid[i])) { liqSetSingle(room, i, grid[i]); if (s.size < LIQUID_MAX_ACTIVE) s.add(i); } else liqClearCell(room, i); }
   for (let i = 0; i < grid.length; i++) if (grid[i] === 9) seedSoilAround(room, grid, i);   // pre-generated lakes absorb just like poured water (no special-casing)
   if (!s.size) delete roomLiquidActive[room];
+  if (liquidCfg.sub > 1) upscaleRoomToFine(room, liquidCfg.sub);   // fine mode: hand the generated lakes to the fine grid
 }
 // Join replay: the full multi-liquid state as a flat list (same mask encoding as the live liquid-cells wire, side 0) for
 // every cell that holds liquid. (Per-cell, not RLE — fine for the ~2k fluid cells a generated world has.)
@@ -3034,6 +3036,8 @@ const runLiquidTick = () => {
   for (const room in roomLiquidSrc) sourceTickRoom(room);   // sources top up first, so their liquid is ordinary pooled liquid to everything below
   if (liquidCfg.droplets) for (const room in roomDroplets) dropletTickRoom(room);
   for (const room in roomLiquidActive) { if (liquidCfg.perfLog) _active += roomLiquidActive[room].size; liquidTickRoom(room); }
+  // FINE-CELL liquid (experimental) — a parallel sim in its own arrays, ticked only when liquidCfg.sub > 1
+  if (liquidCfg.sub > 1) for (const room in roomFineActive) { if (liquidCfg.perfLog) _active += roomFineActive[room].size; fineLiquidTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
   powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room);   // powder runs in lockstep with liquid → consistent gravity
   if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) soilTickRoom(room);
   if (liquidCfg.perfLog) {
@@ -3050,6 +3054,79 @@ const runLiquidTick = () => {
 };
 function restartLiquidLoop() { if (liquidTimer) clearInterval(liquidTimer); liquidTimer = setInterval(runLiquidTick, Math.max(8, Math.min(500, liquidCfg.tickMs | 0))); }
 restartLiquidLoop();
+
+// ── FINE-CELL LIQUID: coarse↔fine conversion + placement + wire helpers (inc 1). All outside the sim block, so the
+// harness never sees them. Volume mapping: a coarse cell holds up to LIQUID_MAX units; a full coarse cell = SUB² full fine
+// cells, so upscale multiplies units by SUB² and downscale divides by SUB².
+function fineSetBlock(room, SUB, cc, cr, coarseAmt) {   // distribute a coarse rank-stack into the SUB×SUB fine block (heaviest at the floor, bottom-up); returns the filled fine indices
+  const amt = roomFineAmt[room], tot = roomFineTotal[room], FCOLS = TERRAIN_COLS * SUB, act = fineSet(room);
+  const per = new Array(LIQ_T); let totalUnits = 0;
+  for (let rk = 0; rk < LIQ_T; rk++) { per[rk] = coarseAmt[rk] * SUB * SUB; totalUnits += per[rk]; }
+  const fx0 = cc * SUB, fy0 = cr * SUB, filled = [];
+  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0; tot[i] = 0; }
+  let rk = 0;
+  for (let dy = SUB - 1; dy >= 0 && totalUnits > 0; dy--) for (let dx = 0; dx < SUB && totalUnits > 0; dx++) {
+    const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; let room2 = LIQUID_MAX;
+    while (room2 > 0 && totalUnits > 0) { while (rk < LIQ_T && per[rk] <= 0) rk++; if (rk >= LIQ_T) { totalUnits = 0; break; } const mv = Math.min(per[rk], room2); amt[b + rk] += mv; per[rk] -= mv; room2 -= mv; totalUnits -= mv; }
+    tot[i] = LIQUID_MAX - room2; if (tot[i] > 0) { act.add(i); filled.push(i); }
+  }
+  return filled;
+}
+function fineClearBlock(room, SUB, cc, cr) {   // clear the SUB×SUB fine block; returns the fine indices that changed
+  const amt = roomFineAmt[room], tot = roomFineTotal[room], sd = roomFineSide[room], FCOLS = TERRAIN_COLS * SUB, act = fineSet(room);
+  const fx0 = cc * SUB, fy0 = cr * SUB, changed = [];
+  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; if (tot[i] > 0 || sd[i]) { for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0; tot[i] = 0; sd[i] = 0; act.delete(i); changed.push(i); } }
+  return changed;
+}
+function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back down to a coarse rank-stack (÷SUB²), clamped to CAP
+  const amt = roomFineAmt[room], FCOLS = TERRAIN_COLS * SUB, out = new Array(LIQ_T).fill(0), fx0 = cc * SUB, fy0 = cr * SUB;
+  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const b = ((fy0 + dy) * FCOLS + (fx0 + dx)) * LIQ_T; for (let k = 0; k < LIQ_T; k++) out[k] += amt[b + k]; }
+  const div = SUB * SUB; let ct = 0; for (let k = 0; k < LIQ_T; k++) { out[k] = Math.round(out[k] / div); ct += out[k]; }
+  let ex = ct - LIQUID_MAX; for (let k = LIQ_T - 1; k >= 0 && ex > 0; k--) { const d = Math.min(out[k], ex); out[k] -= d; ex -= d; }   // trim overflow from the lightest
+  return out;
+}
+function upscaleRoomToFine(room, SUB) {   // convert this room's coarse liquid into the fine grid; coarse liquid is then cleared (fine owns it)
+  ensureFineArrays(room, SUB);
+  roomFineAmt[room].fill(0); roomFineTotal[room].fill(0); roomFineSide[room].fill(0); fineSet(room).clear();
+  const camt = roomLiquidAmt[room], ctot = roomLiquidTotal[room];
+  if (camt && ctot) for (let i = 0; i < ctot.length; i++) { if (ctot[i] <= 0) continue; const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0, ca = new Array(LIQ_T), b = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) ca[k] = camt[b + k]; fineSetBlock(room, SUB, cc, cr, ca); }
+  if (camt) camt.fill(0); if (ctot) ctot.fill(0); if (roomLiquidActive[room]) roomLiquidActive[room].clear();
+}
+function downscaleRoomToCoarse(room, SUB) {   // convert the fine grid back into coarse liquid; fine is then cleared
+  const grid = roomTerrain[room]; if (!grid || !roomFineTotal[room]) return;
+  const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), s = liquidSet(room);
+  amt.fill(0); tot.fill(0); s.clear();
+  for (let cr = 0; cr < TERRAIN_ROWS; cr++) for (let cc = 0; cc < TERRAIN_COLS; cc++) {
+    const out = fineToCoarseCell(room, SUB, cc, cr); let ct = 0; for (let k = 0; k < LIQ_T; k++) ct += out[k];
+    if (ct > 0) { const i = cr * TERRAIN_COLS + cc, b = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[b + k] = out[k]; tot[i] = ct; grid[i] = liqRepId(amt, i); if (s.size < LIQUID_MAX_ACTIVE) s.add(i); }
+  }
+  roomFineAmt[room].fill(0); roomFineTotal[room].fill(0); roomFineSide[room].fill(0); fineSet(room).clear();
+}
+function fineWirePush(room, idxList, cells) {   // append [i, repId, side, mask, amts…] for each fine cell in idxList
+  const amt = roomFineAmt[room], sd = roomFineSide[room];
+  for (const i of idxList) { const b = i * LIQ_T; let mask = 0; for (let rk = 0; rk < LIQ_T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk); cells.push(i, liqRepId(amt, i), (sd[i] & 3), mask); for (let rk = 0; rk < LIQ_T; rk++) if (mask & (1 << rk)) cells.push(amt[b + rk]); }
+}
+function emitFineCells(room, idxList) {   // broadcast a set of fine cells immediately (used by placement — the tick only broadcasts what MOVED)
+  if (!idxList.length || !roomFineAmt[room]) return;
+  const SUB = roomFineSub[room] || liquidCfg.sub, cells = []; fineWirePush(room, idxList, cells);
+  if (cells.length) io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: TERRAIN_COLS * SUB, cells });
+}
+function buildFineInit(room) {   // join replay: every non-empty fine cell (same mask encoding)
+  const tot = roomFineTotal[room]; if (!tot) return null;
+  const SUB = roomFineSub[room] || liquidCfg.sub, idx = []; for (let i = 0; i < tot.length; i++) if (tot[i] > 0) idx.push(i);
+  const cells = []; fineWirePush(room, idx, cells);
+  return { sub: SUB, cols: TERRAIN_COLS * SUB, cells };
+}
+function fineActivateRect(room, grid, c0, r0, c1, r1) {   // placement in fine mode: seed/clear the fine block for each painted coarse cell + broadcast
+  const SUB = liquidCfg.sub; ensureFineArrays(room, SUB);
+  c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(TERRAIN_COLS - 1, c1); r1 = Math.min(TERRAIN_ROWS - 1, r1);
+  const changed = [];
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * TERRAIN_COLS + c;
+    if (isFluidId(grid[i])) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid[i]]] = LIQUID_MAX; for (const x of fineSetBlock(room, SUB, c, r, ca)) changed.push(x); }
+    else for (const x of fineClearBlock(room, SUB, c, r)) changed.push(x);
+  }
+  emitFineCells(room, changed);
+}
 
 const TERRAIN_MAT_MAX = 17;                           // built-in material ids 1..17 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil/glass/drain); 0 = empty
 const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → custom material ids live in 16..255
@@ -4377,6 +4454,7 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom;
     if (!room || !roomTerrain[room] || !roomLiquidTotal[room]) return;
     socket.emit('liquid-init', { cells: buildLiquidInit(room), verify: true });
+    if (liquidCfg.sub > 1) { const fi = buildFineInit(room); if (fi) socket.emit('liquid-fine-init', fi); }
   });
   // ---- LIQUID SOURCES: mark/unmark cells that keep refilling themselves. Sent by the build menu's "Source" option
   // when a liquid is painted; the same cells are sent with on:false when the option is OFF, so painting normally over
@@ -4421,6 +4499,12 @@ io.on('connection', (socket) => {
     for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
+    // FINE-CELL resolution toggle. On change, CONVERT every room's liquid between the coarse and fine grids and push a
+    // fresh init so the picture carries over. sub ∈ {1,3} for now (1 = coarse untouched, 3 = fine 3×3).
+    if ('sub' in patch) { const nv = (patch.sub | 0) === 3 ? 3 : 1; if (nv !== liquidCfg.sub) { const old = liquidCfg.sub; liquidCfg.sub = nv;
+      if (nv > 1) { for (const room in roomLiquidTotal) { upscaleRoomToFine(room, nv); const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); } }
+      else { for (const room in roomFineTotal) { downscaleRoomToCoarse(room, old); io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) }); io.to(room).emit('liquid-fine-init', { sub: 1, cols: TERRAIN_COLS, cells: [] }); } }
+    } }
     // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
     const dnum = { dropUnit: [1, 16], dropFall: [0.05, 4], dropSpawnH: [0, 1], dropSpread: [0.1, 1], dropColSpace: [0, 4],
                    dropLandSpread: [0, 5], dropTermFall: [1, 16], dropSpreadRef: [2, 40], dropImpactCurve: [0.2, 3] };
@@ -4950,6 +5034,7 @@ io.on('connection', (socket) => {
     if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: roomTerrainHp[avRoom] ? terrainRLE(roomTerrainHp[avRoom]).runs : undefined });
     // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
     if (tg && roomLiquidTotal[avRoom]) { const cells = buildLiquidInit(avRoom); if (cells.length) socket.emit('liquid-init', { levelIndex, cells }); }
+    if (tg && liquidCfg.sub > 1) { const fi = buildFineInit(avRoom); if (fi && fi.cells.length) socket.emit('liquid-fine-init', fi); }
     if (roomLiquidSrc[avRoom] && roomLiquidSrc[avRoom].size) socket.emit('liquid-src', { cells: Array.from(roomLiquidSrc[avRoom].keys()), on: true, init: true });   // join replay: which cells are sources (marker only; the sim owns the behaviour)
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
     const mm = roomMats[avRoom];
