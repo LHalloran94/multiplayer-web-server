@@ -1621,6 +1621,7 @@ const liquidCfg = {
   streamTag: true,
   streamMix: true,        // a ledge spill draws its liquids PROPORTIONALLY (keeps the mixture) instead of heaviest-first → the lip oscillates less. off = heaviest-first spill (alternating slugs / pulsing sub-strips)
   streamNoSort: true,     // a tagged FALLING stream does NOT density-sort with the cell below (no buoyancy in free-fall). off = a lighter liquid climbs UP a denser stream (oil rises through water) + bubbles all the way down
+  streamNoSortNbr: true,  // density sort skips a NEIGHBOUR cell that is a stream (sd[j]!==0), not just the cell's own tag. Stops the buoyancy sort floating a light liquid UP-and-OUT of a streaming/draining cell (e.g. a 1-cell gap) into an adjacent pool — the "oil crosses a 1-wide gap, water doesn't" case. off = only the cell's own tag gates buoyancy (streamNoSort)
   // ── DROPLET CASCADE (the streaming rewrite). ON = a ledge spill leaves the grid as droplets that carry the liquid and
   // deposit it on landing; OFF = the original fallSide tag / stream-strip path, kept intact for in-game comparison.
   // Tunings below are the values arrived at in the bench (scratchpad/liquid-droplet-stream.html).
@@ -2325,8 +2326,14 @@ function liquidTickRoom(room) {
     // stream signal), NOT canFall — canFall catches settling pool cells too and gating THOSE broke pool stratification before.
     // A resting pool (sd===0) still sorts normally, so layering is untouched.
     const noSortStream = liquidCfg.streamNoSort && liquidCfg.streamTag && sd[i] !== 0;
+    // NO BUOYANCY OUT OF A STREAMING NEIGHBOUR. The gate above only checks THIS cell's tag, but the buoyancy sort can be
+    // driven by an UNTAGGED pool cell reaching into a tagged/streaming neighbour and lifting its light liquid up-and-out
+    // (measured: a light liquid crosses a 1-wide gap by floating out of the draining hole into the adjacent pool; the
+    // dense one falls cleanly and does not). Also skipping the sort when the PARTNER cell j is a stream stops that. A
+    // resting pool has sd===0 everywhere, so normal stratification/composition levelling is untouched.
+    const noSortNbr = liquidCfg.streamNoSortNbr && liquidCfg.streamTag;
     // (2) DENSITY sort with the cell BELOW: heaviest-above heavier than lightest-below → swap 1 unit (heavy sinks)
-    if (liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(grid[i + COLS])) {
+    if (liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(grid[i + COLS]) && !(noSortNbr && sd[i + COLS] !== 0)) {
       const j = i + COLS, hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); }
     }
@@ -2337,6 +2344,7 @@ function liquidTickRoom(room) {
     if (liquidCfg.densitySort && !noSortStream && canDown) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
       const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
       const j = i + COLS + dc; if (isSolid(grid[j]) || tot[j] === 0) continue;
+      if (noSortNbr && sd[j] !== 0) continue;   // don't buoy a light liquid up-and-out of a streaming neighbour (the 1-wide gap crossing)
       const hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); break; }
     }
@@ -4236,7 +4244,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     // droplet-cascade tunings (numeric); clamped so a bad value can't wedge the sim
