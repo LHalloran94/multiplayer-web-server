@@ -1817,7 +1817,6 @@ function ensureLevelAcc(room) { if (!roomLevelAcc[room]) { const a = new Float32
 // the coarse grid via coarseOf() (map-on-read; the fine sim never writes terrain), and liquid lives only in these arrays.
 const roomFineAmt = {}, roomFineTotal = {}, roomFineSide = {}, roomFineActive = {}, roomFineLevelAcc = {}, roomFineSub = {};
 const roomFineStill = {};   // QUIESCENCE (fineQuiesce): per-fine-cell counter of consecutive ticks with no movement
-const roomFineReact = {}, roomFineReactActive = {};   // FINE REACTIONS (B-i): per-COARSE-cell reaction accumulator (Float32) + the candidate coarse cells to evaluate
 function ensureFineArrays(room, SUB) {
   const cells = (TERRAIN_COLS * SUB) * (TERRAIN_ROWS * SUB);
   if (roomFineSub[room] !== SUB || !roomFineAmt[room] || roomFineTotal[room].length !== cells) {
@@ -3213,8 +3212,6 @@ const runLiquidTick = () => {
   const _fine0 = liquidCfg.perfLog ? performance.now() : 0; let _fineActive = 0;
   if (liquidCfg.sub > 1) for (const room in roomFineActive) { if (liquidCfg.perfLog) _fineActive += roomFineActive[room].size; fineLiquidTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
   if (liquidCfg.perfLog && liquidCfg.sub > 1) { const _fdt = performance.now() - _fine0; liqPerf.fineMs += _fdt; if (_fdt > liqPerf.fineMsMax) liqPerf.fineMsMax = _fdt; if (_fineActive > liqPerf.fineActive) liqPerf.fineActive = _fineActive; }
-  // FINE reactions (B-i): after the fine liquid has moved. Run for rooms with active fine liquid + any with a reaction still in progress.
-  if (liquidCfg.sub > 1 && liquidCfg.reactions) { const _seen = {}; for (const room in roomFineActive) { _seen[room] = 1; fineReactTickRoom(room, roomFineSub[room] || liquidCfg.sub); } for (const room in roomFineReactActive) if (!_seen[room]) fineReactTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
   powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room);   // powder runs in lockstep with liquid → consistent gravity
   if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) soilTickRoom(room);
   if (liquidCfg.perfLog) {
@@ -3258,16 +3255,6 @@ function fineClearBlock(room, SUB, cc, cr) {   // clear the SUB×SUB fine block;
   const fx0 = cc * SUB, fy0 = cr * SUB, changed = [];
   for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; if (tot[i] > 0 || sd[i]) { for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0; tot[i] = 0; sd[i] = 0; act.delete(i); changed.push(i); } }
   return changed;
-}
-function fineDrainRank(room, SUB, cc, cr, rank, amount) {   // remove up to `amount` units of one rank from a coarse block's fine cells; returns { removed, changed[] }
-  const amt = roomFineAmt[room], tot = roomFineTotal[room], FCOLS = TERRAIN_COLS * SUB, act = fineSet(room);
-  const fx0 = cc * SUB, fy0 = cr * SUB; let removed = 0; const changed = [];
-  for (let dy = 0; dy < SUB && amount > 0; dy++) for (let dx = 0; dx < SUB && amount > 0; dx++) {
-    const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T, a = amt[b + rank]; if (a <= 0) continue;
-    const mv = a < amount ? a : amount; amt[b + rank] -= mv; tot[i] -= mv; amount -= mv; removed += mv;
-    if (tot[i] <= 0) act.delete(i); changed.push(i);
-  }
-  return { removed, changed };
 }
 function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back down to a coarse rank-stack (÷SUB²), clamped to CAP
   const amt = roomFineAmt[room], FCOLS = TERRAIN_COLS * SUB, out = new Array(LIQ_T).fill(0), fx0 = cc * SUB, fy0 = cr * SUB;
@@ -3356,54 +3343,6 @@ function rescaleAllLiquid(newCap) {
   for (const room in roomLiquidAmt) doArr(roomLiquidAmt[room], roomLiquidTotal[room]);
   for (const room in roomFineAmt) doArr(roomFineAmt[room], roomFineTotal[room]);
 }
-
-// ── FINE-CELL REACTIONS (B-i: coarse terrain + windowed accumulation) ────────────────────────────────────────────
-// The fine sim never writes terrain; reactions do. A per-COARSE-cell accumulator `roomFineReact` fills in proportion to
-// the fine liquid in CONTACT (so one sub-cell of water on lava does NOT instantly stone a whole block) and decays when
-// contact stops, so sub-threshold contact evaporates. Crossing the threshold converts the coarse block (as the coarse
-// reaction does) and consumes its fine liquid. Terrain change → the terrain-set wire; consumed liquid → liquid-fine-cells;
-// both already exist client-side, so reactions are server-only. Reactions consume mass by design, like the coarse ones.
-// INCREMENT 1 = lava + water → stone (brine quenches too; forms in mid-air per the user). Other reactions plug in here.
-const FREACT_THRESH = 120;   // accumulated boil-off needed to crust a coarse block to stone
-const FREACT_EVAP = 48;      // units of water/brine/acid a lava block boils off PER TICK (fast → the two never coexist/sort)
-const FREACT_DECAY = 0.8;    // per-tick decay (applied ALWAYS) → a splash's worth of boil-off plateaus below the threshold and fades; a sustained pour climbs past it and crusts to stone
-function ensureFineReact(room) { return roomFineReact[room] || (roomFineReact[room] = new Float32Array(TERRAIN_COLS * TERRAIN_ROWS)); }
-function fineReactTickRoom(room, SUB) {
-  const grid = roomTerrain[room]; if (!grid) return;
-  const hp = roomTerrainHp[room], mats = roomMats[room] || {}, COLS = TERRAIN_COLS, ROWS = TERRAIN_ROWS;
-  const FLOOR_R = Math.floor(FLOOR_TOP / TERRAIN_CELL);
-  const react = ensureFineReact(room), fineAct = roomFineActive[room];
-  const cand = roomFineReactActive[room] || (roomFineReactActive[room] = new Set());
-  // Seed candidate coarse cells from wherever fine liquid is active this tick, PLUS their 4 neighbours — so water arriving
-  // next to a SETTLED (inactive) lava pool still seeds the lava cell as a candidate. An in-progress reaction keeps its own cell.
-  if (fineAct) { const FCOLS = COLS * SUB; for (const fi of fineAct) { const fr = (fi / FCOLS) | 0, k = ((fr / SUB) | 0) * COLS + (((fi - fr * FCOLS) / SUB) | 0), kc = k % COLS, kr = (k / COLS) | 0; cand.add(k); if (kr > 0) cand.add(k - COLS); if (kr < ROWS - 1) cand.add(k + COLS); if (kc > 0) cand.add(k - 1); if (kc < COLS - 1) cand.add(k + 1); } }
-  if (!cand.size) { delete roomFineReactActive[room]; return; }
-  const changedTerrain = [], changedFine = [];
-  for (const key of Array.from(cand)) {
-    const cr = (key / COLS) | 0, cc = key - cr * COLS;
-    if (cr >= FLOOR_R || grid[key] !== 0) { react[key] = 0; cand.delete(key); continue; }   // liquid only floats in an AIR coarse cell in fine mode; solid-target reactions come later
-    const a = fineToCoarseCell(room, SUB, cc, cr);
-    const lava = a[0]; let evap = 0;
-    if (lava > 0) {
-      // IMMEDIATE EVAPORATION: water/brine/acid touching lava boils off THIS tick (drained fast), so the two never coexist
-      // or density-sort — and the boiled amount accumulates toward crusting the block to stone. Water floats to the top of
-      // the lava block, so drain this block + the one directly above. Acid boils here too (acid + lava → stone + fumes).
-      let budget = FREACT_EVAP;
-      for (const [bc, br] of [[cc, cr], [cc, cr - 1], [cc, cr + 1], [cc - 1, cr], [cc + 1, cr]]) { if (bc < 0 || br < 0 || bc >= COLS || br >= ROWS) continue;
-        for (const rank of [4, 2, 3]) { if (budget <= 0) break; const d = fineDrainRank(room, SUB, bc, br, rank, budget); if (d.removed > 0) { evap += d.removed; budget -= d.removed; for (const x of d.changed) changedFine.push(x); } }
-      }
-    }
-    react[key] = react[key] * FREACT_DECAY + evap;
-    if (evap > 0 && react[key] >= FREACT_THRESH) {       // enough has boiled off → the block crusts to stone (consumes the lava)
-      grid[key] = 2; hp[key] = matStrengthSrv(mats, 2); react[key] = 0;
-      for (const x of fineClearBlock(room, SUB, cc, cr)) changedFine.push(x);
-      changedTerrain.push(key, 2); cand.delete(key);
-    } else if (evap <= 0 && react[key] < 0.5) { react[key] = 0; cand.delete(key); }
-  }
-  if (changedTerrain.length) io.to(room).emit('terrain-set', { cells: changedTerrain });
-  if (changedFine.length) emitFineCells(room, changedFine);
-}
-// ==FINE_REACT_BLOCK_END== (probe_fine_reactions.js slices the sim + fine helpers + reactions to here)
 
 const TERRAIN_MAT_MAX = 17;                           // built-in material ids 1..17 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil/glass/drain); 0 = empty
 const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → custom material ids live in 16..255
