@@ -5392,7 +5392,7 @@ io.on('connection', (socket) => {
     if (!canBuild()) return;                                // Phase 3: L2 build permission
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
     const cx = Math.max(0, Math.min(MWSim.C.WORLD_W, x)), cy = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
-    const rr = Math.max(8, Math.min(160, r));
+    const rr = Math.max(TERRAIN_CELL / 2, Math.min(160, r));   // floor = one fine tile's half-extent so the client's smallest (1-cell) brush isn't inflated server-side
     const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
     const sq = shape === 'square';
     const hd = op === 'carve' && !!hard;                 // editor Carve tool: hard delete (any block); gameplay slam stays soft
