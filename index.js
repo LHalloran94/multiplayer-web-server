@@ -3259,6 +3259,16 @@ function fineClearBlock(room, SUB, cc, cr) {   // clear the SUB×SUB fine block;
   for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; if (tot[i] > 0 || sd[i]) { for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0; tot[i] = 0; sd[i] = 0; act.delete(i); changed.push(i); } }
   return changed;
 }
+function fineDrainRank(room, SUB, cc, cr, rank, amount) {   // remove up to `amount` units of one rank from a coarse block's fine cells; returns { removed, changed[] }
+  const amt = roomFineAmt[room], tot = roomFineTotal[room], FCOLS = TERRAIN_COLS * SUB, act = fineSet(room);
+  const fx0 = cc * SUB, fy0 = cr * SUB; let removed = 0; const changed = [];
+  for (let dy = 0; dy < SUB && amount > 0; dy++) for (let dx = 0; dx < SUB && amount > 0; dx++) {
+    const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T, a = amt[b + rank]; if (a <= 0) continue;
+    const mv = a < amount ? a : amount; amt[b + rank] -= mv; tot[i] -= mv; amount -= mv; removed += mv;
+    if (tot[i] <= 0) act.delete(i); changed.push(i);
+  }
+  return { removed, changed };
+}
 function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back down to a coarse rank-stack (÷SUB²), clamped to CAP
   const amt = roomFineAmt[room], FCOLS = TERRAIN_COLS * SUB, out = new Array(LIQ_T).fill(0), fx0 = cc * SUB, fy0 = cr * SUB;
   for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const b = ((fy0 + dy) * FCOLS + (fx0 + dx)) * LIQ_T; for (let k = 0; k < LIQ_T; k++) out[k] += amt[b + k]; }
@@ -3354,9 +3364,9 @@ function rescaleAllLiquid(newCap) {
 // reaction does) and consumes its fine liquid. Terrain change → the terrain-set wire; consumed liquid → liquid-fine-cells;
 // both already exist client-side, so reactions are server-only. Reactions consume mass by design, like the coarse ones.
 // INCREMENT 1 = lava + water → stone (brine quenches too; forms in mid-air per the user). Other reactions plug in here.
-const FREACT_THRESH = 120;   // accumulated contact needed to convert a coarse block
-const FREACT_RATE = 1;       // accumulator gain per unit of contact per tick
-const FREACT_DECAY = 0.8;    // per-tick decay (applied ALWAYS) → small steady contact plateaus at contact·RATE/(1-DECAY) below the threshold and evaporates; strong contact climbs past it
+const FREACT_THRESH = 120;   // accumulated boil-off needed to crust a coarse block to stone
+const FREACT_EVAP = 48;      // units of water/brine/acid a lava block boils off PER TICK (fast → the two never coexist/sort)
+const FREACT_DECAY = 0.8;    // per-tick decay (applied ALWAYS) → a splash's worth of boil-off plateaus below the threshold and fades; a sustained pour climbs past it and crusts to stone
 function ensureFineReact(room) { return roomFineReact[room] || (roomFineReact[room] = new Float32Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 function fineReactTickRoom(room, SUB) {
   const grid = roomTerrain[room]; if (!grid) return;
@@ -3364,27 +3374,31 @@ function fineReactTickRoom(room, SUB) {
   const FLOOR_R = Math.floor(FLOOR_TOP / TERRAIN_CELL);
   const react = ensureFineReact(room), fineAct = roomFineActive[room];
   const cand = roomFineReactActive[room] || (roomFineReactActive[room] = new Set());
-  // Seed candidate coarse cells from wherever fine liquid is active this tick (an in-progress reaction keeps its own cell).
-  if (fineAct) { const FCOLS = COLS * SUB; for (const fi of fineAct) { const fr = (fi / FCOLS) | 0; cand.add(((fr / SUB) | 0) * COLS + (((fi - fr * FCOLS) / SUB) | 0)); } }
+  // Seed candidate coarse cells from wherever fine liquid is active this tick, PLUS their 4 neighbours — so water arriving
+  // next to a SETTLED (inactive) lava pool still seeds the lava cell as a candidate. An in-progress reaction keeps its own cell.
+  if (fineAct) { const FCOLS = COLS * SUB; for (const fi of fineAct) { const fr = (fi / FCOLS) | 0, k = ((fr / SUB) | 0) * COLS + (((fi - fr * FCOLS) / SUB) | 0), kc = k % COLS, kr = (k / COLS) | 0; cand.add(k); if (kr > 0) cand.add(k - COLS); if (kr < ROWS - 1) cand.add(k + COLS); if (kc > 0) cand.add(k - 1); if (kc < COLS - 1) cand.add(k + 1); } }
   if (!cand.size) { delete roomFineReactActive[room]; return; }
   const changedTerrain = [], changedFine = [];
-  const waterLike = (cc, cr) => { const a = fineToCoarseCell(room, SUB, cc, cr); return a[4] + a[2]; };   // water(4) + brine(2) both quench lava
   for (const key of Array.from(cand)) {
     const cr = (key / COLS) | 0, cc = key - cr * COLS;
     if (cr >= FLOOR_R || grid[key] !== 0) { react[key] = 0; cand.delete(key); continue; }   // liquid only floats in an AIR coarse cell in fine mode; solid-target reactions come later
     const a = fineToCoarseCell(room, SUB, cc, cr);
-    const lava = a[0]; let contact = 0;
+    const lava = a[0]; let evap = 0;
     if (lava > 0) {
-      let w = a[4] + a[2];                                // water/brine in this block, else in an orthogonal neighbour
-      if (w <= 0) for (const [dc, dr] of [[0, 1], [0, -1], [1, 0], [-1, 0]]) { const nc = cc + dc, nr = cr + dr; if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS) continue; const ww = waterLike(nc, nr); if (ww > 0) { w = ww; break; } }
-      if (w > 0) contact = Math.min(lava, w);
+      // IMMEDIATE EVAPORATION: water/brine/acid touching lava boils off THIS tick (drained fast), so the two never coexist
+      // or density-sort — and the boiled amount accumulates toward crusting the block to stone. Water floats to the top of
+      // the lava block, so drain this block + the one directly above. Acid boils here too (acid + lava → stone + fumes).
+      let budget = FREACT_EVAP;
+      for (const [bc, br] of [[cc, cr], [cc, cr - 1], [cc, cr + 1], [cc - 1, cr], [cc + 1, cr]]) { if (bc < 0 || br < 0 || bc >= COLS || br >= ROWS) continue;
+        for (const rank of [4, 2, 3]) { if (budget <= 0) break; const d = fineDrainRank(room, SUB, bc, br, rank, budget); if (d.removed > 0) { evap += d.removed; budget -= d.removed; for (const x of d.changed) changedFine.push(x); } }
+      }
     }
-    react[key] = react[key] * FREACT_DECAY + contact * FREACT_RATE;
-    if (contact > 0 && react[key] >= FREACT_THRESH) {    // CONVERT the block to stone; consume its fine liquid (require live contact so a decaying tail can't fire)
+    react[key] = react[key] * FREACT_DECAY + evap;
+    if (evap > 0 && react[key] >= FREACT_THRESH) {       // enough has boiled off → the block crusts to stone (consumes the lava)
       grid[key] = 2; hp[key] = matStrengthSrv(mats, 2); react[key] = 0;
       for (const x of fineClearBlock(room, SUB, cc, cr)) changedFine.push(x);
       changedTerrain.push(key, 2); cand.delete(key);
-    } else if (contact <= 0 && react[key] < 0.5) { react[key] = 0; cand.delete(key); }
+    } else if (evap <= 0 && react[key] < 0.5) { react[key] = 0; cand.delete(key); }
   }
   if (changedTerrain.length) io.to(room).emit('terrain-set', { cells: changedTerrain });
   if (changedFine.length) emitFineCells(room, changedFine);
