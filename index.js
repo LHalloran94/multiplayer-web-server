@@ -1709,6 +1709,22 @@ const liquidCfg = {
   // recovering the speed fine cells lose to being smaller. Levelling is O(width²) so fine is ~SUB²≈9× slower than coarse →
   // K≈9 matches coarse. Local, no teleport, broadcast accumulated (wire ~unchanged). 1 = unchanged.
   fineLevelSteps: 1,
+  // (1) QUIESCENCE (perf): freeze a fine cell that has NOT MOVED for fineQuiesceTicks ticks — drop it from the active set
+  // so it stops being processed AND broadcast. Trims the settling wake-front + idle halo. Keys off "did it move (incl.
+  // density sort) this tick", so an inverting cell is never frozen. Pure perf: only removes from the work-set, never
+  // moves mass. A neighbour move re-adds it. OFF = no change.
+  fineQuiesce: false,
+  fineQuiesceTicks: 6,
+  // (2) ADAPTIVE K (perf): stop sub-stepping a room early once a sub-step moves fewer than fineAdaptPct% of its active
+  // cells (it has gone quiet). A settled pool then spends ~1 sub-step, a raging pour still spends the full K. The fall
+  // steps always run first (see fineConstFall) so descent is never starved. OFF = always exactly K sub-steps.
+  fineAdaptiveK: false,
+  fineAdaptPct: 5,
+  // FALL RATE vs sub-steps: sub-steps re-run the DOWN-fall (1a/1b) too, so higher K makes liquid FALL K× faster, not just
+  // level faster. ON = decouple — the fall runs fineFallSteps times/tick REGARDLESS of K (≈ coarse fall speed at SUB=3),
+  // while levelling + density sort still get the full K passes. OFF = fall follows K (original). Behind a toggle to A/B.
+  fineConstFall: false,
+  fineFallSteps: 3,
   // COARSE physics sub-steps (curiosity): run the whole COARSE tick this many times/tick → coarse liquid moves K× faster.
   // Simple (calls liquidTickRoom K times in runLiquidTick), so it broadcasts K× (K× wire) — a debug/experiment dial only.
   coarseSubSteps: 1,
@@ -1790,6 +1806,7 @@ function ensureLevelAcc(room) { if (!roomLevelAcc[room]) { const a = new Float32
 // arrays so the coarse system is UNTOUCHED. Same layout as the coarse arrays but sized FCOLS*FROWS. Terrain is read from
 // the coarse grid via coarseOf() (map-on-read; the fine sim never writes terrain), and liquid lives only in these arrays.
 const roomFineAmt = {}, roomFineTotal = {}, roomFineSide = {}, roomFineActive = {}, roomFineLevelAcc = {}, roomFineSub = {};
+const roomFineStill = {};   // QUIESCENCE (fineQuiesce): per-fine-cell counter of consecutive ticks with no movement
 function ensureFineArrays(room, SUB) {
   const cells = (TERRAIN_COLS * SUB) * (TERRAIN_ROWS * SUB);
   if (roomFineSub[room] !== SUB || !roomFineAmt[room] || roomFineTotal[room].length !== cells) {
@@ -2907,10 +2924,13 @@ function fineLiquidTickRoom(room, SUB) {
   const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; return isSinkId(grid[coarseOf(k)]); };   // a fine cell whose coarse cell is a DRAIN block
   const sinkRate = Math.max(0, Math.min(cap, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
   const changedSet = new Set(), tagCleared = new Set(), airborneWire = new Set();   // accumulate across the physics sub-steps below; broadcast once
+  // QUIESCENCE scratch (only when enabled): per-fine-cell counter of consecutive ticks the cell did NOT move. Reallocated if NCELL changed (sub switch).
+  const quiesce = liquidCfg.fineQuiesce ? ((roomFineStill[room] && roomFineStill[room].length === NCELL) ? roomFineStill[room] : (roomFineStill[room] = new Uint16Array(NCELL))) : null;
+  let stepMoves = 0;   // cell-changes in the current sub-step (adaptive-K activity proxy)
   const wake = (j) => { if (j >= 0 && j < NCELL && !isSolid(j) && tot[j] > 0) active.add(j); };
   const wakeN = (j) => { const x = j % COLS; wake(j - COLS); wake(j + COLS); if (x > 0) wake(j - 1); if (x < COLS - 1) wake(j + 1); };
   const wakeD = (j) => { wakeN(j); const x = j % COLS; if (x > 0) { wake(j - COLS - 1); wake(j + COLS - 1); } if (x < COLS - 1) { wake(j - COLS + 1); wake(j + COLS + 1); } };
-  const mark = (j) => { changedSet.add(j); active.add(j); };
+  const mark = (j) => { changedSet.add(j); active.add(j); stepMoves++; };
   const recomp = (j) => { let s = 0, b = j * T; for (let k = 0; k < T; k++) s += amt[b + k]; tot[j] = s; };
   const moveBottom = (A, B, t) => { let need = t; const ba = A * T, bb = B * T; for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[ba + rk] = a - mv; amt[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
   const moveTop = (A, B, t) => { let need = t; const ba = A * T, bb = B * T; for (let rk = T - 1; rk >= 0 && need > 0; rk--) { const a = amt[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[ba + rk] = a - mv; amt[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
@@ -2925,8 +2945,16 @@ function fineLiquidTickRoom(room, SUB) {
   // (3× wider) is ~SUB²≈9× slower than coarse ⇒ K≈9 matches coarse. Local, no teleport; the broadcast accumulates across
   // sub-steps (wire ≈ unchanged — only the net change per real tick is sent). fell/fellDown/list are per sub-step.
   const FSTEPS = Math.max(1, Math.min(16, liquidCfg.fineLevelSteps | 0));
-  for (let step = 0; step < FSTEPS; step++) {
+  // fineConstFall: run the DOWN-fall (1a/1b) a FIXED number of times/tick, independent of the levelling sub-steps, so a
+  // higher K speeds levelling/sort WITHOUT speeding descent. OFF ⇒ FALLSTEPS = FSTEPS ⇒ doFall = doLevel every step ⇒
+  // byte-identical to the original single-loop behaviour.
+  const FALLSTEPS = liquidCfg.fineConstFall ? Math.max(1, Math.min(16, liquidCfg.fineFallSteps | 0)) : FSTEPS;
+  const NSTEPS = Math.max(FSTEPS, FALLSTEPS), ADAPT_PCT = Math.max(1, Math.min(50, liquidCfg.fineAdaptPct | 0));
+  for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
+    const doFall = step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
+    const doLevel = step < FSTEPS;      // this sub-step runs density sort (2/2b/2c) + lateral levelling (1c/1d)
+    stepMoves = 0;
     const list = Array.from(active); active.clear();
     list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot[a], lb = tot[b]; if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
     const fell = new Set(), fellDown = new Set();
@@ -2947,27 +2975,28 @@ function fineLiquidTickRoom(room, SUB) {
     const noSortStream = liquidCfg.streamNoSort && liquidCfg.streamTag && sd[i] !== 0;
     const noSortNbr = liquidCfg.streamNoSortNbr && liquidCfg.streamTag;
     // (2) density sort with the cell BELOW
-    if (liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(i + COLS) && !(noSortNbr && sd[i + COLS] !== 0)) {
+    if (doLevel && liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(i + COLS) && !(noSortNbr && sd[i + COLS] !== 0)) {
       const j = i + COLS, hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); }
     }
     // (2b) diagonal density sort
-    if (liquidCfg.densitySort && !noSortStream && canDown) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
+    if (doLevel && liquidCfg.densitySort && !noSortStream && canDown) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
       const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
       const j = i + COLS + dc; if (isSolid(j) || tot[j] === 0) continue;
       if (noSortNbr && sd[j] !== 0) continue;
       const hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); break; }
     }
-    // (1a) straight down (tag carried only onto air / an already-falling cell)
-    if (canDown) { const j = i + COLS; const room2 = cap - tot[j]; if (!isSolid(j) && room2 > 0) { const t = Math.min(L, room2); if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t); if (liquidCfg.streamTag && sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i]; L -= t; wakeN(i); } } }
+    // (1a) straight down (tag carried only onto air / an already-falling cell). Gated on doFall so the fall rate can be
+    // held constant regardless of the levelling sub-step count (fineConstFall).
+    if (doFall && canDown) { const j = i + COLS; const room2 = cap - tot[j]; if (!isSolid(j) && room2 > 0) { const t = Math.min(L, room2); if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t); if (liquidCfg.streamTag && sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i]; L -= t; wakeN(i); } } }
     // density throttle (viscosity off by default → lf=1 → reduce is a pass-through)
     const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;
     let pend = false;
     const reduce = (want) => { if (want <= 0) return 0; if (lf >= 1) return want; lvlAcc[i] += want * lf; let mv = lvlAcc[i] | 0; if (mv > want) mv = want; lvlAcc[i] -= mv; if (mv <= 0) pend = true; return mv; };
     // (1b) ledge spill — plain (no chute/secondary-lane, no droplet cascade), with the mid-air support guard. Gated on
     // fineLedge: OFF ⇒ skip it and let 1c move liquid into the edge cell + 1a drop it (same result, one tick slower).
-    if (liquidCfg.ledgeSpill && liquidCfg.fineLedge && L > 0 && canDown && (isSolid(i + COLS) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(j)) continue;
+    if (doFall && liquidCfg.ledgeSpill && liquidCfg.fineLedge && L > 0 && canDown && (isSolid(i + COLS) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(j)) continue;
       if (!isSolid(i + COLS)) { const jb = j + COLS; const jSupported = ((j / COLS) | 0) + 1 >= LIQUID_FLOOR_ROW || isSolid(jb) || tot[jb] > 0; if (!jSupported) continue; }
       if (tot[j] < cap) { const t = reduce(Math.min(L, cap - tot[j])); const ns = dc > 0 ? SIDE_LEFT : SIDE_RIGHT;
         const tagOk = !liquidCfg.streamTag || (isSolid(i + COLS) && (tot[j] === 0 || fell.has(j)));
@@ -2984,7 +3013,7 @@ function fineLiquidTickRoom(room, SUB) {
                    : liquidCfg.levelGate === 2 ? (sd[i] !== 0)
                    : (sd[i] !== 0 || (canDown && roomAt(i + COLS)));
     const shedCap = L;
-    if (!isStream) {
+    if (doLevel && !isStream) {
       const cumAt = (jj, tt) => { let s = 0; const bb = jj * T; for (let k = 0; k <= tt; k++) s += amt[bb + k]; return s; };
       // (2c) per-liquid horizontal levelling (pools only)
       if (liquidCfg.perLiquidLevel) for (let t = 0; t < T - 1; t++) {
@@ -3115,6 +3144,12 @@ function fineLiquidTickRoom(room, SUB) {
       if (maxC >= segA) levelSegment(segA, maxC);
     }
   }
+    // ADAPTIVE K: stop sub-stepping when this sub-step moved fewer than ADAPT_PCT% of its active cells (the room has gone
+    // quiet). A dead-quiet sub-step already empties `active` and breaks above; this trims the long tail where only a
+    // handful of cells are still nudging, which is where high K wastes CPU. When fineConstFall is on we first let all
+    // FALLSTEPS descent passes run so falling liquid is never starved; otherwise a single sub-step is enough to gate on.
+    const adaptMin = liquidCfg.fineConstFall ? FALLSTEPS : 1;
+    if (liquidCfg.fineAdaptiveK && step + 1 >= adaptMin && stepMoves < Math.max(2, (list.length * ADAPT_PCT / 100) | 0)) break;
   }   // ← close the physics sub-step loop
   for (const j of tagCleared) changedSet.add(j);
   if (changedSet.size && !liquidQuiet) {
@@ -3131,7 +3166,16 @@ function fineLiquidTickRoom(room, SUB) {
     }
     if (cells) emitFine();
   }
-  for (const j of Array.from(active)) { if (j < 0 || j >= NCELL) { active.delete(j); continue; } if (isSolid(j) || tot[j] <= 0) active.delete(j); }
+  // QUIESCENCE: freeze (remove from `active`) a cell that has NOT MOVED for fineQuiesceTicks ticks, so it stops being
+  // processed + broadcast — trims the settling wake-front + halo of woken-but-idle cells. "Moved" = in changedSet, i.e.
+  // it fell, levelled, spilled, drained OR density-SORTED this tick; because an inverting cell is marked by the sort
+  // every tick, it can never be frozen mid-stratification → no rest inversions. A neighbour move re-adds it via wake().
+  const QT = quiesce ? Math.max(2, Math.min(60, liquidCfg.fineQuiesceTicks | 0)) : 0;
+  for (const j of Array.from(active)) {
+    if (j < 0 || j >= NCELL) { active.delete(j); continue; }
+    if (isSolid(j) || tot[j] <= 0) { active.delete(j); continue; }
+    if (quiesce) { if (changedSet.has(j)) quiesce[j] = 0; else if (++quiesce[j] >= QT) active.delete(j); }
+  }
   if (!active.size) delete roomFineActive[room];
 }
 // ==LIQUID_SIM_BLOCK_END== (test harness slices the sim to this marker)
@@ -4655,11 +4699,14 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused', 'fineLedge']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused', 'fineLedge', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
     if ('coarseSubSteps' in patch) liquidCfg.coarseSubSteps = Math.max(1, Math.min(16, patch.coarseSubSteps | 0));
+    if ('fineQuiesceTicks' in patch) liquidCfg.fineQuiesceTicks = Math.max(2, Math.min(60, patch.fineQuiesceTicks | 0));
+    if ('fineAdaptPct' in patch) liquidCfg.fineAdaptPct = Math.max(1, Math.min(50, patch.fineAdaptPct | 0));
+    if ('fineFallSteps' in patch) liquidCfg.fineFallSteps = Math.max(1, Math.min(16, patch.fineFallSteps | 0));
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(8, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
       for (const room in roomLiquidTotal) io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) });
