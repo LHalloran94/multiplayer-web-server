@@ -1719,7 +1719,7 @@ const liquidCfg = {
 };
 // DEBUG perf accounting (only touched when liquidCfg.perfLog). `emitLiquidCells` centralises the `liquid-cells` emit so we
 // can size the wire payload; runLiquidTick tallies sim time + active cells and prints a rolling ~1s summary to the console.
-let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0 };
+let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0 };
 function emitLiquidCells(room, arr) {
   if (liquidCfg.perfLog && arr.length) liqPerf.bytes += JSON.stringify(arr).length + 24;   // +~socket.io per-message framing
   io.to(room).emit('liquid-cells', { cells: arr });
@@ -3118,16 +3118,18 @@ function fineLiquidTickRoom(room, SUB) {
   }   // ← close the physics sub-step loop
   for (const j of tagCleared) changedSet.add(j);
   if (changedSet.size && !liquidQuiet) {
+    if (liquidCfg.perfLog) liqPerf.fineChanged += changedSet.size;
     // WIRE (liquid-fine-cells): sub + cols so the client can decode fine indices, then per changed cell
     // [index, repId, side(low2=fallSide, 0x40=airborne), mask] followed by one amt per set rank bit.
     let arr = [], cells = 0;
+    const emitFine = () => { if (liquidCfg.perfLog && arr.length) liqPerf.fineBytes += JSON.stringify(arr).length + 24; io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: COLS, cells: arr }); };
     for (const j of changedSet) {
       const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
       arr.push(j, liqRepId(amt, j), (sd[j] & 0x03) | (airborneWire.has(j) ? 0x40 : 0), mask);
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(amt[b + rk]);
-      if (++cells >= 8192) { io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: COLS, cells: arr }); arr = []; cells = 0; }
+      if (++cells >= 8192) { emitFine(); arr = []; cells = 0; }
     }
-    if (cells) io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: COLS, cells: arr });
+    if (cells) emitFine();
   }
   for (const j of Array.from(active)) { if (j < 0 || j >= NCELL) { active.delete(j); continue; } if (isSolid(j) || tot[j] <= 0) active.delete(j); }
   if (!active.size) delete roomFineActive[room];
@@ -3148,8 +3150,11 @@ const runLiquidTick = () => {
   if (liquidCfg.droplets) for (const room in roomDroplets) dropletTickRoom(room);
   const _cSub = Math.max(1, Math.min(16, liquidCfg.coarseSubSteps | 0));   // curiosity: run the coarse tick K× (K× wire)
   for (const room in roomLiquidActive) { if (liquidCfg.perfLog) _active += roomLiquidActive[room].size; for (let s = 0; s < _cSub && roomLiquidActive[room]; s++) liquidTickRoom(room); }
-  // FINE-CELL liquid (experimental) — a parallel sim in its own arrays, ticked only when liquidCfg.sub > 1
-  if (liquidCfg.sub > 1) for (const room in roomFineActive) { if (liquidCfg.perfLog) _active += roomFineActive[room].size; fineLiquidTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
+  // FINE-CELL liquid (experimental) — a parallel sim in its own arrays, ticked only when liquidCfg.sub > 1.
+  // Timed SEPARATELY from the coarse sim so the Perf tab can isolate the fine cost at various fineLevelSteps (K).
+  const _fine0 = liquidCfg.perfLog ? performance.now() : 0; let _fineActive = 0;
+  if (liquidCfg.sub > 1) for (const room in roomFineActive) { if (liquidCfg.perfLog) _fineActive += roomFineActive[room].size; fineLiquidTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
+  if (liquidCfg.perfLog && liquidCfg.sub > 1) { const _fdt = performance.now() - _fine0; liqPerf.fineMs += _fdt; if (_fdt > liqPerf.fineMsMax) liqPerf.fineMsMax = _fdt; if (_fineActive > liqPerf.fineActive) liqPerf.fineActive = _fineActive; }
   powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room);   // powder runs in lockstep with liquid → consistent gravity
   if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) soilTickRoom(room);
   if (liquidCfg.perfLog) {
@@ -3157,10 +3162,14 @@ const runLiquidTick = () => {
     if (_active > liqPerf.active) liqPerf.active = _active; liqPerf.ticks++;
     if (liqPerf.ticks >= Math.max(1, Math.round(1000 / liquidCfg.tickMs))) {   // ~once per real second
       const _hz = 1000 / liquidCfg.tickMs, _rooms = Object.keys(roomLiquidActive).length;
-      const _stat = { rooms: _rooms, active: liqPerf.active, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs };
-      console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
+      const _stat = { rooms: _rooms, active: liqPerf.active, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs,
+        // FINE-CELL breakout (only meaningful when sub>1): isolated fine sim ms, its own wire KB/s, active-cell peak, mean changed/tick, and the K sub-step count.
+        sub: liquidCfg.sub, steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks) };
+      console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
+        (liquidCfg.sub > 1 ? `  |  FINE sub=${_stat.sub} K=${_stat.steps} active=${_stat.fineActive} fine/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}` : '') +
+        ` (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
       io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
-      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0 };
+      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0 };
     }
   }
 };
