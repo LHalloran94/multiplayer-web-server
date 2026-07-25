@@ -4017,24 +4017,29 @@ function generateWorld(avatarRoom, seed, band) {
   const at = (c, r) => (c < 0 || c >= TERRAIN_COLS || r < 0 || r >= TERRAIN_ROWS) ? 0 : grid[r * TERRAIN_COLS + c];
   const bottomRow = Math.ceil(FLOOR_TOP / TERRAIN_CELL) - 1;            // last terrain row resting on the floor
   const baseRow = Math.round(bottomRow * 0.47);                        // mean surface row ≈ mid-height (deep underground below)
-  const CRUST = 4;                                                     // biome soil crust thickness (rows)
-  // Heightmap: 3 octaves, random phase + amplitude (tuned for the wide world).
+  // ALL-FINE gen scale: the feature sizes below were tuned in ROWS/COLUMNS for the 24px cell. As the cell shrank to 8px
+  // the grid tripled, so an absolute row-count (crust, amplitude, offset) is 3× thinner physically and a spatial
+  // frequency is 3× denser. G = 24/cell (=1 at 24px → gen is IDENTICAL; =3 at 8px) restores physical feature sizes:
+  // multiply row/column sizes by G, divide frequencies by G.
+  const G = 24 / TERRAIN_CELL;
+  const CRUST = Math.round(4 * G);                                     // biome soil crust thickness (rows)
+  // Heightmap: 3 octaves, random phase + amplitude (tuned for the wide world). Amplitudes ×G, frequencies ÷G.
   const p0 = rng() * Math.PI * 2, p1 = rng() * Math.PI * 2, p2 = rng() * Math.PI * 2;
-  const a0 = 7 + rng() * 7, a1 = 3 + rng() * 3, a2 = 1 + rng() * 2;
-  const heightAt = (c) => { const h = Math.sin(c * 0.016 + p0) * a0 + Math.sin(c * 0.05 + p1) * a1 + Math.sin(c * 0.12 + p2) * a2; const s = Math.round(baseRow - h); return s < 6 ? 6 : (s > bottomRow - 10 ? bottomRow - 10 : s); };
-  // Surface biomes: a slow field over the width → 6 biomes (drives crust material + trees + surface pools).
+  const a0 = (7 + rng() * 7) * G, a1 = (3 + rng() * 3) * G, a2 = (1 + rng() * 2) * G;
+  const heightAt = (c) => { const h = Math.sin(c * 0.016 / G + p0) * a0 + Math.sin(c * 0.05 / G + p1) * a1 + Math.sin(c * 0.12 / G + p2) * a2; const s = Math.round(baseRow - h); return s < 6 * G ? 6 * G : (s > bottomRow - 10 * G ? bottomRow - 10 * G : s); };
+  // Surface biomes: a slow field over the width → 6 biomes (drives crust material + trees + surface pools). Freqs ÷G.
   const bp0 = rng() * Math.PI * 2, bp1 = rng() * Math.PI * 2, bp2 = rng() * Math.PI * 2;
-  const surfBiome = (c) => { const v = Math.sin(c * 0.010 + bp0) + 0.5 * Math.sin(c * 0.023 + bp1) + 0.3 * Math.sin(c * 0.043 + bp2);
+  const surfBiome = (c) => { const v = Math.sin(c * 0.010 / G + bp0) + 0.5 * Math.sin(c * 0.023 / G + bp1) + 0.3 * Math.sin(c * 0.043 / G + bp2);
     if (v > 1.05) return 'snow'; if (v > 0.35) return 'forest'; if (v < -1.05) return 'volcanic'; if (v < -0.5) return 'desert'; if (v < -0.1) return 'swamp'; return 'plains'; };
-  // Underground biome regions: an independent slow field → 6 depth-regions (veins, cave pool fluid, scatter).
+  // Underground biome regions: an independent slow field → 6 depth-regions (veins, cave pool fluid, scatter). Freqs ÷G.
   const gp0 = rng() * Math.PI * 2, gp1 = rng() * Math.PI * 2;
-  const ugBiome = (c) => { const v = Math.sin(c * 0.0055 + gp0) + 0.6 * Math.sin(c * 0.015 + gp1);
+  const ugBiome = (c) => { const v = Math.sin(c * 0.0055 / G + gp0) + 0.6 * Math.sin(c * 0.015 / G + gp1);
     if (v > 1.15) return 'frozen'; if (v > 0.4) return 'fungal'; if (v < -1.15) return 'molten'; if (v < -0.45) return 'crystal'; if (v < -0.05) return 'sandstone'; return 'caverns'; };
-  const seaRow = baseRow + 6;                                          // valleys deeper than this flood with Water
+  const seaRow = baseRow + Math.round(6 * G);                          // valleys deeper than this flood with Water
   // Flat spawn plateau, clamped above the water line so spawn is dry + level.
   const centerCol = Math.floor((MWSim.C.WORLD_W / 2) / TERRAIN_CELL);
-  const plateauHalf = Math.ceil(SPAWN_CLEAR_HALF_W / TERRAIN_CELL) + 3;
-  let plateauSurf = heightAt(centerCol); if (plateauSurf > seaRow - 3) plateauSurf = seaRow - 3; if (plateauSurf < 6) plateauSurf = 6;
+  const plateauHalf = Math.ceil(SPAWN_CLEAR_HALF_W / TERRAIN_CELL) + Math.round(3 * G);
+  let plateauSurf = heightAt(centerCol); if (plateauSurf > seaRow - 3 * G) plateauSurf = seaRow - 3 * G; if (plateauSurf < 6 * G) plateauSurf = 6 * G;
   const surf = new Int16Array(TERRAIN_COLS);
   for (let c = 0; c < TERRAIN_COLS; c++) surf[c] = (Math.abs(c - centerCol) <= plateauHalf) ? plateauSurf : heightAt(c);
   const crustMat = (biome, r, s) => biome === 'desert' ? MAT.SAND : biome === 'snow' ? (r === s ? MAT.SNOW : MAT.EARTH) : biome === 'swamp' ? MAT.MUD : biome === 'volcanic' ? MAT.STONE : MAT.EARTH;
@@ -4044,8 +4049,8 @@ function generateWorld(avatarRoom, seed, band) {
     const sB = (Math.abs(c - centerCol) <= plateauHalf) ? 'plains' : surfBiome(c);
     const uB = ugBiome(c);
     const s = surf[c];
-    const dirtBot = s + CRUST + 8 + ((rng() * 5) | 0);                 // bottom of the loose-dirt band
-    const deepTop = bottomRow - 14 - ((rng() * 6) | 0);               // top of the deep band
+    const dirtBot = s + CRUST + Math.round(8 * G) + ((rng() * 5 * G) | 0);   // bottom of the loose-dirt band
+    const deepTop = bottomRow - Math.round(14 * G) - ((rng() * 6 * G) | 0);  // top of the deep band
     for (let r = s; r <= bottomRow; r++) {
       let v;
       if (r < s + CRUST) v = crustMat(sB, r, s);                       // biome crust
@@ -4072,8 +4077,8 @@ function generateWorld(avatarRoom, seed, band) {
     for (let r = top; r <= bottomRow; r++) {
       const i = r * TERRAIN_COLS + c; if (!grid[i]) continue;
       const depth = (r - top) / Math.max(1, bottomRow - top);
-      const worm = Math.abs(Math.sin(c * 0.06 + r * 0.033 + cp0) + Math.sin(c * 0.025 - r * 0.052 + cp1) + Math.sin((c + r) * 0.041 + cp2));
-      const chamber = Math.sin(c * 0.018 + r * 0.022 + cp3) + Math.sin(c * 0.034 - r * 0.013 + cp4);   // rare small pockets
+      const worm = Math.abs(Math.sin((c * 0.06 + r * 0.033) / G + cp0) + Math.sin((c * 0.025 - r * 0.052) / G + cp1) + Math.sin((c + r) * 0.041 / G + cp2));
+      const chamber = Math.sin((c * 0.018 + r * 0.022) / G + cp3) + Math.sin((c * 0.034 - r * 0.013) / G + cp4);   // rare small pockets
       if (worm < 0.24 + depth * 0.12 || chamber > 1.86 - depth * 0.26) { grid[i] = 0; hp[i] = 0; }     // narrow tunnels + occasional pocket
     }
   }
@@ -4082,15 +4087,15 @@ function generateWorld(avatarRoom, seed, band) {
   // ---- 3b. Cave pools: shallow fluid resting on cave floors. ONE liquid per underground region (no random
   // mixing) so each area reads coherently — molten→Lava, sandstone→Quicksand, fungal→Brine, everywhere
   // else→Water. Patchy along the width via a wet field; molten always seeps at the very bottom. ----
-  const wp = rng() * Math.PI * 2, wp2 = rng() * Math.PI * 2, POOL_DEPTH = 4;
+  const wp = rng() * Math.PI * 2, wp2 = rng() * Math.PI * 2, POOL_DEPTH = Math.round(4 * G);
   const regionFluid = { molten: MAT.LAVA, sandstone: MAT.QUICKSAND, fungal: MAT.BRINE, frozen: MAT.WATER, crystal: MAT.WATER, caverns: MAT.WATER };
   for (let c = 0; c < TERRAIN_COLS; c++) {
     if (!inBand(c)) continue;
     const uB = ugBiome(c);
     const fluid = regionFluid[uB] || MAT.WATER;
-    const wet = Math.sin(c * 0.02 + wp) + 0.5 * Math.sin(c * 0.061 + wp2);
+    const wet = Math.sin(c * 0.02 / G + wp) + 0.5 * Math.sin(c * 0.061 / G + wp2);
     const wetOK = uB === 'molten' ? true : wet > 0.25;                 // molten always seeps; others patchy
-    const tableRow = uB === 'molten' ? bottomRow - 10 : surf[c] + CRUST + 14;   // no cave pools too near the surface
+    const tableRow = uB === 'molten' ? bottomRow - Math.round(10 * G) : surf[c] + CRUST + Math.round(14 * G);   // no cave pools too near the surface
     if (!wetOK) continue;
     for (let r = bottomRow; r >= tableRow;) {
       if (grid[r * TERRAIN_COLS + c] !== 0) { r--; continue; }         // solid — skip
@@ -4110,12 +4115,12 @@ function generateWorld(avatarRoom, seed, band) {
   const treeFor = { plains: '🌳', forest: '🌲', desert: '🌵', snow: '🌲', swamp: '🌿', volcanic: '🪨' };
   let wn = 0;
   const addObj = (o) => { if (wn >= OBJ_CAP) return false; o.id = 'world-' + wn; o.ownerId = 'world'; o.owner = 'world'; objs.set(o.id, o); wn++; return true; };
-  for (let c = Math.max(8, genC0); c < Math.min(TERRAIN_COLS - 8, genC1); c += 6) {   // surface rock mounds (terrain)
+  for (let c = Math.max(8, genC0); c < Math.min(TERRAIN_COLS - 8, genC1); c += Math.round(6 * G)) {   // surface rock mounds (terrain); step ×G keeps physical spacing
     if (rng() > 0.10 || !dryLand(c) || !outsideSpawn((c + 0.5) * TERRAIN_CELL)) continue;
-    const hgt = 1 + (rng() * 2 | 0);
+    const hgt = (1 + (rng() * 2 | 0)) * G;
     for (let k = 0; k < hgt; k++) { set(c, surf[c] - 1 - k, MAT.STONE); if (rng() > 0.5) set(c + 1, surf[c + 1] - 1 - k, MAT.STONE); }
   }
-  for (let c = Math.max(5, genC0); c < Math.min(TERRAIN_COLS - 5, genC1); c += 4) {   // surface trees (narrow solid stamps)
+  for (let c = Math.max(5, genC0); c < Math.min(TERRAIN_COLS - 5, genC1); c += Math.round(4 * G)) {   // surface trees (narrow solid stamps); step ×G keeps physical spacing
     if (rng() > 0.16 || !dryLand(c) || !outsideSpawn((c + 0.5) * TERRAIN_CELL)) continue;
     const h = 58 + (rng() * 28 | 0), w = Math.round(h * 0.5);
     addObj({ type: 'stamp', x: (c + 0.5) * TERRAIN_CELL, y: surf[c] * TERRAIN_CELL - h / 2,
@@ -4126,15 +4131,15 @@ function generateWorld(avatarRoom, seed, band) {
   for (let k = 0; k < plats; k++) {
     const c = platLo + (rng() * (platHi - platLo) | 0), wx = (c + 0.5) * TERRAIN_CELL;
     const y = surf[c] * TERRAIN_CELL - (90 + rng() * 240);
-    if (!outsideSpawn(wx) || y < TERRAIN_CELL * 3) continue;
+    if (!outsideSpawn(wx) || y < TERRAIN_CELL * 3 * G) continue;   // ×G: keep the same physical top-margin (72px)
     addObj({ type: 'platform', x: wx, y, w: 110 + (rng() * 120 | 0), h: 16, angle: 0, spin: 0, boost: 0, updraft: 0, fanLen: 1, fanMode: 'push', fanPeriod: 2, hp: null });
   }
   // Underground scatter: props + the occasional bouncy fungus/crystal platform, resting on cave floors.
   const cryFor = { frozen: '❄️', crystal: '💎', fungal: '🍄', sandstone: '🪨', caverns: '💧', molten: '' };
-  for (let c = Math.max(4, genC0); c < Math.min(TERRAIN_COLS - 4, genC1); c += 3) {
+  for (let c = Math.max(4, genC0); c < Math.min(TERRAIN_COLS - 4, genC1); c += Math.round(3 * G)) {   // underground scatter; step ×G keeps physical spacing
     if (wn >= OBJ_CAP) break;
     const uB = ugBiome(c);
-    for (let r = surf[c] + CRUST + 6; r <= bottomRow - 1; r++) {
+    for (let r = surf[c] + CRUST + Math.round(6 * G); r <= bottomRow - 1; r++) {
       const here = grid[r * TERRAIN_COLS + c], below = at(c, r + 1);
       if (here !== 0) continue;                                        // need an open cell…
       if (below === 0 || TERRAIN_MATS_FLUID(below)) continue;         // …resting on a SOLID floor (not fluid/air)
