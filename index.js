@@ -1627,7 +1627,7 @@ const liquidCfg = {
   // Tunings below are the values arrived at in the bench (scratchpad/liquid-droplet-stream.html).
   // The client half has landed (16b parses 'liquid-drops' and replays the fall locally), so this is on by default.
   // Turn it off to compare against the original fallSide/stream-strip path, which is untouched underneath.
-  droplets: true,
+  droplets: false,
   dropUnit: 2,           // target droplet size in liquid units (of LIQUID_MAX per cell)
   dropFall: 0.4,         // constant fall speed, cells per tick
   dropSpread: 1.0,       // ceiling on the width of the band droplets appear in, in cells
@@ -1700,15 +1700,15 @@ const liquidCfg = {
   // FINE-CELL LIQUID resolution (experimental). 1 = the coarse system, UNTOUCHED. 3 = a parallel 3×3-per-cell fine liquid
   // (fineLiquidTickRoom) in SEPARATE arrays, gated ON alongside the coarse one — same multi-liquid physics, smaller cells,
   // so thin streams get a real horizontal position. Inc 1 = pipeline (flow + wire + render); reactions/sources come next.
-  sub: 1,
+  sub: 3,
   // FINE: use the diagonal ledge spill (1b). OFF ⇒ rely on lateral levelling (1c) moving liquid into the edge cell + it
   // falling straight down (1a) next tick — same end state, one tick slower, no diagonal/geometry rule (a diagonal gap
   // between two solids is a sealed corner anyway). Fine-only so the coarse system is unaffected.
-  fineLedge: true,
+  fineLedge: false,
   // FINE PHYSICS SUB-STEPS: run the WHOLE fine tick this many times/tick → ALL movement (fall/spill/level/sort) K× faster,
   // recovering the speed fine cells lose to being smaller. Levelling is O(width²) so fine is ~SUB²≈9× slower than coarse →
   // K≈9 matches coarse. Local, no teleport, broadcast accumulated (wire ~unchanged). 1 = unchanged.
-  fineLevelSteps: 1,
+  fineLevelSteps: 9,
   // (1) QUIESCENCE (perf): freeze a fine cell that has NOT MOVED for fineQuiesceTicks ticks — drop it from the active set
   // so it stops being processed AND broadcast. Trims the settling wake-front + idle halo. Keys off "did it move (incl.
   // density sort) this tick", so an inverting cell is never frozen. Pure perf: only removes from the work-set, never
@@ -1723,8 +1723,8 @@ const liquidCfg = {
   // FALL RATE vs sub-steps: sub-steps re-run the DOWN-fall (1a/1b) too, so higher K makes liquid FALL K× faster, not just
   // level faster. ON = decouple — the fall runs fineFallSteps times/tick REGARDLESS of K (≈ coarse fall speed at SUB=3),
   // while levelling + density sort still get the full K passes. OFF = fall follows K (original). Behind a toggle to A/B.
-  fineConstFall: false,
-  fineFallSteps: 3,
+  fineConstFall: true,
+  fineFallSteps: 1,
   // MINIMUM LIQUID UNIT (fine, experimental): quantise the DOWN-fall so liquid only descends in multiples of this many
   // units — the remainder stays put (mass conserved, a thin film left on the way). Bigger unit ⇒ bigger, chunkier falling
   // slices (they connect up more) at the cost of a more stepped/periodic trickle. 1 = off (exact fall, current). Fall only
