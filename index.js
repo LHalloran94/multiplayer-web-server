@@ -1725,6 +1725,11 @@ const liquidCfg = {
   // while levelling + density sort still get the full K passes. OFF = fall follows K (original). Behind a toggle to A/B.
   fineConstFall: false,
   fineFallSteps: 3,
+  // MINIMUM LIQUID UNIT (fine, experimental): quantise the DOWN-fall so liquid only descends in multiples of this many
+  // units — the remainder stays put (mass conserved, a thin film left on the way). Bigger unit ⇒ bigger, chunkier falling
+  // slices (they connect up more) at the cost of a more stepped/periodic trickle. 1 = off (exact fall, current). Fall only
+  // (1a) so POOLS keep their smooth 1/64 vertical levelling. Fine-mode only.
+  fineMinUnit: 1,
   // COARSE physics sub-steps (curiosity): run the whole COARSE tick this many times/tick → coarse liquid moves K× faster.
   // Simple (calls liquidTickRoom K times in runLiquidTick), so it broadcasts K× (K× wire) — a debug/experiment dial only.
   coarseSubSteps: 1,
@@ -2950,6 +2955,7 @@ function fineLiquidTickRoom(room, SUB) {
   // byte-identical to the original single-loop behaviour.
   const FALLSTEPS = liquidCfg.fineConstFall ? Math.max(1, Math.min(16, liquidCfg.fineFallSteps | 0)) : FSTEPS;
   const NSTEPS = Math.max(FSTEPS, FALLSTEPS), ADAPT_PCT = Math.max(1, Math.min(50, liquidCfg.fineAdaptPct | 0));
+  const MINU = Math.max(1, Math.min(cap, liquidCfg.fineMinUnit | 0));   // quantise the down-fall so falling slices are chunkier (1 = off)
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
     const doFall = step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
@@ -2989,7 +2995,7 @@ function fineLiquidTickRoom(room, SUB) {
     }
     // (1a) straight down (tag carried only onto air / an already-falling cell). Gated on doFall so the fall rate can be
     // held constant regardless of the levelling sub-step count (fineConstFall).
-    if (doFall && canDown) { const j = i + COLS; const room2 = cap - tot[j]; if (!isSolid(j) && room2 > 0) { const t = Math.min(L, room2); if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t); if (liquidCfg.streamTag && sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i]; L -= t; wakeN(i); } } }
+    if (doFall && canDown) { const j = i + COLS; const room2 = cap - tot[j]; if (!isSolid(j) && room2 > 0) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t); if (liquidCfg.streamTag && sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i]; L -= t; wakeN(i); } } }
     // density throttle (viscosity off by default → lf=1 → reduce is a pass-through)
     const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;
     let pend = false;
@@ -4707,6 +4713,7 @@ io.on('connection', (socket) => {
     if ('fineQuiesceTicks' in patch) liquidCfg.fineQuiesceTicks = Math.max(2, Math.min(60, patch.fineQuiesceTicks | 0));
     if ('fineAdaptPct' in patch) liquidCfg.fineAdaptPct = Math.max(1, Math.min(50, patch.fineAdaptPct | 0));
     if ('fineFallSteps' in patch) liquidCfg.fineFallSteps = Math.max(1, Math.min(16, patch.fineFallSteps | 0));
+    if ('fineMinUnit' in patch) liquidCfg.fineMinUnit = Math.max(1, Math.min(64, patch.fineMinUnit | 0));
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(8, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
       for (const room in roomLiquidTotal) io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) });
