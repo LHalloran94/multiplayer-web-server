@@ -1930,9 +1930,14 @@ function soilSet(room) { return roomSoilActive[room] || (roomSoilActive[room] = 
 // water cell happens to be "active") → placement + pre-generated lakes reliably + consistently start absorbing.
 function seedSoilAround(room, grid, i) {
   const nn = grid.length, COLS = TERRAIN_COLS, c = i % COLS, N = [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
+  // In fine mode water is not a grid id — it is rank 4 of the fine stack — so both tests below have to read the fine
+  // arrays or nothing is ever seeded and the whole saturation model stays asleep.
+  const fine = liquidCfg.fine && (roomFineSub[room] || 1) === 1 && roomFineAmt[room];
+  const famt = fine ? roomFineAmt[room] : null;
+  const isWater = (j) => fine ? famt[j * LIQ_T + 4] > 0 : grid[j] === 9;
   const g = grid[i];
-  if (g === 9) { const ss = soilSet(room); for (const j of N) { if (j < 0 || j >= nn) continue; const gj = grid[j]; if (gj === 1 || gj === 3 || gj === 5) ss.add(j); } }         // water → seed absorbent neighbours
-  else if (g === 1 || g === 3 || g === 5) { for (const j of N) if (j >= 0 && j < nn && grid[j] === 9) { soilSet(room).add(i); return; } }                                        // absorbent solid placed by water → seed itself
+  if (isWater(i)) { const ss = soilSet(room); for (const j of N) { if (j < 0 || j >= nn) continue; const gj = grid[j]; if (gj === 1 || gj === 3 || gj === 5) ss.add(j); } }        // water → seed absorbent neighbours
+  else if (g === 1 || g === 3 || g === 5) { for (const j of N) if (j >= 0 && j < nn && isWater(j)) { soilSet(room).add(i); return; } }                                            // absorbent solid placed by water → seed itself
 }
 // Set a cell to a single full-CAP liquid `id` (paint / gen / seed). Clears the other layers.
 function liqSetSingle(room, i, id) { const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), base = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[base + k] = 0; amt[base + LIQ_RANK[id]] = LIQUID_MAX; tot[i] = LIQUID_MAX; ensureStream2Amt(room)[i] = 0; ensureStream2Id(room)[i] = 0; }
@@ -2817,14 +2822,28 @@ function powderTickRoom(room) {
   const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), sd = ensureLiquidSide(room), s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room);
   const mats = roomMats[room] || {}, T = LIQ_T, COLS = TERRAIN_COLS, tick = powderTickCount, nn = grid.length;
   const FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // grains may not enter the bedrock floor row (same as liquid)
-  const canDisplace = (j) => grid[j] === 0 || isFluidId(grid[j]);   // empty or liquid → a grain can fall into it
+  // FINE mode: liquid lives in the roomFine* arrays and the terrain grid holds SOLIDS ONLY, so `isFluidId(grid[j])`
+  // never matches and a grain read a liquid cell as plain AIR — it fell straight through the pool and, worse, the
+  // grid[dst]===0 branch left the fine liquid sitting INSIDE the new solid cell. Same sink-and-swap logic, fine arrays.
+  const FINE = !!liquidCfg.fine && (roomFineSub[room] || 1) === 1 && !!roomFineAmt[room];
+  const famt = FINE ? roomFineAmt[room] : null, ftot = FINE ? roomFineTotal[room] : null, fsd = FINE ? roomFineSide[room] : null;
+  const canDisplace = (j) => grid[j] === 0 || (!FINE && isFluidId(grid[j]));   // empty — which in fine mode covers pooled liquid too, since liquid is not in the grid
   const list = Array.from(active); active.clear();
   list.sort((a, b) => ((b / COLS) | 0) - ((a / COLS) | 0));   // bottom-up so a falling column cascades in a single pass
-  const changedSet = new Set();
+  const changedSet = new Set(), fineChanged = new Set();
   const wakeAround = (i) => { const c = i % COLS; for (const j of [i - COLS, c > 0 ? i - COLS - 1 : -1, c < COLS - 1 ? i - COLS + 1 : -1]) if (j >= 0 && isPowderId(grid[j])) active.add(j); };   // wake grains above the vacated cell → column keeps falling
   const swapMove = (src, dst) => {
     const P = grid[src], hpP = hp[src];
-    if (grid[dst] === 0) { grid[dst] = P; hp[dst] = hpP; grid[src] = 0; hp[src] = 0; }
+    if (FINE) {
+      const bs = src * T, bd = dst * T;                      // src is solid ⇒ holds no fine liquid; dst may hold a pool
+      const carried = ftot[dst];
+      for (let k = 0; k < T; k++) { famt[bs + k] = famt[bd + k]; famt[bd + k] = 0; }   // the pool moves UP into the vacated cell
+      ftot[src] = carried; ftot[dst] = 0; fsd[src] = 0; fsd[dst] = 0;
+      grid[dst] = P; hp[dst] = hpP; grid[src] = 0; hp[src] = 0;
+      if (carried > 0) { fineSet(room).add(src); fineChanged.add(src); fineChanged.add(dst); }
+      else fineChanged.add(dst);
+      const sc = src % COLS; for (const j of [src - COLS, src + COLS, sc > 0 ? src - 1 : -1, sc < COLS - 1 ? src + 1 : -1]) if (j >= 0 && j < nn && ftot[j] > 0) fineSet(room).add(j);
+    } else if (grid[dst] === 0) { grid[dst] = P; hp[dst] = hpP; grid[src] = 0; hp[src] = 0; }
     else {   // dst holds liquid → SWAP its whole stack up into src; the grain sinks into dst (mass-conserved for both)
       const bs = src * T, bd = dst * T;
       for (let k = 0; k < T; k++) { amt[bs + k] = amt[bd + k]; amt[bd + k] = 0; }   // src was solid (amt 0) → move dst's stack up, clear dst
@@ -2836,6 +2855,7 @@ function powderTickRoom(room) {
       const sc = src % COLS; for (const j of [src - COLS, src + COLS, sc > 0 ? src - 1 : -1, sc < COLS - 1 ? src + 1 : -1]) if (j >= 0 && j < nn && isFluidId(grid[j]) && tot[j] > 0) liquidSet(room).add(j);
     }
     changedSet.add(src); changedSet.add(dst); active.add(dst); wakeAround(src);
+    if (FINE && liquidCfg.reactions) { seedFineReactAround(room, src); seedFineReactAround(room, dst); }   // a grain landing in a pool is a new contact (snow dropped into water → ice)
   };
   for (const i of list) {
     if (!isPowderId(grid[i])) continue;
@@ -2845,7 +2865,10 @@ function powderTickRoom(room) {
     for (const dc of (((i + tick) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = below + dc; if (canDisplace(j)) { swapMove(i, j); break; } }
     // couldn't fall or slide → rests (not re-added to active)
   }
-  if (changedSet.size) {   // same wire encoding as liquidTickRoom: [i, gridId, side(|0x80 if s2), mask] + one amt per set rank + [s2amt,s2id]
+  if (FINE) {   // grain movement is a TERRAIN change; any pool it displaced rides the fine-liquid wire
+    if (changedSet.size && !liquidQuiet) { const tc = []; for (const j of changedSet) tc.push(j, grid[j]); io.to(room).emit('terrain-set', { cells: tc }); }
+    if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
+  } else if (changedSet.size) {   // same wire encoding as liquidTickRoom: [i, gridId, side(|0x80 if s2), mask] + one amt per set rank + [s2amt,s2id]
     let arr = [], cells = 0;
     for (const j of changedSet) {
       const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
@@ -2867,11 +2890,20 @@ function soilTickRoom(room) {
   const grid = roomTerrain[room], hp = roomTerrainHp[room];
   if (!grid) { delete roomSoilActive[room]; return; }
   const sat = ensureSat(room), mats = roomMats[room] || {}, COLS = TERRAIN_COLS, nn = grid.length, T = LIQ_T;
-  const lam = ensureLiquidAmt(room), ltot = ensureLiquidTotal(room), sd = ensureLiquidSide(room);
-  const changedSet = new Set();
+  // ── SAME SATURATION LOGIC, FINE DATA SOURCE. In fine mode liquid lives in the roomFine* arrays and the terrain grid
+  // holds solids only, so every `grid[j] === 9` water test and every coarse amt/tot read below found nothing and the
+  // whole saturation model was inert (no earth→mud, no sand→quicksand, no drying). Only the ACCESSORS change here —
+  // the model itself (SAT_MAX cell-by-cell, the wet-CLUMP rule for sand, drying, lava baking) is untouched.
+  const FINE = !!liquidCfg.fine && (roomFineSub[room] || 1) === 1 && !!roomFineAmt[room];
+  const lam = FINE ? roomFineAmt[room] : ensureLiquidAmt(room), ltot = FINE ? roomFineTotal[room] : ensureLiquidTotal(room);
+  const sd = FINE ? roomFineSide[room] : ensureLiquidSide(room);
+  const changedSet = new Set(), fineChanged = new Set(), terrChanged = new Set();
+  const isWater = (j) => FINE ? lam[j * T + 4] > 0 : (grid[j] === 9 && lam[j * T + 4] > 0);   // water = rank 4
+  const isLava = (j) => FINE ? lam[j * T] > 0 : grid[j] === 11;
   const adj = (i, id) => { const c = i % COLS; if (i - COLS >= 0 && grid[i - COLS] === id) return true; if (i + COLS < nn && grid[i + COLS] === id) return true; if (c > 0 && grid[i - 1] === id) return true; if (c < COLS - 1 && grid[i + 1] === id) return true; return false; };
-  const adjWater = (i) => { const c = i % COLS; for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) { if (j < 0 || j >= nn) continue; if (grid[j] === 9 && lam[j * T + 4] > 0) return j; } return -1; };   // water = rank 4
-  const wakeLiq = (j) => { if (j >= 0 && j < nn && isFluidId(grid[j]) && ltot[j] > 0) liquidSet(room).add(j); };
+  const adjFn = (i, fn) => { const c = i % COLS; for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) { if (j < 0 || j >= nn) continue; if (fn(j)) return true; } return false; };
+  const adjWater = (i) => { const c = i % COLS; for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) { if (j < 0 || j >= nn) continue; if (isWater(j)) return j; } return -1; };
+  const wakeLiq = (j) => { if (j < 0 || j >= nn || ltot[j] <= 0) return; if (FINE) fineSet(room).add(j); else if (isFluidId(grid[j])) liquidSet(room).add(j); };
   for (const i of Array.from(ss)) {
     const v = grid[i];
     // ABSORPTION (pull): earth/sand draw water out of an adjacent pool into their saturation, draining it. Only pull from a
@@ -2881,15 +2913,16 @@ function soilTickRoom(room) {
       if (wj >= 0) {                                     // absorb even while the pool is still flowing — SAT_MAX is small enough now that it barely dents leveling
         const take = Math.min(SAT_ABSORB, SAT_MAX - sat[i], lam[wj * T + 4]);   // water = rank 4
         if (take > 0) {
-          sat[i] += take; lam[wj * T + 4] -= take; ltot[wj] -= take; if (ltot[wj] <= 0) { grid[wj] = 0; sd[wj] = 0; }
-          changedSet.add(wj); activateLiquidCell(room, wj, grid);
+          sat[i] += take; lam[wj * T + 4] -= take; ltot[wj] -= take;
+          if (ltot[wj] <= 0) { sd[wj] = 0; if (!FINE) grid[wj] = 0; }             // fine: liquid was never in the grid
+          if (FINE) { fineChanged.add(wj); fineSet(room).add(wj); } else { changedSet.add(wj); activateLiquidCell(room, wj, grid); }
           const wc = wj % COLS; wakeLiq(wj - COLS); wakeLiq(wj + COLS); if (wc > 0) wakeLiq(wj - 1); if (wc < COLS - 1) wakeLiq(wj + 1);   // re-level: the column above falls into the drained space (no hovering slivers)
         }
       }
     }
     if (v === 1) {                                       // EARTH → MUD once it has soaked up a cell's worth of water
-      if (sat[i] >= SAT_MAX) { grid[i] = 5; hp[i] = matStrengthSrv(mats, 5); changedSet.add(i); }   // stays tracked (mud dries later)
-      else if (sat[i] === 0 && !adj(i, 9)) ss.delete(i);
+      if (sat[i] >= SAT_MAX) { grid[i] = 5; hp[i] = matStrengthSrv(mats, 5); changedSet.add(i); terrChanged.add(i); }   // stays tracked (mud dries later)
+      else if (sat[i] === 0 && !adjFn(i, isWater)) ss.delete(i);
     } else if (v === 3) {                                // SAND → QUICKSAND, but only inside a wet CLUMP
       if (sat[i] >= SAT_MAX) {
         const r = (i / COLS) | 0, c = i - r * COLS; let clump = 0;
@@ -2898,13 +2931,24 @@ function soilTickRoom(room) {
           const j = rr * COLS + cc; if (j < 0 || j >= nn) continue; const g = grid[j];
           if (g === 10 || (g === 3 && sat[j] >= SAT_MAX)) clump++;
         }
-        if (clump >= SAT_CLUMP_MIN) { grid[i] = 10; liqSetSingle(room, i, 10); activateLiquidCell(room, i, grid); sat[i] = 0; changedSet.add(i); ss.delete(i); }
-      } else if (sat[i] === 0 && !adj(i, 9)) ss.delete(i);
+        if (clump >= SAT_CLUMP_MIN) {                    // sand becomes the QUICKSAND liquid: in fine mode that means a full fine cell, and the terrain cell empties
+          if (FINE) { const b = i * T; for (let k = 0; k < T; k++) lam[b + k] = 0; lam[b + 1] = LIQUID_MAX; ltot[i] = LIQUID_MAX; sd[i] = 0; grid[i] = 0; hp[i] = 0; fineSet(room).add(i); fineChanged.add(i); terrChanged.add(i); }
+          else { grid[i] = 10; liqSetSingle(room, i, 10); activateLiquidCell(room, i, grid); }
+          sat[i] = 0; changedSet.add(i); ss.delete(i);
+        }
+      } else if (sat[i] === 0 && !adjFn(i, isWater)) ss.delete(i);
     } else if (v === 5) {                                // MUD: lava bakes it dry instantly; water keeps it wet; else it dries → earth
-      if (adj(i, 11)) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); sat[i] = 0; changedSet.add(i); ss.delete(i); }
-      else if (adj(i, 9)) sat[i] = SAT_MAX;
-      else { sat[i] = sat[i] > SAT_DRY ? sat[i] - SAT_DRY : 0; if (sat[i] === 0) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); changedSet.add(i); ss.delete(i); } }
+      if (adjFn(i, isLava)) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); sat[i] = 0; changedSet.add(i); terrChanged.add(i); ss.delete(i); }
+      else if (adjFn(i, isWater)) sat[i] = SAT_MAX;
+      else { sat[i] = sat[i] > SAT_DRY ? sat[i] - SAT_DRY : 0; if (sat[i] === 0) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); changedSet.add(i); terrChanged.add(i); ss.delete(i); } }
     } else { sat[i] = 0; ss.delete(i); }                 // cell dug/overwritten out from under us
+  }
+  if (FINE) {                                            // terrain conversions ride terrain-set; drained/created liquid rides the fine wire
+    if (terrChanged.size && !liquidQuiet) { const tc = []; for (const j of terrChanged) tc.push(j, grid[j]); io.to(room).emit('terrain-set', { cells: tc }); }
+    if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
+    if (liquidCfg.reactions) { const rs = fineReactSet(room); for (const j of terrChanged) rs.add(j); for (const j of fineChanged) rs.add(j); }
+    if (!ss.size) delete roomSoilActive[room];
+    return;
   }
   if (changedSet.size && !liquidQuiet) {                 // same compact liquid-cells encoding as liquidTickRoom (solids → mask 0; quicksand/drained-water carry their stack)
     const s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room);
@@ -3211,6 +3255,12 @@ function fineLiquidTickRoom(room, SUB) {
     }
     if (cells) emitFine();
   }
+  // ⭐ REACTION CANDIDATES COME FROM `changedSet`, NOT FROM `active`. These are different things and conflating them is
+  // why reactions only fired while liquid was still MOVING: the sub-step loop clears `active` every sub-step and only
+  // re-adds cells that moved AGAIN, and the prune below drops more — so a cell that moved early in the tick and then
+  // settled is in changedSet but NOT in active. `active` means "may still move"; `changedSet` means "this cell's
+  // contents changed", which is exactly when a contact can have appeared. Bounded by what we just broadcast.
+  if (liquidCfg.reactions && changedSet.size) { const rs = fineReactSet(room); for (const j of changedSet) rs.add(j); }
   // QUIESCENCE: freeze (remove from `active`) a cell that has NOT MOVED for fineQuiesceTicks ticks, so it stops being
   // processed + broadcast — trims the settling wake-front + halo of woken-but-idle cells. "Moved" = in changedSet, i.e.
   // it fell, levelled, spilled, drained OR density-SORTED this tick; because an inverting cell is marked by the sort
@@ -3260,16 +3310,26 @@ const FREACT_MELT_AMT = 40;  // water units a melted snow/ice cell leaves behind
 const FREACT_BAKE_COST = 4;  // lava spent baking one mud cell → earth
 const FREACT_FUSE_COST = 4;  // lava spent fusing one sand cell → glass
 const FREACT_QSAND_COST = 6; // lava spent fusing one quicksand cell → glass
-const FREACT_OIL_BURN = 6;   // oil units burnt off per tick of contact with lava
+const FREACT_OIL_BURN = 6;   // oil units consumed per pass by a BURNING cell
+// ACID at 8px. The coarse bite was one 24px cell per 8 ticks = 3px of penetration per tick; an 8px cell eaten at the
+// same cadence would only be 1px/tick, i.e. 3× slower through the same wall. Biting every 3rd tick restores the
+// original physical eat-rate — the reaction is unchanged, only the cadence is re-derived for the smaller cell.
+const ACID_BITE_TICKS = 3;
+const FREACT_ACID_COST = 6;  // acid units spent per bite (unchanged from the coarse block)
+// OIL FIRE. Lava does not burn oil directly any more — it IGNITES it, and fire spreads cell to cell through the oil,
+// so a slick lights from the point of contact and runs back through itself instead of quietly shrinking.
+const roomFineFire = {};     // room → Set<fine cell> currently burning
+function fineFireSet(room) { return roomFineFire[room] || (roomFineFire[room] = new Set()); }
 function fineReactTickRoom(room, SUB) {
   if (!liquidCfg.fine || !liquidCfg.reactions) return;
   SUB = SUB || roomFineSub[room] || 1;
   if (SUB !== 1) return;     // reactions write TERRAIN; the two grids only share an index space at the all-fine ratio
   const grid = roomTerrain[room], hp = roomTerrainHp[room], amt = roomFineAmt[room], tot = roomFineTotal[room];
   if (!grid || !hp || !amt || !tot) return;
-  const active = roomFineActive[room], seeded = roomFineReact[room];
-  if ((!active || !active.size) && (!seeded || !seeded.size)) { if (seeded) delete roomFineReact[room]; return; }
+  const active = roomFineActive[room], seeded = roomFineReact[room], burning = roomFineFire[room];
+  if ((!active || !active.size) && (!seeded || !seeded.size) && (!burning || !burning.size)) { if (seeded) delete roomFineReact[room]; return; }
   const sd = roomFineSide[room], mats = roomMats[room] || {}, T = LIQ_T, COLS = TERRAIN_COLS, N = grid.length;
+  const tick = liquidTickCount, FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // acid may not eat the bedrock row
   const act = fineSet(room), liqChanged = new Set(), terrCells = [];
   const wake = (j) => { if (j >= 0 && j < N && tot[j] > 0) { const v = grid[j]; if (v === 0 || isFluidId(v)) act.add(j); } };
   const wakeN = (j) => { const c = j % COLS; wake(j - COLS); wake(j + COLS); if (c > 0) wake(j - 1); if (c < COLS - 1) wake(j + 1); };
@@ -3344,23 +3404,76 @@ function fineReactTickRoom(room, SUB) {
         setSolid(sj, 2);
         continue;
       }
-      // ── (D) OIL burns off on contact — no stone, and the lava is not consumed (2e turns this into spreading fire).
-      // The ONLY gradual reaction in the set: it takes many ticks, so unlike the others it does not resolve its own
-      // contact in one pass. Neither cell moves while it burns, so both drop out of roomFineActive after a tick or two
-      // and the burn would stall part-way (measured: 52 of 64 units still there after 40 ticks). Re-seed the pair.
+      // ── (D) OIL IGNITES on contact with lava. The lava is not consumed; the fire then spreads through the slick on
+      // its own (see the fire phase), so a pool lights at the point of contact and runs back through itself.
       let oj = amt[b + 5] > 0 ? i : -1;
       if (oj < 0) for (const j of NB) { if (j >= 0 && j < N && amt[j * T + 5] > 0) { oj = j; break; } }
-      if (oj >= 0) { const ob = oj * T; amt[ob + 5] = amt[ob + 5] > FREACT_OIL_BURN ? amt[ob + 5] - FREACT_OIL_BURN : 0;
-        recomp(oj); liqChanged.add(oj); if (tot[oj] > 0) act.add(oj); else act.delete(oj); wakeN(oj);
-        if (amt[ob + 5] > 0) { const ns = fineReactSet(room); ns.add(i); ns.add(oj); } }
+      if (oj >= 0) fineFireSet(room).add(oj);
   }
-  // ── PHASE 2: WATER + SNOW → ICE. Only water touching SNOW freezes, and ice is not snow, so it cannot chain — exactly
-  // a one-cell rime shell. Water still touching lava after phase 1 is left alone: lava melts/crusts it instead.
+  // ── FIRE: every burning cell consumes its oil and lights any neighbour holding oil. Driven by its own set rather
+  // than the anchors, so a slick keeps burning after everything has settled and stopped moving.
+  const fire = roomFineFire[room];
+  if (fire && fire.size) for (const i of Array.from(fire)) {
+    const b = i * T;
+    if (i < 0 || i >= N || amt[b + 5] <= 0) { fire.delete(i); continue; }   // burnt out (or the oil moved on)
+    amt[b + 5] = amt[b + 5] > FREACT_OIL_BURN ? amt[b + 5] - FREACT_OIL_BURN : 0;
+    recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i);
+    if (amt[b + 5] <= 0) fire.delete(i);
+    const c = i % COLS;
+    for (const j of [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1])
+      if (j >= 0 && j < N && amt[j * T + 5] > 0) fire.add(j);              // the flame front
+  }
+  if (fire && !fire.size) delete roomFineFire[room];
+  // ── PHASE 2: ACID. Transferred from the coarse liquidTickRoom block, same model: SOAK adjacent water into this cell's
+  // dilution (consuming it) and CONVERT acid→water once saturated; with no water to neutralise against, DISSOLVE an
+  // adjacent breakable solid instead (never bedrock, never glass). Both are GRADUAL, so — like the oil burn — they do
+  // not resolve their own contact in one pass and must re-seed or they stall the moment the pool settles.
+  for (const i of anchors) {
+    const b = i * T, acid = amt[b + 3];
+    if (acid <= 0 || amt[b] > 0) continue;                  // (lava contact already turned this cell to stone in phase 1)
+    const c = i % COLS, NB = [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
+    const dil = ensureDilute(room);
+    let waterSrc = amt[b + 4] > 0 ? i : -1;
+    if (waterSrc < 0) for (const j of NB) { if (j >= 0 && j < N && amt[j * T + 4] > 0) { waterSrc = j; break; } }
+    if (waterSrc >= 0 || dil[i] >= ACID_K) {
+      if (waterSrc >= 0 && (tick % ACID_SOAK_TICKS) === 0 && dil[i] < acid * ACID_K) {   // SOAK 1 water → dilution (consumed)
+        amt[waterSrc * T + 4] -= 1; dil[i] += 1;
+        recomp(waterSrc); liqChanged.add(waterSrc); if (tot[waterSrc] > 0) act.add(waterSrc); else act.delete(waterSrc); wakeN(waterSrc);
+      }
+      if ((tick % ACID_CONVERT_TICKS) === 0 && dil[i] >= ACID_K && amt[b + 3] >= 1) {    // CONVERT 1 saturated acid → water
+        amt[b + 3] -= 1; amt[b + 4] += 1; dil[i] -= ACID_K; recomp(i); liqChanged.add(i); act.add(i); wakeN(i);
+        if (amt[b + 3] <= 0) dil[i] = 0;
+      }
+      const rs = fineReactSet(room); rs.add(i); if (waterSrc >= 0) rs.add(waterSrc);
+    } else {                                                // nothing to neutralise with → eat an adjacent solid
+      let solidJ = -1;
+      for (const j of NB) { if (j < 0 || j >= N) continue; if ((j / COLS | 0) >= FLOOR_ROW) continue;
+        const g = grid[j]; if (g !== 0 && !isFluidId(g) && hp[j] > 0 && g !== 16) { solidJ = j; break; } }   // never bedrock, never glass (acid-immune)
+      if (solidJ >= 0) {
+        fineReactSet(room).add(i);                          // gradual: keep the contact alive between bites
+        if ((tick % ACID_BITE_TICKS) === 0) {
+          if (hp[solidJ] > 1) hp[solidJ] -= 1;
+          else { grid[solidJ] = 0; hp[solidJ] = 0; terrCells.push(solidJ, 0); wakeN(solidJ); seedFineReactAround(room, solidJ); }
+          amt[b + 3] = acid > FREACT_ACID_COST ? acid - FREACT_ACID_COST : 0;
+          recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i);
+        }
+      }
+    }
+  }
+  // ── PHASE 3: WATER. Snow contact freezes it to ICE — only water touching SNOW, and ice is not snow, so it cannot
+  // chain: exactly a one-cell rime shell. Water still touching lava after phase 1 is left alone, lava wins. Water also
+  // SEEDS the saturation model here (the coarse sim did this inline in its water branch, which fine mode never runs).
   for (const i of anchors) {
     const b = i * T;
     if (amt[b] > 0 || amt[b + 4] <= 0) continue;
     const c = i % COLS, NB = [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
-    let snow = false; for (const j of NB) { if (j >= 0 && j < N && grid[j] === 8) { snow = true; break; } }
+    let snow = false, ss = null;
+    for (const j of NB) {
+      if (j < 0 || j >= N) continue;
+      const g = grid[j];
+      if (g === 8) snow = true;
+      if (g === 1 || g === 3 || g === 5) { if (!ss) ss = soilSet(room); ss.add(j); }   // earth/sand/mud beside water → absorb
+    }
     if (!snow) continue;
     let nearLava = false; for (const j of NB) { if (j >= 0 && j < N && amt[j * T] > 0) { nearLava = true; break; } }
     if (!nearLava) setSolid(i, 4);
@@ -3378,6 +3491,17 @@ function fineReactTickRoom(room, SUB) {
     }
     if (cells) flush();
   }
+}
+// Fine-cell wire helpers. INSIDE the sim block because the sim itself now emits through them: soilTickRoom and
+// powderTickRoom both write fine liquid in fine mode, so the harness has to be able to reach these too.
+function fineWirePush(room, idxList, cells) {   // append [i, repId, side, mask, amts…] for each fine cell in idxList
+  const amt = roomFineAmt[room], sd = roomFineSide[room];
+  for (const i of idxList) { const b = i * LIQ_T; let mask = 0; for (let rk = 0; rk < LIQ_T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk); cells.push(i, liqRepId(amt, i), (sd[i] & 3), mask); for (let rk = 0; rk < LIQ_T; rk++) if (mask & (1 << rk)) cells.push(amt[b + rk]); }
+}
+function emitFineCells(room, idxList) {   // broadcast a set of fine cells immediately (used by placement — the tick only broadcasts what MOVED)
+  if (!idxList.length || !roomFineAmt[room]) return;
+  const SUB = roomFineSub[room] || liquidCfg.sub, cells = []; fineWirePush(room, idxList, cells);
+  if (cells.length) io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: TERRAIN_COLS * SUB, cells });
 }
 // ==LIQUID_SIM_BLOCK_END== (test harness slices the sim to this marker)
 // Restartable sim loop — the tick rate is liquidCfg.tickMs so the Liquid Debug menu can speed it up/slow it down live.
@@ -3404,8 +3528,9 @@ const runLiquidTick = () => {
   // first and the set still holds everything that moved last tick, i.e. exactly the cells whose contacts are new.
   // Rooms with no active liquid still get a pass when a terrain edit seeded them.
   const _react = () => {
-    for (const room in roomFineActive) fineReactTickRoom(room, roomFineSub[room] || liquidCfg.sub);
-    for (const room in roomFineReact) if (!roomFineActive[room]) fineReactTickRoom(room, roomFineSub[room] || liquidCfg.sub);
+    const seenRooms = new Set();
+    for (const src of [roomFineActive, roomFineReact, roomFineFire])   // a room may be quiet but still have a seeded contact or a burning slick
+      for (const room in src) { if (seenRooms.has(room)) continue; seenRooms.add(room); fineReactTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
   };
   if (liquidCfg.fine && liquidCfg.reactions) _react();
   if (liquidCfg.fine) for (const room in roomFineActive) { if (liquidCfg.perfLog) _fineActive += roomFineActive[room].size; fineLiquidTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
@@ -3484,15 +3609,6 @@ function downscaleRoomToCoarse(room, SUB) {   // convert the fine grid back into
   }
   roomFineAmt[room].fill(0); roomFineTotal[room].fill(0); roomFineSide[room].fill(0); fineSet(room).clear();
 }
-function fineWirePush(room, idxList, cells) {   // append [i, repId, side, mask, amts…] for each fine cell in idxList
-  const amt = roomFineAmt[room], sd = roomFineSide[room];
-  for (const i of idxList) { const b = i * LIQ_T; let mask = 0; for (let rk = 0; rk < LIQ_T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk); cells.push(i, liqRepId(amt, i), (sd[i] & 3), mask); for (let rk = 0; rk < LIQ_T; rk++) if (mask & (1 << rk)) cells.push(amt[b + rk]); }
-}
-function emitFineCells(room, idxList) {   // broadcast a set of fine cells immediately (used by placement — the tick only broadcasts what MOVED)
-  if (!idxList.length || !roomFineAmt[room]) return;
-  const SUB = roomFineSub[room] || liquidCfg.sub, cells = []; fineWirePush(room, idxList, cells);
-  if (cells.length) io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: TERRAIN_COLS * SUB, cells });
-}
 function buildFineInit(room) {   // join replay: every non-empty fine cell (same mask encoding)
   const tot = roomFineTotal[room]; if (!tot) return null;
   const SUB = roomFineSub[room] || liquidCfg.sub, idx = []; for (let i = 0; i < tot.length; i++) if (tot[i] > 0) idx.push(i);
@@ -3508,6 +3624,10 @@ function fineActivateRect(room, grid, c0, r0, c1, r1) {   // placement in fine m
     else for (const x of fineClearBlock(room, SUB, c, r)) changed.push(x);
     seedFineReactAround(room, i);   // an edit is the only way a SETTLED pair (lava beside painted snow/water) starts reacting
   }
+  // ...and the same for SATURATION. This used to sit in activateLiquidRect's coarse tail, which fine mode returns before
+  // reaching — so painting water beside earth never started it absorbing. +1 margin so an edit on either side seeds.
+  for (let r = Math.max(0, r0 - 1); r <= Math.min(TERRAIN_ROWS - 1, r1 + 1); r++)
+    for (let c = Math.max(0, c0 - 1); c <= Math.min(TERRAIN_COLS - 1, c1 + 1); c++) seedSoilAround(room, grid, r * TERRAIN_COLS + c);
   emitFineCells(room, changed);
 }
 // SOURCE tick for the fine grid: each source coarse cell tops up its SUB×SUB fine block (bottom-fill) by rate·SUB² units
