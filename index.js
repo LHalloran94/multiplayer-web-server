@@ -1587,7 +1587,7 @@ function dropSourcesInRect(room, c0, r0, c1, r1) {
   if (!s.size) delete roomLiquidSrc[room];
   if (gone.length) io.to(room).emit('liquid-src', { cells: gone, on: false });
 }
-let LIQUID_MAX = 64;                                  // TOTAL fill units per cell (= vertical "slices"). Runtime-tunable via liquidCfg.cellCap (rescales existing liquid); MUST stay ≤255 (Uint8 arrays/wire).
+let LIQUID_MAX = 24;                                  // TOTAL fill units per cell (= vertical "slices"). Runtime-tunable via liquidCfg.cellCap (rescales existing liquid); MUST stay ≤255 (Uint8 arrays/wire).
 const LIQUID_LEVEL_SCAN = 28;                         // how far a surface cell looks along its row for a lower spot to level toward (flat-settle)
 // OPTION 2 — MULTI-LIQUID per cell. Each cell holds a density-sorted stack: roomLiquidAmt[i*LIQ_T + rank] = fine units of
 // the liquid whose density RANK is `rank` (0 heaviest=lava … 5 lightest=oil). The slot index IS the density order, so a
@@ -1748,7 +1748,7 @@ const liquidCfg = {
   // CELL CAPACITY = the number of vertical fill "slices" a cell holds (LIQUID_MAX). Higher = smoother/finer vertical fill;
   // must stay ≤255 (Uint8). Changing it RESCALES all existing liquid (a full cell stays full) + re-broadcasts. Global
   // (coarse + fine); at 64 the coarse system is unchanged. Stratification (sortRate units/tick) is proportionally slower higher.
-  cellCap: 64,
+  cellCap: 24,
 };
 // DEBUG perf accounting (only touched when liquidCfg.perfLog). `emitLiquidCells` centralises the `liquid-cells` emit so we
 // can size the wire payload; runLiquidTick tallies sim time + active cells and prints a rolling ~1s summary to the console.
@@ -1837,6 +1837,26 @@ function ensureFineArrays(room, SUB) {
   return roomFineAmt[room];
 }
 function fineSet(room) { return roomFineActive[room] || (roomFineActive[room] = new Set()); }
+// ⭐ RE-COUPLED 2026-07-29. The terrain grid holds the fine cell's REPRESENTATIVE fluid id again, exactly as the coarse
+// system always did. It was decoupled only because at SUB>1 nine fine cells shared one grid cell and no single id could
+// stand for them; at the all-fine ratio one fine cell IS one grid cell, so that reason is gone. Keeping them apart
+// silently broke everything that asks "what material is at this cell?" — powder displacement, soil saturation,
+// collision buoyancy, the renderer, and the FX transition table — each of which had to be patched at its own call site.
+// Call this for every fine cell whose stack changes; it is a no-op on a cell a real solid owns (liquid never lives
+// inside one). Returns true if the grid actually changed, so callers can add it to a terrain broadcast.
+function fineSyncGrid(room, i) {
+  const grid = roomTerrain[room], amt = roomFineAmt[room], tot = roomFineTotal[room];
+  if (!grid || !amt || !tot || i < 0 || i >= grid.length) return false;
+  const v = grid[i];
+  if (v !== 0 && !isFluidId(v)) return false;          // a real solid owns this cell
+  const id = tot[i] > 0 ? liqRepId(amt, i) : 0;
+  if (v === id) return false;
+  grid[i] = id; const hp = roomTerrainHp[room]; if (hp) hp[i] = 0;   // liquid is not diggable
+  return true;
+}
+// Reaction amounts are FRACTIONS OF A CELL, resolved against the live capacity, so they keep meaning the same thing
+// when cellCap is changed. Hard-coded unit counts were calibrated at cap 64 and silently became 2.7× stronger at 24.
+const capFrac = (f) => { const v = Math.round(LIQUID_MAX * f); return v < 1 ? 1 : v; };
 // scratch for the flux-levelling flood fill (reused per room so the pass allocates nothing per tick)
 const roomFluxSeen = {}, roomFluxStack = {};
 function ensureFluxSeen(room) { return roomFluxSeen[room] || (roomFluxSeen[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
@@ -1922,7 +1942,7 @@ function activatePowderRect(room, grid, c0, r0, c1, r1) {
 }
 // SATURATION tuning (terrain reactions). SAT_MAX ≈ "a cell's worth" of water; ABSORB per absorb-tick; DRY per soil-tick when
 // away from water; a saturated sand cell needs ≥ CLUMP saturated-sand/quicksand neighbours to turn (keeps beach edges dry).
-const SAT_MAX = 12, SAT_ABSORB = 4, SAT_DRY = 1, SAT_CLUMP_MIN = 3;   // low SAT_MAX: earth saturates fast + absorbs little water → flow barely slowed, pre-gen lakes barely shrink
+const SAT_MAX_F = 0.1875, SAT_ABSORB_F = 0.0625, SAT_DRY = 1, SAT_CLUMP_MIN = 3;   // low SAT_MAX: earth saturates fast + absorbs little water → flow barely slowed, pre-gen lakes barely shrink
 function ensureSat(room) { return roomSat[room] || (roomSat[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 const roomSoilActive = {};                            // room → Set<cellIndex> of absorbent/wet solid cells worth ticking (earth/sand soaking, mud drying)
 function soilSet(room) { return roomSoilActive[room] || (roomSoilActive[room] = new Set()); }
@@ -2840,6 +2860,7 @@ function powderTickRoom(room) {
       for (let k = 0; k < T; k++) { famt[bs + k] = famt[bd + k]; famt[bd + k] = 0; }   // the pool moves UP into the vacated cell
       ftot[src] = carried; ftot[dst] = 0; fsd[src] = 0; fsd[dst] = 0;
       grid[dst] = P; hp[dst] = hpP; grid[src] = 0; hp[src] = 0;
+      fineSyncGrid(room, src);                               // the pool that moved up owns this cell now
       if (carried > 0) { fineSet(room).add(src); fineChanged.add(src); fineChanged.add(dst); }
       else fineChanged.add(dst);
       const sc = src % COLS; for (const j of [src - COLS, src + COLS, sc > 0 ? src - 1 : -1, sc < COLS - 1 ? src + 1 : -1]) if (j >= 0 && j < nn && ftot[j] > 0) fineSet(room).add(j);
@@ -2897,6 +2918,7 @@ function soilTickRoom(room) {
   const grid = roomTerrain[room], hp = roomTerrainHp[room];
   if (!grid) { delete roomSoilActive[room]; return; }
   const sat = ensureSat(room), mats = roomMats[room] || {}, COLS = TERRAIN_COLS, nn = grid.length, T = LIQ_T;
+  const SAT_MAX = capFrac(SAT_MAX_F), SAT_ABSORB = capFrac(SAT_ABSORB_F);   // fractions of a cell → they track cellCap
   // ── SAME SATURATION LOGIC, FINE DATA SOURCE. In fine mode liquid lives in the roomFine* arrays and the terrain grid
   // holds solids only, so every `grid[j] === 9` water test and every coarse amt/tot read below found nothing and the
   // whole saturation model was inert (no earth→mud, no sand→quicksand, no drying). Only the ACCESSORS change here —
@@ -2923,7 +2945,7 @@ function soilTickRoom(room) {
         if (take > 0) {
           sat[i] += take; lam[wj * T + 4] -= take; ltot[wj] -= take;
           if (ltot[wj] <= 0) { sd[wj] = 0; if (!FINE) grid[wj] = 0; }             // fine: liquid was never in the grid
-          if (FINE) { fineChanged.add(wj); fineSet(room).add(wj); } else { changedSet.add(wj); activateLiquidCell(room, wj, grid); }
+          if (FINE) { fineChanged.add(wj); fineSet(room).add(wj); if (fineSyncGrid(room, wj)) terrChanged.add(wj); } else { changedSet.add(wj); activateLiquidCell(room, wj, grid); }
           const wc = wj % COLS; wakeLiq(wj - COLS); wakeLiq(wj + COLS); if (wc > 0) wakeLiq(wj - 1); if (wc < COLS - 1) wakeLiq(wj + 1);   // re-level: the column above falls into the drained space (no hovering slivers)
         }
       }
@@ -2940,7 +2962,7 @@ function soilTickRoom(room) {
           if (g === 10 || (g === 3 && sat[j] >= SAT_MAX)) clump++;
         }
         if (clump >= SAT_CLUMP_MIN) {                    // sand becomes the QUICKSAND liquid: in fine mode that means a full fine cell, and the terrain cell empties
-          if (FINE) { const b = i * T; for (let k = 0; k < T; k++) lam[b + k] = 0; lam[b + 1] = LIQUID_MAX; ltot[i] = LIQUID_MAX; sd[i] = 0; grid[i] = 0; hp[i] = 0; fineSet(room).add(i); fineChanged.add(i); terrChanged.add(i); }
+          if (FINE) { const b = i * T; for (let k = 0; k < T; k++) lam[b + k] = 0; lam[b + 1] = LIQUID_MAX; ltot[i] = LIQUID_MAX; sd[i] = 0; grid[i] = 10; hp[i] = 0; fineSet(room).add(i); fineChanged.add(i); terrChanged.add(i); }   // quicksand id back in the grid
           else { grid[i] = 10; liqSetSingle(room, i, 10); activateLiquidCell(room, i, grid); }
           sat[i] = 0; changedSet.add(i); ss.delete(i);
         }
@@ -3250,6 +3272,8 @@ function fineLiquidTickRoom(room, SUB) {
     if (liquidCfg.fineAdaptiveK && step + 1 >= adaptMin && stepMoves < Math.max(2, (list.length * ADAPT_PCT / 100) | 0)) break;
   }   // ← close the physics sub-step loop
   for (const j of tagCleared) changedSet.add(j);
+  // Keep the grid's representative fluid id in step with every cell that moved (see fineSyncGrid).
+  for (const j of changedSet) fineSyncGrid(room, j);
   if (changedSet.size && !liquidQuiet) {
     if (liquidCfg.perfLog) liqPerf.fineChanged += changedSet.size;
     // WIRE (liquid-fine-cells): sub + cols so the client can decode fine indices, then per changed cell
@@ -3313,19 +3337,18 @@ function seedFineReactAround(room, i) {
 //   WATER + snow (solid) → ICE. Ice is not snow, so it cannot chain: exactly a one-cell rime shell. Water that is ALSO
 //     touching lava does not freeze — lava wins (same precedence the coarse sim had).
 // Terrain conversions cost the lava that did them, which is what bounds how far a pool eats into a snow/sand field.
-const FREACT_QUENCH = 24;    // units of the other liquid flashed off per contact, per tick, when the LAVA cell is the one that crusts
-const FREACT_MELT_COST = 8;  // lava spent melting one snow/ice cell
-const FREACT_MELT_AMT = 40;  // water units a melted snow/ice cell leaves behind (< cap, so it flows away rather than sitting brim-full)
-const FREACT_BAKE_COST = 4;  // lava spent baking one mud cell → earth
-const FREACT_FUSE_COST = 4;  // lava spent fusing one sand cell → glass
-const FREACT_QSAND_COST = 6; // lava spent fusing one quicksand cell → glass
-const FREACT_OIL_BURN = 6;   // oil units consumed per pass by a BURNING cell
-const FREACT_FREEZE_COST = 24;// water units consumed when a snow cell freezes into ice
+const FREACT_QUENCH_F = 0.375;  // fraction of a cell of the other liquid flashed off per contact when the LAVA cell crusts
+const FREACT_MELT_COST_F = 0.125;  // lava spent melting one snow/ice cell
+const FREACT_MELT_AMT_F = 0.625;   // water a melted snow/ice cell leaves behind (< a full cell, so it flows away rather than sitting brim-full)
+const FREACT_BAKE_COST_F = 0.0625; // lava spent baking one mud cell → earth
+const FREACT_FUSE_COST_F = 0.0625; // lava spent fusing one sand cell → glass
+const FREACT_OIL_BURN_F = 0.09375;  // oil consumed per pass by a BURNING cell
+const FREACT_FREEZE_COST_F = 0.375; // water consumed when a snow cell freezes into ice
 // ACID at 8px. The coarse bite was one 24px cell per 8 ticks = 3px of penetration per tick; an 8px cell eaten at the
 // same cadence would only be 1px/tick, i.e. 3× slower through the same wall. Biting every 3rd tick restores the
 // original physical eat-rate — the reaction is unchanged, only the cadence is re-derived for the smaller cell.
 const ACID_BITE_TICKS = 3;
-const FREACT_ACID_COST = 6;  // acid units spent per bite (unchanged from the coarse block)
+const FREACT_ACID_COST_F = 0.09375; // acid spent per bite
 // OIL FIRE. Lava does not burn oil directly any more — it IGNITES it, and fire spreads cell to cell through the oil,
 // so a slick lights from the point of contact and runs back through itself instead of quietly shrinking.
 const roomFineFire = {};     // room → Set<fine cell> currently burning
@@ -3370,7 +3393,9 @@ function fineReactTickRoom(room, SUB) {
   // ...and when BOTH reactants are LIQUID, the lower-cell rule still applies, so lava dropping into a pool cannot
   // leave its product hanging in mid-air above the surface.
   const combine = (a, bc, id, code) => {
-    const prod = (bc === a + COLS) ? bc : (a === bc + COLS ? a : (grid[bc] !== 0 ? bc : a));
+    // tie-break: the cell that is a REAL solid. `grid[bc] !== 0` no longer means that — since the re-coupling a liquid
+    // cell carries its own fluid id too, which silently flipped this to "whichever cell has anything in it".
+    const prod = (bc === a + COLS) ? bc : (a === bc + COLS ? a : (isSolidCell(grid[bc]) ? bc : a));
     const gone = prod === a ? bc : a;
     if (grid[gone] !== 0) { grid[gone] = 0; hp[gone] = 0; terrCells.push(gone, 0); wakeN(gone); }
     if (tot[gone] > 0) clearFine(gone);
@@ -3402,9 +3427,9 @@ function fineReactTickRoom(room, SUB) {
       for (const j of NB) {
         if (amt[b] <= 0 || j < 0 || j >= N) continue;
         const g = grid[j];
-        if (g === 8 || g === 4) { setLiquid(j, 4, FREACT_MELT_AMT); spendLava(i, FREACT_MELT_COST); addFx(j, 1); }   // snow/ice melt → water
-        else if (g === 5) { setSolid(j, 1); spendLava(i, FREACT_BAKE_COST); addFx(j, 4); }                          // mud baked dry → earth
-        else if (g === 3) { convertSolid(j, 16, 3); spendLava(i, FREACT_FUSE_COST); }                                                       // sand fused → glass, BOTH consumed
+        if (g === 8 || g === 4) { setLiquid(j, 4, capFrac(FREACT_MELT_AMT_F)); spendLava(i, capFrac(FREACT_MELT_COST_F)); addFx(j, 1); }   // snow/ice melt → water
+        else if (g === 5) { setSolid(j, 1); spendLava(i, capFrac(FREACT_BAKE_COST_F)); addFx(j, 4); }                          // mud baked dry → earth
+        else if (g === 3) { convertSolid(j, 16, 3); spendLava(i, capFrac(FREACT_FUSE_COST_F)); }                                                       // sand fused → glass, BOTH consumed
       }
       if (amt[b] <= 0) continue;                              // the lava spent itself on the terrain
       // ── (B) QUICKSAND fuses to GLASS. Checked before the quench so it wins over the generic crust.
@@ -3423,7 +3448,7 @@ function fineReactTickRoom(room, SUB) {
         const sj = (wj === i + COLS) ? wj : i, pj = sj === i ? wj : i;      // the stone takes the LOWER cell; tie ⇒ the lava cell
         if (sj !== pj) {
           if (pj === i) { amt[b] = 0; recomp(i); }             // the lava went into making the stone below it
-          else { let q = FREACT_QUENCH; const pb = pj * T;     // ...or the other liquid flashes off above the crust
+          else { let q = capFrac(FREACT_QUENCH_F); const pb = pj * T;     // ...or the other liquid flashes off above the crust
             for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = amt[pb + rk]; if (a <= 0) continue; const mv = a < q ? a : q; amt[pb + rk] = a - mv; q -= mv; }
             recomp(pj); }
           liqChanged.add(pj); if (tot[pj] > 0) act.add(pj); else act.delete(pj);
@@ -3444,7 +3469,7 @@ function fineReactTickRoom(room, SUB) {
   if (fire && fire.size) for (const i of Array.from(fire)) {
     const b = i * T;
     if (i < 0 || i >= N || amt[b + 5] <= 0) { fire.delete(i); continue; }   // burnt out (or the oil moved on)
-    amt[b + 5] = amt[b + 5] > FREACT_OIL_BURN ? amt[b + 5] - FREACT_OIL_BURN : 0;
+    const oburn = capFrac(FREACT_OIL_BURN_F); amt[b + 5] = amt[b + 5] > oburn ? amt[b + 5] - oburn : 0;
     recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i);
     addFx(i, 7);                                                            // flame, every pass it is alight — not a one-shot
     if (amt[b + 5] <= 0) fire.delete(i);
@@ -3484,7 +3509,7 @@ function fineReactTickRoom(room, SUB) {
           addFx(solidJ, 8);                                   // fizz at the bite, every bite — not just the one that breaks through
           if (hp[solidJ] > 1) hp[solidJ] -= 1;
           else { grid[solidJ] = 0; hp[solidJ] = 0; terrCells.push(solidJ, 0); wakeN(solidJ); seedFineReactAround(room, solidJ); }
-          amt[b + 3] = acid > FREACT_ACID_COST ? acid - FREACT_ACID_COST : 0;
+          const abite = capFrac(FREACT_ACID_COST_F); amt[b + 3] = acid > abite ? acid - abite : 0;
           recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i);
         }
       }
@@ -3508,13 +3533,15 @@ function fineReactTickRoom(room, SUB) {
     let nearLava = false; for (const j of NB) { if (j >= 0 && j < N && amt[j * T] > 0) { nearLava = true; break; } }
     if (!nearLava) {
       convertSolid(snowJ, 4, 2);                                            // the snow itself becomes the ice, so nothing survives to slide on
-      let q = FREACT_FREEZE_COST; for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = amt[b + rk]; if (a <= 0) continue; const mv = a < q ? a : q; amt[b + rk] = a - mv; q -= mv; }
+      let q = capFrac(FREACT_FREEZE_COST_F); for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = amt[b + rk]; if (a <= 0) continue; const mv = a < q ? a : q; amt[b + rk] = a - mv; q -= mv; }
       recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i);
     }   // BOTH the snow and the water become one ice cell — the snow must not survive to slide on and freeze a trail
   }
+  for (const j of liqChanged) fineSyncGrid(room, j);           // a drained/created stack changes the cell's representative id
   if (liquidQuiet) return;                                    // gen pre-settle: react, but don't broadcast
   if (fx.length) io.to(room).emit('liquid-fx', { cells: fx });
-  if (terrCells.length) io.to(room).emit('terrain-set', { cells: terrCells });
+  // ORDER MATTERS now the grid carries fluid ids: a cell the reaction turned SOLID also appears in liqChanged with an
+  // empty stack, and applying that after the terrain write would clear the new solid straight back to 0.
   if (liqChanged.size) {                                      // same encoding as the fine tick's own wire
     let arr = [], cells = 0;
     const flush = () => io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: COLS, cells: arr });
@@ -3526,6 +3553,7 @@ function fineReactTickRoom(room, SUB) {
     }
     if (cells) flush();
   }
+  if (terrCells.length) io.to(room).emit('terrain-set', { cells: terrCells });
 }
 // Fine-cell wire helpers. INSIDE the sim block because the sim itself now emits through them: soilTickRoom and
 // powderTickRoom both write fine liquid in fine mode, so the harness has to be able to reach these too.
@@ -3610,13 +3638,14 @@ function fineSetBlock(room, SUB, cc, cr, coarseAmt) {   // distribute a coarse r
     const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; let room2 = LIQUID_MAX;
     while (room2 > 0 && totalUnits > 0) { while (rk < LIQ_T && per[rk] <= 0) rk++; if (rk >= LIQ_T) { totalUnits = 0; break; } const mv = Math.min(per[rk], room2); amt[b + rk] += mv; per[rk] -= mv; room2 -= mv; totalUnits -= mv; }
     tot[i] = LIQUID_MAX - room2; if (tot[i] > 0) { act.add(i); filled.push(i); }
+    fineSyncGrid(room, i);
   }
   return filled;
 }
 function fineClearBlock(room, SUB, cc, cr) {   // clear the SUB×SUB fine block; returns the fine indices that changed
   const amt = roomFineAmt[room], tot = roomFineTotal[room], sd = roomFineSide[room], FCOLS = TERRAIN_COLS * SUB, act = fineSet(room);
   const fx0 = cc * SUB, fy0 = cr * SUB, changed = [];
-  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; if (tot[i] > 0 || sd[i]) { for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0; tot[i] = 0; sd[i] = 0; act.delete(i); changed.push(i); } }
+  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; if (tot[i] > 0 || sd[i]) { for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0; tot[i] = 0; sd[i] = 0; act.delete(i); changed.push(i); fineSyncGrid(room, i); } }
   return changed;
 }
 function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back down to a coarse rank-stack (÷SUB²), clamped to CAP
@@ -3630,7 +3659,7 @@ function upscaleRoomToFine(room, SUB) {   // convert this room's coarse liquid i
   ensureFineArrays(room, SUB);
   roomFineAmt[room].fill(0); roomFineTotal[room].fill(0); roomFineSide[room].fill(0); fineSet(room).clear();
   const camt = roomLiquidAmt[room], ctot = roomLiquidTotal[room], grid = roomTerrain[room], hp = roomTerrainHp[room], cleared = [];
-  if (camt && ctot) for (let i = 0; i < ctot.length; i++) { if (ctot[i] <= 0) continue; const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0, ca = new Array(LIQ_T), b = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) ca[k] = camt[b + k]; fineSetBlock(room, SUB, cc, cr, ca); if (grid && isFluidId(grid[i])) { grid[i] = 0; if (hp) hp[i] = 0; cleared.push(i, 0); } }   // decouple grid fluid-ids
+  if (camt && ctot) for (let i = 0; i < ctot.length; i++) { if (ctot[i] <= 0) continue; const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0, ca = new Array(LIQ_T), b = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) ca[k] = camt[b + k]; fineSetBlock(room, SUB, cc, cr, ca); }   // grid fluid ids are KEPT (re-coupled): the fine cell and the grid cell are the same cell
   if (camt) camt.fill(0); if (ctot) ctot.fill(0); if (roomLiquidActive[room]) roomLiquidActive[room].clear();
   return cleared;
 }
@@ -3679,7 +3708,7 @@ function sourceTickRoomFine(room, SUB) {
     let toAdd = rate * SUB * SUB; const cc = ci % TERRAIN_COLS, cr = (ci / TERRAIN_COLS) | 0, fx0 = cc * SUB, fy0 = cr * SUB;
     for (let dy = SUB - 1; dy >= 0 && toAdd > 0; dy--) for (let dx = 0; dx < SUB && toAdd > 0; dx++) {
       const i = (fy0 + dy) * FCOLS + (fx0 + dx), free = cap - tot[i]; if (free <= 0) continue;
-      const add = free < toAdd ? free : toAdd; amt[i * LIQ_T + rank] += add; tot[i] += add; led[rank] += add; toAdd -= add; act.add(i); touched.add(i);
+      const add = free < toAdd ? free : toAdd; amt[i * LIQ_T + rank] += add; tot[i] += add; led[rank] += add; toAdd -= add; act.add(i); touched.add(i); fineSyncGrid(room, i);
     }
   }
   if (!src.size) delete roomLiquidSrc[room];
@@ -5810,7 +5839,7 @@ io.on('connection', (socket) => {
       for (let k = 0; k + 1 < cells.length; k += 2) {
         const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
         const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0;
-        if (isFluidId(grid[i])) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid[i]]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, liquidCfg.sub, cc, cr, ca)) changedFine.push(x); grid[i] = 0; hp[i] = 0; cells[k + 1] = 0; changed = true; }   // decouple: liquid → fine grid, terrain stays empty
+        if (isFluidId(grid[i])) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid[i]]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, liquidCfg.sub, cc, cr, ca)) changedFine.push(x); hp[i] = 0; }   // the painted fluid id STAYS in the grid (re-coupled)
         else for (const x of fineClearBlock(currentAvatarRoom, liquidCfg.sub, cc, cr)) changedFine.push(x);   // a solid/empty coarse cell clears its fine block
         if (isPowderId(grid[i])) powderSet(currentAvatarRoom).add(i); const up = i - TERRAIN_COLS; if (up >= 0 && isPowderId(grid[up])) powderSet(currentAvatarRoom).add(up);
         seedFineReactAround(currentAvatarRoom, i);   // explicit cell write (undo/paste/scene) can put a solid next to settled liquid
