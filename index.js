@@ -5193,8 +5193,43 @@ io.on('connection', (socket) => {
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) cells.push(amt[b + rk]);
     }
     const act = roomFineActive[room];
+    // ⭐⭐ WHY ISN'T THIS PAIR SORTING? The mirror came back clean, so a standing inversion is really in the server's
+    // state — and the sub-step loop runs 9 sort passes a tick, each guaranteed to move at least 1 unit once the swap
+    // fires. So the swap is not firing, and the sim knows exactly which of its gates is stopping it. Rather than guess
+    // at the geometry (10 hand-built + 1320 randomised scenes never produced one), report every gate's value for each
+    // standing pair. Mirrors the conditions on step (2) in fineLiquidTickRoom verbatim — keep the two in step.
+    const FROW_FLOOR = Math.floor(FLOOR_TOP / TERRAIN_CELL) * SUB;
+    const isSolidF = (k) => { if (k < 0 || k >= FCOLS * FROWS) return true; const fr = (k / FCOLS) | 0, fc = k - fr * FCOLS;
+      const v = grid[((fr / SUB) | 0) * TERRAIN_COLS + ((fc / SUB) | 0)]; return v !== 0 && !isFluidId(v); };
+    const floorRk = (j) => { const b = j * T; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) return rk; return -1; };
+    const ceilRk = (j) => { const b = j * T; for (let rk = T - 1; rk >= 0; rk--) if (amt[b + rk] > 0) return rk; return -1; };
+    const stk = (j) => { const o = []; for (let rk = 0; rk < T; rk++) if (amt[j * T + rk] > 0) o.push(rk + ':' + amt[j * T + rk]); return '{' + o.join(' ') + '}'; };
+    const lavaB = (A, B) => { if (!liquidCfg.reactions) return false; const la = amt[A * T] > 0, lb = amt[B * T] > 0;
+      if (!la && !lb) return false; return (la && tot[B] - amt[B * T] > 0) || (lb && tot[A] - amt[A * T] > 0); };
+    const stuck = []; let invTotal = 0;
+    for (let r = r0; r < r1; r++) for (let c = c0; c <= c1; c++) {
+      const a = r * FCOLS + c, b = a + FCOLS;
+      if (tot[a] <= 0 || tot[b] <= 0) continue;
+      const f = floorRk(a); if (f < 0 || f >= ceilRk(b)) continue;
+      invTotal++;
+      if (stuck.length >= 8) continue;
+      stuck.push({
+        c, r, up: stk(a), dn: stk(b),
+        hi: f, lo: ceilRk(b),
+        upActive: !!(act && act.has(a)), dnActive: !!(act && act.has(b)),
+        upSolid: isSolidF(a), dnSolid: isSolidF(b),          // a solid grid id over a cell that still holds liquid = the sim skips it AND wake() refuses to re-add it → permanent
+        gUp: grid[a], gDn: grid[b],
+        canDown: r + 1 < FROW_FLOOR,                          // step (2) requires it; false near the bedrock row
+        sdUp: sd[a], sdDn: sd[b],                             // streamNoSort / streamNoSortNbr gate on these
+        lavaBlk: lavaB(a, b),
+        k: Math.min(amt[a * T + f], amt[b * T + ceilRk(b)], liquidCfg.sortRate),
+      });
+    }
     socket.emit('liquid-mirror-state', { sub: SUB, cols: FCOLS, c0, r0, c1, r1, cells, cap: LIQUID_MAX,
-      active: act ? act.size : 0, tick: liquidTickCount });
+      active: act ? act.size : 0, tick: liquidTickCount, invTotal, stuck,
+      cfg: { densitySort: liquidCfg.densitySort, streamTag: liquidCfg.streamTag, streamNoSort: liquidCfg.streamNoSort,
+             streamNoSortNbr: liquidCfg.streamNoSortNbr, sortRate: liquidCfg.sortRate, K: liquidCfg.fineLevelSteps,
+             sortSteps: liquidCfg.fineSortSteps, reactions: liquidCfg.reactions, minUnit: liquidCfg.fineMinUnit } });
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
