@@ -1758,6 +1758,17 @@ const liquidCfg = {
   // so lateral travel is bounded to N cells/tick rather than K. 0 = follow the sort sub-steps (no cap) — deliberately
   // the default, because the right value is a feel judgement and inventing one here would just be a guess.
   fineSortDiagSteps: 0,
+  // ── (2c) PER-LIQUID LEVELLING — MEASURED to be what actually spreads a parcel sideways (probe_sort_spread).
+  // 2c flattens each liquid's OWN layer across columns. It scans up to LIQUID_LEVEL_SCAN cells to choose a direction
+  // and runs on every one of the K sub-steps, so a 3-column blob of oil dropped into a 58-wide pool is filmed across
+  // the WHOLE pool in a single tick — 216 units over 54 cells is ~4 units each, i.e. thin scattered slivers rather
+  // than a blob that rises and gathers. (The diagonal sort 2b was the obvious suspect and measured an exact no-op.)
+  // Two independent dials, BOTH defaulting to today's behaviour so nothing changes until they are turned down:
+  //   finePerLiquidSteps — how many of the K sub-steps 2c may run in ⇒ its spread SPEED in cells/tick. 0 = all of them.
+  finePerLiquidSteps: 0,
+  //   finePerLiquidScan  — how far 2c looks along the row for a lower spot of its own liquid, in cells. Shorter keeps
+  //   the flattening LOCAL instead of reaching across a pool. 0 = follow LIQUID_LEVEL_SCAN (28), the original reach.
+  finePerLiquidScan: 0,
   // COARSE physics sub-steps (curiosity): run the whole COARSE tick this many times/tick → coarse liquid moves K× faster.
   // Simple (calls liquidTickRoom K times in runLiquidTick), so it broadcasts K× (K× wire) — a debug/experiment dial only.
   coarseSubSteps: 1,
@@ -3095,6 +3106,10 @@ function fineLiquidTickRoom(room, SUB) {
   // (2b) DIAGONAL sort budget — capped SEPARATELY from the vertical sort, so sideways travel while separating can be
   // bounded without slowing stratification itself. 0 = follow SORTSTEPS (uncapped, the original behaviour).
   const DIAGSTEPS = liquidCfg.fineSortDiagSteps > 0 ? Math.min(SORTSTEPS, liquidCfg.fineSortDiagSteps | 0) : SORTSTEPS;
+  // (2c) PER-LIQUID LEVELLING budget + reach — the measured cause of sideways spread (see liquidCfg). Both 0 = today.
+  // The reach is scaled by SUB like SCAN is, so the dial means the same PHYSICAL distance at any resolution.
+  const PLSTEPS = liquidCfg.finePerLiquidSteps > 0 ? Math.min(FSTEPS, liquidCfg.finePerLiquidSteps | 0) : FSTEPS;
+  const PLSCAN = liquidCfg.finePerLiquidScan > 0 ? Math.min(SCAN, (liquidCfg.finePerLiquidScan | 0) * SUB) : SCAN;
   // (1d) SURFACE FLAT-SETTLE BUDGET — how many of the K sub-steps 1d may run in. 0 = every sub-step (the old
   // behaviour, kept for A/B). Front speed is ~1 cell per invocation, so this dial IS the spread speed in cells/tick.
   // ⚠️ Deliberately NOT derived from cellCap. It looked like it should be (1d moves a fixed 1 unit, and a unit is
@@ -3110,6 +3125,7 @@ function fineLiquidTickRoom(room, SUB) {
     const doLevel = step < FSTEPS;      // this sub-step runs lateral levelling (1c/1d/2c)
     const doSort = step < SORTSTEPS;    // this sub-step runs the DENSITY SORT (2/2b) — capped separately so sorting can be slowed independently of levelling
     const doSortDiag = step < DIAGSTEPS; // ...and the DIAGONAL half (2b) is capped tighter still, to bound sideways travel
+    const doPerLiq = step < PLSTEPS;    // (2c) per-liquid levelling — capped separately: this IS its sideways spread speed in cells/tick
     stepMoves = 0;
     const list = Array.from(active); active.clear();
     list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot[a], lb = tot[b]; if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
@@ -3212,12 +3228,15 @@ function fineLiquidTickRoom(room, SUB) {
     const shedCap = L;
     if (doLevel && !isStream && !sortingHere) {
       const cumAt = (jj, tt) => { let s = 0; const bb = jj * T; for (let k = 0; k <= tt; k++) s += amt[bb + k]; return s; };
-      // (2c) per-liquid horizontal levelling (pools only)
-      if (liquidCfg.perLiquidLevel) for (let t = 0; t < T - 1; t++) {
+      // (2c) per-liquid horizontal levelling (pools only). MEASURED to be what spreads a parcel sideways: it runs on
+      // every sub-step and looks SCAN cells along the row, so a 3-column blob films across a whole pool in one tick.
+      // PLSTEPS caps how many sub-steps it may run in (= its spread speed) and PLSCAN how far it looks; both default
+      // to the original values, so this is unchanged until the dials are turned down.
+      if (liquidCfg.perLiquidLevel && doPerLiq) for (let t = 0; t < T - 1; t++) {
         if (amt[i * T + t] <= 0) continue;
         const Ci = cumAt(i, t);
         let dir = 0, best = Infinity;
-        for (const sdir of [-1, 1]) for (let d = 1; d <= SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } }
+        for (const sdir of [-1, 1]) for (let d = 1; d <= PLSCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } }
         if (dir === 0) continue;
         const j = i + dir; if (isSolid(j) || lavaBlk(i, j)) continue;
         const Cj = cumAt(j, t);
@@ -5264,6 +5283,8 @@ io.on('connection', (socket) => {
     if ('fineMinUnit' in patch) liquidCfg.fineMinUnit = Math.max(1, Math.min(64, patch.fineMinUnit | 0));
     if ('fineSortSteps' in patch) liquidCfg.fineSortSteps = Math.max(0, Math.min(16, patch.fineSortSteps | 0));
     if ('fineSortDiagSteps' in patch) liquidCfg.fineSortDiagSteps = Math.max(0, Math.min(16, patch.fineSortDiagSteps | 0));
+    if ('finePerLiquidSteps' in patch) liquidCfg.finePerLiquidSteps = Math.max(0, Math.min(16, patch.finePerLiquidSteps | 0));
+    if ('finePerLiquidScan' in patch) liquidCfg.finePerLiquidScan = Math.max(0, Math.min(32, patch.finePerLiquidScan | 0));
     if ('fineFlatSteps' in patch) liquidCfg.fineFlatSteps = Math.max(0, Math.min(16, patch.fineFlatSteps | 0));
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(1, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
