@@ -5165,6 +5165,37 @@ io.on('connection', (socket) => {
     liquidStepsPending += k;
     io.emit('liquid-stepped', k);   // clients replay the droplet fall locally, so they must step it too
   });
+  // ⭐ MIRROR CHECK (diagnostic). The client only ever receives CHANGED fine cells, so ANY server-side write that does
+  // not make it into a broadcast leaves the client's mirror wrong FOREVER — the cell is never mentioned again. That
+  // shows up as liquid frozen in place, and (because the rise/sink bubble FX key off a density inversion between
+  // MIRROR cells) as bubbles that never stop. This hands back the server's authoritative stack for a rectangle of
+  // cells so the client can diff its mirror against it and say exactly which cells disagree.
+  // Same flat encoding as the fine wire — [i, repId, side, mask] + one amt per set rank — but for EVERY cell in the
+  // rect, empty ones included (mask 0), because a PHANTOM (client has liquid where the server has none) is the case
+  // we are hunting and it is invisible if empties are omitted.
+  socket.on('liquid-mirror-check', (rect) => {
+    const room = currentAvatarRoom;
+    if (!room || !rect || typeof rect !== 'object') return;
+    if (!liquidCfg.fine) { socket.emit('liquid-mirror-state', { err: 'fine mode is off' }); return; }
+    const amt = roomFineAmt[room], tot = roomFineTotal[room], sd = roomFineSide[room], grid = roomTerrain[room];
+    if (!amt || !tot || !grid) { socket.emit('liquid-mirror-state', { err: 'no fine state for this room' }); return; }
+    const SUB = roomFineSub[room] || liquidCfg.sub || 1, FCOLS = TERRAIN_COLS * SUB, FROWS = TERRAIN_ROWS * SUB;
+    const cl = (v, hi) => Math.max(0, Math.min(hi, v | 0));
+    const c0 = cl(rect.c0, FCOLS - 1), c1 = cl(rect.c1, FCOLS - 1), r0 = cl(rect.r0, FROWS - 1), r1 = cl(rect.r1, FROWS - 1);
+    if (c1 < c0 || r1 < r0) return;
+    const W = c1 - c0 + 1, H = r1 - r0 + 1;
+    if (W * H > 90000) { socket.emit('liquid-mirror-state', { err: 'rect too large (' + W + '×' + H + ') — zoom in' }); return; }
+    const cells = [], T = LIQ_T;
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
+      const i = r * FCOLS + c, b = i * T;
+      let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
+      cells.push(i, tot[i] > 0 ? liqRepId(amt, i) : grid[i], sd[i] & 0x03, mask);
+      for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) cells.push(amt[b + rk]);
+    }
+    const act = roomFineActive[room];
+    socket.emit('liquid-mirror-state', { sub: SUB, cols: FCOLS, c0, r0, c1, r1, cells, cap: LIQUID_MAX,
+      active: act ? act.size : 0, tick: liquidTickCount });
+  });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
     for (const k of ['densitySort', 'sortBeforeLevel', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused', 'fineLedge', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall']) if (k in patch) liquidCfg[k] = !!patch[k];
