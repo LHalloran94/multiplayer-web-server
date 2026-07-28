@@ -1839,6 +1839,23 @@ function ensureFineArrays(room, SUB) {
   return roomFineAmt[room];
 }
 function fineSet(room) { return roomFineActive[room] || (roomFineActive[room] = new Set()); }
+// ⭐ WAKE THE NEIGHBOURS of a cell whose stack was written from OUTSIDE the tick (placement, undo, a scene load).
+// The density sort is only ever driven from the UPPER cell of a pair — processing a cell compares it with the cell
+// BELOW — so dropping a lighter liquid under a settled heavier one activates the wrong half: the new cell has nothing
+// to sort against below it, the cell above it is not active, and NOTHING happens. Measured: 2 cells of oil placed at
+// the bottom of a settled water pool sat there forever, room quiet on the very next tick, with two genuine density
+// inversions left standing. That is the "stuck slices" — and because the client spawns rise/sink bubbles for any
+// sliver that is inverted with a neighbour, a permanently stuck inversion means the bubbles never stop.
+function fineWakeAround(room, i) {
+  const tot = roomFineTotal[room], grid = roomTerrain[room];
+  if (!tot || !grid) return;
+  const N = grid.length, COLS = TERRAIN_COLS, c = i % COLS, act = fineSet(room);
+  for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) {
+    if (j < 0 || j >= N || tot[j] <= 0) continue;
+    const v = grid[j]; if (v !== 0 && !isFluidId(v)) continue;
+    act.add(j);
+  }
+}
 // ⭐ RE-COUPLED 2026-07-29. The terrain grid holds the fine cell's REPRESENTATIVE fluid id again, exactly as the coarse
 // system always did. It was decoupled only because at SUB>1 nine fine cells shared one grid cell and no single id could
 // stand for them; at the all-fine ratio one fine cell IS one grid cell, so that reason is gone. Keeping them apart
@@ -3680,14 +3697,14 @@ function fineSetBlock(room, SUB, cc, cr, coarseAmt) {   // distribute a coarse r
     const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; let room2 = LIQUID_MAX;
     while (room2 > 0 && totalUnits > 0) { while (rk < LIQ_T && per[rk] <= 0) rk++; if (rk >= LIQ_T) { totalUnits = 0; break; } const mv = Math.min(per[rk], room2); amt[b + rk] += mv; per[rk] -= mv; room2 -= mv; totalUnits -= mv; }
     tot[i] = LIQUID_MAX - room2; if (tot[i] > 0) { act.add(i); filled.push(i); }
-    fineSyncGrid(room, i);
+    fineSyncGrid(room, i); fineWakeAround(room, i);
   }
   return filled;
 }
 function fineClearBlock(room, SUB, cc, cr) {   // clear the SUB×SUB fine block; returns the fine indices that changed
   const amt = roomFineAmt[room], tot = roomFineTotal[room], sd = roomFineSide[room], FCOLS = TERRAIN_COLS * SUB, act = fineSet(room);
   const fx0 = cc * SUB, fy0 = cr * SUB, changed = [];
-  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; if (tot[i] > 0 || sd[i]) { for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0; tot[i] = 0; sd[i] = 0; act.delete(i); changed.push(i); fineSyncGrid(room, i); } }
+  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), b = i * LIQ_T; if (tot[i] > 0 || sd[i]) { for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0; tot[i] = 0; sd[i] = 0; act.delete(i); changed.push(i); fineSyncGrid(room, i); fineWakeAround(room, i); } }
   return changed;
 }
 function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back down to a coarse rank-stack (÷SUB²), clamped to CAP
