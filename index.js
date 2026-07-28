@@ -2904,7 +2904,8 @@ function soilTickRoom(room) {
   const FINE = !!liquidCfg.fine && (roomFineSub[room] || 1) === 1 && !!roomFineAmt[room];
   const lam = FINE ? roomFineAmt[room] : ensureLiquidAmt(room), ltot = FINE ? roomFineTotal[room] : ensureLiquidTotal(room);
   const sd = FINE ? roomFineSide[room] : ensureLiquidSide(room);
-  const changedSet = new Set(), fineChanged = new Set(), terrChanged = new Set();
+  const changedSet = new Set(), fineChanged = new Set(), terrChanged = new Set(), fx = [];
+  const addFx = (i, code) => { if (fx.length < 2048) fx.push(i, code); };   // same explicit FX wire as the reaction pass
   const isWater = (j) => FINE ? lam[j * T + 4] > 0 : (grid[j] === 9 && lam[j * T + 4] > 0);   // water = rank 4
   const isLava = (j) => FINE ? lam[j * T] > 0 : grid[j] === 11;
   const adj = (i, id) => { const c = i % COLS; if (i - COLS >= 0 && grid[i - COLS] === id) return true; if (i + COLS < nn && grid[i + COLS] === id) return true; if (c > 0 && grid[i - 1] === id) return true; if (c < COLS - 1 && grid[i + 1] === id) return true; return false; };
@@ -2928,7 +2929,7 @@ function soilTickRoom(room) {
       }
     }
     if (v === 1) {                                       // EARTH → MUD once it has soaked up a cell's worth of water
-      if (sat[i] >= SAT_MAX) { grid[i] = 5; hp[i] = matStrengthSrv(mats, 5); changedSet.add(i); terrChanged.add(i); }   // stays tracked (mud dries later)
+      if (sat[i] >= SAT_MAX) { grid[i] = 5; hp[i] = matStrengthSrv(mats, 5); changedSet.add(i); terrChanged.add(i); addFx(i, 5); }   // mud splat   // stays tracked (mud dries later)
       else if (sat[i] === 0 && !adjFn(i, isWater)) ss.delete(i);
     } else if (v === 3) {                                // SAND → QUICKSAND, but only inside a wet CLUMP
       if (sat[i] >= SAT_MAX) {
@@ -2945,12 +2946,13 @@ function soilTickRoom(room) {
         }
       } else if (sat[i] === 0 && !adjFn(i, isWater)) ss.delete(i);
     } else if (v === 5) {                                // MUD: lava bakes it dry instantly; water keeps it wet; else it dries → earth
-      if (adjFn(i, isLava)) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); sat[i] = 0; changedSet.add(i); terrChanged.add(i); ss.delete(i); }
+      if (adjFn(i, isLava)) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); sat[i] = 0; changedSet.add(i); terrChanged.add(i); addFx(i, 4); ss.delete(i); }   // baked dry: smoke
       else if (adjFn(i, isWater)) sat[i] = SAT_MAX;
-      else { sat[i] = sat[i] > SAT_DRY ? sat[i] - SAT_DRY : 0; if (sat[i] === 0) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); changedSet.add(i); terrChanged.add(i); ss.delete(i); } }
+      else { sat[i] = sat[i] > SAT_DRY ? sat[i] - SAT_DRY : 0; if (sat[i] === 0) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); changedSet.add(i); terrChanged.add(i); addFx(i, 6); ss.delete(i); } }   // dried out: dust puff
     } else { sat[i] = 0; ss.delete(i); }                 // cell dug/overwritten out from under us
   }
   if (FINE) {                                            // terrain conversions ride terrain-set; drained/created liquid rides the fine wire
+    if (fx.length && !liquidQuiet) io.to(room).emit('liquid-fx', { cells: fx });
     if (terrChanged.size && !liquidQuiet) { const tc = []; for (const j of terrChanged) tc.push(j, grid[j]); io.to(room).emit('terrain-set', { cells: tc }); }
     if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
     if (liquidCfg.reactions) { const rs = fineReactSet(room); for (const j of terrChanged) rs.add(j); for (const j of fineChanged) rs.add(j); }
@@ -3337,7 +3339,11 @@ function fineReactTickRoom(room, SUB) {
   if ((!active || !active.size) && (!seeded || !seeded.size) && (!burning || !burning.size)) { if (seeded) delete roomFineReact[room]; return; }
   const sd = roomFineSide[room], mats = roomMats[room] || {}, T = LIQ_T, COLS = TERRAIN_COLS, N = grid.length;
   const tick = liquidTickCount, FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // acid may not eat the bedrock row
-  const act = fineSet(room), liqChanged = new Set(), terrCells = [];
+  const act = fineSet(room), liqChanged = new Set(), terrCells = [], fx = [];
+  // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
+  // && gid === 2` ⇒ steam, etc). In fine mode liquid is not a grid id at all, so no transition can ever match and every
+  // one of those effects is unreachable. The server knows exactly which reaction fired, so it says so: [cell, code].
+  const addFx = (i, code) => { if (fx.length < 4096) fx.push(i, code); };
   const wake = (j) => { if (j >= 0 && j < N && tot[j] > 0) { const v = grid[j]; if (v === 0 || isFluidId(v)) act.add(j); } };
   const wakeN = (j) => { const c = j % COLS; wake(j - COLS); wake(j + COLS); if (c > 0) wake(j - 1); if (c < COLS - 1) wake(j + 1); };
   const recomp = (j) => { let s = 0; const b = j * T; for (let k = 0; k < T; k++) s += amt[b + k]; tot[j] = s; };
@@ -3358,12 +3364,12 @@ function fineReactTickRoom(room, SUB) {
   // as the lava quench — the LOWER of the two, so the product never hangs above what made it; on a tie the cell that
   // was already solid. Consuming both is the point: while one reactant survived it slid on and laid a TRAIL of product
   // behind it (a snow grain freezing a diagonal line of ice across a pool, sand glassing a path down through lava).
-  const combine = (a, bc, id) => {
+  const combine = (a, bc, id, code) => {
     const prod = (bc === a + COLS) ? bc : (a === bc + COLS ? a : (grid[bc] !== 0 ? bc : a));
     const gone = prod === a ? bc : a;
     if (grid[gone] !== 0) { grid[gone] = 0; hp[gone] = 0; terrCells.push(gone, 0); wakeN(gone); }
     if (tot[gone] > 0) clearFine(gone);
-    setSolid(prod, id);
+    setSolid(prod, id); if (code) addFx(prod, code);
   };
   // Candidates: every cell that moved this tick, plus anything seeded by a terrain edit. The reaction is anchored on the
   // LAVA cell, which may be a candidate itself OR a settled neighbour of one (a still lava pool a stream just reached),
@@ -3391,17 +3397,17 @@ function fineReactTickRoom(room, SUB) {
       for (const j of NB) {
         if (amt[b] <= 0 || j < 0 || j >= N) continue;
         const g = grid[j];
-        if (g === 8 || g === 4) { setLiquid(j, 4, FREACT_MELT_AMT); spendLava(i, FREACT_MELT_COST); }   // snow/ice melt → water
-        else if (g === 5) { setSolid(j, 1); spendLava(i, FREACT_BAKE_COST); }                          // mud baked dry → earth
-        else if (g === 3) { combine(i, j, 16); }                                                       // sand fused → glass, BOTH consumed
+        if (g === 8 || g === 4) { setLiquid(j, 4, FREACT_MELT_AMT); spendLava(i, FREACT_MELT_COST); addFx(j, 1); }   // snow/ice melt → water
+        else if (g === 5) { setSolid(j, 1); spendLava(i, FREACT_BAKE_COST); addFx(j, 4); }                          // mud baked dry → earth
+        else if (g === 3) { combine(i, j, 16, 3); }                                                       // sand fused → glass, BOTH consumed
       }
       if (amt[b] <= 0) continue;                              // the lava spent itself on the terrain
       // ── (B) QUICKSAND fuses to GLASS. Checked before the quench so it wins over the generic crust.
       let qj = amt[b + 1] > 0 ? i : -1;
       if (qj < 0) for (const j of NB) { if (j >= 0 && j < N && amt[j * T + 1] > 0) { qj = j; break; } }
       if (qj >= 0) {
-        if (qj === i) { setSolid(i, 16); continue; }           // mixed in one cell → that cell is the glass
-        combine(i, qj, 16); continue;                          // both consumed
+        if (qj === i) { setSolid(i, 16); addFx(i, 3); continue; }           // mixed in one cell → that cell is the glass
+        combine(i, qj, 16, 3); continue;                          // both consumed
       }
       // ── (C) QUENCH → STONE. Brine, acid and water all crust lava.
       let wj = -1;
@@ -3418,7 +3424,7 @@ function fineReactTickRoom(room, SUB) {
           liqChanged.add(pj); if (tot[pj] > 0) act.add(pj); else act.delete(pj);
           wakeN(pj);
         }
-        setSolid(sj, 2);
+        setSolid(sj, 2); addFx(sj, 1);
         continue;
       }
       // ── (D) OIL IGNITES on contact with lava. The lava is not consumed; the fire then spreads through the slick on
@@ -3435,6 +3441,7 @@ function fineReactTickRoom(room, SUB) {
     if (i < 0 || i >= N || amt[b + 5] <= 0) { fire.delete(i); continue; }   // burnt out (or the oil moved on)
     amt[b + 5] = amt[b + 5] > FREACT_OIL_BURN ? amt[b + 5] - FREACT_OIL_BURN : 0;
     recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i);
+    addFx(i, 7);                                                            // flame, every pass it is alight — not a one-shot
     if (amt[b + 5] <= 0) fire.delete(i);
     const c = i % COLS;
     for (const j of [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1])
@@ -3469,6 +3476,7 @@ function fineReactTickRoom(room, SUB) {
       if (solidJ >= 0) {
         fineReactSet(room).add(i);                          // gradual: keep the contact alive between bites
         if ((tick % ACID_BITE_TICKS) === 0) {
+          addFx(solidJ, 8);                                   // fizz at the bite, every bite — not just the one that breaks through
           if (hp[solidJ] > 1) hp[solidJ] -= 1;
           else { grid[solidJ] = 0; hp[solidJ] = 0; terrCells.push(solidJ, 0); wakeN(solidJ); seedFineReactAround(room, solidJ); }
           amt[b + 3] = acid > FREACT_ACID_COST ? acid - FREACT_ACID_COST : 0;
@@ -3493,9 +3501,10 @@ function fineReactTickRoom(room, SUB) {
     }
     if (snowJ < 0) continue;
     let nearLava = false; for (const j of NB) { if (j >= 0 && j < N && amt[j * T] > 0) { nearLava = true; break; } }
-    if (!nearLava) combine(i, snowJ, 4);   // BOTH the snow and the water become one ice cell — the snow must not survive to slide on and freeze a trail
+    if (!nearLava) combine(i, snowJ, 4, 2);   // BOTH the snow and the water become one ice cell — the snow must not survive to slide on and freeze a trail
   }
   if (liquidQuiet) return;                                    // gen pre-settle: react, but don't broadcast
+  if (fx.length) io.to(room).emit('liquid-fx', { cells: fx });
   if (terrCells.length) io.to(room).emit('terrain-set', { cells: terrCells });
   if (liqChanged.size) {                                      // same encoding as the fine tick's own wire
     let arr = [], cells = 0;
