@@ -1613,6 +1613,7 @@ const liquidCfg = {
   lateralLevel: true,    // steps 1c/1d: liquid flows SIDEWAYS to find a flat level. off = it piles up where it lands (no spreading)
   perLiquidLevel: true,  // step 2c: each liquid flattens its OWN layer across columns (heavy ends flat along the bottom)
   viscosity: false,      // per-liquid LEVEL_VISC throttle: denser liquids ooze flat slower. off = ALL liquids level at full speed
+  fineFlatSteps: 3,      // (1d) surface flat-settle: sub-steps/tick it may run in ≈ its spread speed in cells/tick. 0 = uncapped (every sub-step)
   sortBeforeLevel: true, // a cell that density-sorted this sub-step does not also level sideways — it settles its layers first, then spreads
   reactions: true,       // lava+water→stone, acid dissolves terrain, water+snow→ice, oil burns, etc.
   // ONE flag for the whole "make fallSide mean what it says" rule set (it is one idea; splitting it into
@@ -3059,7 +3060,16 @@ function fineLiquidTickRoom(room, SUB) {
   const FALLSTEPS = liquidCfg.fineConstFall ? Math.max(1, Math.min(16, liquidCfg.fineFallSteps | 0)) : FSTEPS;
   const NSTEPS = Math.max(FSTEPS, FALLSTEPS), ADAPT_PCT = Math.max(1, Math.min(50, liquidCfg.fineAdaptPct | 0));
   const MINU = Math.max(1, Math.min(cap, liquidCfg.fineMinUnit | 0));   // quantise the down-fall so falling slices are chunkier (1 = off)
-  const SORTSTEPS = liquidCfg.fineSortSteps > 0 ? Math.min(FSTEPS, liquidCfg.fineSortSteps | 0) : FSTEPS;   // cap the density sort to the first N sub-steps (slower, visible stratification); 0 = follow K
+  const SORTSTEPS = liquidCfg.fineSortSteps > 0 ? Math.min(FSTEPS, liquidCfg.fineSortSteps | 0) : FSTEPS;
+  // (1d) SURFACE FLAT-SETTLE BUDGET — how many of the K sub-steps 1d may run in. 0 = every sub-step (the old
+  // behaviour, kept for A/B). Front speed is ~1 cell per invocation, so this dial IS the spread speed in cells/tick.
+  // ⚠️ Deliberately NOT derived from cellCap. It looked like it should be (1d moves a fixed 1 unit, and a unit is
+  // 1/24 of a cell at cap 24 vs 1/64 at 64), but measurement says otherwise: front speed comes out at 9 cells/tick
+  // at EVERY capacity (t10 width 70/66/63/61 for cap 64/24/12/8), because the front advances one cell per invocation
+  // regardless of how much rides along. What capacity actually changes is the SETTLE time (83/51/39/25) — the
+  // vertical levelling, not the horizontal reach. Deriving the budget from capacity made front speed scale WITH
+  // capacity and broke the very invariant it was meant to protect.
+  const FLATSTEPS = liquidCfg.fineFlatSteps > 0 ? Math.min(FSTEPS, liquidCfg.fineFlatSteps | 0) : FSTEPS;
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
     const doFall = step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
@@ -3210,8 +3220,10 @@ function fineLiquidTickRoom(room, SUB) {
           }
         } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(j) || lavaBlk(i, j)) continue; const nl = tot[j], room2 = cap - nl; if (L - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((L - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
       }
-      // (1d) surface flat-settle
-      if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0) {
+      // (1d) surface flat-settle — capped to FLATSTEPS of the K sub-steps (see the budget above). Uncapped it runs
+      // every sub-step, and because an EMPTY neighbour always counts as "lower", the leading edge of a puddle sheds
+      // onward every time: the front advanced ~9 cells/tick and raced away from the body that was still separating.
+      if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0 && step < FLATSTEPS) {
         let dir = 0, best = Infinity;
         for (const sdir of [-1, 1]) for (let d = 1; d <= SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d; if (isSolid(j)) break; const jl = tot[j]; if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
         if (dir !== 0 && shedCap >= 1) { const j = i + dir; if (tot[j] < L && tot[j] < cap && !lavaBlk(i, j) && reduce(1) > 0) { lvlMove(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
@@ -5148,6 +5160,7 @@ io.on('connection', (socket) => {
     if ('fineFallSteps' in patch) liquidCfg.fineFallSteps = Math.max(1, Math.min(16, patch.fineFallSteps | 0));
     if ('fineMinUnit' in patch) liquidCfg.fineMinUnit = Math.max(1, Math.min(64, patch.fineMinUnit | 0));
     if ('fineSortSteps' in patch) liquidCfg.fineSortSteps = Math.max(0, Math.min(16, patch.fineSortSteps | 0));
+    if ('fineFlatSteps' in patch) liquidCfg.fineFlatSteps = Math.max(0, Math.min(16, patch.fineFlatSteps | 0));
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(1, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
       for (const room in roomLiquidTotal) io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) });
