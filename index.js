@@ -2862,7 +2862,14 @@ function powderTickRoom(room) {
     const r = (i / COLS) | 0, c = i - r * COLS; if (r + 1 >= FLOOR_ROW) continue;
     const below = i + COLS;
     if (canDisplace(below)) { swapMove(i, below); continue; }
-    for (const dc of (((i + tick) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = below + dc; if (canDisplace(j)) { swapMove(i, j); break; } }
+    // DIAGONAL SLIDE — the grain must be able to pass THROUGH the side cell, not just land in the target. Checking only
+    // the destination let a grain squeeze between two solids that touch only at their corners: it tunnelled through a
+    // sealed diagonal crack, and in a pool it slipped past the ice it had just made and froze a diagonal trail behind it.
+    for (const dc of (((i + tick) & 1) ? [-1, 1] : [1, -1])) {
+      const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
+      if (!canDisplace(i + dc)) continue;                     // side blocked → no corner-cutting
+      const j = below + dc; if (canDisplace(j)) { swapMove(i, j); break; }
+    }
     // couldn't fall or slide → rests (not re-added to active)
   }
   if (FINE) {   // grain movement is a TERRAIN change; any pool it displaced rides the fine-liquid wire
@@ -3347,6 +3354,17 @@ function fineReactTickRoom(room, SUB) {
     const up = j - COLS; if (up >= 0 && isPowderId(grid[up])) powderSet(room).add(up);   // grains resting on the melted cell may now fall
   };
   const spendLava = (i, cost) => { const b = i * T; amt[b] = amt[b] > cost ? amt[b] - cost : 0; recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i); return amt[b]; };
+  // ⭐ COMBINE: a reaction that CONSUMES BOTH reactant cells and leaves ONE product cell. Siting follows the same rule
+  // as the lava quench — the LOWER of the two, so the product never hangs above what made it; on a tie the cell that
+  // was already solid. Consuming both is the point: while one reactant survived it slid on and laid a TRAIL of product
+  // behind it (a snow grain freezing a diagonal line of ice across a pool, sand glassing a path down through lava).
+  const combine = (a, bc, id) => {
+    const prod = (bc === a + COLS) ? bc : (a === bc + COLS ? a : (grid[bc] !== 0 ? bc : a));
+    const gone = prod === a ? bc : a;
+    if (grid[gone] !== 0) { grid[gone] = 0; hp[gone] = 0; terrCells.push(gone, 0); wakeN(gone); }
+    if (tot[gone] > 0) clearFine(gone);
+    setSolid(prod, id);
+  };
   // Candidates: every cell that moved this tick, plus anything seeded by a terrain edit. The reaction is anchored on the
   // LAVA cell, which may be a candidate itself OR a settled neighbour of one (a still lava pool a stream just reached),
   // so each candidate also offers up its 4 neighbours — `done` keeps a shared lava cell from being evaluated twice.
@@ -3375,16 +3393,15 @@ function fineReactTickRoom(room, SUB) {
         const g = grid[j];
         if (g === 8 || g === 4) { setLiquid(j, 4, FREACT_MELT_AMT); spendLava(i, FREACT_MELT_COST); }   // snow/ice melt → water
         else if (g === 5) { setSolid(j, 1); spendLava(i, FREACT_BAKE_COST); }                          // mud baked dry → earth
-        else if (g === 3) { setSolid(j, 16); spendLava(i, FREACT_FUSE_COST); }                         // sand fused → glass
+        else if (g === 3) { combine(i, j, 16); }                                                       // sand fused → glass, BOTH consumed
       }
       if (amt[b] <= 0) continue;                              // the lava spent itself on the terrain
       // ── (B) QUICKSAND fuses to GLASS. Checked before the quench so it wins over the generic crust.
       let qj = amt[b + 1] > 0 ? i : -1;
       if (qj < 0) for (const j of NB) { if (j >= 0 && j < N && amt[j * T + 1] > 0) { qj = j; break; } }
       if (qj >= 0) {
-        setSolid(qj, 16);
-        if (qj === i) continue;                               // the lava cell itself fused
-        if (spendLava(i, FREACT_QSAND_COST) <= 0) continue;
+        if (qj === i) { setSolid(i, 16); continue; }           // mixed in one cell → that cell is the glass
+        combine(i, qj, 16); continue;                          // both consumed
       }
       // ── (C) QUENCH → STONE. Brine, acid and water all crust lava.
       let wj = -1;
@@ -3467,16 +3484,16 @@ function fineReactTickRoom(room, SUB) {
     const b = i * T;
     if (amt[b] > 0 || amt[b + 4] <= 0) continue;
     const c = i % COLS, NB = [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
-    let snow = false, ss = null;
+    let snowJ = -1, ss = null;
     for (const j of NB) {
       if (j < 0 || j >= N) continue;
       const g = grid[j];
-      if (g === 8) snow = true;
+      if (g === 8 && snowJ < 0) snowJ = j;
       if (g === 1 || g === 3 || g === 5) { if (!ss) ss = soilSet(room); ss.add(j); }   // earth/sand/mud beside water → absorb
     }
-    if (!snow) continue;
+    if (snowJ < 0) continue;
     let nearLava = false; for (const j of NB) { if (j >= 0 && j < N && amt[j * T] > 0) { nearLava = true; break; } }
-    if (!nearLava) setSolid(i, 4);
+    if (!nearLava) combine(i, snowJ, 4);   // BOTH the snow and the water become one ice cell — the snow must not survive to slide on and freeze a trail
   }
   if (liquidQuiet) return;                                    // gen pre-settle: react, but don't broadcast
   if (terrCells.length) io.to(room).emit('terrain-set', { cells: terrCells });
