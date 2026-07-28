@@ -1743,7 +1743,7 @@ const liquidCfg = {
   // fast enough that the sinking/rising interface reads as instant (no visible bubbling). This caps the sort to the FIRST
   // N sub-steps/tick so it can be SLOWED independently of levelling: 1 = one sort pass/tick (slow, visible), while
   // levelling still runs the full K. 0 = follow K (sort every sub-step, current). Pairs with sortRate (units per swap).
-  fineSortSteps: 0,
+  fineSortSteps: 1,   // DEFAULT 1 (user's choice): one slow, visible density-sort pass per tick while levelling keeps the full K
   // ── (2b) DIAGONAL DENSITY SORT — how far a rising/sinking parcel travels SIDEWAYS while it separates.
   // The vertical sort (2) and the diagonal (2b) both ran on every sub-step, and 2b runs UNCONDITIONALLY with an
   // alternating direction, so at K=9 a parcel could be displaced sideways up to 9 cells in a single tick. A blob of
@@ -1772,6 +1772,19 @@ const liquidCfg = {
   //   into slivers across the whole thing. 1c/1d keep the full 28 reach, so overall pool levelling is unchanged — this
   //   only shortens how far each liquid's OWN layer looks when flattening itself.
   finePerLiquidScan: 2,
+  // ⭐⭐ SYMMETRIC SORT GATE for 2c. `sortBeforeLevel` stops a still-stratifying cell from levelling, but 2c is an
+  // EXCHANGE and the gate only covered the cell being processed — a settled neighbour could reach in and pull a
+  // parcel apart from the other side. With this on, 2c also refuses a PARTNER column that is still sorting, so
+  // "nothing levels while it is still separating" is true in both directions. That is what makes a LONG reach safe:
+  // a parcel keeps its shape while it sorts, then the interface flattens at full speed once it has settled.
+  // ⚠️ MEASURED NEAR-INERT on the case it was built for (a buried blob still spread 44→50 columns with it on),
+  // so it ships OFF. Kept because it makes the rule honest in both directions and may matter in other geometry.
+  finePerLiquidSortGate: false,
+  // ⭐⭐ ONE CELL PER SORT PASS. `list` is scanned BOTTOM-UP (right for falling), which let each higher cell pull the
+  // same light liquid up one more cell within a single pass — so a sliver rode the whole height of a pool in one
+  // sub-step and was then filmed across it by 2c, while the bulk rose at the expected rate. This makes a parcel
+  // advance exactly one cell per sort pass, which is what "density-sort passes/tick" is supposed to mean.
+  fineSortOnePerPass: true,
   // COARSE physics sub-steps (curiosity): run the whole COARSE tick this many times/tick → coarse liquid moves K× faster.
   // Simple (calls liquidTickRoom K times in runLiquidTick), so it broadcasts K× (K× wire) — a debug/experiment dial only.
   coarseSubSteps: 1,
@@ -3150,6 +3163,16 @@ function fineLiquidTickRoom(room, SUB) {
     const list = Array.from(active); active.clear();
     list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot[a], lb = tot[b]; if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
     const fell = new Set(), fellDown = new Set();
+    // ⭐⭐ ONE CELL PER PASS (fineSortOnePerPass). `list` is sorted BOTTOM-UP, which is right for falling — a column
+    // cascades in a single pass — but for the density sort it means each successively HIGHER cell pulls the same light
+    // liquid up one more cell within the SAME pass, so a sliver rides the entire height of a pool in one sub-step.
+    // Measured: with the sort capped to 1 pass/tick, 38 of 216 units of oil still jumped 17 rows to the surface on tick
+    // one and were immediately filmed across 34 columns (they now read as "settled", so 2c levels them at full reach),
+    // while the bulk rose at the expected 1 row/tick. That is the thin-slivers-spread-wide symptom.
+    // A cell that has just RECEIVED lighter liquid is recorded here, and the cell above it may not swap with it again
+    // this pass — so a parcel advances exactly one cell per sort pass, which is what "density-sort passes/tick" is
+    // supposed to mean. Cleared every sub-step.
+    const sortedTo = new Set();
     // Whether a column still holds a vertical density inversion — computed once per column per sub-step, since every
     // cell in it asks the same question (see sortingHere below).
     const colSorting = new Map();
@@ -3186,9 +3209,10 @@ function fineLiquidTickRoom(room, SUB) {
     // is merely BLOCKED (stream tag, lavaBlk) must not freeze levelling, or that cell would never settle at all.
     let sortedHere = false;
     // (2) density sort with the cell BELOW
-    if (doSort && liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(i + COLS) && !(noSortNbr && sd[i + COLS] !== 0) && !lavaBlk(i, i + COLS)) {
+    if (doSort && liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(i + COLS) && !(noSortNbr && sd[i + COLS] !== 0) && !lavaBlk(i, i + COLS)
+        && !(liquidCfg.fineSortOnePerPass && sortedTo.has(i + COLS))) {
       const j = i + COLS, hi = floorRank(i), lo = ceilRank(j);
-      if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); if (k > 0) sortedHere = true; }
+      if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); if (k > 0) { sortedHere = true; sortedTo.add(i); } }
     }
     // (2b) diagonal density sort — see fineSortDiagGate/fineSortDiagSteps. `sortedHere` is set by (2) directly above,
     // so gating on it means "the straight-up swap already handled this cell, don't ALSO shove it sideways".
@@ -3198,8 +3222,9 @@ function fineLiquidTickRoom(room, SUB) {
       const j = i + COLS + dc; if (isSolid(j) || tot[j] === 0) continue;
       if (noSortNbr && sd[j] !== 0) continue;
       if (lavaBlk(i, j)) continue;
+      if (liquidCfg.fineSortOnePerPass && sortedTo.has(j)) continue;
       const hi = floorRank(i), lo = ceilRank(j);
-      if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); if (k > 0) sortedHere = true; break; }
+      if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); if (k > 0) { sortedHere = true; sortedTo.add(i); } break; }
     }
     // ⭐⭐ A CELL THAT IS STILL DENSITY-INVERTED MUST NEVER LEAVE THE ACTIVE SET.
     // `fineSortSteps` caps the sort to the first SORTSTEPS sub-steps. On every sub-step past that, an inverted pair can
@@ -3271,6 +3296,14 @@ function fineLiquidTickRoom(room, SUB) {
         for (const sdir of [-1, 1]) for (let d = 1; d <= PLSCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } }
         if (dir === 0) continue;
         const j = i + dir; if (isSolid(j) || lavaBlk(i, j)) continue;
+        // ⭐⭐ SYMMETRIC SORT GATE. `sortingHere` stops a cell that is still stratifying from levelling — but it only
+        // gates the cell being PROCESSED. 2c is an EXCHANGE, so a settled neighbour was free to reach in and pull the
+        // parcel apart from the other side: measured, a 3-column blob of oil buried in a still pool was filmed across
+        // 58 columns in a single tick, because the surrounding pure-water columns were not themselves sorting and so
+        // were never gated. Gating the PARTNER's column too makes the rule mean what it says — nothing levels into or
+        // out of a region that is still separating — which is what lets the reach stay long: a parcel keeps its shape
+        // while it sorts, then the interface flattens at full reach the moment it has settled.
+        if (liquidCfg.finePerLiquidSortGate && liquidCfg.densitySort && liquidCfg.sortBeforeLevel && colStillSorting(c + dir)) continue;
         const Cj = cumAt(j, t);
         if (Cj >= Ci) continue;
         let avail = 0; for (let k = t + 1; k < T; k++) avail += amt[j * T + k];
@@ -3432,7 +3465,11 @@ function fineLiquidTickRoom(room, SUB) {
   for (const j of Array.from(active)) {
     if (j < 0 || j >= NCELL) { active.delete(j); continue; }
     if (isSolid(j) || tot[j] <= 0) { active.delete(j); continue; }
-    if (quiesce) { if (changedSet.has(j)) quiesce[j] = 0; else if (++quiesce[j] >= QT) active.delete(j); }
+    // ⚠️ Quiescence's whole safety argument is "an inverting cell is marked by the sort every tick, so it can never
+    // freeze mid-stratification". `fineSortOnePerPass` breaks that premise: a pair whose swap was BLOCKED this pass
+    // (the cell below already received liquid) never moves, so it is absent from changedSet and was frozen while still
+    // inverted — 4 rest inversions, exactly the failure quiescence was designed to avoid. Ask the sort directly.
+    if (quiesce) { if (changedSet.has(j) || wouldSort(j, (j / COLS) | 0, j % COLS)) quiesce[j] = 0; else if (++quiesce[j] >= QT) active.delete(j); }
   }
   if (!active.size) delete roomFineActive[room];
 }
@@ -5304,7 +5341,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'sortBeforeLevel', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused', 'fineLedge', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'sortBeforeLevel', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused', 'fineLedge', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
