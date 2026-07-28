@@ -1768,7 +1768,10 @@ const liquidCfg = {
   finePerLiquidSteps: 0,
   //   finePerLiquidScan  — how far 2c looks along the row for a lower spot of its own liquid, in cells. Shorter keeps
   //   the flattening LOCAL instead of reaching across a pool. 0 = follow LIQUID_LEVEL_SCAN (28), the original reach.
-  finePerLiquidScan: 0,
+  //   DEFAULT 2, set from in-game testing: the original 28 reached most of a pool, which is what filmed a dropped blob
+  //   into slivers across the whole thing. 1c/1d keep the full 28 reach, so overall pool levelling is unchanged — this
+  //   only shortens how far each liquid's OWN layer looks when flattening itself.
+  finePerLiquidScan: 2,
   // COARSE physics sub-steps (curiosity): run the whole COARSE tick this many times/tick → coarse liquid moves K× faster.
   // Simple (calls liquidTickRoom K times in runLiquidTick), so it broadcasts K× (K× wire) — a debug/experiment dial only.
   coarseSubSteps: 1,
@@ -3091,6 +3094,23 @@ function fineLiquidTickRoom(room, SUB) {
     if (!la && !lb) return false;
     return (la && tot[B] - amt[B * T] > 0) || (lb && tot[A] - amt[A * T] > 0);
   };
+  // ⭐⭐ WOULD THE DENSITY SORT FIRE FOR THIS CELL RIGHT NOW? Mirrors (2) and (2b) below exactly, minus the per-sub-step
+  // budget — used to keep a still-inverted cell in the ACTIVE SET when that budget has turned the sort off. Keep the
+  // three in step: if a gate is added to (2)/(2b), add it here too, or a pair it blocks will spin in `active` forever.
+  const wouldSort = (i, r, c) => {
+    if (!liquidCfg.densitySort) return false;
+    if (liquidCfg.streamNoSort && liquidCfg.streamTag && sd[i] !== 0) return false;   // noSortStream
+    if (r + 1 >= LIQUID_FLOOR_ROW) return false;                                      // canDown
+    const hi = floorRank(i); if (hi < 0) return false;
+    const nbr = liquidCfg.streamNoSortNbr && liquidCfg.streamTag;
+    for (const j of [i + COLS, c > 0 ? i + COLS - 1 : -1, c < COLS - 1 ? i + COLS + 1 : -1]) {
+      if (j < 0 || j >= NCELL || tot[j] <= 0 || isSolid(j)) continue;
+      if (nbr && sd[j] !== 0) continue;
+      if (lavaBlk(i, j)) continue;
+      if (hi < ceilRank(j)) return true;     // the sim's own swap rule: floorRank(above) < ceilRank(below)
+    }
+    return false;
+  };
   // PHYSICS SUB-STEPS (fineLevelSteps): run the WHOLE fine tick K times per tick, so ALL movement (fall/spill/level/sort)
   // propagates K× faster — recovers the speed fine cells lose to being smaller. Levelling is O(width²), so a fine pool
   // (3× wider) is ~SUB²≈9× slower than coarse ⇒ K≈9 matches coarse. Local, no teleport; the broadcast accumulates across
@@ -3181,6 +3201,18 @@ function fineLiquidTickRoom(room, SUB) {
       const hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); if (k > 0) sortedHere = true; break; }
     }
+    // ⭐⭐ A CELL THAT IS STILL DENSITY-INVERTED MUST NEVER LEAVE THE ACTIVE SET.
+    // `fineSortSteps` caps the sort to the first SORTSTEPS sub-steps. On every sub-step past that, an inverted pair can
+    // neither sort (doSort off) nor level — levelling is gated off precisely BECAUSE its column is still sorting
+    // (`sortingHere`/`colStillSorting`) — so nothing mark()s it, `active` drains to empty and the room is dropped with
+    // the inversion standing FOREVER. It renders, it shows in Inspect, and the client's rise/sink bubble FX keep firing
+    // at it because they key off exactly this inversion: the "stuck slice that bubbles for ever".
+    // ⚠️ This is the SAME structural trap as the fineConstFall/fineFallSteps one above (a lone falling parcel freezing
+    // one cell below where it was placed): a per-sub-step budget switches a branch off and the cell has nothing else
+    // left to keep it alive. Whenever a new budget dial is added, ask what keeps its cells active when it is spent.
+    // MEASURED: 21 stuck pairs across 500 randomised scenes at fineSortSteps 1–2, and none at the default 0 — which is
+    // why this hid through 1320 earlier runs. Self-limiting: wouldSort goes false the moment the pair resolves.
+    if (!doSort && wouldSort(i, r, c)) active.add(i);
     // (1a) straight down (tag carried only onto air / an already-falling cell). Gated on doFall so the fall rate can be
     // held constant regardless of the levelling sub-step count (fineConstFall).
     if (doFall && canDown) { const j = i + COLS; const room2 = cap - tot[j]; if (!isSolid(j) && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t); if (liquidCfg.streamTag && sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i]; L -= t; wakeN(i); } } }
