@@ -3242,14 +3242,25 @@ function seedFineReactAround(room, i) {
   s.add(i); if (i - COLS >= 0) s.add(i - COLS); if (i + COLS < N) s.add(i + COLS);
   if (c > 0) s.add(i - 1); if (c < COLS - 1) s.add(i + 1);
 }
-// LAVA + ANY OTHER LIQUID → STONE, on contact, in ONE 8px cell — ANY amount of lava, no minimum. (An earlier
-// FREACT_LAVA_MIN floor stopped a thin film from paving a sheet of stone; the user's call is that a sheet is fine, and
-// lavaBlk means lava is no longer smeared across cells anyway.) It has to cover EVERY other liquid, not just water:
-// lavaBlk stops lava entering their cells, so a pair with no reaction to resolve it would hover against each other
-// forever. Increments 2b/2e refine the specific pairs (oil→fire, acid→fumes, quicksand→glass) on top of this baseline.
-// ⭐ The stone forms in the LOWER of the two cells (tie ⇒ the lava cell): lava dropped into a pool then fills it from
-// the surface downward instead of crusting one cell ABOVE the water, which is what read as stone floating in mid-air.
+// THE REACTION SET, all on 8px contact, all resolving the tick they are seen. Every non-lava liquid must have an
+// outcome here: lavaBlk stops lava entering their cells, so a pair with nothing to resolve it would hover against each
+// other forever. Exhaustive over the six ranks — quicksand→glass, brine/acid/water→stone, oil→burns off.
+//   LAVA + water/brine/acid  → STONE, in ONE 8px cell, from ANY amount of lava (no minimum: an earlier FREACT_LAVA_MIN
+//     floor stopped a film paving a sheet of stone, and the user's call is that a sheet is fine).
+//     ⭐ The stone takes the LOWER of the two cells (tie ⇒ the lava cell): lava dropped into a pool fills it from the
+//     surface downward instead of crusting one cell ABOVE the water, which read as stone floating in mid-air.
+//   LAVA + quicksand → GLASS · LAVA + oil → the oil BURNS OFF (no stone; 2e makes the fire spread)
+//   LAVA + snow/ice (solid) → WATER, and the lava cools · LAVA + mud → EARTH (baked dry) · LAVA + sand → GLASS (fused)
+//   WATER + snow (solid) → ICE. Ice is not snow, so it cannot chain: exactly a one-cell rime shell. Water that is ALSO
+//     touching lava does not freeze — lava wins (same precedence the coarse sim had).
+// Terrain conversions cost the lava that did them, which is what bounds how far a pool eats into a snow/sand field.
 const FREACT_QUENCH = 24;    // units of the other liquid flashed off per contact, per tick, when the LAVA cell is the one that crusts
+const FREACT_MELT_COST = 8;  // lava spent melting one snow/ice cell
+const FREACT_MELT_AMT = 40;  // water units a melted snow/ice cell leaves behind (< cap, so it flows away rather than sitting brim-full)
+const FREACT_BAKE_COST = 4;  // lava spent baking one mud cell → earth
+const FREACT_FUSE_COST = 4;  // lava spent fusing one sand cell → glass
+const FREACT_QSAND_COST = 6; // lava spent fusing one quicksand cell → glass
+const FREACT_OIL_BURN = 6;   // oil units burnt off per tick of contact with lava
 function fineReactTickRoom(room, SUB) {
   if (!liquidCfg.fine || !liquidCfg.reactions) return;
   SUB = SUB || roomFineSub[room] || 1;
@@ -3264,44 +3275,95 @@ function fineReactTickRoom(room, SUB) {
   const wakeN = (j) => { const c = j % COLS; wake(j - COLS); wake(j + COLS); if (c > 0) wake(j - 1); if (c < COLS - 1) wake(j + 1); };
   const recomp = (j) => { let s = 0; const b = j * T; for (let k = 0; k < T; k++) s += amt[b + k]; tot[j] = s; };
   const clearFine = (j) => { const b = j * T; for (let k = 0; k < T; k++) amt[b + k] = 0; tot[j] = 0; sd[j] = 0; act.delete(j); liqChanged.add(j); };
+  // A reaction product that is SOLID: takes the cell whole (any liquid in it goes with it) and rides the terrain wire.
+  const setSolid = (j, id) => { if (tot[j] > 0 || sd[j]) clearFine(j); act.delete(j); grid[j] = id; hp[j] = matStrengthSrv(mats, id); terrCells.push(j, id); if (roomSat[room]) roomSat[room][j] = 0; wakeN(j); };
+  // ...and one that is LIQUID: the solid is removed from terrain and the liquid appears in the same cell (in fine mode
+  // terrain holds solids only, so a melt is BOTH a terrain-set to empty and a fine-liquid write).
+  const setLiquid = (j, rk, units) => {
+    grid[j] = 0; hp[j] = 0; terrCells.push(j, 0);
+    const jb = j * T; for (let k = 0; k < T; k++) amt[jb + k] = 0;
+    amt[jb + rk] = units; tot[j] = units; sd[j] = 0;
+    liqChanged.add(j); act.add(j); wakeN(j);
+    const up = j - COLS; if (up >= 0 && isPowderId(grid[up])) powderSet(room).add(up);   // grains resting on the melted cell may now fall
+  };
+  const spendLava = (i, cost) => { const b = i * T; amt[b] = amt[b] > cost ? amt[b] - cost : 0; recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i); return amt[b]; };
   // Candidates: every cell that moved this tick, plus anything seeded by a terrain edit. The reaction is anchored on the
   // LAVA cell, which may be a candidate itself OR a settled neighbour of one (a still lava pool a stream just reached),
   // so each candidate also offers up its 4 neighbours — `done` keeps a shared lava cell from being evaluated twice.
   const cand = [];
   if (active) for (const i of active) cand.push(i);
   if (seeded) { for (const i of seeded) cand.push(i); seeded.clear(); }
-  const done = new Set();
+  const seen = new Set(), anchors = [];
   for (const ci of cand) {
     if (ci < 0 || ci >= N) continue;
     const cc = ci % COLS;
     for (const i of [ci, ci - COLS, ci + COLS, cc > 0 ? ci - 1 : -1, cc < COLS - 1 ? ci + 1 : -1]) {
-      if (i < 0 || i >= N || done.has(i)) continue;
-      const b = i * T, lava = amt[b + 0];   // ranks: lava0 quicksand1 brine2 acid3 water4 oil5
-      if (lava <= 0) continue;
-      done.add(i);
-      const c = i % COLS;
-      const other = (j) => tot[j] - amt[j * T] > 0;            // holds any liquid that is not lava
-      // BELOW first, so lava resting on a pool crusts INTO the pool rather than one cell above it
-      let wj = other(i) ? i : -1;                             // another liquid mixed into this very cell counts as contact
-      if (wj < 0) for (const j of [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) {
-        if (j < 0 || j >= N || tot[j] <= 0) continue; if (other(j)) { wj = j; break; }
-      }
-      if (wj < 0) continue;
-      // The stone takes the LOWER cell; on a tie (same row, or same cell) it takes the lava cell.
-      const sj = (wj > i && wj === i + COLS) ? wj : i, pj = sj === i ? wj : i;
-      if (sj !== pj) {
-        if (pj === i) { amt[b] = 0; recomp(i); }               // the lava went into making the stone below it
-        else { let q = FREACT_QUENCH; const pb = pj * T;       // ...or the other liquid flashes off above the crust
-          for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = amt[pb + rk]; if (a <= 0) continue; const mv = a < q ? a : q; amt[pb + rk] = a - mv; q -= mv; }
-          recomp(pj); }
-        liqChanged.add(pj); if (tot[pj] > 0) act.add(pj); else act.delete(pj);
-        wakeN(pj);
-      }
-      clearFine(sj);                                          // CRUST: this cell is now an 8px block of stone; its whole
-      grid[sj] = 2; hp[sj] = matStrengthSrv(mats, 2);         // stack goes with it
-      terrCells.push(sj, 2); wakeN(sj);
-      done.add(sj);
+      if (i < 0 || i >= N || seen.has(i)) continue;
+      seen.add(i); anchors.push(i);
     }
+  }
+  // ⭐ TWO PHASES, so the result cannot depend on Set iteration order. EVERY lava contact is resolved first, then the
+  // water-freezing is evaluated against the state that leaves. Measured before the split: the same lava-on-snow setup
+  // gave STONE in one geometry and ICE in another, purely on which cell the pass happened to reach first.
+  for (const i of anchors) {
+      const b = i * T, c = i % COLS;                          // ranks: lava0 quicksand1 brine2 acid3 water4 oil5
+      if (amt[b] <= 0) continue;
+      const NB = [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];   // BELOW first: lava resting on a pool crusts INTO it, not one cell above
+      // ── (A) SOLID terrain the lava is touching. Each conversion costs lava, so a pool eats a bounded distance in.
+      for (const j of NB) {
+        if (amt[b] <= 0 || j < 0 || j >= N) continue;
+        const g = grid[j];
+        if (g === 8 || g === 4) { setLiquid(j, 4, FREACT_MELT_AMT); spendLava(i, FREACT_MELT_COST); }   // snow/ice melt → water
+        else if (g === 5) { setSolid(j, 1); spendLava(i, FREACT_BAKE_COST); }                          // mud baked dry → earth
+        else if (g === 3) { setSolid(j, 16); spendLava(i, FREACT_FUSE_COST); }                         // sand fused → glass
+      }
+      if (amt[b] <= 0) continue;                              // the lava spent itself on the terrain
+      // ── (B) QUICKSAND fuses to GLASS. Checked before the quench so it wins over the generic crust.
+      let qj = amt[b + 1] > 0 ? i : -1;
+      if (qj < 0) for (const j of NB) { if (j >= 0 && j < N && amt[j * T + 1] > 0) { qj = j; break; } }
+      if (qj >= 0) {
+        setSolid(qj, 16);
+        if (qj === i) continue;                               // the lava cell itself fused
+        if (spendLava(i, FREACT_QSAND_COST) <= 0) continue;
+      }
+      // ── (C) QUENCH → STONE. Brine, acid and water all crust lava.
+      let wj = -1;
+      for (const rk of [2, 3, 4]) if (amt[b + rk] > 0) { wj = i; break; }   // mixed into this very cell counts as contact
+      if (wj < 0) for (const j of NB) { if (j < 0 || j >= N || tot[j] <= 0) continue; const jb = j * T;
+        if (amt[jb + 2] > 0 || amt[jb + 3] > 0 || amt[jb + 4] > 0) { wj = j; break; } }
+      if (wj >= 0) {
+        const sj = (wj === i + COLS) ? wj : i, pj = sj === i ? wj : i;      // the stone takes the LOWER cell; tie ⇒ the lava cell
+        if (sj !== pj) {
+          if (pj === i) { amt[b] = 0; recomp(i); }             // the lava went into making the stone below it
+          else { let q = FREACT_QUENCH; const pb = pj * T;     // ...or the other liquid flashes off above the crust
+            for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = amt[pb + rk]; if (a <= 0) continue; const mv = a < q ? a : q; amt[pb + rk] = a - mv; q -= mv; }
+            recomp(pj); }
+          liqChanged.add(pj); if (tot[pj] > 0) act.add(pj); else act.delete(pj);
+          wakeN(pj);
+        }
+        setSolid(sj, 2);
+        continue;
+      }
+      // ── (D) OIL burns off on contact — no stone, and the lava is not consumed (2e turns this into spreading fire).
+      // The ONLY gradual reaction in the set: it takes many ticks, so unlike the others it does not resolve its own
+      // contact in one pass. Neither cell moves while it burns, so both drop out of roomFineActive after a tick or two
+      // and the burn would stall part-way (measured: 52 of 64 units still there after 40 ticks). Re-seed the pair.
+      let oj = amt[b + 5] > 0 ? i : -1;
+      if (oj < 0) for (const j of NB) { if (j >= 0 && j < N && amt[j * T + 5] > 0) { oj = j; break; } }
+      if (oj >= 0) { const ob = oj * T; amt[ob + 5] = amt[ob + 5] > FREACT_OIL_BURN ? amt[ob + 5] - FREACT_OIL_BURN : 0;
+        recomp(oj); liqChanged.add(oj); if (tot[oj] > 0) act.add(oj); else act.delete(oj); wakeN(oj);
+        if (amt[ob + 5] > 0) { const ns = fineReactSet(room); ns.add(i); ns.add(oj); } }
+  }
+  // ── PHASE 2: WATER + SNOW → ICE. Only water touching SNOW freezes, and ice is not snow, so it cannot chain — exactly
+  // a one-cell rime shell. Water still touching lava after phase 1 is left alone: lava melts/crusts it instead.
+  for (const i of anchors) {
+    const b = i * T;
+    if (amt[b] > 0 || amt[b + 4] <= 0) continue;
+    const c = i % COLS, NB = [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
+    let snow = false; for (const j of NB) { if (j >= 0 && j < N && grid[j] === 8) { snow = true; break; } }
+    if (!snow) continue;
+    let nearLava = false; for (const j of NB) { if (j >= 0 && j < N && amt[j * T] > 0) { nearLava = true; break; } }
+    if (!nearLava) setSolid(i, 4);
   }
   if (liquidQuiet) return;                                    // gen pre-settle: react, but don't broadcast
   if (terrCells.length) io.to(room).emit('terrain-set', { cells: terrCells });
