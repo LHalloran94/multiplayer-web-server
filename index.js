@@ -2957,6 +2957,21 @@ function fineLiquidTickRoom(room, SUB) {
     if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
   const floorRank = (j) => { const b = j * T; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) return rk; return -1; };
   const ceilRank = (j) => { const b = j * T; for (let rk = T - 1; rk >= 0; rk--) if (amt[b + rk] > 0) return rk; return -1; };
+  // ── LAVA IS NEVER MIXED WITH ANOTHER LIQUID ──────────────────────────────────────────────────────────────────────
+  // Lava reacts on contact with every other liquid (fineReactTickRoom), so the two must never end up sharing a cell in
+  // the first place. Without this, a falling lava parcel merges into a pool cell and the K levelling/sort sub-steps
+  // smear it across several cells BEFORE the next reaction pass sees it — which is what produced a whole column of
+  // stone from a small amount of lava, and stone appearing away from the interface. Blocked in BOTH directions on
+  // every transfer path (1a fall · 1b spill · 1c/1d level · 2/2b sort · 2c per-liquid · flux). Guarded at the call
+  // sites rather than inside moveBottom/moveTop, because those callers decrement L by the amount they ASKED to move.
+  // Tied to liquidCfg.reactions: with reactions off there is nothing to react, so lava is an ordinary liquid again
+  // (which is also what keeps the coarse-vs-fine identity probe honest).
+  const lavaBlk = (A, B) => {
+    if (!liquidCfg.reactions) return false;
+    const la = amt[A * T] > 0, lb = amt[B * T] > 0;
+    if (!la && !lb) return false;
+    return (la && tot[B] - amt[B * T] > 0) || (lb && tot[A] - amt[A * T] > 0);
+  };
   // PHYSICS SUB-STEPS (fineLevelSteps): run the WHOLE fine tick K times per tick, so ALL movement (fall/spill/level/sort)
   // propagates K× faster — recovers the speed fine cells lose to being smaller. Levelling is O(width²), so a fine pool
   // (3× wider) is ~SUB²≈9× slower than coarse ⇒ K≈9 matches coarse. Local, no teleport; the broadcast accumulates across
@@ -2995,7 +3010,7 @@ function fineLiquidTickRoom(room, SUB) {
     const noSortStream = liquidCfg.streamNoSort && liquidCfg.streamTag && sd[i] !== 0;
     const noSortNbr = liquidCfg.streamNoSortNbr && liquidCfg.streamTag;
     // (2) density sort with the cell BELOW
-    if (doSort && liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(i + COLS) && !(noSortNbr && sd[i + COLS] !== 0)) {
+    if (doSort && liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(i + COLS) && !(noSortNbr && sd[i + COLS] !== 0) && !lavaBlk(i, i + COLS)) {
       const j = i + COLS, hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); }
     }
@@ -3004,19 +3019,20 @@ function fineLiquidTickRoom(room, SUB) {
       const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
       const j = i + COLS + dc; if (isSolid(j) || tot[j] === 0) continue;
       if (noSortNbr && sd[j] !== 0) continue;
+      if (lavaBlk(i, j)) continue;
       const hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); break; }
     }
     // (1a) straight down (tag carried only onto air / an already-falling cell). Gated on doFall so the fall rate can be
     // held constant regardless of the levelling sub-step count (fineConstFall).
-    if (doFall && canDown) { const j = i + COLS; const room2 = cap - tot[j]; if (!isSolid(j) && room2 > 0) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t); if (liquidCfg.streamTag && sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i]; L -= t; wakeN(i); } } }
+    if (doFall && canDown) { const j = i + COLS; const room2 = cap - tot[j]; if (!isSolid(j) && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t); if (liquidCfg.streamTag && sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i]; L -= t; wakeN(i); } } }
     // density throttle (viscosity off by default → lf=1 → reduce is a pass-through)
     const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;
     let pend = false;
     const reduce = (want) => { if (want <= 0) return 0; if (lf >= 1) return want; lvlAcc[i] += want * lf; let mv = lvlAcc[i] | 0; if (mv > want) mv = want; lvlAcc[i] -= mv; if (mv <= 0) pend = true; return mv; };
     // (1b) ledge spill — plain (no chute/secondary-lane, no droplet cascade), with the mid-air support guard. Gated on
     // fineLedge: OFF ⇒ skip it and let 1c move liquid into the edge cell + 1a drop it (same result, one tick slower).
-    if (doFall && liquidCfg.ledgeSpill && liquidCfg.fineLedge && L > 0 && canDown && (isSolid(i + COLS) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(j)) continue;
+    if (doFall && liquidCfg.ledgeSpill && liquidCfg.fineLedge && L > 0 && canDown && (isSolid(i + COLS) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(j) || lavaBlk(i, j)) continue;
       if (!isSolid(i + COLS)) { const jb = j + COLS; const jSupported = ((j / COLS) | 0) + 1 >= LIQUID_FLOOR_ROW || isSolid(jb) || tot[jb] > 0; if (!jSupported) continue; }
       if (tot[j] < cap) { const t = reduce(Math.min(L, cap - tot[j])); const ns = dc > 0 ? SIDE_LEFT : SIDE_RIGHT;
         const tagOk = !liquidCfg.streamTag || (isSolid(i + COLS) && (tot[j] === 0 || fell.has(j)));
@@ -3026,7 +3042,16 @@ function fineLiquidTickRoom(room, SUB) {
     const canFall = canDown && (roomAt(i + COLS) || fell.has(i + COLS) || (c > 0 && roomAt(i + COLS - 1)) || (c < COLS - 1 && roomAt(i + COLS + 1)));
     if (canFall) fell.add(i);
     const airborne = canDown && (roomAt(i + COLS) || fellDown.has(i + COLS));
-    if (airborne) { fellDown.add(i); airborneWire.add(i); }
+    // A cell that still has room to fall must NEVER leave the active set. With fineConstFall on, the descent runs in
+    // sub-step 0 only; sub-steps 1..K-1 then process an airborne cell that can neither fall (doFall off) nor level
+    // (gated off for a stream), so nothing mark()s it, `active` drains to empty and the room is dropped — a lone parcel
+    // freezes in mid-air exactly one cell below where it was placed. A continuous stream hid this because the cell above
+    // re-wakes it every tick. Self-limiting: once it lands, roomAt(below) is false ⇒ not airborne ⇒ it settles normally.
+    // ...but only while a fall is genuinely still possible. fineMinUnit quantises the descent, so a sub-unit remainder
+    // can never move; keeping THAT active spins forever (it never settles, which the mitigations probe caught).
+    const belowRoom = (canDown && !isSolid(i + COLS)) ? cap - tot[i + COLS] : 0;
+    const keepFalling = belowRoom > 0 && L > 0 && (MINU <= 1 || (L < belowRoom ? L : belowRoom) >= MINU);
+    if (airborne) { fellDown.add(i); airborneWire.add(i); if (keepFalling) active.add(i); }
     if (!canFall) { if (liquidCfg.streamTag && sd[i] !== 0) { sd[i] = 0; tagCleared.add(i); } }
     const isStream = liquidCfg.levelGate === 0 ? canFall
                    : liquidCfg.levelGate === 3 ? (sd[i] !== 0 || airborne)
@@ -3042,7 +3067,7 @@ function fineLiquidTickRoom(room, SUB) {
         let dir = 0, best = Infinity;
         for (const sdir of [-1, 1]) for (let d = 1; d <= SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } }
         if (dir === 0) continue;
-        const j = i + dir; if (isSolid(j)) continue;
+        const j = i + dir; if (isSolid(j) || lavaBlk(i, j)) continue;
         const Cj = cumAt(j, t);
         if (Cj >= Ci) continue;
         let avail = 0; for (let k = t + 1; k < T; k++) avail += amt[j * T + k];
@@ -3062,8 +3087,8 @@ function fineLiquidTickRoom(room, SUB) {
       if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 1) {
         if (liquidCfg.symLevel) {
           const jL = c > 0 ? i - 1 : -1, jR = c < COLS - 1 ? i + 1 : -1;
-          const okL = jL >= 0 && !isSolid(jL) && L - tot[jL] > 1;
-          const okR = jR >= 0 && !isSolid(jR) && L - tot[jR] > 1;
+          const okL = jL >= 0 && !isSolid(jL) && L - tot[jL] > 1 && !lavaBlk(i, jL);
+          const okR = jR >= 0 && !isSolid(jR) && L - tot[jR] > 1 && !lavaBlk(i, jR);
           let sum = L, cnt = 1; if (okL) { sum += tot[jL]; cnt++; } if (okR) { sum += tot[jR]; cnt++; }
           if (cnt > 1) {
             const avg = sum / cnt;
@@ -3078,13 +3103,13 @@ function fineLiquidTickRoom(room, SUB) {
               if (mvR > 0) { lvlMove(i, jR, mvR); sd[jR] = 0; L -= mvR; wakeN(i); }
             }
           }
-        } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(j)) continue; const nl = tot[j], room2 = cap - nl; if (L - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((L - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
+        } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(j) || lavaBlk(i, j)) continue; const nl = tot[j], room2 = cap - nl; if (L - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((L - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
       }
       // (1d) surface flat-settle
       if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0) {
         let dir = 0, best = Infinity;
         for (const sdir of [-1, 1]) for (let d = 1; d <= SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d; if (isSolid(j)) break; const jl = tot[j]; if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
-        if (dir !== 0 && shedCap >= 1) { const j = i + dir; if (tot[j] < L && tot[j] < cap && reduce(1) > 0) { lvlMove(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
+        if (dir !== 0 && shedCap >= 1) { const j = i + dir; if (tot[j] < L && tot[j] < cap && !lavaBlk(i, j) && reduce(1) > 0) { lvlMove(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
       }
     }
     if (pend) active.add(i);
@@ -3152,7 +3177,7 @@ function fineLiquidTickRoom(room, SUB) {
             if (sr >= cFloor[src]) break;
             while (dr >= cTop[dst] && (isSolid(dr * COLS + dst) || cap - tot[dr * COLS + dst] <= 0)) dr--;
             if (dr < cTop[dst] || dr < sr) break;
-            const A = sr * COLS + src, B = dr * COLS + dst; if (A === B) break;
+            const A = sr * COLS + src, B = dr * COLS + dst; if (A === B || lavaBlk(A, B)) break;
             const mv = Math.min(tot[A], cap - tot[B], need); if (mv <= 0) break;
             const did = lvlMove(A, B, mv); if (did <= 0) break;
             sd[B] = 0; need -= did; wakeN(A); wakeN(B);
@@ -3217,11 +3242,14 @@ function seedFineReactAround(room, i) {
   s.add(i); if (i - COLS >= 0) s.add(i - COLS); if (i + COLS < N) s.add(i + COLS);
   if (c > 0) s.add(i - 1); if (c < COLS - 1) s.add(i + 1);
 }
-// LAVA + WATER/BRINE → STONE. Contact boils the water off the same tick (they never coexist); a lava cell holding at least
-// FREACT_LAVA_MIN crusts into a stone cell, a thinner FILM is simply quenched away — without that floor, a sliver of lava
-// smeared across a pool surface by the density sort would pave a whole sheet of stone.
-const FREACT_LAVA_MIN = 8;   // lava units a fine cell needs before water contact crusts it (8/64 = ⅛ of a cell)
-const FREACT_QUENCH = 24;    // water/brine units flashed to steam per contact, per tick
+// LAVA + ANY OTHER LIQUID → STONE, on contact, in ONE 8px cell — ANY amount of lava, no minimum. (An earlier
+// FREACT_LAVA_MIN floor stopped a thin film from paving a sheet of stone; the user's call is that a sheet is fine, and
+// lavaBlk means lava is no longer smeared across cells anyway.) It has to cover EVERY other liquid, not just water:
+// lavaBlk stops lava entering their cells, so a pair with no reaction to resolve it would hover against each other
+// forever. Increments 2b/2e refine the specific pairs (oil→fire, acid→fumes, quicksand→glass) on top of this baseline.
+// ⭐ The stone forms in the LOWER of the two cells (tie ⇒ the lava cell): lava dropped into a pool then fills it from
+// the surface downward instead of crusting one cell ABOVE the water, which is what read as stone floating in mid-air.
+const FREACT_QUENCH = 24;    // units of the other liquid flashed off per contact, per tick, when the LAVA cell is the one that crusts
 function fineReactTickRoom(room, SUB) {
   if (!liquidCfg.fine || !liquidCfg.reactions) return;
   SUB = SUB || roomFineSub[room] || 1;
@@ -3252,24 +3280,27 @@ function fineReactTickRoom(room, SUB) {
       if (lava <= 0) continue;
       done.add(i);
       const c = i % COLS;
-      let wj = (amt[b + 4] > 0 || amt[b + 2] > 0) ? i : -1;   // water/brine mixed into this very cell counts as contact
+      const other = (j) => tot[j] - amt[j * T] > 0;            // holds any liquid that is not lava
+      // BELOW first, so lava resting on a pool crusts INTO the pool rather than one cell above it
+      let wj = other(i) ? i : -1;                             // another liquid mixed into this very cell counts as contact
       if (wj < 0) for (const j of [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) {
-        if (j < 0 || j >= N) continue; const jb = j * T; if (amt[jb + 4] > 0 || amt[jb + 2] > 0) { wj = j; break; }
+        if (j < 0 || j >= N || tot[j] <= 0) continue; if (other(j)) { wj = j; break; }
       }
       if (wj < 0) continue;
-      const wb = wj * T;
-      let q = FREACT_QUENCH;                                  // BOIL: the contacting water/brine goes off as steam NOW
-      for (const rk of [4, 2]) { if (q <= 0) break; const a = amt[wb + rk]; if (a <= 0) continue; const mv = a < q ? a : q; amt[wb + rk] = a - mv; q -= mv; }
-      if (wj !== i) { recomp(wj); liqChanged.add(wj); if (tot[wj] > 0) act.add(wj); else act.delete(wj); wakeN(wj); }
-      if (lava >= FREACT_LAVA_MIN) {                          // CRUST: this cell is now an 8px block of stone
-        clearFine(i);                                         // its whole stack goes with it (incl. any water mixed in)
-        grid[i] = 2; hp[i] = matStrengthSrv(mats, 2); terrCells.push(i, 2);
-        wakeN(i);
-      } else {                                                // a film of lava is just quenched away — no stone from a sliver
-        amt[b + 0] = 0; recomp(i); liqChanged.add(i);
-        if (tot[i] > 0) act.add(i); else act.delete(i);
-        wakeN(i);
+      // The stone takes the LOWER cell; on a tie (same row, or same cell) it takes the lava cell.
+      const sj = (wj > i && wj === i + COLS) ? wj : i, pj = sj === i ? wj : i;
+      if (sj !== pj) {
+        if (pj === i) { amt[b] = 0; recomp(i); }               // the lava went into making the stone below it
+        else { let q = FREACT_QUENCH; const pb = pj * T;       // ...or the other liquid flashes off above the crust
+          for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = amt[pb + rk]; if (a <= 0) continue; const mv = a < q ? a : q; amt[pb + rk] = a - mv; q -= mv; }
+          recomp(pj); }
+        liqChanged.add(pj); if (tot[pj] > 0) act.add(pj); else act.delete(pj);
+        wakeN(pj);
       }
+      clearFine(sj);                                          // CRUST: this cell is now an 8px block of stone; its whole
+      grid[sj] = 2; hp[sj] = matStrengthSrv(mats, 2);         // stack goes with it
+      terrCells.push(sj, 2); wakeN(sj);
+      done.add(sj);
     }
   }
   if (liquidQuiet) return;                                    // gen pre-settle: react, but don't broadcast
@@ -3310,11 +3341,17 @@ const runLiquidTick = () => {
   // the set by the time the tick returns — running after would miss every static contact, which is most of them. Run
   // first and the set still holds everything that moved last tick, i.e. exactly the cells whose contacts are new.
   // Rooms with no active liquid still get a pass when a terrain edit seeded them.
-  if (liquidCfg.fine && liquidCfg.reactions) {
+  const _react = () => {
     for (const room in roomFineActive) fineReactTickRoom(room, roomFineSub[room] || liquidCfg.sub);
     for (const room in roomFineReact) if (!roomFineActive[room]) fineReactTickRoom(room, roomFineSub[room] || liquidCfg.sub);
-  }
+  };
+  if (liquidCfg.fine && liquidCfg.reactions) _react();
   if (liquidCfg.fine) for (const room in roomFineActive) { if (liquidCfg.perfLog) _fineActive += roomFineActive[room].size; fineLiquidTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
+  // ...and AGAIN after the flow. The pre-pass catches contacts that were already standing (the set still holds last
+  // tick's movers); the post-pass catches contacts this tick's movement JUST created, in the same tick. Without it,
+  // lava that lands on a partially-filled cell — which lavaBlk stops it entering — would visibly HOVER over the gap
+  // for a tick before crusting. The pass is O(active) and does nothing unless lava is actually touching something.
+  if (liquidCfg.fine && liquidCfg.reactions) _react();
   if (liquidCfg.perfLog && liquidCfg.fine) { const _fdt = performance.now() - _fine0; liqPerf.fineMs += _fdt; if (_fdt > liqPerf.fineMsMax) liqPerf.fineMsMax = _fdt; if (_fineActive > liqPerf.fineActive) liqPerf.fineActive = _fineActive; }
   powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room);   // powder runs in lockstep with liquid → consistent gravity
   if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) soilTickRoom(room);
