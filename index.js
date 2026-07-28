@@ -3320,6 +3320,7 @@ const FREACT_BAKE_COST = 4;  // lava spent baking one mud cell → earth
 const FREACT_FUSE_COST = 4;  // lava spent fusing one sand cell → glass
 const FREACT_QSAND_COST = 6; // lava spent fusing one quicksand cell → glass
 const FREACT_OIL_BURN = 6;   // oil units consumed per pass by a BURNING cell
+const FREACT_FREEZE_COST = 24;// water units consumed when a snow cell freezes into ice
 // ACID at 8px. The coarse bite was one 24px cell per 8 ticks = 3px of penetration per tick; an 8px cell eaten at the
 // same cadence would only be 1px/tick, i.e. 3× slower through the same wall. Biting every 3rd tick restores the
 // original physical eat-rate — the reaction is unchanged, only the cadence is re-derived for the smaller cell.
@@ -3360,10 +3361,14 @@ function fineReactTickRoom(room, SUB) {
     const up = j - COLS; if (up >= 0 && isPowderId(grid[up])) powderSet(room).add(up);   // grains resting on the melted cell may now fall
   };
   const spendLava = (i, cost) => { const b = i * T; amt[b] = amt[b] > cost ? amt[b] - cost : 0; recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i); return amt[b]; };
-  // ⭐ COMBINE: a reaction that CONSUMES BOTH reactant cells and leaves ONE product cell. Siting follows the same rule
-  // as the lava quench — the LOWER of the two, so the product never hangs above what made it; on a tie the cell that
-  // was already solid. Consuming both is the point: while one reactant survived it slid on and laid a TRAIL of product
-  // behind it (a snow grain freezing a diagonal line of ice across a pool, sand glassing a path down through lava).
+  // ⭐ SOLID REACTANT ⇒ THE PRODUCT REPLACES IT IN PLACE, and the liquid partner just pays a cost. A solid cannot
+  // hover, so the lower-cell rule has no work to do here — and RELOCATING the product is what produced the
+  // unpredictable holes: a lava cell with sand ABOVE it turned ITSELF to glass and deleted the sand, so a 2×2 lava
+  // block in sand gave a scatter of glass and gaps instead of a clean ring. The solid also stops being that solid, so
+  // there is still nothing left to slide on and lay a trail (which is what consuming both was really for).
+  const convertSolid = (sol, id, code) => { setSolid(sol, id); if (code) addFx(sol, code); };
+  // ...and when BOTH reactants are LIQUID, the lower-cell rule still applies, so lava dropping into a pool cannot
+  // leave its product hanging in mid-air above the surface.
   const combine = (a, bc, id, code) => {
     const prod = (bc === a + COLS) ? bc : (a === bc + COLS ? a : (grid[bc] !== 0 ? bc : a));
     const gone = prod === a ? bc : a;
@@ -3399,7 +3404,7 @@ function fineReactTickRoom(room, SUB) {
         const g = grid[j];
         if (g === 8 || g === 4) { setLiquid(j, 4, FREACT_MELT_AMT); spendLava(i, FREACT_MELT_COST); addFx(j, 1); }   // snow/ice melt → water
         else if (g === 5) { setSolid(j, 1); spendLava(i, FREACT_BAKE_COST); addFx(j, 4); }                          // mud baked dry → earth
-        else if (g === 3) { combine(i, j, 16, 3); }                                                       // sand fused → glass, BOTH consumed
+        else if (g === 3) { convertSolid(j, 16, 3); spendLava(i, FREACT_FUSE_COST); }                                                       // sand fused → glass, BOTH consumed
       }
       if (amt[b] <= 0) continue;                              // the lava spent itself on the terrain
       // ── (B) QUICKSAND fuses to GLASS. Checked before the quench so it wins over the generic crust.
@@ -3501,7 +3506,11 @@ function fineReactTickRoom(room, SUB) {
     }
     if (snowJ < 0) continue;
     let nearLava = false; for (const j of NB) { if (j >= 0 && j < N && amt[j * T] > 0) { nearLava = true; break; } }
-    if (!nearLava) combine(i, snowJ, 4, 2);   // BOTH the snow and the water become one ice cell — the snow must not survive to slide on and freeze a trail
+    if (!nearLava) {
+      convertSolid(snowJ, 4, 2);                                            // the snow itself becomes the ice, so nothing survives to slide on
+      let q = FREACT_FREEZE_COST; for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = amt[b + rk]; if (a <= 0) continue; const mv = a < q ? a : q; amt[b + rk] = a - mv; q -= mv; }
+      recomp(i); liqChanged.add(i); if (tot[i] > 0) act.add(i); else act.delete(i); wakeN(i);
+    }   // BOTH the snow and the water become one ice cell — the snow must not survive to slide on and freeze a trail
   }
   if (liquidQuiet) return;                                    // gen pre-settle: react, but don't broadcast
   if (fx.length) io.to(room).emit('liquid-fx', { cells: fx });
@@ -5081,7 +5090,7 @@ io.on('connection', (socket) => {
     if ('fineMinUnit' in patch) liquidCfg.fineMinUnit = Math.max(1, Math.min(64, patch.fineMinUnit | 0));
     if ('fineSortSteps' in patch) liquidCfg.fineSortSteps = Math.max(0, Math.min(16, patch.fineSortSteps | 0));
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
-    if ('cellCap' in patch) { const nv = Math.max(8, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
+    if ('cellCap' in patch) { const nv = Math.max(1, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
       for (const room in roomLiquidTotal) io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) });
       if (liquidCfg.fine) for (const room in roomFineTotal) { const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); }
     } }
