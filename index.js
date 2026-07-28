@@ -1744,6 +1744,20 @@ const liquidCfg = {
   // N sub-steps/tick so it can be SLOWED independently of levelling: 1 = one sort pass/tick (slow, visible), while
   // levelling still runs the full K. 0 = follow K (sort every sub-step, current). Pairs with sortRate (units per swap).
   fineSortSteps: 0,
+  // ── (2b) DIAGONAL DENSITY SORT — how far a rising/sinking parcel travels SIDEWAYS while it separates.
+  // The vertical sort (2) and the diagonal (2b) both ran on every sub-step, and 2b runs UNCONDITIONALLY with an
+  // alternating direction, so at K=9 a parcel could be displaced sideways up to 9 cells in a single tick. A blob of
+  // liquid dropped into a pool is therefore shredded into thin slivers strewn across many columns before it has risen
+  // more than a cell or two, which is not what separating looks like.
+  // GATE: the diagonal only fires when the straight-up swap did NOT — i.e. the cell below is solid, empty, or the pair
+  // simply is not inverted. That is exactly the rationale the LEDGE SPILL (1b) already uses: the diagonal is a way PAST
+  // an obstacle, not a second route that always runs alongside the vertical one. With clear water above, a parcel now
+  // rises straight up.
+  fineSortDiagGate: true,
+  // ...and a cap on top, the way fineFlatSteps caps 1d: the diagonal may only run in the first N of the sort sub-steps,
+  // so lateral travel is bounded to N cells/tick rather than K. 0 = follow the sort sub-steps (no cap) — deliberately
+  // the default, because the right value is a feel judgement and inventing one here would just be a guess.
+  fineSortDiagSteps: 0,
   // COARSE physics sub-steps (curiosity): run the whole COARSE tick this many times/tick → coarse liquid moves K× faster.
   // Simple (calls liquidTickRoom K times in runLiquidTick), so it broadcasts K× (K× wire) — a debug/experiment dial only.
   coarseSubSteps: 1,
@@ -3078,6 +3092,9 @@ function fineLiquidTickRoom(room, SUB) {
   const NSTEPS = Math.max(FSTEPS, FALLSTEPS), ADAPT_PCT = Math.max(1, Math.min(50, liquidCfg.fineAdaptPct | 0));
   const MINU = Math.max(1, Math.min(cap, liquidCfg.fineMinUnit | 0));   // quantise the down-fall so falling slices are chunkier (1 = off)
   const SORTSTEPS = liquidCfg.fineSortSteps > 0 ? Math.min(FSTEPS, liquidCfg.fineSortSteps | 0) : FSTEPS;
+  // (2b) DIAGONAL sort budget — capped SEPARATELY from the vertical sort, so sideways travel while separating can be
+  // bounded without slowing stratification itself. 0 = follow SORTSTEPS (uncapped, the original behaviour).
+  const DIAGSTEPS = liquidCfg.fineSortDiagSteps > 0 ? Math.min(SORTSTEPS, liquidCfg.fineSortDiagSteps | 0) : SORTSTEPS;
   // (1d) SURFACE FLAT-SETTLE BUDGET — how many of the K sub-steps 1d may run in. 0 = every sub-step (the old
   // behaviour, kept for A/B). Front speed is ~1 cell per invocation, so this dial IS the spread speed in cells/tick.
   // ⚠️ Deliberately NOT derived from cellCap. It looked like it should be (1d moves a fixed 1 unit, and a unit is
@@ -3092,6 +3109,7 @@ function fineLiquidTickRoom(room, SUB) {
     const doFall = step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
     const doLevel = step < FSTEPS;      // this sub-step runs lateral levelling (1c/1d/2c)
     const doSort = step < SORTSTEPS;    // this sub-step runs the DENSITY SORT (2/2b) — capped separately so sorting can be slowed independently of levelling
+    const doSortDiag = step < DIAGSTEPS; // ...and the DIAGONAL half (2b) is capped tighter still, to bound sideways travel
     stepMoves = 0;
     const list = Array.from(active); active.clear();
     list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot[a], lb = tot[b]; if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
@@ -3136,8 +3154,10 @@ function fineLiquidTickRoom(room, SUB) {
       const j = i + COLS, hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); if (k > 0) sortedHere = true; }
     }
-    // (2b) diagonal density sort
-    if (doSort && liquidCfg.densitySort && !noSortStream && canDown) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
+    // (2b) diagonal density sort — see fineSortDiagGate/fineSortDiagSteps. `sortedHere` is set by (2) directly above,
+    // so gating on it means "the straight-up swap already handled this cell, don't ALSO shove it sideways".
+    if (doSort && doSortDiag && liquidCfg.densitySort && !noSortStream && canDown && !(liquidCfg.fineSortDiagGate && sortedHere))
+      for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
       const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
       const j = i + COLS + dc; if (isSolid(j) || tot[j] === 0) continue;
       if (noSortNbr && sd[j] !== 0) continue;
@@ -5233,7 +5253,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'sortBeforeLevel', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused', 'fineLedge', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'sortBeforeLevel', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'droplets', 'dropWeir', 'dropStratify', 'dropSpreadFlow', 'dropSpreadWide', 'dropEdgeFill', 'paused', 'fineLedge', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
@@ -5243,6 +5263,7 @@ io.on('connection', (socket) => {
     if ('fineFallSteps' in patch) liquidCfg.fineFallSteps = Math.max(1, Math.min(16, patch.fineFallSteps | 0));
     if ('fineMinUnit' in patch) liquidCfg.fineMinUnit = Math.max(1, Math.min(64, patch.fineMinUnit | 0));
     if ('fineSortSteps' in patch) liquidCfg.fineSortSteps = Math.max(0, Math.min(16, patch.fineSortSteps | 0));
+    if ('fineSortDiagSteps' in patch) liquidCfg.fineSortDiagSteps = Math.max(0, Math.min(16, patch.fineSortDiagSteps | 0));
     if ('fineFlatSteps' in patch) liquidCfg.fineFlatSteps = Math.max(0, Math.min(16, patch.fineFlatSteps | 0));
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(1, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
