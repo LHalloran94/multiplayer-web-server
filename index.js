@@ -1614,7 +1614,13 @@ const liquidCfg = {
   perLiquidLevel: true,  // step 2c: each liquid flattens its OWN layer across columns (heavy ends flat along the bottom)
   viscosity: false,      // per-liquid LEVEL_VISC throttle: denser liquids ooze flat slower. off = ALL liquids level at full speed
   fineFlatSteps: 3,      // (1d) surface flat-settle: sub-steps/tick it may run in ≈ its spread speed in cells/tick. 0 = uncapped (every sub-step)
-  sortBeforeLevel: true, // a cell that density-sorted this sub-step does not also level sideways — it settles its layers first, then spreads
+  // ⚠️ DEFAULT OFF since 2026-07-29. This is the BLANKET rule: a cell in a column that still holds ANY inversion may
+  // not level at all. It freezes the whole column — including its free surface — until the column has finished
+  // sorting, which leaves a liquid heap standing as a terraced mound (measured: the heap held its shape until t176
+  // with it on vs t46 with it off, and settled 306 vs 125). And it turns out it was never doing the job: with the
+  // per-EXCHANGE gate (finePerLiquidSortGate) on, a buried blob spreads 13 columns whether this is on or off; with
+  // that gate off it spreads 50–58 either way. So the spread limiting is entirely the other rule's doing.
+  sortBeforeLevel: false,
   reactions: true,       // lava+water→stone, acid dissolves terrain, water+snow→ice, oil burns, etc.
   // ONE flag for the whole "make fallSide mean what it says" rule set (it is one idea; splitting it into
   // separate toggles just produced broken half-states). On, the tag obeys three rules:
@@ -1768,18 +1774,21 @@ const liquidCfg = {
   finePerLiquidSteps: 0,
   //   finePerLiquidScan  — how far 2c looks along the row for a lower spot of its own liquid, in cells. Shorter keeps
   //   the flattening LOCAL instead of reaching across a pool. 0 = follow LIQUID_LEVEL_SCAN (28), the original reach.
-  //   DEFAULT 2, set from in-game testing: the original 28 reached most of a pool, which is what filmed a dropped blob
-  //   into slivers across the whole thing. 1c/1d keep the full 28 reach, so overall pool levelling is unchanged — this
-  //   only shortens how far each liquid's OWN layer looks when flattening itself.
-  finePerLiquidScan: 2,
+  //   DEFAULT 0 (= the full 28) again: throttling the reach limited spread but also made the oil/water INTERFACE
+  //   jagged, because both are the same operation (measured jaggedness 9 at reach 2 vs 1 at full reach). With the
+  //   per-exchange sort gate handling the spread instead, the reach is free to stay long.
+  finePerLiquidScan: 0,
   // ⭐⭐ SYMMETRIC SORT GATE for 2c. `sortBeforeLevel` stops a still-stratifying cell from levelling, but 2c is an
   // EXCHANGE and the gate only covered the cell being processed — a settled neighbour could reach in and pull a
   // parcel apart from the other side. With this on, 2c also refuses a PARTNER column that is still sorting, so
   // "nothing levels while it is still separating" is true in both directions. That is what makes a LONG reach safe:
   // a parcel keeps its shape while it sorts, then the interface flattens at full speed once it has settled.
-  // ⚠️ MEASURED NEAR-INERT on the case it was built for (a buried blob still spread 44→50 columns with it on),
-  // so it ships OFF. Kept because it makes the rule honest in both directions and may matter in other geometry.
-  finePerLiquidSortGate: false,
+  // ⭐⭐ THIS IS THE RULE THAT LIMITS SPREAD WHILE SORTING — measured: buried blob 13 columns with it on, 50–58 with
+  // it off, and it is what lets the REACH stay long (a long reach flattens the interface; throttling the reach is what
+  // made interfaces jagged). 🟥 I first measured this as near-inert and was wrong: that run predated
+  // fineSortOnePerPass, and without that a sliver teleported to the surface, where it already counted as settled, so
+  // this gate had nothing left to block. The two changes only work together.
+  finePerLiquidSortGate: true,
   // ⭐⭐ ONE CELL PER SORT PASS. `list` is scanned BOTTOM-UP (right for falling), which let each higher cell pull the
   // same light liquid up one more cell within a single pass — so a sliver rode the whole height of a pool in one
   // sub-step and was then filmed across it by 2c, while the bulk rose at the expected rate. This makes a parcel
@@ -3303,7 +3312,11 @@ function fineLiquidTickRoom(room, SUB) {
         // were never gated. Gating the PARTNER's column too makes the rule mean what it says — nothing levels into or
         // out of a region that is still separating — which is what lets the reach stay long: a parcel keeps its shape
         // while it sorts, then the interface flattens at full reach the moment it has settled.
-        if (liquidCfg.finePerLiquidSortGate && liquidCfg.densitySort && liquidCfg.sortBeforeLevel && colStillSorting(c + dir)) continue;
+        // ⚠️ Deliberately NOT gated on `sortBeforeLevel`. This is a per-EXCHANGE rule and the blanket one is a
+        // per-CELL rule; tying them together made it impossible to use this INSTEAD of the blanket rule, which is
+        // exactly the combination worth having (the blanket rule freezes a still-sorting column out of levelling
+        // entirely, which leaves unnatural terraced mounds standing until it finishes).
+        if (liquidCfg.finePerLiquidSortGate && liquidCfg.densitySort && colStillSorting(c + dir)) continue;
         const Cj = cumAt(j, t);
         if (Cj >= Ci) continue;
         let avail = 0; for (let k = t + 1; k < T; k++) avail += amt[j * T + k];
