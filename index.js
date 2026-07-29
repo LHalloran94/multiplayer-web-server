@@ -1809,6 +1809,9 @@ function emitLiquidCells(room, arr) {
   if (liquidCfg.perfLog && arr.length) liqPerf.bytes += JSON.stringify(arr).length + 24;   // +~socket.io per-message framing
   io.to(room).emit('liquid-cells', { cells: arr });
 }
+// Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
+// the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
+const PRESETTLE_MS = 200;
 const LIQUID_MS = 60;                                 // legacy default (the live rate is liquidCfg.tickMs)
 // (LIQUID_FLOOR_ROW is derived inside liquidTickRoom because FLOOR_TOP is declared later in the file.)
 const LIQUID_MAX_ACTIVE = 80000;                      // safety cap on tracked active cells per room
@@ -4758,15 +4761,39 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   generateWorld(avatarRoom, worldSeedFor(roomId), genColBand(roomId, levelIndex));
   seedLiquidActivity(avatarRoom);                    // give generated liquid its fill levels, then…
   liquidQuiet = true;                                // …pre-settle it silently so joiners see it already at rest (no on-load sloshing / broadcast storm)
-  // Droplets must fly during the pre-settle too, or gen-time ledge spills leave mass airborne that suddenly rains down
-  // the moment the first player arrives. The loop also has to keep going while droplets are still in the air, since a
-  // room can have zero ACTIVE CELLS while all its moving liquid is mid-fall.
+  // ⭐⭐ THE PRE-SETTLE HAD SILENTLY STOPPED HAPPENING. This loop tested the COARSE active set, but `seedLiquidActivity`
+  // ends by calling `upscaleRoomToFine`, which hands the generated lakes to the fine grid and CLEARS
+  // roomLiquidActive — so the loop broke on iteration zero and no settling ran at all. Every lake cell then went into
+  // the FINE active set and settled live in front of the first player to arrive, broadcasting the whole way: exactly
+  // the on-load sloshing and broadcast storm this was written to prevent.
+  // Now it ticks whichever sim actually owns the liquid, in runLiquidTick's own order (REACT · FLOW · REACT) so a
+  // generated lava/water contact resolves here rather than erupting on first join. Every emit path is already gated on
+  // `liquidQuiet`, so none of it goes out over the wire.
+  // ⚠️ AND IT MUST BE BOUNDED BY WALL CLOCK, NOT JUST ITERATIONS. ensureWorldGenerated runs SYNCHRONOUSLY on the
+  // first join, so every iteration here is a stall for every room on the server. Measured on a real generated world
+  // (1920×405, 13,484 fluid cells, all of them active at once): the fine tick costs ~50ms per iteration at that active
+  // count and 3000 iterations DID NOT REACH REST — it would have blocked the process for ~2.5 minutes. The iteration
+  // cap alone was safe before only because this loop was dead. A partial settle is strictly better than none (that is
+  // today's behaviour) and the cost is capped, so spend a fixed slice and hand the rest to the live sim.
+  const preSettleFine = liquidCfg.fine, preSettleUntil = Date.now() + PRESETTLE_MS;
   for (let s = 0; s < 3000; s++) {
-    const act = roomLiquidActive[avatarRoom], air = roomDroplets[avatarRoom];
-    if (!(act && act.size) && !(air && air.length)) break;
-    liquidTickCount++;
-    if (liquidCfg.droplets) dropletTickRoom(avatarRoom);
-    liquidTickRoom(avatarRoom);
+    if (Date.now() > preSettleUntil) break;   // checked EVERY iteration: one iteration of a freshly generated world costs ~165ms, so sampling every 8th overshot the budget 6×
+    if (preSettleFine) {
+      const fact = roomFineActive[avatarRoom];
+      const seeded = roomFineReact[avatarRoom], burning = roomFineFire[avatarRoom];
+      if (!(fact && fact.size) && !(seeded && seeded.size) && !(burning && burning.size)) break;
+      liquidTickCount++;
+      const SUB = roomFineSub[avatarRoom] || liquidCfg.sub;
+      if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
+      fineLiquidTickRoom(avatarRoom, SUB);
+      if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
+    } else {
+      const act = roomLiquidActive[avatarRoom], air = roomDroplets[avatarRoom];
+      if (!(act && act.size) && !(air && air.length)) break;
+      liquidTickCount++;
+      if (liquidCfg.droplets) dropletTickRoom(avatarRoom);
+      liquidTickRoom(avatarRoom);
+    }
   }
   // Anything still airborne after the cap is put back into the grid where it is, rather than being left to fall on the
   // first joiner. Deposits downward from its own cell so it lands somewhere it could actually have reached.
