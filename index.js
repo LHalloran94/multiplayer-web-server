@@ -2805,10 +2805,11 @@ const runLiquidTick = () => {
     if (liqPerf.ticks >= Math.max(1, Math.round(1000 / liquidCfg.tickMs))) {   // ~once per real second
       const _hz = 1000 / liquidCfg.tickMs, _rooms = Object.keys(roomFineActive).length;
       const _stat = { rooms: _rooms, active: liqPerf.active, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs,
-        // FINE-CELL breakout (only meaningful when sub>1): isolated fine sim ms, its own wire KB/s, active-cell peak, mean changed/tick, and the K sub-step count.
-        sub: 1, steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks) };
+        // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
+        // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
+        steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks) };
       console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
-        (`  |  FINE sub=${_stat.sub} K=${_stat.steps} active=${_stat.fineActive} fine/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
+        (`  |  LIQUID K=${_stat.steps} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
         ` (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
       io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
       liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0 };
