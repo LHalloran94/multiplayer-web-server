@@ -1495,7 +1495,7 @@ const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Mat
 // ALL-FINE (2026-07-26): terrain cell was 24px; now 8px so terrain matches the fine-liquid resolution
 // (grid 640×135 → 1920×405). Reactions/dig/collision/render become fine-granular. The fine-liquid subsystem
 // is now THE liquid path (ratio 1 = one liquid cell per terrain cell), gated by liquidCfg.fine (always on;
-// git branch is the A/B). liquidCfg.sub stays as the ratio and is 1 everywhere now.
+// git branch is the A/B). 1 stays as the ratio and is 1 everywhere now.
 const TERRAIN_CELL = 8;
 const TERRAIN_COLS = Math.ceil(MWSim.C.WORLD_W / TERRAIN_CELL);
 const TERRAIN_ROWS = Math.ceil(MWSim.C.WORLD_H / TERRAIN_CELL);
@@ -1642,7 +1642,7 @@ const liquidCfg = {
   // problem droplets existed to solve. `droplets`, `dropUnit/Fall/Spread/SpreadFlow/SpawnH/Weir/Stratify/LandSpread/
   // TermFall/ImpactCurve/SpreadRef/SpreadWide/EdgeFill/ColSpace` all went with it, along with dropletTickRoom,
   // spawnDroplets, the `liquid-drops` wire and the client's local replay.
-  streamFullClear: false, // (experimental) a brim-full cell drops its stream tag → renders as bands + re-enables density sorting (full = pool, not stream). off = full cells keep streaming / side-by-side. TRADEOFF: on makes full chutes + fat streams slice/stratify
+  // (streamFullClear — a brim-full cell drops its stream tag — was read only by the coarse sim and went with it.)
   // LEVELLING GATE — which cells are excluded from lateral levelling (1c/1d/2c) as "still falling". The old test (canFall)
   // also counted a cell that could shed DIAGONALLY over a nearby edge, so pool cells sitting at an edge never levelled →
   // the blocky/stair surface near drops. A cell is genuinely a STREAM only if it is TAGGED (a ledge spill, carried down)
@@ -1673,13 +1673,9 @@ const liquidCfg = {
   srcRate: 8,            // units/tick a source cell tops itself back up by
   sinkRate: 64,          // units/tick a drain block eats from each liquid cell touching it (64 = a full cell per tick)
   fluxRate: 32,         // max units crossing one column interface per tick. Higher = faster levelling, linearly (no instability window).
-  // ALL-FINE: `fine` is the GATE (was `sub > 1`). ON = the fine-liquid sim (fineLiquidTickRoom) IS the liquid path.
-  // The coarse liquidTickRoom is kept compiling for the harness but never runs at runtime (fine placement never fills
-  // roomLiquidActive). Off would fall back to coarse, but the git branch is the real A/B so this stays true.
-  fine: true,
-  // FINE-CELL LIQUID resolution = fine cells per TERRAIN cell. Terrain is now itself fine (8px), so this is 1
-  // (one liquid cell per terrain cell). All the ÷/×SUB² mapping helpers collapse to identity at 1. Was 3 (24px terrain).
-  sub: 1,
+  // (`fine` and `sub` are gone. `fine` gated the fine sim against the coarse one, and there is no coarse one; `sub`
+  //  was the fine-cells-per-terrain-cell ratio, which is 1 now that terrain is itself 8px — every ÷/×SUB² mapping
+  //  helper collapses to identity at 1. roomFineSub is still carried per room and defaults to 1.)
   // FINE: use the diagonal ledge spill (1b). OFF ⇒ rely on lateral levelling (1c) moving liquid into the edge cell + it
   // falling straight down (1a) next tick — same end state, one tick slower, no diagonal/geometry rule (a diagonal gap
   // between two solids is a sealed corner anyway). Fine-only so the coarse system is unaffected.
@@ -1758,21 +1754,15 @@ const liquidCfg = {
   // sub-step and was then filmed across it by 2c, while the bulk rose at the expected rate. This makes a parcel
   // advance exactly one cell per sort pass, which is what "density-sort passes/tick" is supposed to mean.
   fineSortOnePerPass: true,
-  // COARSE physics sub-steps (curiosity): run the whole COARSE tick this many times/tick → coarse liquid moves K× faster.
-  // Simple (calls liquidTickRoom K times in runLiquidTick), so it broadcasts K× (K× wire) — a debug/experiment dial only.
-  coarseSubSteps: 1,
   // CELL CAPACITY = the number of vertical fill "slices" a cell holds (LIQUID_MAX). Higher = smoother/finer vertical fill;
   // must stay ≤255 (Uint8). Changing it RESCALES all existing liquid (a full cell stays full) + re-broadcasts. Global
   // (coarse + fine); at 64 the coarse system is unchanged. Stratification (sortRate units/tick) is proportionally slower higher.
   cellCap: 24,
 };
-// DEBUG perf accounting (only touched when liquidCfg.perfLog). `emitLiquidCells` centralises the `liquid-cells` emit so we
-// can size the wire payload; runLiquidTick tallies sim time + active cells and prints a rolling ~1s summary to the console.
+// DEBUG perf accounting (only touched when liquidCfg.perfLog): runLiquidTick tallies sim time + active cells and
+// prints a rolling ~1s summary to the console. (emitLiquidCells, which centralised the coarse `liquid-cells` emit so
+// its wire payload could be sized, went with that wire.)
 let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0 };
-function emitLiquidCells(room, arr) {
-  if (liquidCfg.perfLog && arr.length) liqPerf.bytes += JSON.stringify(arr).length + 24;   // +~socket.io per-message framing
-  io.to(room).emit('liquid-cells', { cells: arr });
-}
 // Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
 // the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
 // ⭐ 0 = OFF, and that is the shipping value. Tried at 200 and the user reported prolonged lag on joining: the cost is
@@ -1786,19 +1776,17 @@ const LIQUID_MS = 60;                                 // legacy default (the liv
 // (LIQUID_FLOOR_ROW is derived inside liquidTickRoom because FLOOR_TOP is declared later in the file.)
 const LIQUID_MAX_ACTIVE = 80000;                      // safety cap on tracked active cells per room
 const LIQUID_MAX_PER_TICK = 9000;                     // process at most this many cells/room/tick (rest carry over)
-const roomLiquidActive = {};                          // room → Set<cellIndex> of liquid cells worth simulating
-const roomLiquidAmt = {};                             // room → Uint8Array(cells * LIQ_T): per-rank units (the multi-liquid stack)
-const roomLiquidTotal = {};                           // room → Uint8Array(cells): Σ amt cache
+// (roomLiquidActive / roomLiquidAmt / roomLiquidTotal — the COARSE liquid state — were deleted with liquidTickRoom
+//  on 2026-07-29. The roomFine* arrays are the liquid now.)
 // FALL SIDE (per liquid cell): which edge a falling parcel spilled off — 0 none/settled · 1 hug LEFT · 2 hug RIGHT. Set
 // from the spill direction on a down-diagonal, CARRIED straight down on a vertical fall, cleared on settle/empty. History
 // the client render can't reconstruct from one frame → the sim owns it + broadcasts it. Pure annotation, never mass.
-const roomLiquidSide = {};
 const SIDE_LEFT = 1, SIDE_RIGHT = 2;
 // SECONDARY STREAM LANE (dual-stream chute): a 1-wide chute fed by streams from BOTH sides can't be one fall side, so a
 // cell may carry a SECOND falling stream alongside the main one — its own liquid id + amount, hugging the opposite side.
 // Only used for falling stream cells (rare); it falls independently and MERGES into the pool's main stack on landing.
-const roomStream2Amt = {};   // room → Uint8Array(cells): units in the secondary lane (0 = none)
-const roomStream2Id = {};    // room → Uint8Array(cells): the secondary lane's liquid id
+// (roomStream2Amt / roomStream2Id — the s2 SECONDARY LANE, a coarse-only workaround letting two streams share one
+//  scalar cell — went with the coarse sim. The fine grid resolves two streams by simply having enough cells.)
 // FLOW (display-twice): per-cell units that FELL INTO this cell this tick — the INCOMING STREAM's thickness, DISTINCT from the
 // pooled total. Tracked PER SIDE (flowL = liquid that arrived hugging the LEFT wall, flowR = the RIGHT), because a cell can be
 // fed from BOTH sides at once (a chute) and each lip/strip must match ONLY its own side's inflow, not the combined width. A
@@ -1821,19 +1809,26 @@ const ACID_SOAK_TICKS = 2;   // soak 1 water into dilution every N ticks (rate �
 const ACID_CONVERT_TICKS = 2;// convert 1 acid → water every N ticks once saturated (rate ≈ 0.5/tick)
 let liquidTickCount = 0;
 let liquidQuiet = false;                              // when true, the sim runs but suppresses broadcasts (used to pre-settle at gen time)
-function ensureLiquidAmt(room) { return roomLiquidAmt[room] || (roomLiquidAmt[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS * LIQ_T)); }
-function ensureLiquidTotal(room) { return roomLiquidTotal[room] || (roomLiquidTotal[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
-function ensureLiquidSide(room) { return roomLiquidSide[room] || (roomLiquidSide[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
 // Per-cell LEVELING carry (reduced-amount density throttle): holds the SUB-UNIT remainder of each throttled leveling move so
 // a fractional per-tick amount still adds up to whole units over time (see `reduce` in liquidTickRoom). Sub-unit (<1/LIQUID_MAX
 // of a cell) so it's never visible; seeded with a small per-cell phase so the invisible 1-unit fine steps don't all align.
 const roomLevelAcc = {};
 function ensureLevelAcc(room) { if (!roomLevelAcc[room]) { const a = new Float32Array(TERRAIN_COLS * TERRAIN_ROWS); for (let i = 0; i < a.length; i++) a[i] = ((Math.imul(i, 2654435761)) >>> 0) / 4294967296; roomLevelAcc[room] = a; } return roomLevelAcc[room]; }
-// ── FINE-CELL LIQUID (experimental, gated by liquidCfg.sub) — a parallel liquid grid at SUB× resolution, in SEPARATE
+// ── FINE-CELL LIQUID (experimental, gated by 1) — a parallel liquid grid at SUB× resolution, in SEPARATE
 // arrays so the coarse system is UNTOUCHED. Same layout as the coarse arrays but sized FCOLS*FROWS. Terrain is read from
 // the coarse grid via coarseOf() (map-on-read; the fine sim never writes terrain), and liquid lives only in these arrays.
 const roomFineAmt = {}, roomFineTotal = {}, roomFineSide = {}, roomFineActive = {}, roomFineLevelAcc = {}, roomFineSub = {};
 const roomFineStill = {};   // QUIESCENCE (fineQuiesce): per-fine-cell counter of consecutive ticks with no movement
+// Wipe a room's liquid outright (world clear / scene load). The coarse version of this inlined five array fills at
+// each call site; there is one grid now, so it is one helper.
+function clearFineRoom(room) {
+  if (roomFineAmt[room]) roomFineAmt[room].fill(0);
+  if (roomFineTotal[room]) roomFineTotal[room].fill(0);
+  if (roomFineSide[room]) roomFineSide[room].fill(0);
+  if (roomFineActive[room]) roomFineActive[room].clear();
+  if (roomFineReact[room]) roomFineReact[room].clear();
+  if (roomFineFire[room]) roomFineFire[room].clear();
+}
 function ensureFineArrays(room, SUB) {
   const cells = (TERRAIN_COLS * SUB) * (TERRAIN_ROWS * SUB);
   if (roomFineSub[room] !== SUB || !roomFineAmt[room] || roomFineTotal[room].length !== cells) {
@@ -1896,23 +1891,6 @@ const isSolidCell = (v) => v !== 0 && !isFluidId(v);
 // A coarse source writes into cells outside the liquid tick, so those cells need broadcasting in the same wire format
 // the main loop uses. Kept to exactly that format so the client has one parser, not two. (Was dropletBroadcastCells —
 // the landing half went with the droplet cascade; the coarse sourceTickRoom is the only caller left.)
-function coarseBroadcastCells(room, cells) {
-  const amt = ensureLiquidAmt(room), grid = roomTerrain[room], sd = ensureLiquidSide(room);
-  const s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room), T = LIQ_T;
-  if (!grid) return;
-  let arr = [], n = 0;
-  for (const j of cells) {
-    const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
-    const rep = liqRepId(amt, j);
-    if (!isSolidCell(grid[j]) && rep && grid[j] !== rep) { grid[j] = rep; }
-    const hasS2 = s2a[j] > 0;
-    arr.push(j, grid[j], (sd[j] & 0x03) | (hasS2 ? 0x80 : 0), mask);
-    for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(amt[b + rk]);
-    if (hasS2) arr.push(s2a[j], s2i[j]);
-    if (++n >= 8192) { emitLiquidCells(room, arr); arr = []; n = 0; }
-  }
-  if (n) emitLiquidCells(room, arr);
-}
 // SOURCE PASS — top every source cell back up. Runs BEFORE the droplets and the grid each tick, so liquid a source
 // makes is ordinary pooled liquid by the time anything looks at it (it spends a tick in the cell like any other
 // arrival). A source cell whose grid square has been built over with a SOLID is deleted: that is how you remove one.
@@ -1920,31 +1898,8 @@ function coarseBroadcastCells(room, cells) {
 // cell reads as air.
 function sourceTickRoom(room) {
   const src = roomLiquidSrc[room]; if (!src || !src.size) return;
-  if (liquidCfg.fine) return sourceTickRoomFine(room, roomFineSub[room] || liquidCfg.sub);   // fine mode: top up the fine block
-  const grid = roomTerrain[room]; if (!grid) return;
-  const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), led = srcLedger(room);
-  const touched = [];
-  for (const [i, s] of src) {
-    if (i < 0 || i >= grid.length || isSinkId(grid[i]) || isSolidCell(grid[i])) { src.delete(i); continue; }
-    const rank = s.rank | 0;
-    const rate = Math.max(0, Math.min(LIQUID_MAX, (s.rate === undefined ? liquidCfg.srcRate : s.rate) | 0));
-    if (!rate) continue;
-    const free = LIQUID_MAX - tot[i]; if (free <= 0) continue;
-    const add = free < rate ? free : rate;
-    amt[i * LIQ_T + rank] += add; tot[i] += add; led[rank] += add;
-    const rep = liqRepId(amt, i); if (rep && grid[i] !== rep) grid[i] = rep;
-    activateLiquidCell(room, i, grid);
-    touched.push(i);
-  }
-  if (!src.size) delete roomLiquidSrc[room];
-  // Broadcast here rather than leaving it to liquidTickRoom: a source feeding a cell that is already brim-full moves
-  // nothing, so the grid tick would have nothing to report and the client would never see the top-up.
-  if (touched.length && !liquidQuiet) coarseBroadcastCells(room, touched);
+  sourceTickRoomFine(room, roomFineSub[room] || 1);
 }
-function ensureStream2Amt(room) { return roomStream2Amt[room] || (roomStream2Amt[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
-function ensureStream2Id(room) { return roomStream2Id[room] || (roomStream2Id[room] = new Uint8Array(TERRAIN_COLS * TERRAIN_ROWS)); }
-function liquidSet(room) { return roomLiquidActive[room] || (roomLiquidActive[room] = new Set()); }
-function activateLiquidCell(room, i, grid) { if (i >= 0 && i < grid.length && isFluidId(grid[i])) { const s = liquidSet(room); if (s.size < LIQUID_MAX_ACTIVE) s.add(i); } }
 // ---- GRANULAR POWDER (sand 3, snow 8) — SOLID cells that fall + pile like a classic falling-sand CA, distinct from the
 // liquid-leveling flow. A grain moves DOWN or DOWN-DIAGONAL only (→ ~45° angle of repose / piling), NEVER sideways (so it
 // piles instead of leveling flat). Meeting a liquid cell = SWAP: the grain sinks a cell and that cell's whole liquid stack
@@ -1976,7 +1931,7 @@ function seedSoilAround(room, grid, i) {
   const nn = grid.length, COLS = TERRAIN_COLS, c = i % COLS, N = [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
   // In fine mode water is not a grid id — it is rank 4 of the fine stack — so both tests below have to read the fine
   // arrays or nothing is ever seeded and the whole saturation model stays asleep.
-  const fine = liquidCfg.fine && (roomFineSub[room] || 1) === 1 && roomFineAmt[room];
+  const fine = (roomFineSub[room] || 1) === 1 && roomFineAmt[room];
   const famt = fine ? roomFineAmt[room] : null;
   const isWater = (j) => fine ? famt[j * LIQ_T + 4] > 0 : grid[j] === 9;
   const g = grid[i];
@@ -1984,616 +1939,58 @@ function seedSoilAround(room, grid, i) {
   else if (g === 1 || g === 3 || g === 5) { for (const j of N) if (j >= 0 && j < nn && isWater(j)) { soilSet(room).add(i); return; } }                                            // absorbent solid placed by water → seed itself
 }
 // Set a cell to a single full-CAP liquid `id` (paint / gen / seed). Clears the other layers.
-function liqSetSingle(room, i, id) { const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), base = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[base + k] = 0; amt[base + LIQ_RANK[id]] = LIQUID_MAX; tot[i] = LIQUID_MAX; ensureStream2Amt(room)[i] = 0; ensureStream2Id(room)[i] = 0; }
-function liqClearCell(room, i) { const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), base = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[base + k] = 0; tot[i] = 0; ensureLiquidSide(room)[i] = 0; ensureStream2Amt(room)[i] = 0; ensureStream2Id(room)[i] = 0; }
 // Representative id (heaviest present) for grid[i], or 0 if the cell holds no liquid.
 function liqRepId(amt, i) { const base = i * LIQ_T; for (let rk = 0; rk < LIQ_T; rk++) if (amt[base + rk] > 0) return LIQ_ID[rk]; return 0; }
 // Wake + seed every cell in a rect after a terrain edit: a freshly PAINTED fluid becomes a full single-liquid stack, a
 // CARVED-away fluid is cleared, and any surviving fluid is re-activated so it can flow.
-function activateLiquidRect(room, grid, c0, r0, c1, r1) {
-  if (liquidCfg.fine) { fineActivateRect(room, grid, c0, r0, c1, r1); return; }   // fine mode: seed the fine grid, not the coarse one
-  c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(TERRAIN_COLS - 1, c1); r1 = Math.min(TERRAIN_ROWS - 1, r1);
-  const s = liquidSet(room), tot = ensureLiquidTotal(room), amt = ensureLiquidAmt(room);
-  // Seed a painted fluid cell to a full single-liquid stack when it's empty OR its layers don't match the painted id
-  // (painting a NEW liquid over an existing pool must REPLACE it — otherwise grid says brine but the layers stay water and
-  // the tick syncs grid back to water: the placed liquid "turns to water" and sits inert). A same-liquid partial cell
-  // (layers already match grid) is left untouched so waking around an edit doesn't reset legitimate partial fills.
-  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * TERRAIN_COLS + c;
-    if (isFluidId(grid[i])) { if (!tot[i] || liqRepId(amt, i) !== grid[i]) liqSetSingle(room, i, grid[i]); if (s.size < LIQUID_MAX_ACTIVE) s.add(i); } else liqClearCell(room, i); }
-  // seed absorption around the edit (+1 margin so painting water beside earth, OR earth beside water, both start absorbing)
-  for (let r = Math.max(0, r0 - 1); r <= Math.min(TERRAIN_ROWS - 1, r1 + 1); r++) for (let c = Math.max(0, c0 - 1); c <= Math.min(TERRAIN_COLS - 1, c1 + 1); c++) seedSoilAround(room, grid, r * TERRAIN_COLS + c);
-}
+function activateLiquidRect(room, grid, c0, r0, c1, r1) { fineActivateRect(room, grid, c0, r0, c1, r1); }
 // After generation: every fluid grid cell becomes a full single-liquid stack + wakes (they settle in a few ticks).
+// This used to fill the COARSE arrays and then call upscaleRoomToFine to hand them over, which at the all-fine ratio
+// (one liquid cell per terrain cell) was a copy from an array to an identically-shaped array. It now seeds the fine
+// grid directly. Same result, and it is what let upscaleRoomToFine/downscaleRoomToCoarse go.
 function seedLiquidActivity(room) {
   const grid = roomTerrain[room]; if (!grid) return;
-  const s = liquidSet(room);
-  for (let i = 0; i < grid.length; i++) { if (isFluidId(grid[i])) { liqSetSingle(room, i, grid[i]); if (s.size < LIQUID_MAX_ACTIVE) s.add(i); } else liqClearCell(room, i); }
+  ensureFineArrays(room, 1);
+  const amt = roomFineAmt[room], tot = roomFineTotal[room], sd = roomFineSide[room], act = fineSet(room);
+  amt.fill(0); tot.fill(0); sd.fill(0); act.clear();
+  for (let i = 0; i < grid.length; i++) {
+    if (!isFluidId(grid[i])) continue;
+    amt[i * LIQ_T + LIQ_RANK[grid[i]]] = LIQUID_MAX; tot[i] = LIQUID_MAX;
+    if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
+  }
   for (let i = 0; i < grid.length; i++) if (grid[i] === 9) seedSoilAround(room, grid, i);   // pre-generated lakes absorb just like poured water (no special-casing)
-  if (!s.size) delete roomLiquidActive[room];
-  if (liquidCfg.fine) upscaleRoomToFine(room, liquidCfg.sub);   // fine mode: hand the generated lakes to the fine grid
+  if (!act.size) delete roomFineActive[room];
 }
 // Join replay: the full multi-liquid state as a flat list (same mask encoding as the live liquid-cells wire, side 0) for
 // every cell that holds liquid. (Per-cell, not RLE — fine for the ~2k fluid cells a generated world has.)
-function buildLiquidInit(room) {
-  const amt = roomLiquidAmt[room], tot = roomLiquidTotal[room], grid = roomTerrain[room]; if (!amt || !tot || !grid) return [];
-  const s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room);
-  const cells = [];
-  for (let i = 0; i < tot.length; i++) { const hasS2 = s2a[i] > 0; if (tot[i] <= 0 && !hasS2) continue; const b = i * LIQ_T; let mask = 0; for (let rk = 0; rk < LIQ_T; rk++) { if (amt[b + rk] > 0) mask |= (1 << rk); } cells.push(i, grid[i], (hasS2 ? 0x80 : 0), mask); for (let rk = 0; rk < LIQ_T; rk++) if (mask & (1 << rk)) cells.push(amt[b + rk]); if (hasS2) cells.push(s2a[i], s2i[i]); }
-  return cells;
-}
-function liquidTickRoom(room) {
-  const grid = roomTerrain[room], hp = roomTerrainHp[room], active = roomLiquidActive[room];
-  const amt = roomLiquidAmt[room], tot = roomLiquidTotal[room];
-  if (!grid || !amt || !tot || !active || !active.size) { if (active && !active.size) delete roomLiquidActive[room]; return; }
-  const sd = ensureLiquidSide(room), s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room), lvlAcc = ensureLevelAcc(room);
-  const mats = roomMats[room] || {}, tick = liquidTickCount, cap = LIQUID_MAX, T = LIQ_T, COLS = TERRAIN_COLS;
-  const LIQUID_FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // liquid may not descend into this row or below (bedrock)
-  const isSolid = (v) => v !== 0 && !isFluidId(v);
-  const sinkRate = Math.max(0, Math.min(LIQUID_MAX, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
-  const list = Array.from(active); active.clear();
-  // bottom-up (row descending) + emptiest-first within a row (see history) → primed edges, position-independent.
-  list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot[a], lb = tot[b]; if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
-  const changedSet = new Set();
-  const spillSide = new Map();   // cell → the fall side spilled onto it THIS tick; a spill from the OTHER side routes into the SECONDARY lane (dual-stream chute)
-  const neutralizedThisTick = new Set();   // acid cells that turned (partly) to water THIS tick — other acid must not chain off that fresh water in the same tick (else a whole blob neutralises instantly)
-  const fell = new Set();   // cells determined FALLING this tick (propagates up a full stream column, since we process bottom-up) → they don't level laterally
-  // STRAIGHT-DOWN-only variant of `fell`, and the difference is the whole point. `fell` also counts a cell that could
-  // shed DIAGONALLY, which is true of any pool cell sitting next to a drop — that over-catching is what froze edge
-  // cells out of levelling and gave the blocky/stair surface. `fellDown` propagates only through straight-down room,
-  // so it means "this cell is part of a column that is genuinely airborne": a falling block is entirely in it, and a
-  // settled pool (bottom cell resting on solid, everything above brim-full and going nowhere) is entirely out of it.
-  const fellDown = new Set();
-  const tagCleared = new Set();   // cells that dropped a stale fallSide tag this tick — broadcast-only (merged into changedSet AFTER the loop, so it never wakes neighbours)
-  const wake = (j) => { if (j >= 0 && j < grid.length && !isSolid(grid[j]) && tot[j] > 0) active.add(j); };
-  const wakeN = (j) => { const x = j % COLS; wake(j - COLS); wake(j + COLS); if (x > 0) wake(j - 1); if (x < COLS - 1) wake(j + 1); };
-  const wakeD = (j) => { wakeN(j); const x = j % COLS; if (x > 0) { wake(j - COLS - 1); wake(j + COLS - 1); } if (x < COLS - 1) { wake(j - COLS + 1); wake(j + COLS + 1); } };   // 8-neighbourhood (density swaps propagate diagonally through a block)
-  const mark = (j) => { changedSet.add(j); active.add(j); };
-  const recomp = (j) => { let s = 0, b = j * T; for (let k = 0; k < T; k++) s += amt[b + k]; tot[j] = s; };
-  // move `t` units A→B taking from A's BOTTOM (heaviest) — a fall
-  const moveBottom = (A, B, t) => { let need = t; const ba = A * T, bb = B * T; for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[ba + rk] = a - mv; amt[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
-  // remove `t` units of a SINGLE rank from A's stack (nearest to `wantRk`, else its heaviest) — feeds the secondary lane, which is single-liquid. Returns [movedUnits, rankTaken].
-  const takeRank = (A, t, wantRk) => { const ba = A * T; let rk = (wantRk != null && amt[ba + wantRk] > 0) ? wantRk : floorRank(A); if (rk < 0) return [0, -1]; const a = amt[ba + rk], mv = a < t ? a : t; if (mv > 0) { amt[ba + rk] = a - mv; tot[A] -= mv; mark(A); } return [mv, rk]; };
-  // move `t` units A→B taking from A's TOP (lightest) — surface flow
-  const moveTop = (A, B, t) => { let need = t; const ba = A * T, bb = B * T; for (let rk = T - 1; rk >= 0 && need > 0; rk--) { const a = amt[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[ba + rk] = a - mv; amt[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
-  // move `t` units A→B taking every rank in PROPORTION to its share of A — a spill/fall keeps its MIXTURE instead of
-  // shedding heaviest-first (moveBottom), which is what makes a ledge lip oscillate water-rich/oil-rich every tick and sends
-  // period-2 slugs down the stream. Used only at the ledge spill under liquidCfg.streamMix; pools keep moveBottom (stratify).
-  const moveProp = (A, B, t) => { const ba = A * T, bb = B * T, TA = tot[A]; if (TA <= 0 || t <= 0) return 0; let need = t, moved = 0;
-    for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[ba + rk]; if (a <= 0) continue; let mv = Math.round(t * a / TA); if (mv > a) mv = a; if (mv > need) mv = need; if (mv <= 0) continue; amt[ba + rk] -= mv; amt[bb + rk] += mv; need -= mv; moved += mv; }
-    for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[ba + rk] -= mv; amt[bb + rk] += mv; need -= mv; moved += mv; }   // rounding remainder, heaviest-first
-    if (moved) { tot[A] -= moved; tot[B] += moved; mark(A); mark(B); } return moved; };
-  const floorRank = (j) => { const b = j * T; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) return rk; return -1; };
-  const ceilRank = (j) => { const b = j * T; for (let rk = T - 1; rk >= 0; rk--) if (amt[b + rk] > 0) return rk; return -1; };
-  // FLOW (display-twice): record that `t` units fell INTO cell j on `side` (1 hug-left / 2 hug-right; 0 straight-down → ignored,
-  // straight falls just pool, no side-aligned strip). j is below/diagonally-below i → it was reset at the start of ITS
-  // processing earlier this bottom-up tick, so this accumulates the current tick's inflow. Pure annotation, never mass.
-  let processed = 0;
-  for (const i of list) {
-    if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); continue; }
-    if (isSolid(grid[i])) continue;
-    const r = (i / COLS) | 0, c = i - r * COLS, canDown = r + 1 < LIQUID_FLOOR_ROW;
-    // SECONDARY LANE (dual-stream chute): fall it straight down independently of the main stream; when it can't fall
-    // further (solid or a full pool below), MERGE it into this cell's main stack so it joins the pool. Runs even when the
-    // cell has no main liquid (a lone secondary stream), so it's handled before the L<=0 skip below.
-    if (s2a[i] > 0) {
-      const belowI = i + COLS;
-      // fall straight down the secondary lane while there's shared-cap room below (keeps it a continuous stream)
-      const roomBelow = (canDown && !isSolid(grid[belowI]) && (s2a[belowI] === 0 || s2i[belowI] === s2i[i])) ? (cap - tot[belowI] - s2a[belowI]) : 0;
-      if (roomBelow > 0) { const mv = s2a[i] < roomBelow ? s2a[i] : roomBelow; s2a[belowI] += mv; s2i[belowI] = s2i[i]; s2a[i] -= mv; if (s2a[i] === 0) s2i[i] = 0; mark(i); mark(belowI);}   // secondary lane hugs the side OPPOSITE the main
-      // remainder (can't fall = landed on a pool/solid) merges into THIS cell's main stack — combined cap guarantees it fits
-      if (s2a[i] > 0) { const rk = LIQ_RANK[s2i[i]]; if (rk !== undefined) { const add = (cap - tot[i]) < s2a[i] ? (cap - tot[i]) : s2a[i]; if (add > 0) { amt[i * T + rk] += add; tot[i] += add; s2a[i] -= add; if (s2a[i] === 0) s2i[i] = 0; mark(i); wakeN(i); } } if (s2a[i] > 0) active.add(i); }
-    }
-    let L = tot[i]; if (L <= 0) continue;
-    // ---- SINK (drain block, id 17) — destroy liquid touching a drain, heaviest first (it is the bottom of the stack
-    // that is in contact). Ledgered into roomSinkEaten so grid+air conservation stays checkable: eaten units are
-    // accounted for, not merely missing. Neighbours are woken so the pool keeps feeding the drain instead of settling.
-    if (sinkRate > 0 && (isSinkId(grid[i + COLS]) || isSinkId(grid[i - COLS]) || (c > 0 && isSinkId(grid[i - 1])) || (c < COLS - 1 && isSinkId(grid[i + 1])))) {
-      let need = sinkRate < L ? sinkRate : L;
-      const sb = i * T;
-      for (let rk = 0; rk < T && need > 0; rk++) { const a = amt[sb + rk]; if (a <= 0) continue; const mv = a < need ? a : need; amt[sb + rk] = a - mv; sinkLed[rk] += mv; need -= mv; }
-      recomp(i); mark(i); wakeN(i);
-      L = tot[i]; if (L <= 0) continue;
-    }
-    processed++;
-    const base = i * T, lava = amt[base + 0], acid = amt[base + 3], water = amt[base + 4], oil = amt[base + 5];   // ranks: lava0 quicksand1 brine2 ACID3 WATER4 oil5
-    // ---- REACTIONS (layer-aware; consume mass by design; client derives steam/fire/fizz FX from the transitions) ----
-    if (liquidCfg.reactions && (lava > 0 || oil > 0 || acid > 0 || water > 0)) {
-      const L4 = c > 0 ? i - 1 : -1, R4 = c < COLS - 1 ? i + 1 : -1, U4 = i - COLS, D4 = i + COLS, nn = grid.length;
-      const nbrRank = (rank) => { for (const j of [D4, L4, R4, U4]) if (j >= 0 && j < nn && amt[j * T + rank] > 0) return j; return -1; };
-      const nbrGrid = (id) => { for (const j of [D4, L4, R4, U4]) if (j >= 0 && j < nn && grid[j] === id) return j; return -1; };   // adjacent SOLID cell of material `id`
-      if (lava > 0) {                                   // LAVA + WATER → STONE (same cell, or lava beside water)
-        const wj = water > 0 ? i : nbrRank(4);   // water is rank 4
-        if (wj >= 0) {
-          if (Math.random() < 0.5) {
-            grid[i] = 2; hp[i] = matStrengthSrv(mats, 2); for (let k = 0; k < T; k++) amt[base + k] = 0; tot[i] = 0; sd[i] = 0; changedSet.add(i);   // crust to stone
-            if (wj !== i) { const wb = wj * T + 3, nl = amt[wb] - 20; amt[wb] = nl > 0 ? nl : 0; recomp(wj); mark(wj); }
-            continue;                                    // this cell is now stone → done
-          }
-          active.add(i);
-        }
-        // LAVA melts adjacent SNOW → Water (and the lava cools a little). The fresh water beside lava may then crust it to stone next tick.
-        const snj = nbrGrid(8);
-        if (snj >= 0 && Math.random() < 0.5) {
-          const sb = snj * T; for (let k = 0; k < T; k++) amt[sb + k] = 0; amt[sb + 4] = 40; tot[snj] = 40; sd[snj] = 0; s2a[snj] = 0; s2i[snj] = 0;   // water = rank 4
-          grid[snj] = 9; changedSet.add(snj); active.add(snj); wakeN(snj);
-          const nl = lava - 8; amt[base + 0] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
-          if (L <= 0) continue;
-        }
-        // LAVA bakes adjacent MUD → Earth (dries it out).
-        const mdj = nbrGrid(5);
-        if (mdj >= 0 && Math.random() < 0.5) {
-          grid[mdj] = 1; hp[mdj] = matStrengthSrv(mats, 1); if (roomSat[room]) roomSat[room][mdj] = 0; changedSet.add(mdj);
-          const nl = lava - 4; amt[base + 0] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
-          if (L <= 0) continue;
-        }
-        // LAVA fuses adjacent SAND → Glass.
-        const sgj = nbrGrid(3);
-        if (sgj >= 0 && Math.random() < 0.5) {
-          grid[sgj] = 16; hp[sgj] = matStrengthSrv(mats, 16); if (roomSat[room]) roomSat[room][sgj] = 0; changedSet.add(sgj);
-          const nl = lava - 4; amt[base + 0] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
-          if (L <= 0) continue;
-        }
-        // LAVA fuses QUICKSAND → Glass (mixed in this cell, or an adjacent quicksand cell).
-        const qj = amt[base + 1] > 0 ? i : nbrRank(1);
-        if (qj >= 0 && Math.random() < 0.5) {
-          const qb = qj * T; for (let k = 0; k < T; k++) amt[qb + k] = 0; tot[qj] = 0; sd[qj] = 0; s2a[qj] = 0; s2i[qj] = 0;
-          grid[qj] = 16; hp[qj] = matStrengthSrv(mats, 16); if (roomSat[room]) roomSat[room][qj] = 0; changedSet.add(qj);
-          if (qj === i) continue;                          // the lava cell itself fused → done
-          const nl = lava - 6; amt[base + 0] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
-          if (L <= 0) continue;
-        }
-      }
-      if (oil > 0) {                                    // OIL + LAVA → burns off (gradual → the client draws flame on lava-adjacent oil)
-        if (lava > 0 || nbrRank(0) >= 0) {
-          const nl = oil - 6; amt[base + 5] = nl > 0 ? nl : 0; recomp(i); L = tot[i]; mark(i);
-          const oj = nbrRank(5); if (oj >= 0) active.add(oj);
-          if (amt[base + 5] > 0) active.add(i); else continue;
-        }
-      }
-      if (acid > 0) {
-        // ACID — SATURATION neutralise: SOAK water (consuming it) into this cell's dilution, and once saturated CONVERT acid→water,
-        // both rate-gated (see ACID_* consts). If there's NO water to react with, DISSOLVE an adjacent breakable solid instead.
-        const dil = ensureDilute(room);   // ranks: water = 4, acid = 3
-        let waterSrc = amt[base + 4] > 0 ? i : -1;        // in-cell water first, else an adjacent liquid cell holding water
-        if (waterSrc < 0) for (const j of [D4, L4, R4, U4]) { if (j >= 0 && j < nn && isFluidId(grid[j]) && amt[j * T + 4] > 0) { waterSrc = j; break; } }
-        if (waterSrc >= 0 || dil[i] >= ACID_K) {          // can soak, or is saturated enough to convert (else fall through to dissolving / idle)
-          if (waterSrc >= 0 && (tick % ACID_SOAK_TICKS) === 0 && dil[i] < acid * ACID_K) {   // SOAK 1 water → dilution (consumed)
-            amt[waterSrc * T + 4] -= 1; dil[i] += 1;
-            if (waterSrc !== i) { recomp(waterSrc); mark(waterSrc); wakeN(waterSrc); } else recomp(i);
-          }
-          if ((tick % ACID_CONVERT_TICKS) === 0 && dil[i] >= ACID_K && amt[base + 3] >= 1) {   // CONVERT 1 saturated acid → water
-            amt[base + 3] -= 1; amt[base + 4] += 1; dil[i] -= ACID_K; recomp(i); mark(i); wakeN(i);
-            if (amt[base + 3] <= 0) dil[i] = 0;            // fully neutralised → drop leftover dilution
-          }
-          L = tot[i]; active.add(i);                       // reaction in progress → keep simulating
-        } else {                                         // no liquid to neutralise with → dissolve an adjacent solid instead
-          let solidJ = -1;
-          for (const j of [D4, L4, R4, U4]) { if (j < 0 || j >= nn) continue; if ((j / COLS | 0) >= LIQUID_FLOOR_ROW) continue; if (isSolid(grid[j]) && hp[j] > 0 && grid[j] !== 16) { solidJ = j; break; } }   // never eats bedrock or Glass (acid-immune)
-          if (solidJ >= 0) {
-            active.add(i);                                // keep working every tick regardless of whether the acid can flow
-            if ((tick & 7) === 0) {                       // SLOW bite (~1/8 ticks) → time to spread between bites
-              if (hp[solidJ] > 1) hp[solidJ] -= 1; else { grid[solidJ] = 0; hp[solidJ] = 0; changedSet.add(solidJ); wakeN(solidJ); active.add(solidJ); }
-              const na = acid - 6; amt[base + 3] = na > 0 ? na : 0; recomp(i); L = tot[i]; mark(i);   // acid = rank 3
-              if (L <= 0) continue;
-            }
-          }
-        }
-      }
-      if (water > 0 && lava === 0 && (tick & 3) === 0) {   // WATER freezes to ICE where it touches Snow (cold). Lava-adjacent water melts/crusts instead, so it wins.
-        if (nbrGrid(8) >= 0 && Math.random() < 0.35) {
-          for (let k = 0; k < T; k++) amt[base + k] = 0; tot[i] = 0; sd[i] = 0; s2a[i] = 0; s2i[i] = 0;
-          grid[i] = 4; hp[i] = matStrengthSrv(mats, 4); changedSet.add(i);
-          continue;                                      // this cell is now ice → done
-        }
-      }
-      if (water > 0) {                                    // SEED (ungated): flag adjacent absorbent solids for the soil tick, which PULLS water into them once the pool has settled
-        const ss = soilSet(room);
-        for (const j of [D4, L4, R4, U4]) { if (j < 0 || j >= nn) continue; const g = grid[j]; if (g === 1 || g === 3 || g === 5) ss.add(j); }
-      }
-    }
-    if (L <= 0) continue;
-    // FULL CELL DROPS ITS TAG (experimental, user idea). A brim-full cell is packed, not really "streaming", so treat it as a
-    // pool: clear the tag → it renders as flush bands AND (because the no-buoyancy gate below keys off the tag) its density
-    // sort re-enables, so a full mixed cell stratifies instead of holding unmixed side-by-side. Cleared BEFORE the sort so it
-    // takes effect this tick. TRADEOFF: a genuinely full falling stream / full chute also reverts to bands+stratify (may
-    // slice / may flicker if the cell above re-tags it next tick). Toggle streamFullClear to compare.
-    if (liquidCfg.streamTag && liquidCfg.streamFullClear && sd[i] !== 0 && tot[i] >= cap) { sd[i] = 0; tagCleared.add(i); }
-    // NO BUOYANCY IN FREE-FALL. A tagged FALLING stream cell must not density-sort with the cell below: otherwise a lighter
-    // liquid in the pool it pours into climbs UP the stream cell by cell (oil rises through a falling water column, reaching
-    // the top, and the render draws sink/rise bubbles the whole way down — the reported bug). Gated on the sd tag (a reliable
-    // stream signal), NOT canFall — canFall catches settling pool cells too and gating THOSE broke pool stratification before.
-    // A resting pool (sd===0) still sorts normally, so layering is untouched.
-    const noSortStream = liquidCfg.streamNoSort && liquidCfg.streamTag && sd[i] !== 0;
-    // NO BUOYANCY OUT OF A STREAMING NEIGHBOUR. The gate above only checks THIS cell's tag, but the buoyancy sort can be
-    // driven by an UNTAGGED pool cell reaching into a tagged/streaming neighbour and lifting its light liquid up-and-out
-    // (measured: a light liquid crosses a 1-wide gap by floating out of the draining hole into the adjacent pool; the
-    // dense one falls cleanly and does not). Also skipping the sort when the PARTNER cell j is a stream stops that. A
-    // resting pool has sd===0 everywhere, so normal stratification/composition levelling is untouched.
-    const noSortNbr = liquidCfg.streamNoSortNbr && liquidCfg.streamTag;
-    // (2) DENSITY sort with the cell BELOW: heaviest-above heavier than lightest-below → swap 1 unit (heavy sinks)
-    if (liquidCfg.densitySort && !noSortStream && canDown && tot[i + COLS] > 0 && !isSolid(grid[i + COLS]) && !(noSortNbr && sd[i + COLS] !== 0)) {
-      const j = i + COLS, hi = floorRank(i), lo = ceilRank(j);
-      if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); }
-    }
-    // (2b) DIAGONAL density sort — my heaviest sinks into a DIAGONALLY-below cell that holds something lighter, and its
-    // lighter rises to me. This is what levels COMPOSITION horizontally: a dense liquid spreads along the bottom across
-    // columns (flows under an adjacent lighter one to find its level) instead of standing beside it in a blocky strip.
-    // Heavy drops a row → density-weighted PE strictly down → monotone, terminates.
-    if (liquidCfg.densitySort && !noSortStream && canDown) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
-      const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
-      const j = i + COLS + dc; if (isSolid(grid[j]) || tot[j] === 0) continue;
-      if (noSortNbr && sd[j] !== 0) continue;   // don't buoy a light liquid up-and-out of a streaming neighbour (the 1-wide gap crossing)
-      const hi = floorRank(i), lo = ceilRank(j);
-      if (hi >= 0 && lo >= 0 && hi < lo) { const k = Math.min(amt[i * T + hi], amt[j * T + lo], liquidCfg.sortRate); amt[i * T + hi] -= k; amt[j * T + hi] += k; amt[j * T + lo] -= k; amt[i * T + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); break; }
-    }
-    // (Horizontal composition leveling is handled column-integrated AFTER this per-cell loop — see the COLUMN SWAP pass.
-    //  A per-cell horizontal move is PE-neutral (same row) so it can only shuffle, never settle; the column pass moves a
-    //  heavy unit from the taller-heavy column and a light unit back, which is total-preserving + strictly PE-decreasing.)
-    // (1) TOTAL flow — proven single-liquid leveling on total[i], composition advected + STREAM COHESION
-    // 1a straight down. (`cohesion` -- a fed falling cell held 1 unit back to keep a stream continuous -- was DELETED
-    // 2026-07-22: measured to buy nothing on steady pours or four trickle rates, while shredding a falling block into
-    // partial rows, since every cell in a falling block has liquid above it. The cascade carries ledge spills now.)
-    // The tag CARRY rides along with the liquid — but only onto AIR or a cell that is already a stream. Writing it onto a cell
-    // that already holds untagged (resting) liquid stamped the stream's tag onto the pool cell it LANDS in, so that cell drew
-    // as a sideways strip instead of filling bottom-up with the incoming stream in its empty top ("cell = both"). It's exactly
-    // one cell — the landing cell — and it's only tagged WHILE liquid pours into it, so a tags-at-rest check can't see it.
-    if (canDown) { const j = i + COLS; const room = cap - tot[j] - s2a[j]; if (!isSolid(grid[j]) && room > 0) { const t = Math.min(L, room); if (t > 0) { const wasAirJ = tot[j] === 0; moveBottom(i, j, t);
-      // TAG CARRY. streamTag off = the old unconditional copy. On: only PROPAGATE a real tag (sd[i]!==0 — never clobber a good
-      // tag with 0, which happens when an untagged mouth cell falls into a chute cell the side-spill already tagged), and only
-      // INTO a cell that is air OR itself falling (fell.has(j) — j is straight below, processed already this bottom-up tick).
-      // Not into settled liquid: that stamped the tag onto the POOL cell a stream lands in (the landing-cell sideways bug).
-      if (!liquidCfg.streamTag) sd[j] = sd[i]; else if (sd[i] !== 0 && (wasAirJ || fell.has(j))) sd[j] = sd[i];
-      L -= t; wakeN(i); } } }   // side = the carried fall side (0 straight-down → no strip)
-    // DENSITY THROTTLE (reduced-amount). Streaming DOWN A SURFACE — the diagonal spill 1b (here) and the lateral leveling
-    // 1c/1d (below) — moves a reduced amount per tick for denser liquids (rate lf = 1/(1+LEVEL_VISC[surface rank])), so a
-    // dense liquid oozes DOWN A SLOPE at ~the same speed it spreads SIDEWAYS instead of racing down 1b-fast and heaping up at
-    // each terrace where it can only clear 1c-slow. Free-fall 1a stays UNGATED — gravity is uniform in open air. `reduce(want)`
-    // returns the throttled integer to move (carrying the sub-unit fraction in lvlAcc) and flags `pend` when it rounds to 0.
-    const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;   // lf=1 ⇒ `reduce` is a pass-through (full-speed leveling for every liquid)
-    let pend = false;
-    const reduce = (want) => { if (want <= 0) return 0; if (lf >= 1) return want; lvlAcc[i] += want * lf; let mv = lvlAcc[i] | 0; if (mv > want) mv = want; lvlAcc[i] -= mv; if (mv <= 0) pend = true; return mv; };
-    // 1b down-diagonals — ONLY when straight-down is BLOCKED (below solid or full) → a genuine spill over a ledge / down a
-    // slope (moving against a surface), so it's density-throttled like leveling. If straight-down has room the cell is a
-    // free-falling stream (1a handles it): do NOT spread it diagonally (that fanned streams into a pyramid).
-    if (liquidCfg.ledgeSpill && L > 0 && canDown && (isSolid(grid[i + COLS]) || tot[i + COLS] >= cap)) for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { if (L <= 0) break; const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + COLS + dc; if (isSolid(grid[j])) continue;
-      // MID-AIR SPILL GUARD. 1b fires when straight-down is blocked by a SOLID *or* by FULL LIQUID. Only the first is a
-      // ledge; the second exists for a pool spreading sideways across its own surface. But a BLOCK OF LIQUID FALLING
-      // THROUGH THE AIR also has full liquid below it, so this spilled diagonally into open air and left liquid hanging
-      // there — the long-standing "placed liquid spreads out in mid-air" bug, and its odd signature (a 4x4 fans on the
-      // 1st and 3rd rows, a 5x5 on the 2nd and 4th) falls straight out of which rows still hold a full cell beneath
-      // them on a given tick. Measured: 268 mid-air 1b moves while one 4x4 block fell, every one with tot[below] = 64.
-      // So when the block below is LIQUID rather than solid, the target must have something under it. A pool surface
-      // passes (the pool continues beneath the target); mid-air does not. Real ledges are untouched.
-      if (!isSolid(grid[i + COLS])) {
-        const jb = j + COLS;
-        const jSupported = ((j / COLS) | 0) + 1 >= LIQUID_FLOOR_ROW || isSolid(grid[jb]) || tot[jb] > 0;
-        if (!jSupported) continue;
-      }
-      const ns = dc > 0 ? SIDE_LEFT : SIDE_RIGHT, ps = spillSide.get(j), srcId = liqRepId(amt, i);
-      const jc2 = j % COLS, chute = (jc2 === 0 || isSolid(grid[j - 1])) && (jc2 === COLS - 1 || isSolid(grid[j + 1]));   // a 1-wide channel (both horizontal neighbours solid) — only there do two spills become two lanes; a wide pool just mixes (else spurious lanes never drain)
-      if (chute && ps !== undefined && ps !== ns && srcId && (s2a[j] === 0 || s2i[j] === srcId)) {   // a SECOND stream from the OTHER side → secondary lane; the two lanes SHARE the cell's width (main+secondary ≤ cap) so it drains cleanly (two fat streams just each go thinner)
-        const room2 = cap - tot[j] - s2a[j], want = reduce(L < room2 ? L : room2); if (want > 0) { const [mv] = takeRank(i, want, LIQ_RANK[srcId]); if (mv > 0) { s2a[j] += mv; s2i[j] = srcId; L -= mv; mark(j); wakeN(i); } }   // secondary route (chute): side ns, ledge-gated
-      // LEDGE GATE on the tag. 1b fires when straight-down is blocked by SOLID *or* by FULL LIQUID — and only the first is a
-      // ledge. The second is ordinary liquid spreading sideways across a POOL SURFACE, which happens all over any settling
-      // pool, so tagging it made `sd` mean "moved diagonally-down recently" rather than "spilled off an edge". Harmless while
-      // the render also demanded room below (pool cells fail that), but the moment the render TRUSTS the tag those cells all
-      // draw as sideways-filling strips: a plain no-ledge basin peaked at 197 of 266 cells tagged mid-settle (0 with the gate).
-      // Note `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream chute lane, which is MASS. Only sd is gated, so
-      // physics is untouched (dam-break 728 ticks / 266 cells either way).
-      } else if (tot[j] + s2a[j] < cap) { const t = reduce(Math.min(L, cap - tot[j] - s2a[j]));
-        // BIRTH gate: a REAL ledge underfoot (1b also fires when full LIQUID blocks straight-down — a pool surface spreading
-        // sideways, not a fall), AND landing in air OR a cell that is itself falling (fell.has(j) — the target is diagonally
-        // below, already processed this bottom-up tick). Admitting a falling cell that already holds untagged liquid is what
-        // lets a tag reach a chute fed from the side, where the mouth fills level-then-down (untagged) before the spill tags it.
-        // `spillSide.set` stays UNCONDITIONAL — it routes the dual-stream chute lane (MASS); only sd (annotation) is gated.
-        const tagOk = !liquidCfg.streamTag || (isSolid(grid[i + COLS]) && (tot[j] === 0 || fell.has(j)));
-        // streamMix: a ledge spill draws PROPORTIONALLY (moveProp) so the lip keeps its mixture instead of shedding heaviest
-        // -first — that heaviest-first shedding is what makes the lip oscillate period-2 and sends alternating water/oil slugs
-        // down the stream (visible now as pulsing sub-strip widths). Pools are untouched: this is only the ledge-spill path.
-        // flow only on a GENUINE ledge fall (solid under the source) — NOT pool-surface spreading (full liquid below), which
-        // also fires 1b and would paint spurious incoming strips all over a settling pool surface (matches the tag's gate).
-        if (t > 0) { (liquidCfg.streamMix ? moveProp : moveBottom)(i, j, t); if (tagOk) sd[j] = ns; spillSide.set(j, ns); L -= t; wakeN(i); } }
-    }
-    // A FALLING stream must NOT level laterally, or it fans out into a pyramid as it falls. A cell "can fall" if the cell
-    // below (or a diagonal-below) has ROOM (not solid, not full) — note: room, NOT empty, because a falling stream's below
-    // holds the CONTINUING stream, so an empty-only test wrongly registered streams as settled. Lateral leveling (1c) +
-    // flat-settle (1d) apply only to cells that can't fall — settled/pool cells. Streams just fall (1a/1b).
-    const roomAt = (j) => !isSolid(grid[j]) && tot[j] < cap;
-    // "falling" = this cell can still descend: room straight/diagonally below, OR the cell DIRECTLY below is itself
-    // falling (this propagates up an entire full-to-the-brim stream column — we process bottom-up, so the below cell was
-    // already decided). A falling cell never levels laterally, so a stream stays a narrow column instead of fanning.
-    const canFall = canDown && (roomAt(i + COLS) || fell.has(i + COLS) || (c > 0 && roomAt(i + COLS - 1)) || (c < COLS - 1 && roomAt(i + COLS + 1)));
-    if (canFall) fell.add(i);
-    // AIRBORNE = straight-down room, or the cell directly below is itself airborne. No diagonal term, so a pool cell
-    // beside a drop is NOT airborne and still levels; a block of liquid falling through open air IS, top to bottom,
-    // even though every cell in it has a brim-full cell underneath.
-    const airborne = canDown && (roomAt(i + COLS) || fellDown.has(i + COLS));
-    if (airborne) fellDown.add(i);
-    // (2c) PER-LIQUID horizontal leveling (POOLS ONLY — streams/mid-air fall via 1a/1b and are excluded by !canFall).
-    // The density sorts (2)/(2b) only erode a dense pile's EDGES (a heavy unit surrounded by the same heavy can't sink),
-    // so a tall pre-mixed pile leaves diagonal BANDS. This levels each DENSE liquid's own surface so it flows from a tall
-    // column to a short one like water finding its level — WITHOUT disturbing the denser layers below (user idea 2: settle
-    // densest-first over the floor of what's denser). For rank t (densest→lightest, skipping the lightest = the total,
-    // handled by 1c/1d), compare the cumulative depth C_t = Σ_{k≤t} along the row; if this cell's is higher, nudge 1 unit
-    // of rank t toward the nearest lower-C_t neighbour and swap a lighter unit back. TOTAL-PRESERVING (the total-flow sees
-    // nothing to undo), DIRECTIONAL by surface height (PE drops), scan for global reach, deadband to stop jitter. This is
-    // what makes different-density liquids never rest adjacent (user idea 1) — the heavy ends flat along the bottom.
-    // LATERAL LEVELING (pools only) — the sideways spread + flat-settle, density-throttled by the same `reduce` as 1b above
-    // (defined before 1b since streaming down a surface shares the throttle). 2c/1c/1d all move a reduced amount per tick.
-    // LEVELLING GATE. A cell is excluded from levelling only if it is genuinely a STREAM. The old gate (!canFall) also froze
-    // pool cells that could shed DIAGONALLY over a nearby edge → the blocky/stair surface. isStream: TAGGED (a ledge spill,
-    // carried down) OR straight-down room (a vertical drop the tag never marks). levelGate 0=old canFall · 1=tag-or-straight ·
-    // 2=tag-only. The DIAGONAL room that used to over-catch edge pools is gone from modes 1/2. (Tag read AFTER the clear below.)
-    if (!canFall) {
-      // STREAM TAG CLEAR. `sd` (fallSide) is meant to mean "this liquid spilled off an edge and hasn't landed yet" — it is
-      // born ONLY on a ledge spill (1b) and carried down by 1a. But it only ever CLEARED when a cell became the TARGET of
-      // someone else's lateral move (the sd[j]=0 in 1c/1d) or when it emptied — and a BRIM-FULL settled cell gets NEITHER
-      // (nothing can laterally move INTO a full cell, and it never empties), so it kept a stale tag forever. That's why the
-      // render can't trust the tag alone and has to AND in a room-below test — which then misfires on a brim-full stream and
-      // draws it as flush horizontal bands (the horizontal-slices bug). A cell that can't fall is settled/pooling, so it is
-      // by definition not a stream: drop the tag here, the other half of "carry it until it lands".
-      // Guarded on sd[i] !== 0 so it fires ONCE per cell (a no-op re-broadcast every tick would never let the room go quiet).
-      // Collected in its OWN set, merged into changedSet only for the post-loop broadcast: mark() would re-activate the cell
-      // (settled pools would never go quiet) and even a bare changedSet.add would trip the `changedSet.has(i) → wakeN(i)` at
-      // the foot of this loop, perturbing activation order (it shifted DAM-BREAK by 2 ticks). PURE ANNOTATION: sd never gates
-      // mass anywhere in this tick, so with the wake ripple avoided this cannot touch how pools flow, settle or stratify.
-      if (liquidCfg.streamTag && sd[i] !== 0) { sd[i] = 0; tagCleared.add(i); }
-    }
-    // LEVELLING runs on NON-STREAM (settled/pool) cells. isStream read AFTER the tag clear so a just-settled cell can level this
-    // tick. Mode 0 = old canFall (identical to before). Modes 1/2 drop the diagonal-below room that froze edge pools.
-    // Mode 3 (default) = AIRBORNE, the propagating straight-down test. Modes 1 and 2 both fail on a falling BLOCK of liquid:
-    // mode 2 keys off the tag, which the droplet cascade never writes, and mode 1 asks for straight-down ROOM, which a block
-    // never has because the cell under it is another full cell of the same block. So under the cascade nothing was held back
-    // and a placed block levelled itself sideways in mid-air. Mode 3 propagates the way `fell` does, without the diagonal
-    // term that over-caught pool edges — so a falling block is excluded top to bottom and a pool beside a drop still levels.
-    const isStream = liquidCfg.levelGate === 0 ? canFall
-                   : liquidCfg.levelGate === 3 ? (sd[i] !== 0 || airborne)
-                   : liquidCfg.levelGate === 2 ? (sd[i] !== 0)
-                   : (sd[i] !== 0 || (canDown && roomAt(i + COLS)));
-    // How much of this cell may move on THIS tick. (Was reduced by whatever a droplet had just landed here — the
-    // land-then-pool rule — which went with the droplet cascade; nothing arrives out-of-band any more.)
-    const shedCap = L;
-    if (!isStream) {
-      // (2c) PER-LIQUID horizontal leveling: level each dense layer's own surface over the floor of what's denser (heavy ends
-      // flat along the bottom) without disturbing the layers below. Cumulative depth C_t=Σ_{k≤t}; nudge rank t toward the
-      // nearest strictly-lower-C_t neighbour, swap the nearest lighter back (total-preserving). Throttled by `reduce` too.
-      const cumAt = (jj, tt) => { let s = 0; const bb = jj * T; for (let k = 0; k <= tt; k++) s += amt[bb + k]; return s; };
-      if (liquidCfg.perLiquidLevel) for (let t = 0; t < T - 1; t++) {
-        if (amt[i * T + t] <= 0) continue;                 // no rank-t here to shed (a lighter/absent layer)
-        const Ci = cumAt(i, t);
-        let dir = 0, best = Infinity;
-        for (const sdir of [-1, 1]) for (let d = 1; d <= LIQUID_LEVEL_SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d; if (isSolid(grid[j2])) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } }
-        if (dir === 0) continue;
-        const j = i + dir; if (isSolid(grid[j])) continue;
-        const Cj = cumAt(j, t);
-        if (Cj >= Ci) continue;                            // adjacent must be STRICTLY lower — a deficit propagates as a clean wave
-        let avail = 0; for (let k = t + 1; k < T; k++) avail += amt[j * T + k];   // lighter mass at j available to swap back
-        if (avail <= 0) continue;
-        // BULK amount (was a fixed 1-unit nudge). A SUBMERGED layer has no other leveling path — 1c/1d only ever read tot[],
-        // which a lighter layer resting on top holds flat, so they see nothing to do and 2c alone must flatten the interface.
-        // At 1 unit/tick that crawled: a 1-cell step (64 units) took ≥64 ticks to erase and propagated column by column, ~8×
-        // slower than the identical step at a free surface. Shed HALF the cumulative-depth difference instead, exactly as 1c
-        // does on totals — halving ⇒ no overshoot ⇒ still monotone + terminating. The floor of 1 keeps the old polish nudge
-        // for the last few units (a pure halving floors to 0 early and rests ~½-cell rough).
-        let n = (Ci - Cj) >> 1;
-        if (n > amt[i * T + t]) n = amt[i * T + t];
-        if (n > avail) n = avail;
-        if (n < 1) n = 1;
-        n = reduce(n);                                     // density throttle (carried this tick)
-        if (n <= 0) continue;
-        amt[i * T + t] -= n; amt[j * T + t] += n;          // rank t → j
-        let need = n; for (let q = t + 1; q < T && need > 0; q++) { const a = amt[j * T + q]; if (a <= 0) continue; const mv = a < need ? a : need; amt[j * T + q] -= mv; amt[i * T + q] += mv; need -= mv; }   // NEAREST lighter j → i (total-preserving)
-        mark(i); mark(j); wakeD(i); wakeD(j);
-      }
-      // levelMix: move the MIXTURE (moveProp) instead of skimming the lightest off the top (moveTop). Skimming oil each tick is
-      // the oil/water slosh pump; moving the mixture keeps a surface cell's ratio steady (the density sorts still re-stratify).
-      const lvlMove = liquidCfg.levelMix ? moveProp : moveTop;
-      // 1c lateral equalise — surface flow. SYMMETRIC (symLevel): shed to BOTH lower
-      // neighbours from the SAME pre-shed snapshot, aimed at the 3-cell AVERAGE. No per-tick direction preference (the old
-      // `(tick+i)&1` order + sequential `L -=` made whichever side went FIRST take more → the period-2 water/oil slosh that
-      // streams replay as chunks) and no overshoot (two lower neighbours can't drain a cell below them: each lands on the avg).
-      // fluxLevel takes over 1c/1d entirely (it solves the same job globally) — running both would double-move.
-      if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 1) {
-        if (liquidCfg.symLevel) {
-          const jL = c > 0 ? i - 1 : -1, jR = c < COLS - 1 ? i + 1 : -1;
-          const okL = jL >= 0 && !isSolid(grid[jL]) && L - tot[jL] > 1;   // a strictly-lower non-solid neighbour that can receive
-          const okR = jR >= 0 && !isSolid(grid[jR]) && L - tot[jR] > 1;
-          let sum = L, cnt = 1; if (okL) { sum += tot[jL]; cnt++; } if (okR) { sum += tot[jR]; cnt++; }
-          if (cnt > 1) {
-            const avg = sum / cnt;
-            let shedL = okL ? Math.min(avg - tot[jL], cap - tot[jL] - s2a[jL]) : 0;   // bring each lower neighbour UP to the avg (capped by its room)
-            let shedR = okR ? Math.min(avg - tot[jR], cap - tot[jR] - s2a[jR]) : 0;
-            if (shedL < 0) shedL = 0; if (shedR < 0) shedR = 0;
-            const denom = shedL + shedR; let total = reduce(Math.floor(denom));   // throttle the TOTAL once (reduce carries a per-cell accumulator)
-            if (total > shedCap) total = shedCap;                       // fresh droplet liquid waits a tick
-            if (total > 0 && denom > 0) {
-              let mvL = Math.round(total * shedL / denom); if (mvL > total) mvL = total; const mvR = total - mvL;   // split by deficit; sum stays = total (conserved)
-              if (mvL > 0) { lvlMove(i, jL, mvL); sd[jL] = 0; L -= mvL; wakeN(i); }
-              if (mvR > 0) { lvlMove(i, jR, mvR); sd[jR] = 0; L -= mvR; wakeN(i); }
-            }
-          }
-        } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(grid[j])) continue; const nl = tot[j], room2 = cap - nl - s2a[j]; if (L - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((L - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); sd[j] = 0; L -= mv; wakeN(i); } } }
-      }
-      // 1d surface FLAT-SETTLE — nudge toward the nearest strictly-lower reachable spot in the row; throttled REDUCED-AMOUNT
-      if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0) {
-        let dir = 0, best = Infinity;
-        for (const sdir of [-1, 1]) for (let d = 1; d <= LIQUID_LEVEL_SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d; if (isSolid(grid[j])) break; const jl = tot[j]; if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
-        if (dir !== 0 && shedCap >= 1) { const j = i + dir; if (tot[j] < L && tot[j] + s2a[j] < cap && reduce(1) > 0) { lvlMove(i, j, 1); sd[j] = 0; L -= 1; wakeN(i); } }
-      }
-    }
-    if (pend) active.add(i);                               // throttled diagonal spill OR leveling still owed this tick → revisit
-    if (changedSet.has(i)) wakeN(i);
-  }
-  // ═══ FLUX LEVELLING (liquidCfg.fluxLevel) — "global target, LOCAL transport" ═══════════════════════════
-  // The default 1c/1d levelling is pure local diffusion: a cell only knows its neighbours, so "which way is
-  // downhill" has to spread one cell per tick and a pool of width N takes O(N²) ticks to flatten.
-  // Here we instead (a) flood-fill each connected body, (b) solve its equilibrium waterline, (c) take the
-  // RUNNING SUM of (columnHeight − target) across the body's columns — that prefix sum IS exactly how much
-  // water must cross each column interface — and (d) move at most `fluxRate` units across each interface,
-  // BETWEEN ADJACENT CELLS ONLY. Transport stays local and continuous (nothing teleports, mass moves cell to
-  // cell through the existing moveProp/moveTop), but every interface already knows the correct direction and
-  // amount, so convergence is O(N). Measured on the probe (scratchpad/probe_scalar_leveling.js):
-  // N=42 1344→258 · N=60 3071→425 · N=90 8294→707 · N=120 15581→1029 ticks (5×→15×, and the win grows with N).
-  // Only the SETTLED run of each column (water resting on its floor) takes part, so falling streams are
-  // untouched and keep rendering as streams. Off by default → straight A/B against today's levelling.
-  if (liquidCfg.fluxLevel) {
-    const ROWS = TERRAIN_ROWS, NCELL = COLS * ROWS, RATE = liquidCfg.fluxRate | 0;
-    const lvlMove = liquidCfg.levelMix ? moveProp : moveTop;
-    const seen = ensureFluxSeen(room); seen.fill(0);
-    const stack = ensureFluxStack(room);
-    const cFloor = new Int32Array(COLS), cTop = new Int32Array(COLS), cH = new Float64Array(COLS);
-    for (let start = 0; start < NCELL; start++) {
-      if (seen[start] || isSolid(grid[start]) || tot[start] <= 0) continue;
-      let sp = 0; stack[sp++] = start; seen[start] = 1;
-      let minC = COLS, maxC = -1;
-      while (sp > 0) {                                        // flood the connected body (4-way, through liquid)
-        const j = stack[--sp], jc = j % COLS;
-        if (jc < minC) minC = jc; if (jc > maxC) maxC = jc;
-        const jr = (j / COLS) | 0;
-        if (jc > 0) { const k = j - 1; if (!seen[k] && !isSolid(grid[k]) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
-        if (jc < COLS - 1) { const k = j + 1; if (!seen[k] && !isSolid(grid[k]) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
-        if (jr > 0) { const k = j - COLS; if (!seen[k] && !isSolid(grid[k]) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
-        if (jr < ROWS - 1) { const k = j + COLS; if (!seen[k] && !isSolid(grid[k]) && tot[k] > 0) { seen[k] = 1; stack[sp++] = k; } }
-      }
-      if (maxC <= minC) continue;                             // single column → nothing to level across
-      // A 4-connected body always occupies a CONTIGUOUS column range (you cannot reach column c+2 without
-      // passing through c+1), so walk minC..maxC and record which columns actually PARTICIPATE (have settled
-      // water). Non-participants — a column the body only passes through as a falling stream, say — are kept
-      // in the chain and simply pass the running flux along. Previously they were dropped and the chain was
-      // reset at each hole, which split one pool into segments that each levelled to their OWN waterline:
-      // that is the "doesn't level completely" seen on real terrain (flat test basins never hit it).
-      const cols = [], part = new Uint8Array(COLS);
-      for (let c = minC; c <= maxC; c++) {                    // per column: floor, settled run, headroom
-        let r = -1;                                           // lowest body row in this column
-        for (let rr = ROWS - 1; rr >= 0; rr--) { const j = rr * COLS + c; if (seen[j] && tot[j] > 0) { r = rr; break; } }
-        if (r < 0) continue;
-        while (r + 1 < ROWS && r + 1 < LIQUID_FLOOR_ROW && !isSolid(grid[(r + 1) * COLS + c])) r++;
-        const fl = r + 1;
-        // SETTLED RUN = the block of FULL cells resting on the floor, plus AT MOST ONE partial surface cell.
-        // A landing stream is contiguous with the pool it feeds, so a naive "walk up while there's liquid"
-        // climbs the whole falling column and the flux pass fans it sideways (PYRAMID spread 1 → 18 cols).
-        // A falling column is a run of PARTIAL cells, so stopping at the first non-full cell excludes it.
-        // (The stream tag can't be used for this: it is only born on a diagonal spill, so a straight-down
-        // pour carries no tag at all.)
-        let t = fl; while (t - 1 >= 0 && !isSolid(grid[(t - 1) * COLS + c]) && tot[(t - 1) * COLS + c] >= cap) t--;
-        if (t - 1 >= 0 && !isSolid(grid[(t - 1) * COLS + c])) {                      // one partial surface cell
-          const v = tot[(t - 1) * COLS + c];
-          if (v > 0 && v < cap && sd[(t - 1) * COLS + c] === 0) t--;
-        }
-        if (t >= fl) continue;                                                        // nothing actually resting here
-        let h = 0; for (let rr = t; rr < fl; rr++) h += tot[rr * COLS + c];
-        let cl = t; while (cl - 1 >= 0 && !isSolid(grid[(cl - 1) * COLS + c]) && tot[(cl - 1) * COLS + c] <= 0) cl--;
-        cFloor[c] = fl; cTop[c] = cl; cH[c] = h; part[c] = 1; cols.push(c);
-      }
-      if (cols.length < 2) continue;
-      // BARRIER SPLIT. This sim has no upward transport — liquid only falls, spills and flows sideways. So a
-      // body joined ONLY through a submerged, ceiling-capped channel (two basins linked under a rock, a U-tube)
-      // can never actually equalise: water would have to climb the far side. Solving one waterline across such
-      // a body demands transport that can never happen, so the flux pushes at the barrier FOREVER — a permanent
-      // futile conveyor that both stalls short of level and shows as liquid endlessly sliding over the surface.
-      // A column that is full to a SOLID ceiling is exactly that barrier, so cut the body there and level each
-      // reachable stretch on its own. (Levelling across such a channel needs real pressure, which is a separate
-      // piece of work — note that today's non-flux levelling cannot do it either.)
-      const barrier = (c) => part[c] && cTop[c] > 0 && isSolid(grid[(cTop[c] - 1) * COLS + c]) && cH[c] >= (cFloor[c] - cTop[c]) * cap - 1;
-      const levelSegment = (a, b) => {
-        let n = 0, M = 0;
-        for (let c = a; c <= b; c++) if (part[c]) { n++; M += cH[c]; }
-        if (n < 2) return;
-        const volAt = (L) => { let v = 0; for (let c = a; c <= b; c++) if (part[c]) { const mx = (cFloor[c] - cTop[c]) * cap; let hh = (cFloor[c] - L) * cap; if (hh < 0) hh = 0; if (hh > mx) hh = mx; v += hh; } return v; };
-        let loL = -1, hiL = ROWS + 1;                         // binary-search the equilibrium waterline
-        for (let it = 0; it < 32; it++) { const mid = (loL + hiL) / 2; if (volAt(mid) > M) loL = mid; else hiL = mid; }
-        const L = (loL + hiL) / 2;
-        let run = 0;
-        for (let c = a; c < b; c++) {                         // walk the whole stretch; the run is never reset
-          if (part[c]) {
-            const mx = (cFloor[c] - cTop[c]) * cap;
-            let tgt = (cFloor[c] - L) * cap; if (tgt < 0) tgt = 0; if (tgt > mx) tgt = mx;
-            run += cH[c] - tgt;
-          }
-          if (!part[c] || !part[c + 1]) continue;             // can't transport here yet — but the run carries on
-          let want = run > RATE ? RATE : run < -RATE ? -RATE : run;
-          if (want > -1 && want < 1) continue;                // deadband → a level pool goes quiet (no endless churn)
-        const src = want > 0 ? c : c + 1, dst = want > 0 ? c + 1 : c;
-        // Take from the SOURCE's surface and deliver at the DESTINATION's surface — i.e. water runs over the
-        // top from the higher column into the lower one. Delivering at the source's ROW instead would drop
-        // water into unsupported cells in the neighbour, scattering mid-air liquid across the pool
-        // (that fanned PYRAMID's falling-cell spread out to 17 columns).
-        let need = Math.floor(Math.abs(want));
-        let sr = cTop[src], dr = cFloor[dst] - 1;
-        while (need > 0) {
-          while (sr < cFloor[src] && (isSolid(grid[sr * COLS + src]) || tot[sr * COLS + src] <= 0)) sr++;
-          if (sr >= cFloor[src]) break;
-          while (dr >= cTop[dst] && (isSolid(grid[dr * COLS + dst]) || cap - tot[dr * COLS + dst] - s2a[dr * COLS + dst] <= 0)) dr--;
-          if (dr < cTop[dst] || dr < sr) break;                 // no room left, or it would mean lifting water uphill
-          const a = sr * COLS + src, b = dr * COLS + dst; if (a === b) break;
-          const mv = Math.min(tot[a], cap - tot[b] - s2a[b], need); if (mv <= 0) break;
-          const did = lvlMove(a, b, mv); if (did <= 0) break;
-          sd[b] = 0; need -= did; wakeN(a); wakeN(b);
-        }
-        }
-      };
-      // Cut the body's column range at barriers; each reachable stretch levels on its own waterline.
-      let segA = minC;
-      for (let c = minC; c <= maxC; c++) if (barrier(c)) { if (c - 1 >= segA) levelSegment(segA, c - 1); segA = c + 1; }
-      if (maxC >= segA) levelSegment(segA, maxC);
-    }
-  }
-  for (const j of tagCleared) changedSet.add(j);   // annotation-only changes join the broadcast here — too late to wake anything
-  // sync grid[i]/hp to the representative (heaviest present) for every changed liquid cell (reaction-produced solids kept)
-  for (const j of changedSet) {
-    if (isSolid(grid[j])) continue;
-    const rep = liqRepId(amt, j);
-    if (rep === 0) { if (s2a[j] > 0) { grid[j] = s2i[j]; hp[j] = 0; } else { if (isFluidId(grid[j])) { grid[j] = 0; hp[j] = 0; } sd[j] = 0; } }   // lone secondary stream → show its liquid
-    else if (grid[j] !== rep) { grid[j] = rep; hp[j] = matStrengthSrv(mats, rep); }
-  }
-  // Wake settled POWDER above a cell that just emptied or turned to liquid (support drained/dissolved out from under it → it falls/sinks).
-  for (const j of changedSet) { const up = j - COLS; if (up >= 0 && isPowderId(grid[up]) && (grid[j] === 0 || isFluidId(grid[j]))) powderSet(room).add(up); }
-  if (changedSet.size && !liquidQuiet) {
-    // WIRE per changed cell: [index, gridId, fallSide, mask] then one amt for each set bit of `mask` (rank order). mask
-    // is a 6-bit set of which density ranks are present → compact (a single-liquid cell is 5 values). Chunked at cell
-    // boundaries. gridId carries reaction-produced solids (e.g. stone) the client can't derive from the amounts.
-    // Side byte: low 2 bits = fallSide (0/1/2). 0x80 = secondary lane [amt,id] follows the mask amts.
-    // (0x40/0x20 per-side FLOW bytes were removed 2026-07-20: the client stopped rendering from per-tick flow
-    //  when display-twice was rebuilt off the stream tag, so they were pure bandwidth.)
-    let arr = [], cells = 0;
-    for (const j of changedSet) {
-      const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
-      const hasS2 = s2a[j] > 0;
-      // 0x40 = the sim classed this cell AIRBORNE this tick (it will not level sideways). Pure annotation for the
-      // Inspect overlay — nothing reads it back. It is the distinction behind most of the bugs found here, and it is
-      // invisible on screen: the mid-air spread was entirely cells being on the wrong side of it.
-      arr.push(j, grid[j], (sd[j] & 0x03) | (hasS2 ? 0x80 : 0) | (fellDown.has(j) ? 0x40 : 0), mask);
-      for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(amt[b + rk]);
-      if (hasS2) arr.push(s2a[j], s2i[j]);
-      if (++cells >= 8192) { emitLiquidCells(room, arr); arr = []; cells = 0; }
-    }
-    if (cells) emitLiquidCells(room, arr);
-  }
-  // prune woken cells that aren't liquid (neighbour-wakes can add solids/empties)
-  for (const j of Array.from(active)) { if (j < 0 || j >= grid.length) { active.delete(j); continue; } if (isSolid(grid[j]) || (tot[j] <= 0 && s2a[j] <= 0)) active.delete(j); }
-  if (!active.size) delete roomLiquidActive[room];
-}
+// ⭐ THE COARSE `liquidTickRoom` (601 lines) WAS DELETED HERE, 2026-07-29.
+// It was the original 24px-cell multi-liquid sim: density sorts, straight-down fall, the diagonal ledge spill, lateral
+// and per-liquid levelling, flux levelling, reactions, sources/sinks and the stream-tag annotation. `fineLiquidTickRoom`
+// below is its successor and, at the all-fine ratio, its equivalent — `probe_fine_identity` proves the fine sim
+// reproduces the recorded coarse flow tick-for-tick against golden vectors in scratchpad/golden_coarse_flow.json.
+// It had been DEAD AT RUNTIME since all-fine landed: runLiquidTick iterated roomLiquidActive, which fine mode never
+// populated. That was measured before cutting, not assumed — scratchpad/probe_coarse_dead.js drives every real entry
+// point and asserts the coarse active set stays empty, with a fine:false control proving the check can actually fail.
 // GRANULAR POWDER tick (sand/snow). Falling-sand CA on grid[]: each active grain moves DOWN or DOWN-DIAGONAL only (piles at
 // ~45°, never levels), swapping with a liquid it enters (grain sinks, liquid rises). Broadcasts moved cells over liquid-cells.
 function powderTickRoom(room) {
   const grid = roomTerrain[room], hp = roomTerrainHp[room], active = roomPowderActive[room];
   if (!grid || !hp || !active || !active.size) { if (active && !active.size) delete roomPowderActive[room]; return; }
-  const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), sd = ensureLiquidSide(room), s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room);
   const mats = roomMats[room] || {}, T = LIQ_T, COLS = TERRAIN_COLS, tick = powderTickCount, nn = grid.length;
   const FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // grains may not enter the bedrock floor row (same as liquid)
   // FINE mode: liquid lives in the roomFine* arrays and the terrain grid holds SOLIDS ONLY, so `isFluidId(grid[j])`
   // never matches and a grain read a liquid cell as plain AIR — it fell straight through the pool and, worse, the
   // grid[dst]===0 branch left the fine liquid sitting INSIDE the new solid cell. Same sink-and-swap logic, fine arrays.
-  const FINE = !!liquidCfg.fine && (roomFineSub[room] || 1) === 1 && !!roomFineAmt[room];
-  const famt = FINE ? roomFineAmt[room] : null, ftot = FINE ? roomFineTotal[room] : null, fsd = FINE ? roomFineSide[room] : null;
-  const canDisplace = (j) => grid[j] === 0 || (!FINE && isFluidId(grid[j]));   // empty — which in fine mode covers pooled liquid too, since liquid is not in the grid
+  ensureFineArrays(room, 1);   // the fine arrays ARE the liquid; there is no coarse fallback to degrade to
+  const famt = roomFineAmt[room], ftot = roomFineTotal[room], fsd = roomFineSide[room];
+  const canDisplace = (j) => grid[j] === 0;   // liquid is not a grid id, so an empty grid cell covers a pool too
   const list = Array.from(active); active.clear();
   list.sort((a, b) => ((b / COLS) | 0) - ((a / COLS) | 0));   // bottom-up so a falling column cascades in a single pass
   const changedSet = new Set(), fineChanged = new Set();
   const wakeAround = (i) => { const c = i % COLS; for (const j of [i - COLS, c > 0 ? i - COLS - 1 : -1, c < COLS - 1 ? i - COLS + 1 : -1]) if (j >= 0 && isPowderId(grid[j])) active.add(j); };   // wake grains above the vacated cell → column keeps falling
   const swapMove = (src, dst) => {
     const P = grid[src], hpP = hp[src];
-    if (FINE) {
+    {
       const bs = src * T, bd = dst * T;                      // src is solid ⇒ holds no fine liquid; dst may hold a pool
       const carried = ftot[dst];
       for (let k = 0; k < T; k++) { famt[bs + k] = famt[bd + k]; famt[bd + k] = 0; }   // the pool moves UP into the vacated cell
@@ -2603,19 +2000,9 @@ function powderTickRoom(room) {
       if (carried > 0) { fineSet(room).add(src); fineChanged.add(src); fineChanged.add(dst); }
       else fineChanged.add(dst);
       const sc = src % COLS; for (const j of [src - COLS, src + COLS, sc > 0 ? src - 1 : -1, sc < COLS - 1 ? src + 1 : -1]) if (j >= 0 && j < nn && ftot[j] > 0) fineSet(room).add(j);
-    } else if (grid[dst] === 0) { grid[dst] = P; hp[dst] = hpP; grid[src] = 0; hp[src] = 0; }
-    else {   // dst holds liquid → SWAP its whole stack up into src; the grain sinks into dst (mass-conserved for both)
-      const bs = src * T, bd = dst * T;
-      for (let k = 0; k < T; k++) { amt[bs + k] = amt[bd + k]; amt[bd + k] = 0; }   // src was solid (amt 0) → move dst's stack up, clear dst
-      tot[src] = tot[dst]; tot[dst] = 0;
-      sd[src] = 0; s2a[src] = 0; s2i[src] = 0; sd[dst] = 0; s2a[dst] = 0; s2i[dst] = 0;   // secondary lanes never live at a settling interface (negligible)
-      grid[dst] = P; hp[dst] = hpP;
-      grid[src] = liqRepId(amt, src); hp[src] = 0;
-      activateLiquidCell(room, src, grid);   // the displaced liquid, now above, may need to flow/settle
-      const sc = src % COLS; for (const j of [src - COLS, src + COLS, sc > 0 ? src - 1 : -1, sc < COLS - 1 ? src + 1 : -1]) if (j >= 0 && j < nn && isFluidId(grid[j]) && tot[j] > 0) liquidSet(room).add(j);
     }
     changedSet.add(src); changedSet.add(dst); active.add(dst); wakeAround(src);
-    if (FINE && liquidCfg.reactions) { seedFineReactAround(room, src); seedFineReactAround(room, dst); }   // a grain landing in a pool is a new contact (snow dropped into water → ice)
+    if (liquidCfg.reactions) { seedFineReactAround(room, src); seedFineReactAround(room, dst); }   // a grain landing in a pool is a new contact (snow dropped into water → ice)
   };
   for (const i of list) {
     if (!isPowderId(grid[i])) continue;
@@ -2632,20 +2019,9 @@ function powderTickRoom(room) {
     }
     // couldn't fall or slide → rests (not re-added to active)
   }
-  if (FINE) {   // grain movement is a TERRAIN change; any pool it displaced rides the fine-liquid wire
+  {   // grain movement is a TERRAIN change; any pool it displaced rides the fine-liquid wire
     if (changedSet.size && !liquidQuiet) { const tc = []; for (const j of changedSet) tc.push(j, grid[j]); io.to(room).emit('terrain-set', { cells: tc }); }
     if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
-  } else if (changedSet.size) {   // same wire encoding as liquidTickRoom: [i, gridId, side(|0x80 if s2), mask] + one amt per set rank + [s2amt,s2id]
-    let arr = [], cells = 0;
-    for (const j of changedSet) {
-      const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (amt[b + rk] > 0) mask |= (1 << rk);
-      const hasS2 = s2a[j] > 0;
-      arr.push(j, grid[j], sd[j] | (hasS2 ? 0x80 : 0), mask);
-      for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(amt[b + rk]);
-      if (hasS2) arr.push(s2a[j], s2i[j]);
-      if (++cells >= 8192) { emitLiquidCells(room, arr); arr = []; cells = 0; }
-    }
-    if (cells) emitLiquidCells(room, arr);
   }
   if (!active.size) delete roomPowderActive[room];
 }
@@ -2662,17 +2038,16 @@ function soilTickRoom(room) {
   // holds solids only, so every `grid[j] === 9` water test and every coarse amt/tot read below found nothing and the
   // whole saturation model was inert (no earth→mud, no sand→quicksand, no drying). Only the ACCESSORS change here —
   // the model itself (SAT_MAX cell-by-cell, the wet-CLUMP rule for sand, drying, lava baking) is untouched.
-  const FINE = !!liquidCfg.fine && (roomFineSub[room] || 1) === 1 && !!roomFineAmt[room];
-  const lam = FINE ? roomFineAmt[room] : ensureLiquidAmt(room), ltot = FINE ? roomFineTotal[room] : ensureLiquidTotal(room);
-  const sd = FINE ? roomFineSide[room] : ensureLiquidSide(room);
+  ensureFineArrays(room, 1);
+  const lam = roomFineAmt[room], ltot = roomFineTotal[room], sd = roomFineSide[room];
   const changedSet = new Set(), fineChanged = new Set(), terrChanged = new Set(), fx = [];
   const addFx = (i, code) => { if (fx.length < 2048) fx.push(i, code); };   // same explicit FX wire as the reaction pass
-  const isWater = (j) => FINE ? lam[j * T + 4] > 0 : (grid[j] === 9 && lam[j * T + 4] > 0);   // water = rank 4
-  const isLava = (j) => FINE ? lam[j * T] > 0 : grid[j] === 11;
+  const isWater = (j) => lam[j * T + 4] > 0;   // water = rank 4
+  const isLava = (j) => lam[j * T] > 0;
   const adj = (i, id) => { const c = i % COLS; if (i - COLS >= 0 && grid[i - COLS] === id) return true; if (i + COLS < nn && grid[i + COLS] === id) return true; if (c > 0 && grid[i - 1] === id) return true; if (c < COLS - 1 && grid[i + 1] === id) return true; return false; };
   const adjFn = (i, fn) => { const c = i % COLS; for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) { if (j < 0 || j >= nn) continue; if (fn(j)) return true; } return false; };
   const adjWater = (i) => { const c = i % COLS; for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) { if (j < 0 || j >= nn) continue; if (isWater(j)) return j; } return -1; };
-  const wakeLiq = (j) => { if (j < 0 || j >= nn || ltot[j] <= 0) return; if (FINE) fineSet(room).add(j); else if (isFluidId(grid[j])) liquidSet(room).add(j); };
+  const wakeLiq = (j) => { if (j < 0 || j >= nn || ltot[j] <= 0) return; fineSet(room).add(j); };
   for (const i of Array.from(ss)) {
     const v = grid[i];
     // ABSORPTION (pull): earth/sand draw water out of an adjacent pool into their saturation, draining it. Only pull from a
@@ -2683,8 +2058,8 @@ function soilTickRoom(room) {
         const take = Math.min(SAT_ABSORB, SAT_MAX - sat[i], lam[wj * T + 4]);   // water = rank 4
         if (take > 0) {
           sat[i] += take; lam[wj * T + 4] -= take; ltot[wj] -= take;
-          if (ltot[wj] <= 0) { sd[wj] = 0; if (!FINE) grid[wj] = 0; }             // fine: liquid was never in the grid
-          if (FINE) { fineChanged.add(wj); fineSet(room).add(wj); if (fineSyncGrid(room, wj)) terrChanged.add(wj); } else { changedSet.add(wj); activateLiquidCell(room, wj, grid); }
+          if (ltot[wj] <= 0) sd[wj] = 0;                                  // liquid was never in the grid
+          fineChanged.add(wj); fineSet(room).add(wj); if (fineSyncGrid(room, wj)) terrChanged.add(wj);
           const wc = wj % COLS; wakeLiq(wj - COLS); wakeLiq(wj + COLS); if (wc > 0) wakeLiq(wj - 1); if (wc < COLS - 1) wakeLiq(wj + 1);   // re-level: the column above falls into the drained space (no hovering slivers)
         }
       }
@@ -2701,8 +2076,7 @@ function soilTickRoom(room) {
           if (g === 10 || (g === 3 && sat[j] >= SAT_MAX)) clump++;
         }
         if (clump >= SAT_CLUMP_MIN) {                    // sand becomes the QUICKSAND liquid: in fine mode that means a full fine cell, and the terrain cell empties
-          if (FINE) { const b = i * T; for (let k = 0; k < T; k++) lam[b + k] = 0; lam[b + 1] = LIQUID_MAX; ltot[i] = LIQUID_MAX; sd[i] = 0; grid[i] = 10; hp[i] = 0; fineSet(room).add(i); fineChanged.add(i); terrChanged.add(i); }   // quicksand id back in the grid
-          else { grid[i] = 10; liqSetSingle(room, i, 10); activateLiquidCell(room, i, grid); }
+          { const b = i * T; for (let k = 0; k < T; k++) lam[b + k] = 0; lam[b + 1] = LIQUID_MAX; ltot[i] = LIQUID_MAX; sd[i] = 0; grid[i] = 10; hp[i] = 0; fineSet(room).add(i); fineChanged.add(i); terrChanged.add(i); }   // quicksand id back in the grid
           sat[i] = 0; changedSet.add(i); ss.delete(i);
         }
       } else if (sat[i] === 0 && !adjFn(i, isWater)) ss.delete(i);
@@ -2712,27 +2086,11 @@ function soilTickRoom(room) {
       else { sat[i] = sat[i] > SAT_DRY ? sat[i] - SAT_DRY : 0; if (sat[i] === 0) { grid[i] = 1; hp[i] = matStrengthSrv(mats, 1); changedSet.add(i); terrChanged.add(i); addFx(i, 6); ss.delete(i); } }   // dried out: dust puff
     } else { sat[i] = 0; ss.delete(i); }                 // cell dug/overwritten out from under us
   }
-  if (FINE) {                                            // terrain conversions ride terrain-set; drained/created liquid rides the fine wire
-    if (fx.length && !liquidQuiet) io.to(room).emit('liquid-fx', { cells: fx });
-    if (terrChanged.size && !liquidQuiet) { const tc = []; for (const j of terrChanged) tc.push(j, grid[j]); io.to(room).emit('terrain-set', { cells: tc }); }
-    if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
-    if (liquidCfg.reactions) { const rs = fineReactSet(room); for (const j of terrChanged) rs.add(j); for (const j of fineChanged) rs.add(j); }
-    if (!ss.size) delete roomSoilActive[room];
-    return;
-  }
-  if (changedSet.size && !liquidQuiet) {                 // same compact liquid-cells encoding as liquidTickRoom (solids → mask 0; quicksand/drained-water carry their stack)
-    const s2a = ensureStream2Amt(room), s2i = ensureStream2Id(room);
-    let arr = [], cells = 0;
-    for (const j of changedSet) {
-      const b = j * T; let mask = 0; for (let rk = 0; rk < T; rk++) if (lam[b + rk] > 0) mask |= (1 << rk);
-      const hasS2 = s2a[j] > 0;
-      arr.push(j, grid[j], sd[j] | (hasS2 ? 0x80 : 0), mask);
-      for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(lam[b + rk]);
-      if (hasS2) arr.push(s2a[j], s2i[j]);
-      if (++cells >= 8192) { emitLiquidCells(room, arr); arr = []; cells = 0; }
-    }
-    if (cells) emitLiquidCells(room, arr);
-  }
+  // terrain conversions ride terrain-set; drained/created liquid rides the fine wire
+  if (fx.length && !liquidQuiet) io.to(room).emit('liquid-fx', { cells: fx });
+  if (terrChanged.size && !liquidQuiet) { const tc = []; for (const j of terrChanged) tc.push(j, grid[j]); io.to(room).emit('terrain-set', { cells: tc }); }
+  if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
+  if (liquidCfg.reactions) { const rs = fineReactSet(room); for (const j of terrChanged) rs.add(j); for (const j of fineChanged) rs.add(j); }
   if (!ss.size) delete roomSoilActive[room];
 }
 // ── FINE-CELL LIQUID TICK ── the coarse multi-liquid CORE FLOW (density sorts 2/2b · straight-down 1a · ledge spill 1b ·
@@ -3169,7 +2527,7 @@ function fineReactSet(room) { return roomFineReact[room] || (roomFineReact[room]
 // uses as its candidate list. What that misses is a change to a SETTLED pair (painting water beside a settled lava pool,
 // digging the wall between them), so terrain edits seed the cell + its 4 neighbours explicitly.
 function seedFineReactAround(room, i) {
-  if (!liquidCfg.fine || !liquidCfg.reactions) return;
+  if (!liquidCfg.reactions) return;
   const COLS = TERRAIN_COLS, N = COLS * TERRAIN_ROWS; if (i < 0 || i >= N) return;
   const s = fineReactSet(room), c = i % COLS;
   s.add(i); if (i - COLS >= 0) s.add(i - COLS); if (i + COLS < N) s.add(i + COLS);
@@ -3204,7 +2562,7 @@ const FREACT_ACID_COST_F = 0.09375; // acid spent per bite
 const roomFineFire = {};     // room → Set<fine cell> currently burning
 function fineFireSet(room) { return roomFineFire[room] || (roomFineFire[room] = new Set()); }
 function fineReactTickRoom(room, SUB) {
-  if (!liquidCfg.fine || !liquidCfg.reactions) return;
+  if (!liquidCfg.reactions) return;
   SUB = SUB || roomFineSub[room] || 1;
   if (SUB !== 1) return;     // reactions write TERRAIN; the two grids only share an index space at the all-fine ratio
   const grid = roomTerrain[room], hp = roomTerrainHp[room], amt = roomFineAmt[room], tot = roomFineTotal[room];
@@ -3413,7 +2771,7 @@ function fineWirePush(room, idxList, cells) {   // append [i, repId, side, mask,
 }
 function emitFineCells(room, idxList) {   // broadcast a set of fine cells immediately (used by placement — the tick only broadcasts what MOVED)
   if (!idxList.length || !roomFineAmt[room]) return;
-  const SUB = roomFineSub[room] || liquidCfg.sub, cells = []; fineWirePush(room, idxList, cells);
+  const SUB = roomFineSub[room] || 1, cells = []; fineWirePush(room, idxList, cells);
   if (cells.length) io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: TERRAIN_COLS * SUB, cells });
 }
 // ==LIQUID_SIM_BLOCK_END== (test harness slices the sim to this marker)
@@ -3427,8 +2785,6 @@ const runLiquidTick = () => {
   const _t0 = liquidCfg.perfLog ? performance.now() : 0; let _active = 0;
   liquidTickCount++;
   for (const room in roomLiquidSrc) sourceTickRoom(room);   // sources top up first, so their liquid is ordinary pooled liquid to everything below
-  const _cSub = Math.max(1, Math.min(16, liquidCfg.coarseSubSteps | 0));   // curiosity: run the coarse tick K× (K× wire)
-  for (const room in roomLiquidActive) { if (liquidCfg.perfLog) _active += roomLiquidActive[room].size; for (let s = 0; s < _cSub && roomLiquidActive[room]; s++) liquidTickRoom(room); }
   // FINE-CELL liquid (experimental) — a parallel sim in its own arrays, ticked only when liquidCfg.fine.
   // Timed SEPARATELY from the coarse sim so the Perf tab can isolate the fine cost at various fineLevelSteps (K).
   const _fine0 = liquidCfg.perfLog ? performance.now() : 0; let _fineActive = 0;
@@ -3440,28 +2796,28 @@ const runLiquidTick = () => {
   const _react = () => {
     const seenRooms = new Set();
     for (const src of [roomFineActive, roomFineReact, roomFineFire])   // a room may be quiet but still have a seeded contact or a burning slick
-      for (const room in src) { if (seenRooms.has(room)) continue; seenRooms.add(room); fineReactTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
+      for (const room in src) { if (seenRooms.has(room)) continue; seenRooms.add(room); fineReactTickRoom(room, roomFineSub[room] || 1); }
   };
-  if (liquidCfg.fine && liquidCfg.reactions) _react();
-  if (liquidCfg.fine) for (const room in roomFineActive) { if (liquidCfg.perfLog) _fineActive += roomFineActive[room].size; fineLiquidTickRoom(room, roomFineSub[room] || liquidCfg.sub); }
+  if (liquidCfg.reactions) _react();
+  for (const room in roomFineActive) { if (liquidCfg.perfLog) _fineActive += roomFineActive[room].size; fineLiquidTickRoom(room, roomFineSub[room] || 1); }
   // ...and AGAIN after the flow. The pre-pass catches contacts that were already standing (the set still holds last
   // tick's movers); the post-pass catches contacts this tick's movement JUST created, in the same tick. Without it,
   // lava that lands on a partially-filled cell — which lavaBlk stops it entering — would visibly HOVER over the gap
   // for a tick before crusting. The pass is O(active) and does nothing unless lava is actually touching something.
-  if (liquidCfg.fine && liquidCfg.reactions) _react();
-  if (liquidCfg.perfLog && liquidCfg.fine) { const _fdt = performance.now() - _fine0; liqPerf.fineMs += _fdt; if (_fdt > liqPerf.fineMsMax) liqPerf.fineMsMax = _fdt; if (_fineActive > liqPerf.fineActive) liqPerf.fineActive = _fineActive; }
+  if (liquidCfg.reactions) _react();
+  if (liquidCfg.perfLog) { const _fdt = performance.now() - _fine0; liqPerf.fineMs += _fdt; if (_fdt > liqPerf.fineMsMax) liqPerf.fineMsMax = _fdt; if (_fineActive > liqPerf.fineActive) liqPerf.fineActive = _fineActive; }
   powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room);   // powder runs in lockstep with liquid → consistent gravity
   if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) soilTickRoom(room);
   if (liquidCfg.perfLog) {
     const _dt = performance.now() - _t0; liqPerf.simMs += _dt; if (_dt > liqPerf.simMsMax) liqPerf.simMsMax = _dt;
     if (_active > liqPerf.active) liqPerf.active = _active; liqPerf.ticks++;
     if (liqPerf.ticks >= Math.max(1, Math.round(1000 / liquidCfg.tickMs))) {   // ~once per real second
-      const _hz = 1000 / liquidCfg.tickMs, _rooms = Object.keys(roomLiquidActive).length;
+      const _hz = 1000 / liquidCfg.tickMs, _rooms = Object.keys(roomFineActive).length;
       const _stat = { rooms: _rooms, active: liqPerf.active, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs,
         // FINE-CELL breakout (only meaningful when sub>1): isolated fine sim ms, its own wire KB/s, active-cell peak, mean changed/tick, and the K sub-step count.
-        fine: liquidCfg.fine, sub: liquidCfg.sub, steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks) };
+        sub: 1, steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks) };
       console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
-        (liquidCfg.fine ? `  |  FINE sub=${_stat.sub} K=${_stat.steps} active=${_stat.fineActive} fine/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}` : '') +
+        (`  |  FINE sub=${_stat.sub} K=${_stat.steps} active=${_stat.fineActive} fine/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
         ` (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
       io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
       liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0 };
@@ -3502,32 +2858,16 @@ function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back do
   let ex = ct - LIQUID_MAX; for (let k = LIQ_T - 1; k >= 0 && ex > 0; k--) { const d = Math.min(out[k], ex); out[k] -= d; ex -= d; }   // trim overflow from the lightest
   return out;
 }
-function upscaleRoomToFine(room, SUB) {   // convert this room's coarse liquid into the fine grid; coarse liquid + grid fluid-ids are cleared (fine owns it). Returns [i,0,…] terrain cells to re-broadcast.
-  ensureFineArrays(room, SUB);
-  roomFineAmt[room].fill(0); roomFineTotal[room].fill(0); roomFineSide[room].fill(0); fineSet(room).clear();
-  const camt = roomLiquidAmt[room], ctot = roomLiquidTotal[room], grid = roomTerrain[room], hp = roomTerrainHp[room], cleared = [];
-  if (camt && ctot) for (let i = 0; i < ctot.length; i++) { if (ctot[i] <= 0) continue; const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0, ca = new Array(LIQ_T), b = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) ca[k] = camt[b + k]; fineSetBlock(room, SUB, cc, cr, ca); }   // grid fluid ids are KEPT (re-coupled): the fine cell and the grid cell are the same cell
-  if (camt) camt.fill(0); if (ctot) ctot.fill(0); if (roomLiquidActive[room]) roomLiquidActive[room].clear();
-  return cleared;
-}
-function downscaleRoomToCoarse(room, SUB) {   // convert the fine grid back into coarse liquid; fine is then cleared
-  const grid = roomTerrain[room]; if (!grid || !roomFineTotal[room]) return;
-  const amt = ensureLiquidAmt(room), tot = ensureLiquidTotal(room), s = liquidSet(room);
-  amt.fill(0); tot.fill(0); s.clear();
-  for (let cr = 0; cr < TERRAIN_ROWS; cr++) for (let cc = 0; cc < TERRAIN_COLS; cc++) {
-    const out = fineToCoarseCell(room, SUB, cc, cr); let ct = 0; for (let k = 0; k < LIQ_T; k++) ct += out[k];
-    if (ct > 0) { const i = cr * TERRAIN_COLS + cc, b = i * LIQ_T; for (let k = 0; k < LIQ_T; k++) amt[b + k] = out[k]; tot[i] = ct; grid[i] = liqRepId(amt, i); if (s.size < LIQUID_MAX_ACTIVE) s.add(i); }
-  }
-  roomFineAmt[room].fill(0); roomFineTotal[room].fill(0); roomFineSide[room].fill(0); fineSet(room).clear();
-}
+// (upscaleRoomToFine / downscaleRoomToCoarse converted a room between the two liquid grids. With the coarse sim gone
+//  there is nothing to convert to or from; seedLiquidActivity now seeds the fine grid directly.)
 function buildFineInit(room) {   // join replay: every non-empty fine cell (same mask encoding)
   const tot = roomFineTotal[room]; if (!tot) return null;
-  const SUB = roomFineSub[room] || liquidCfg.sub, idx = []; for (let i = 0; i < tot.length; i++) if (tot[i] > 0) idx.push(i);
+  const SUB = roomFineSub[room] || 1, idx = []; for (let i = 0; i < tot.length; i++) if (tot[i] > 0) idx.push(i);
   const cells = []; fineWirePush(room, idx, cells);
   return { sub: SUB, cols: TERRAIN_COLS * SUB, cells };
 }
 function fineActivateRect(room, grid, c0, r0, c1, r1) {   // placement in fine mode: seed/clear the fine block for each painted coarse cell + broadcast
-  const SUB = liquidCfg.sub; ensureFineArrays(room, SUB);
+  const SUB = 1; ensureFineArrays(room, SUB);
   c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(TERRAIN_COLS - 1, c1); r1 = Math.min(TERRAIN_ROWS - 1, r1);
   const changed = [];
   for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * TERRAIN_COLS + c;
@@ -3565,7 +2905,7 @@ function sourceTickRoomFine(room, SUB) {
 // or clear (seeding/clearing is done explicitly by placement). Grid is decoupled in fine mode, so this reads only fine state.
 function fineWakeRect(room, c0, r0, c1, r1) {
   const tot = roomFineTotal[room]; if (!tot) return;
-  const SUB = roomFineSub[room] || liquidCfg.sub, FCOLS = TERRAIN_COLS * SUB, FROWS = TERRAIN_ROWS * SUB, act = fineSet(room);
+  const SUB = roomFineSub[room] || 1, FCOLS = TERRAIN_COLS * SUB, FROWS = TERRAIN_ROWS * SUB, act = fineSet(room);
   const fc0 = Math.max(0, c0 * SUB), fc1 = Math.min(FCOLS - 1, (c1 + 1) * SUB - 1), fr0 = Math.max(0, r0 * SUB), fr1 = Math.min(FROWS - 1, (r1 + 1) * SUB - 1);
   for (let r = fr0; r <= fr1; r++) for (let c = fc0; c <= fc1; c++) { const i = r * FCOLS + c; if (tot[i] > 0) act.add(i); }
 }
@@ -3575,7 +2915,6 @@ function rescaleAllLiquid(newCap) {
   const oldCap = LIQUID_MAX; if (newCap === oldCap || oldCap <= 0) return;
   const f = newCap / oldCap;
   const doArr = (amtArr, totArr) => { if (!amtArr || !totArr) return; for (let i = 0; i < totArr.length; i++) { const b = i * LIQ_T; let s = 0; for (let k = 0; k < LIQ_T; k++) { let v = Math.round(amtArr[b + k] * f); if (v > 255) v = 255; amtArr[b + k] = v; s += v; } totArr[i] = s > 255 ? 255 : s; } };
-  for (const room in roomLiquidAmt) doArr(roomLiquidAmt[room], roomLiquidTotal[room]);
   for (const room in roomFineAmt) doArr(roomFineAmt[room], roomFineTotal[room]);
 }
 
@@ -4439,27 +3778,20 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   // count and 3000 iterations DID NOT REACH REST — it would have blocked the process for ~2.5 minutes. The iteration
   // cap alone was safe before only because this loop was dead. A partial settle is strictly better than none (that is
   // today's behaviour) and the cost is capped, so spend a fixed slice and hand the rest to the live sim.
-  const preSettleFine = liquidCfg.fine, preSettleUntil = Date.now() + PRESETTLE_MS;
+  const preSettleUntil = Date.now() + PRESETTLE_MS;
   for (let s = 0; s < 3000 && PRESETTLE_MS > 0; s++) {
     // ⚠️ The budget CANNOT stop the first iteration — this check sits at the top of the loop, so iteration 0 always
     // runs to completion before the limit is consulted, and on a fresh world that alone is ~540ms. So the loop is
     // skipped outright at 0 rather than relying on the clock, which would be a same-millisecond race.
     if (Date.now() > preSettleUntil) break;
-    if (preSettleFine) {
-      const fact = roomFineActive[avatarRoom];
-      const seeded = roomFineReact[avatarRoom], burning = roomFineFire[avatarRoom];
-      if (!(fact && fact.size) && !(seeded && seeded.size) && !(burning && burning.size)) break;
-      liquidTickCount++;
-      const SUB = roomFineSub[avatarRoom] || liquidCfg.sub;
-      if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
-      fineLiquidTickRoom(avatarRoom, SUB);
-      if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
-    } else {
-      const act = roomLiquidActive[avatarRoom];
-      if (!(act && act.size)) break;
-      liquidTickCount++;
-      liquidTickRoom(avatarRoom);
-    }
+    const fact = roomFineActive[avatarRoom];
+    const seeded = roomFineReact[avatarRoom], burning = roomFineFire[avatarRoom];
+    if (!(fact && fact.size) && !(seeded && seeded.size) && !(burning && burning.size)) break;
+    liquidTickCount++;
+    const SUB = roomFineSub[avatarRoom] || 1;
+    if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
+    fineLiquidTickRoom(avatarRoom, SUB);
+    if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
   }
   // (There used to be a pass here putting still-airborne DROPLETS back into the grid, so the cap could not leave water
   // falling on the first joiner. It went with the droplet cascade — nothing is ever in flight outside the grid now.)
@@ -4920,9 +4252,8 @@ io.on('connection', (socket) => {
   // a stale cell there produces BOTH phantom liquid and droplets that stop early on it.
   socket.on('liquid-resync', () => {
     const room = currentAvatarRoom;
-    if (!room || !roomTerrain[room] || !roomLiquidTotal[room]) return;
-    socket.emit('liquid-init', { cells: buildLiquidInit(room), verify: true });
-    if (liquidCfg.fine) { const fi = buildFineInit(room); if (fi) socket.emit('liquid-fine-init', fi); }
+    if (!room || !roomTerrain[room]) return;
+    const fi = buildFineInit(room); if (fi) socket.emit('liquid-fine-init', { ...fi, verify: true });
   });
   // ---- LIQUID SOURCES: mark/unmark cells that keep refilling themselves. Sent by the build menu's "Source" option
   // when a liquid is painted; the same cells are sent with on:false when the option is OFF, so painting normally over
@@ -4973,10 +4304,9 @@ io.on('connection', (socket) => {
   socket.on('liquid-mirror-check', (rect) => {
     const room = currentAvatarRoom;
     if (!room || !rect || typeof rect !== 'object') return;
-    if (!liquidCfg.fine) { socket.emit('liquid-mirror-state', { err: 'fine mode is off' }); return; }
     const amt = roomFineAmt[room], tot = roomFineTotal[room], sd = roomFineSide[room], grid = roomTerrain[room];
     if (!amt || !tot || !grid) { socket.emit('liquid-mirror-state', { err: 'no fine state for this room' }); return; }
-    const SUB = roomFineSub[room] || liquidCfg.sub || 1, FCOLS = TERRAIN_COLS * SUB, FROWS = TERRAIN_ROWS * SUB;
+    const SUB = roomFineSub[room] || 1 || 1, FCOLS = TERRAIN_COLS * SUB, FROWS = TERRAIN_ROWS * SUB;
     const cl = (v, hi) => Math.max(0, Math.min(hi, v | 0));
     const c0 = cl(rect.c0, FCOLS - 1), c1 = cl(rect.c1, FCOLS - 1), r0 = cl(rect.r0, FROWS - 1), r1 = cl(rect.r1, FROWS - 1);
     if (c1 < c0 || r1 < r0) return;
@@ -5030,11 +4360,10 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'sortBeforeLevel', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'streamFullClear', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineLedge', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'sortBeforeLevel', 'ledgeSpill', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'streamTag', 'streamMix', 'streamNoSort', 'streamNoSortNbr', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineLedge', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(3, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
-    if ('coarseSubSteps' in patch) liquidCfg.coarseSubSteps = Math.max(1, Math.min(16, patch.coarseSubSteps | 0));
     if ('fineQuiesceTicks' in patch) liquidCfg.fineQuiesceTicks = Math.max(2, Math.min(60, patch.fineQuiesceTicks | 0));
     if ('fineAdaptPct' in patch) liquidCfg.fineAdaptPct = Math.max(1, Math.min(50, patch.fineAdaptPct | 0));
     if ('fineFallSteps' in patch) liquidCfg.fineFallSteps = Math.max(1, Math.min(16, patch.fineFallSteps | 0));
@@ -5046,19 +4375,10 @@ io.on('connection', (socket) => {
     if ('fineFlatSteps' in patch) liquidCfg.fineFlatSteps = Math.max(0, Math.min(16, patch.fineFlatSteps | 0));
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(1, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
-      for (const room in roomLiquidTotal) io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) });
-      if (liquidCfg.fine) for (const room in roomFineTotal) { const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); }
+      for (const room in roomFineTotal) { const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); }
     } }
-    // ALL-FINE gate toggle. On change, CONVERT every room's liquid between the coarse and fine grids (ratio 1 now, so
-    // the conversion is 1:1) and push a fresh init so the picture carries over. Legacy `sub` patches are accepted as an
-    // alias (sub>1 ⇒ fine on). Kept for within-branch A/B + stage-C; the git branch is the primary A/B.
-    if ('fine' in patch || 'sub' in patch) {
-      const want = ('fine' in patch) ? !!patch.fine : (patch.sub | 0) > 1;
-      if (want !== liquidCfg.fine) { liquidCfg.fine = want;
-        if (want) { for (const room in roomLiquidTotal) { const cleared = upscaleRoomToFine(room, liquidCfg.sub); if (cleared.length) io.to(room).emit('terrain-set', { cells: cleared }); const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); } }
-        else { for (const room in roomFineTotal) { downscaleRoomToCoarse(room, liquidCfg.sub); io.to(room).emit('liquid-init', { cells: buildLiquidInit(room) }); io.to(room).emit('liquid-fine-init', { sub: liquidCfg.sub, cols: TERRAIN_COLS, cells: [] }); } }
-      }
-    }
+    // (The fine/coarse gate toggle lived here. There is no coarse sim to switch to any more, so `fine` and `sub` are
+    //  no longer accepted as patches — the fine grid at ratio 1 is the only liquid there is.)
     if ('fluxRate' in patch) liquidCfg.fluxRate = Math.max(1, Math.min(128, patch.fluxRate | 0));
     if ('srcRate' in patch) liquidCfg.srcRate = Math.max(0, Math.min(64, patch.srcRate | 0));
     if ('sinkRate' in patch) liquidCfg.sinkRate = Math.max(0, Math.min(64, patch.sinkRate | 0));
@@ -5583,8 +4903,7 @@ io.on('connection', (socket) => {
     const tg = roomTerrain[avRoom];
     if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: roomTerrainHp[avRoom] ? terrainRLE(roomTerrainHp[avRoom]).runs : undefined });
     // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
-    if (tg && roomLiquidTotal[avRoom]) { const cells = buildLiquidInit(avRoom); if (cells.length) socket.emit('liquid-init', { levelIndex, cells }); }
-    if (tg && liquidCfg.fine) { const fi = buildFineInit(avRoom); if (fi && fi.cells.length) socket.emit('liquid-fine-init', fi); }
+    if (tg) { const fi = buildFineInit(avRoom); if (fi && fi.cells.length) socket.emit('liquid-fine-init', fi); }
     if (roomLiquidSrc[avRoom] && roomLiquidSrc[avRoom].size) socket.emit('liquid-src', { cells: Array.from(roomLiquidSrc[avRoom].keys()), on: true, init: true });   // join replay: which cells are sources (marker only; the sim owns the behaviour)
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
     const mm = roomMats[avRoom];
@@ -5678,7 +4997,7 @@ io.on('connection', (socket) => {
     for (const id of ids) map.delete(id);
     if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     // Terrain is unowned (and ephemeral / all player-placed), so "Remove all" wipes the whole grid too.
-    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomPowderActive[currentAvatarRoom]; clearFineRoom(currentAvatarRoom); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   socket.on('avatar-objects-clear-all', () => {
@@ -5689,7 +5008,7 @@ io.on('connection', (socket) => {
       map.clear();
       if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     }
-    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomLiquidActive[currentAvatarRoom]; delete roomPowderActive[currentAvatarRoom]; if (roomLiquidAmt[currentAvatarRoom]) roomLiquidAmt[currentAvatarRoom].fill(0); if (roomLiquidTotal[currentAvatarRoom]) roomLiquidTotal[currentAvatarRoom].fill(0); if (roomLiquidSide[currentAvatarRoom]) roomLiquidSide[currentAvatarRoom].fill(0); if (roomStream2Amt[currentAvatarRoom]) roomStream2Amt[currentAvatarRoom].fill(0); if (roomStream2Id[currentAvatarRoom]) roomStream2Id[currentAvatarRoom].fill(0); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
+    if (roomTerrain[currentAvatarRoom]) { roomTerrain[currentAvatarRoom].fill(0); if (roomTerrainHp[currentAvatarRoom]) roomTerrainHp[currentAvatarRoom].fill(0); delete roomPowderActive[currentAvatarRoom]; clearFineRoom(currentAvatarRoom); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); }
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
@@ -5710,22 +5029,21 @@ io.on('connection', (socket) => {
     // NOT idempotent, double-applying would desync the sender's per-cell hp from everyone else's.
     if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd)) {
       // Wake any liquid in/around the edit so it flows into the freed space (dig-out) or spreads (poured).
-      if (liquidCfg.fine) {
-        // FINE mode: liquid is DECOUPLED from the grid. A fluid paint → seed the fine block + set the grid back to EMPTY
+      {
+        // Liquid is DECOUPLED from the grid. A fluid paint → seed the fine block + set the grid back to EMPTY
         // (no fluid-id litter → no phantom FX / "can't place" / re-seed on the next edit). Solid-over-liquid + carve clear
         // the fine block; surrounding fine liquid is only WOKEN, never re-seeded from the grid.
-        ensureFineArrays(currentAvatarRoom, liquidCfg.sub);
+        ensureFineArrays(currentAvatarRoom, 1);
         const bc0 = Math.max(0, Math.floor((cx - rr) / TERRAIN_CELL)), bc1 = Math.min(TERRAIN_COLS - 1, Math.floor((cx + rr) / TERRAIN_CELL));
         const br0 = Math.max(0, Math.floor((cy - rr) / TERRAIN_CELL)), br1 = Math.min(TERRAIN_ROWS - 1, Math.floor((cy + rr) / TERRAIN_CELL));
         const changedFine = [];
         for (let r = br0; r <= br1; r++) for (let c = bc0; c <= bc1; c++) { const i = r * TERRAIN_COLS + c;
-          if (op === 'paint' && isFluidId(m) && grid[i] === m) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[m]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, liquidCfg.sub, c, r, ca)) changedFine.push(x); grid[i] = 0; hp[i] = 0; }
-          else if (op === 'carve' || (op === 'paint' && isSolidCell(grid[i]))) for (const x of fineClearBlock(currentAvatarRoom, liquidCfg.sub, c, r)) changedFine.push(x);
+          if (op === 'paint' && isFluidId(m) && grid[i] === m) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[m]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, 1, c, r, ca)) changedFine.push(x); grid[i] = 0; hp[i] = 0; }
+          else if (op === 'carve' || (op === 'paint' && isSolidCell(grid[i]))) for (const x of fineClearBlock(currentAvatarRoom, 1, c, r)) changedFine.push(x);
         }
         fineWakeRect(currentAvatarRoom, bc0 - 1, br0 - 1, bc1 + 1, br1 + 1);
         emitFineCells(currentAvatarRoom, changedFine);
-      } else
-      activateLiquidRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);
+      }
       activatePowderRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);   // dig removes support / paint drops grains
       socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd });
       // A CARVE removes any source in the dug-out area. Digging the cell out is the obvious way to get rid of a
@@ -5754,27 +5072,19 @@ io.on('connection', (socket) => {
       // was drops its source flag. Only a cell that stays a liquid keeps refilling.
       if (!isFluidId(v)) dropSource(currentAvatarRoom, i);
     }
-    if (liquidCfg.fine) {
-      // FINE mode: route liquid placement into the FINE grid. The old inline coarse seed (below) would drop the liquid
+    {
+      // Route liquid placement into the FINE grid. The old inline coarse seed (below) would drop the liquid
       // into the coarse sim, which the fine renderer skips → the "placed liquid is invisible / trapped mid-air" bug.
-      ensureFineArrays(currentAvatarRoom, liquidCfg.sub); const changedFine = [];
+      ensureFineArrays(currentAvatarRoom, 1); const changedFine = [];
       for (let k = 0; k + 1 < cells.length; k += 2) {
         const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
         const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0;
-        if (isFluidId(grid[i])) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid[i]]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, liquidCfg.sub, cc, cr, ca)) changedFine.push(x); hp[i] = 0; }   // the painted fluid id STAYS in the grid (re-coupled)
-        else for (const x of fineClearBlock(currentAvatarRoom, liquidCfg.sub, cc, cr)) changedFine.push(x);   // a solid/empty coarse cell clears its fine block
+        if (isFluidId(grid[i])) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid[i]]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, 1, cc, cr, ca)) changedFine.push(x); hp[i] = 0; }   // the painted fluid id STAYS in the grid (re-coupled)
+        else for (const x of fineClearBlock(currentAvatarRoom, 1, cc, cr)) changedFine.push(x);   // a solid/empty coarse cell clears its fine block
         if (isPowderId(grid[i])) powderSet(currentAvatarRoom).add(i); const up = i - TERRAIN_COLS; if (up >= 0 && isPowderId(grid[up])) powderSet(currentAvatarRoom).add(up);
         seedFineReactAround(currentAvatarRoom, i);   // explicit cell write (undo/paste/scene) can put a solid next to settled liquid
       }
       emitFineCells(currentAvatarRoom, changedFine);
-    } else {
-      const tot = ensureLiquidTotal(currentAvatarRoom), lam = ensureLiquidAmt(currentAvatarRoom);    // keep the multi-liquid stacks in step with placed/cleared cells, then wake
-      for (let k = 0; k + 1 < cells.length; k += 2) {
-        const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
-        if (isFluidId(grid[i])) { if (!tot[i] || liqRepId(lam, i) !== grid[i]) liqSetSingle(currentAvatarRoom, i, grid[i]); activateLiquidCell(currentAvatarRoom, i, grid); } else liqClearCell(currentAvatarRoom, i);
-        const up = i - TERRAIN_COLS; if (up >= 0 && isFluidId(grid[up])) activateLiquidCell(currentAvatarRoom, up, grid);
-        if (isPowderId(grid[i])) powderSet(currentAvatarRoom).add(i); if (up >= 0 && isPowderId(grid[up])) powderSet(currentAvatarRoom).add(up);   // placed/undone powder + grains above a cleared cell may fall
-      }
     }
     if (changed) io.to(currentAvatarRoom).emit('terrain-set', { cells });
   });
