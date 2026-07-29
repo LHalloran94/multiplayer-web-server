@@ -1811,7 +1811,13 @@ function emitLiquidCells(room, arr) {
 }
 // Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
 // the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
-const PRESETTLE_MS = 200;
+// ⭐ 0 = OFF, and that is the shipping value. Tried at 200 and the user reported prolonged lag on joining: the cost is
+// PER ROOM (every page URL is its own room, so joining several at once multiplies it), the stall blocks every other
+// room on the server because ensureWorldGenerated is synchronous, and the budget cannot prevent the first iteration —
+// ~540ms on a fresh world — because it is only checked at the top of the loop. Generated worlds therefore settle live
+// again, as they already did before this was found to be dead code. Raising this trades join latency for less on-load
+// sloshing; measure with probe_gen_presettle.js before picking a value.
+const PRESETTLE_MS = 0;
 const LIQUID_MS = 60;                                 // legacy default (the live rate is liquidCfg.tickMs)
 // (LIQUID_FLOOR_ROW is derived inside liquidTickRoom because FLOOR_TOP is declared later in the file.)
 const LIQUID_MAX_ACTIVE = 80000;                      // safety cap on tracked active cells per room
@@ -4776,8 +4782,11 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   // cap alone was safe before only because this loop was dead. A partial settle is strictly better than none (that is
   // today's behaviour) and the cost is capped, so spend a fixed slice and hand the rest to the live sim.
   const preSettleFine = liquidCfg.fine, preSettleUntil = Date.now() + PRESETTLE_MS;
-  for (let s = 0; s < 3000; s++) {
-    if (Date.now() > preSettleUntil) break;   // checked EVERY iteration: one iteration of a freshly generated world costs ~165ms, so sampling every 8th overshot the budget 6×
+  for (let s = 0; s < 3000 && PRESETTLE_MS > 0; s++) {
+    // ⚠️ The budget CANNOT stop the first iteration — this check sits at the top of the loop, so iteration 0 always
+    // runs to completion before the limit is consulted, and on a fresh world that alone is ~540ms. So the loop is
+    // skipped outright at 0 rather than relying on the clock, which would be a same-millisecond race.
+    if (Date.now() > preSettleUntil) break;
     if (preSettleFine) {
       const fact = roomFineActive[avatarRoom];
       const seeded = roomFineReact[avatarRoom], burning = roomFineFire[avatarRoom];
