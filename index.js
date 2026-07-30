@@ -3570,7 +3570,11 @@ function flushRoomBatch(room, evs) {
 // ==INTEREST_BLOCK_END==
 // ⇓ the three lines that turn the sim's broadcasts into interest-limited, per-tick-batched fan-out
 wireFanout = interestFanout;
-beginWireBatch = () => { if (interestCfg.batch) wireBatch = new Map(); };
+// ⚠️ A LEFTOVER BATCH IS FLUSHED, NEVER DISCARDED. runLiquidTick's only early return is above beginWireBatch, so
+// the pair is balanced on every normal path — but an exception mid-tick would leave a batch open, and simply
+// overwriting it would silently drop diffs the sim had already produced. Delivering them one tick late is strictly
+// better than a client whose world quietly stops matching the server's.
+beginWireBatch = () => { if (wireBatch) endWireBatch(); if (interestCfg.batch) wireBatch = new Map(); };
 endWireBatch = () => { const b = wireBatch; wireBatch = null; if (b) for (const [room, evs] of b) flushRoomBatch(room, evs); };
 
 // ═══ VISIBILITY CAP — which PLAYERS you are told about (SHARED-WORLD.md §3, §7 Phase 4) ═════════════════════════
