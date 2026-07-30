@@ -1662,6 +1662,13 @@ const liquidCfg = {
   levelMix: true,        // lateral leveling (1c/1d) moves the MIXTURE proportionally (moveProp) instead of skimming the lightest liquid off the top (moveTop). Skimming oil each tick oil-depletes→oil-replenishes a surface cell in a period-2 cycle = THE oil/water slosh (probe: swing 0.69→0.00). off = moveTop (skims the top, sloshes). Stratification is kept by the density sorts, not by skimming.
   sortRate: 4,           // units the density sort swaps across an interface per tick (higher = liquids separate faster; capped by the mismatch)
   tickMs: 40,            // sim interval in ms — LOWER = faster real-time flow/leveling (but more CPU + network traffic). 40 ≈ 25 ticks/s
+  // PER-TICK SIM BUDGET, as a percent of tickMs. 0 = unlimited (the old behaviour). When the rooms with
+  // active liquid cannot all be ticked inside the budget, whole rooms are DEFERRED to a later tick on a
+  // rotating basis, so an overloaded room makes liquid resolve more SLOWLY instead of stalling the event
+  // loop for everyone. Measured motivation: ~21–26µs per active cell means one breached lake can exceed a
+  // 40ms tick on its own. See SHARED-WORLD.md Phase 1 — the goal is that no single player action can
+  // exceed the budget, so the server degrades instead of breaking.
+  simBudgetPct: 70,
   // DEBUG: freeze the whole sim (liquid, droplets, powder, soil) where it stands, so behaviour can be inspected and
   // screenshotted without it moving under you. `liquid-step` then advances it a fixed number of ticks. GLOBAL, like
   // every other sim switch — it stops the world for everyone in the room, not just the person who pressed it.
@@ -1770,7 +1777,7 @@ const liquidCfg = {
 // DEBUG perf accounting (only touched when liquidCfg.perfLog): runLiquidTick tallies sim time + active cells and
 // prints a rolling ~1s summary to the console. (emitLiquidCells, which centralised the coarse `liquid-cells` emit so
 // its wire payload could be sized, went with that wire.)
-let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0 };
+let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0 };
 // Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
 // the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
 // ⭐ 0 = OFF, and that is the shipping value. Tried at 200 and the user reported prolonged lag on joining: the cost is
@@ -2769,13 +2776,48 @@ function emitFineCells(room, idxList) {   // broadcast a set of fine cells immed
 // Restartable sim loop — the tick rate is liquidCfg.tickMs so the Liquid Debug menu can speed it up/slow it down live.
 let liquidTimer = null;
 let liquidStepsPending = 0;                           // ticks the debug panel has asked for while paused
+// ── PER-TICK SIM BUDGET (liquidCfg.simBudgetPct; SHARED-WORLD.md Phase 1).
+// `roomLiqCost` is an EMA of each room's OWN flow-pass ms. It is used to PLAN the roster before any pass
+// runs, so sources, reactions, flow, powder and soil all agree on who is being skipped; a reactive
+// wall-clock stop inside the flow loop is the hard guarantee if a prediction is badly wrong.
+// ⚠️ WHY WHOLE ROOMS, NEVER PART OF ONE. Half-ticking a pool would advance one end and not the other, and
+// it would break powder's lockstep with liquid ("consistent gravity"). Rooms never interact, so skipping
+// one entirely is behaviour-preserving for the others.
+// ⚠️ A DEFERRED ROOM IS SIMPLY NOT TICKED — its active Set is never read and never cleared, so nothing
+// drains and no cell is stranded. That is deliberately dodging the trap this codebase has hit twice
+// (a budget switches a branch off and the cell has nothing left to keep it alive → frozen mid-sort);
+// skipping at ROOM granularity sidesteps it by construction rather than by another wouldSort()-style fix.
+// `liqRoomCursor` rotates the starting point so the same rooms are not starved every tick.
+const roomLiqCost = {};
+let liqRoomCursor = 0;
 const runLiquidTick = () => {
   // FROZEN. Nothing advances — not the grid, not droplets in flight, not powder or soil — until either the pause is
   // lifted or a step is requested, so what you are looking at is exactly what the sim last produced.
   if (liquidCfg.paused) { if (liquidStepsPending <= 0) return; liquidStepsPending--; }
   const _t0 = liquidCfg.perfLog ? performance.now() : 0; let _active = 0;
   liquidTickCount++;
-  for (const room in roomLiquidSrc) sourceTickRoom(room);   // sources top up first, so their liquid is ordinary pooled liquid to everything below
+  // ── PLAN THE ROSTER. Admit rooms in rotating order until their predicted cost fills the budget; the rest
+  // are deferred whole. At least one room is ALWAYS admitted, so a single room bigger than the whole budget
+  // still makes progress (slowly) rather than deadlocking.
+  const _budgetMs = liquidCfg.simBudgetPct > 0 ? liquidCfg.tickMs * liquidCfg.simBudgetPct / 100 : 0;
+  const _tickT0 = _budgetMs ? performance.now() : 0;
+  const _deferred = _budgetMs ? new Set() : null;
+  if (_budgetMs) {
+    const _keys = []; for (const r in roomFineActive) if (roomFineActive[r].size) _keys.push(r);
+    if (_keys.length) {
+      const _start = liqRoomCursor % _keys.length;
+      let _acc = 0, _admitted = 0;
+      for (let n = 0; n < _keys.length; n++) {
+        const room = _keys[(_start + n) % _keys.length];
+        const est = roomLiqCost[room] || 0;
+        if (_admitted > 0 && _acc + est > _budgetMs) { _deferred.add(room); continue; }
+        _acc += est; _admitted++;
+      }
+      liqRoomCursor = (_start + Math.max(1, _admitted)) % _keys.length;
+      if ((liquidTickCount & 255) === 0) for (const r in roomLiqCost) if (!(r in roomFineActive)) delete roomLiqCost[r];
+    }
+  }
+  for (const room in roomLiquidSrc) { if (_deferred && _deferred.has(room)) continue; sourceTickRoom(room); }   // sources top up first, so their liquid is ordinary pooled liquid to everything below
   // FINE-CELL liquid (experimental) — a parallel sim in its own arrays, ticked only when liquidCfg.fine.
   // Timed SEPARATELY from the coarse sim so the Perf tab can isolate the fine cost at various fineLevelSteps (K).
   const _fine0 = liquidCfg.perfLog ? performance.now() : 0; let _fineActive = 0;
@@ -2787,18 +2829,43 @@ const runLiquidTick = () => {
   const _react = () => {
     const seenRooms = new Set();
     for (const src of [roomFineActive, roomFineReact, roomFineFire])   // a room may be quiet but still have a seeded contact or a burning slick
-      for (const room in src) { if (seenRooms.has(room)) continue; seenRooms.add(room); fineReactTickRoom(room, roomFineSub[room] || 1); }
+      for (const room in src) { if (seenRooms.has(room) || (_deferred && _deferred.has(room))) continue; seenRooms.add(room); fineReactTickRoom(room, roomFineSub[room] || 1); }
   };
   if (liquidCfg.reactions) _react();
-  for (const room in roomFineActive) { if (liquidCfg.perfLog) _fineActive += roomFineActive[room].size; fineLiquidTickRoom(room, roomFineSub[room] || 1); }
+  for (const room in roomFineActive) {
+    if (_deferred && _deferred.has(room)) continue;
+    // HARD STOP — the guarantee. A room cut here has already had its sources and pre-reactions run but gets
+    // no flow this tick; harmless and rare (only when the EMA badly under-predicted), and adding it to
+    // _deferred keeps powder in lockstep by skipping it too.
+    if (_budgetMs && performance.now() - _tickT0 > _budgetMs) { _deferred.add(room); continue; }
+    if (liquidCfg.perfLog) _fineActive += roomFineActive[room].size;
+    const _r0 = _budgetMs ? performance.now() : 0;
+    // TIER 2 — a room bigger than the WHOLE budget cannot be fixed by deferring other rooms, and skipping
+    // it forever would freeze it. Instead cut its sub-steps (K) in proportion: cost is ~linear in K
+    // (measured — 18 sub-steps costs ~2× 9), so this bounds one room's tick while degrading it UNIFORMLY.
+    // Uniform is the point: fewer sub-steps slows the whole room's liquid evenly, where processing only
+    // some of its cells would advance one end of a pool and not the other.
+    const _kFull = liquidCfg.fineLevelSteps;
+    let _kUsed = _kFull;
+    if (_budgetMs && _kFull > 1) {
+      const est = roomLiqCost[room] || 0;
+      if (est > _budgetMs) { _kUsed = Math.max(1, Math.floor(_kFull * _budgetMs / est)); liquidCfg.fineLevelSteps = _kUsed; }
+    }
+    fineLiquidTickRoom(room, roomFineSub[room] || 1);
+    if (_kUsed !== _kFull) liquidCfg.fineLevelSteps = _kFull;
+    // EMA is kept NORMALISED TO FULL K, so a throttled room does not report a small cost, get its K
+    // restored, blow the budget again and oscillate.
+    if (_budgetMs) { const _d = (performance.now() - _r0) * (_kFull / _kUsed); roomLiqCost[room] = roomLiqCost[room] ? roomLiqCost[room] * 0.7 + _d * 0.3 : _d; }
+  }
   // ...and AGAIN after the flow. The pre-pass catches contacts that were already standing (the set still holds last
   // tick's movers); the post-pass catches contacts this tick's movement JUST created, in the same tick. Without it,
   // lava that lands on a partially-filled cell — which lavaBlk stops it entering — would visibly HOVER over the gap
   // for a tick before crusting. The pass is O(active) and does nothing unless lava is actually touching something.
   if (liquidCfg.reactions) _react();
   if (liquidCfg.perfLog) { const _fdt = performance.now() - _fine0; liqPerf.fineMs += _fdt; if (_fdt > liqPerf.fineMsMax) liqPerf.fineMsMax = _fdt; if (_fineActive > liqPerf.fineActive) liqPerf.fineActive = _fineActive; }
-  powderTickCount++; for (const room in roomPowderActive) powderTickRoom(room);   // powder runs in lockstep with liquid → consistent gravity
-  if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) soilTickRoom(room);
+  powderTickCount++; for (const room in roomPowderActive) { if (_deferred && _deferred.has(room)) continue; powderTickRoom(room); }   // powder runs in lockstep with liquid → consistent gravity
+  if ((liquidTickCount & 3) === 0) for (const room in roomSoilActive) { if (_deferred && _deferred.has(room)) continue; soilTickRoom(room); }
+  if (liquidCfg.perfLog && _deferred) liqPerf.deferred += _deferred.size;
   if (liquidCfg.perfLog) {
     const _dt = performance.now() - _t0; liqPerf.simMs += _dt; if (_dt > liqPerf.simMsMax) liqPerf.simMsMax = _dt;
     if (_active > liqPerf.active) liqPerf.active = _active; liqPerf.ticks++;
@@ -2807,17 +2874,23 @@ const runLiquidTick = () => {
       const _stat = { rooms: _rooms, active: liqPerf.active, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs,
         // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
         // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
-        steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks) };
+        steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
+        // BUDGET: mean rooms deferred per tick. Non-zero = the budget is biting and liquid is resolving slower
+        // than real time somewhere. Zero at rest is the expected state.
+        deferred: +(liqPerf.deferred / liqPerf.ticks).toFixed(2), simBudgetPct: liquidCfg.simBudgetPct };
       console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
         (`  |  LIQUID K=${_stat.steps} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
+        (_stat.simBudgetPct ? `  |  BUDGET ${_stat.simBudgetPct}% deferred-rooms/tick=${_stat.deferred}` : '') +
         ` (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
       io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
-      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0 };
+      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0 };
     }
   }
 };
 function restartLiquidLoop() { if (liquidTimer) clearInterval(liquidTimer); liquidTimer = setInterval(runLiquidTick, Math.max(8, Math.min(500, liquidCfg.tickMs | 0))); }
 restartLiquidLoop();
+// ==LIQUID_TICK_BLOCK_END== (probe_budget.js slices to HERE — it needs runLiquidTick itself, which the
+//  narrower ==LIQUID_SIM_BLOCK_END== above deliberately excludes. Stub setInterval when slicing this far.)
 
 // ── FINE-CELL LIQUID: coarse↔fine conversion + placement + wire helpers (inc 1). All outside the sim block, so the
 // harness never sees them. Volume mapping: a coarse cell holds up to LIQUID_MAX units; a full coarse cell = SUB² full fine
@@ -4373,6 +4446,7 @@ io.on('connection', (socket) => {
     if ('srcRate' in patch) liquidCfg.srcRate = Math.max(0, Math.min(64, patch.srcRate | 0));
     if ('sinkRate' in patch) liquidCfg.sinkRate = Math.max(0, Math.min(64, patch.sinkRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
+    if ('simBudgetPct' in patch) liquidCfg.simBudgetPct = Math.max(0, Math.min(100, patch.simBudgetPct | 0));
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
   });
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
