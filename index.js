@@ -1920,6 +1920,14 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard) {
 // descends past LIQUID_FLOOR_ROW → it rests on the world's bedrock floor instead of falling through it.
 const LIQUID_IDS = new Set([9, 10, 11, 12, 14, 15]);   // water, quicksand, lava, acid, brine, oil
 const isFluidId = (v) => LIQUID_IDS.has(v);
+// ── INTEREST FAN-OUT HOOK (SHARED-WORLD.md §7, Phase 4) ──────────────────────────────────────────────────────────
+// Every CELL-ADDRESSED world diff leaves the sim through here instead of calling `io.to(room).emit` directly, so
+// interest-limiting is one reassignment outside this block rather than a change threaded through the sim.
+// ⚠️ IT IS DELIBERATELY A PLAIN BROADCAST BY DEFAULT. The probe rigs slice this block into a `new Function` and see
+// only what is written here, so the sim they measure still broadcasts exactly as it always did — which is what keeps
+// probe_fine_identity's 500-tick bit-identity claim about the SIM rather than about the netcode wrapped around it.
+// The interest layer (==INTEREST_BLOCK==, further down) reassigns this at load; probe_subscriptions tests THAT.
+let wireFanout = (room, ev, payload) => io.to(room).emit(ev, payload);
 // ---- SOURCE + SINK (test/scene tooling, but real world features) ------------------------------------------------
 // SINK = material id 17 ("Drain"): an ordinary SOLID block that DESTROYS liquid touching it, at liquidCfg.sinkRate
 // units per tick per touching cell. Put a row of them under a pool instead of clearing it by hand.
@@ -2398,7 +2406,7 @@ function powderTickRoom(room) {
     // couldn't fall or slide → rests (not re-added to active)
   }
   {   // grain movement is a TERRAIN change; any pool it displaced rides the fine-liquid wire
-    if (changedSet.size && !liquidQuiet) { const tc = []; for (const j of changedSet) tc.push(j, grid.g(j)); io.to(room).emit('terrain-set', { cells: tc }); }
+    if (changedSet.size && !liquidQuiet) { const tc = []; for (const j of changedSet) tc.push(j, grid.g(j)); wireFanout(room, 'terrain-set', { cells: tc }); }
     if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
   }
   if (!active.size) dropPowderSet(room);
@@ -2465,8 +2473,8 @@ function soilTickRoom(room) {
     } else { sat.s(i, 0); ss.delete(i); }                 // cell dug/overwritten out from under us
   }
   // terrain conversions ride terrain-set; drained/created liquid rides the fine wire
-  if (fx.length && !liquidQuiet) io.to(room).emit('liquid-fx', { cells: fx });
-  if (terrChanged.size && !liquidQuiet) { const tc = []; for (const j of terrChanged) tc.push(j, grid.g(j)); io.to(room).emit('terrain-set', { cells: tc }); }
+  if (fx.length && !liquidQuiet) wireFanout(room, 'liquid-fx', { cells: fx });
+  if (terrChanged.size && !liquidQuiet) { const tc = []; for (const j of terrChanged) tc.push(j, grid.g(j)); wireFanout(room, 'terrain-set', { cells: tc }); }
   if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
   if (liquidCfg.reactions) { const rs = fineReactSet(room); for (const j of terrChanged) rs.add(j); for (const j of fineChanged) rs.add(j); }
   if (!ss.size) dropSoilSet(room);
@@ -2863,7 +2871,7 @@ function fineLiquidTickRoom(room, SUB) {
     // AIRBORNE bit is a different thing entirely — it comes from `airborneWire`, which the sim fills from its own
     // levelling gate, and the client's fine ribbon render + the Inspect airborne overlay both read it.
     let arr = [], cells = 0;
-    const emitFine = () => { if (liquidCfg.perfLog && arr.length) liqPerf.fineBytes += JSON.stringify(arr).length + 24; io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: COLS, cells: arr }); };
+    const emitFine = () => { if (liquidCfg.perfLog && arr.length) liqPerf.fineBytes += JSON.stringify(arr).length + 24; wireFanout(room, 'liquid-fine-cells', { sub: SUB, cols: COLS, cells: arr }); };
     for (const j of changedSet) {
       const p = amt.rp(j), b = amt.o(j); let mask = 0; for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) mask |= (1 << rk);
       arr.push(j, liqRepId(amt, j), airborneWire.has(j) ? 0x40 : 0, mask);
@@ -3134,12 +3142,12 @@ function fineReactTickRoom(room, SUB) {
   }
   for (const j of liqChanged) fineSyncGrid(room, j);           // a drained/created stack changes the cell's representative id
   if (liquidQuiet) return;                                    // gen pre-settle: react, but don't broadcast
-  if (fx.length) io.to(room).emit('liquid-fx', { cells: fx });
+  if (fx.length) wireFanout(room, 'liquid-fx', { cells: fx });
   // ORDER MATTERS now the grid carries fluid ids: a cell the reaction turned SOLID also appears in liqChanged with an
   // empty stack, and applying that after the terrain write would clear the new solid straight back to 0.
   if (liqChanged.size) {                                      // same encoding as the fine tick's own wire
     let arr = [], cells = 0;
-    const flush = () => io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: COLS, cells: arr });
+    const flush = () => wireFanout(room, 'liquid-fine-cells', { sub: SUB, cols: COLS, cells: arr });
     for (const j of liqChanged) {
       const p = amt.rp(j), b = amt.o(j); let mask = 0; for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) mask |= (1 << rk);
       arr.push(j, liqRepId(amt, j), 0, mask);   // flags: not a tick observation, so no AIRBORNE bit (see fineWirePush)
@@ -3148,7 +3156,7 @@ function fineReactTickRoom(room, SUB) {
     }
     if (cells) flush();
   }
-  if (terrCells.length) io.to(room).emit('terrain-set', { cells: terrCells });
+  if (terrCells.length) wireFanout(room, 'terrain-set', { cells: terrCells });
 }
 // Fine-cell wire helpers. INSIDE the sim block because the sim itself now emits through them: soilTickRoom and
 // powderTickRoom both write fine liquid in fine mode, so the harness has to be able to reach these too.
@@ -3162,7 +3170,7 @@ function emitFineCells(room, idxList) {   // broadcast a set of fine cells immed
   const st = cellsOf(room);
   if (!idxList.length || !st.fineAmt) return;
   const SUB = st.fineSub || 1, cells = []; fineWirePush(room, idxList, cells);
-  if (cells.length) io.to(room).emit('liquid-fine-cells', { sub: SUB, cols: TERRAIN_COLS * SUB, cells });
+  if (cells.length) wireFanout(room, 'liquid-fine-cells', { sub: SUB, cols: TERRAIN_COLS * SUB, cells });
 }
 // ==LIQUID_SIM_BLOCK_END== (test harness slices the sim to this marker)
 // Restartable sim loop — the tick rate is liquidCfg.tickMs so the Liquid Debug menu can speed it up/slow it down live.
@@ -3330,12 +3338,14 @@ function noteWhere(avRoom, sid, v) {
   const w = Math.max(0, Math.min(MWSim.C.WORLD_W, +v.w || 0));
   const h = Math.max(0, Math.min(MWSim.C.WORLD_H, +v.h || 0));
   const m = roomWhere[avRoom] || (roomWhere[avRoom] = new Map());
-  m.set(sid, {
+  const rect = {
     cx0: Math.floor(x / span), cy0: Math.floor(y / span),
     cx1: Math.floor((x + w) / span), cy1: Math.floor((y + h) / span),
     ax: isFinite(+v.ax) ? Math.floor(+v.ax / span) : -1,
     ay: isFinite(+v.ay) ? Math.floor(+v.ay / span) : -1,
-  });
+  };
+  m.set(sid, rect);
+  return rect;   // Phase 4 reuses the same parsed rect for interest, so the clamp above applies to both
 }
 function chunkResidencySweep() {
   if (!chunkCfg.evict) return;
@@ -3366,6 +3376,150 @@ function chunkResidencySweep() {
 }
 // ==CHUNK_RESIDENCY_BLOCK_END==
 setInterval(chunkResidencySweep, Math.max(1000, chunkCfg.sweepMs | 0));
+
+// ═══ INTEREST-LIMITED REPLICATION (SHARED-WORLD.md §7, Phase 4) ═════════════════════════════════════════════════
+// Residency (Phase 3) decides what the SERVER holds in memory. This decides what each CLIENT is told about, which is
+// a different question with a different answer: a chunk can be resident because someone else is standing on it and
+// still be of no interest to you.
+//
+// ⚠️ THE MARGIN IS NOT EVICTION'S MARGIN. `chunkCfg.margin` (2) buys page-fault hysteresis — faulting a chunk back in
+// is expensive, so it is worth holding spare ones. A replication margin only has to stay ahead of how far a camera
+// can travel between two beacons, and every extra ring is bytes on the wire for every client. MEASURED
+// (scratchpad/probe_interest.js): a chunk is 512px and the fastest a camera moves is MAX_VX·60·0.5s = 150px, so one
+// ring is 3.4× the headroom needed — and margin 2 delivers about TWICE the bytes of margin 1 for no benefit.
+//
+// MEASURED SAVING, same probe, a dam break in the real 15360×3240 world replayed against scattered viewers:
+// 85–92% of world-diff bytes at zoom 1. Zoomed fully out it falls to ~50%, because the world is only 6.3 chunks
+// tall and a zoomed-out viewport genuinely covers half of it. Everyone crowded onto the same disturbance saves
+// nothing, which is correct — that is the PLAYER cap's job, not this one's.
+//
+// ⚠️⚠️ WHAT MADE THIS DANGEROUS, and how it is avoided. Phase 3's worst bug was that an evicted chunk read as ZEROS,
+// so "unloaded" was indistinguishable from "empty world" to every reader. Interest-limiting has exactly that shape
+// on the CLIENT: a chunk it stops being told about must go STALE, never EMPTY. Two things keep that true:
+//   1. THE JOIN REPLAY IS NOT INTEREST-LIMITED. `terrain-init` still sends the whole world, so the client's mirror
+//      is complete from the first frame and an unsubscribed chunk is merely out of date. Local collision, the
+//      minimap and `chunkHashesClient` all keep working everywhere. (Interest-limiting the join replay is a real
+//      further saving, but it needs a per-chunk "unknown" state on the client first — deliberately not in Phase 4.)
+//   2. RE-SUBSCRIBING REPAIRS. When a chunk leaves a socket's set its hash is remembered; when it comes back the
+//      hash is compared, and if anything moved meanwhile the chunk's content is pushed over the SAME wires
+//      chunk-verify already uses. A chunk is therefore only ever stale while it is out of view.
+// ⚠️ AND THE THIRD SHAPE — a gate must stay in step with what it guards. The fan-out iterates the ROOM'S SOCKETS,
+// not the subscription map, because a socket that has not sent a beacon yet (just joined, old client, cursor mode
+// before the first frame) has no entry — and "no entry" must mean EVERYTHING, not NOTHING. Getting that backwards
+// would silently freeze a joining client's world, which is the same bug wearing a different hat.
+// Send the full current content of some chunks to ONE socket, over the `terrain-set` / `liquid-fine-cells` wires it
+// already parses. Factored out of the `chunk-verify` handler, which is what the kickoff meant by extending
+// chunk-verify into subscriptions instead of inventing a parallel wire: resync and re-subscribe are the same
+// operation — "you may be out of date about these chunks, here is what they hold".
+// ⚠️ IT CARRIES A `clear` LIST, AND IT HAS TO. The fine wire only ever names cells that HOLD liquid, so a repair
+// built from "here is what this chunk contains" can add liquid but can never remove it — a pool that DRAINED while
+// you were away would repair its terrain and leave the water behind as a phantom. That was already true of
+// `chunk-verify` (a resync could not undo a disappearance), and it only went unnoticed because chunk-verify runs
+// once after a reconnect; re-subscribing runs it constantly. Sending every cell instead would be ~49KB per chunk,
+// so the wire says "zero these chunks first" in one number each and then names the survivors.
+function sendChunkContent(sock, room, chunks) {
+  if (!chunks || !chunks.length) return;
+  const s = peekCells(room); if (!s.terrain) return;
+  const geom = WORLD_GEOM(), tc = [], fine = [];
+  for (const p of chunks) {
+    rehydrateChunk(room, p);   // a chunk we are about to READ OUT must not be sitting in a blob
+    const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
+    for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
+      for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
+        const i = (r0 + lr) * geom.cols + c0 + lc;
+        tc.push(i, s.terrain.g(i));
+        if (s.fineTotal && s.fineTotal.g(i) > 0) fine.push(i);
+      }
+  }
+  if (tc.length) sock.emit('terrain-set', { cells: tc });
+  const cells = []; if (fine.length) fineWirePush(room, fine, cells);
+  sock.emit('liquid-fine-cells', { sub: 1, cols: TERRAIN_COLS, cells, clear: chunks.slice() });
+}
+// ==INTEREST_BLOCK_START== (probe_subscriptions slices this out — stub io/chunkHash/WORLD_GEOM when you do)
+const interestCfg = {
+  chunks: true,        // filter cell-addressed world diffs to the chunks a socket can see
+  margin: 1,           // replication rings beyond the viewport (see above — MEASURED, not guessed)
+  pushPerBeacon: 16,   // chunks repaired per beacon when re-subscribing; the rest carry over to the next one
+};
+// The CELL-ADDRESSED wires, and how to walk one record. Anything not listed here is broadcast untouched.
+// ⚠️ `liquid-src` is deliberately NOT here. It is a low-rate MARKER toggle with no re-subscribe repair path, so
+// filtering it would leave a client permanently wrong about which cells are sources — cost nothing, break something.
+const CELL_WIRE = {
+  'terrain-set':       () => 2,
+  'liquid-fx':         () => 2,
+  // [i, repId, flags, mask, ...one amount per set rank bit] — see the WIRE comment in fineLiquidTickRoom.
+  'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n; },
+};
+// avRoom → Map(socketId → { subs: Set<chunk>, mark: Map<chunk, hash-when-it-left>, pending: Set<chunk> })
+const roomSubs = {};
+function subsEntry(room, sid) {
+  const m = roomSubs[room] || (roomSubs[room] = new Map());
+  let e = m.get(sid); if (!e) m.set(sid, e = { subs: new Set(), mark: new Map(), pending: new Set() });
+  return e;
+}
+function dropSubs(room, sid) { const m = roomSubs[room]; if (m) { m.delete(sid); if (!m.size) delete roomSubs[room]; } }
+// Recompute one socket's subscription set from the viewport it just reported, and repair whatever it re-enters.
+// Driven by `avt-where`, which is the same signal residency uses — and for the same reason: what has to be
+// replicated is what a player can SEE. Cursor mode has no body at all, so an avatar-keyed version would send an
+// entire mode's worth of players nothing.
+function updateSubs(room, sid, v) {
+  if (!interestCfg.chunks) return;
+  const geom = WORLD_GEOM(), M = Math.max(0, interestCfg.margin | 0), e = subsEntry(room, sid);
+  const want = new Set();
+  const add = (x0, y0, x1, y1) => {
+    for (let gy = Math.max(0, y0); gy <= Math.min(geom.cy - 1, y1); gy++)
+      for (let gx = Math.max(0, x0); gx <= Math.min(geom.cx - 1, x1); gx++) want.add(gy * geom.cx + gx);
+  };
+  add(v.cx0 - M, v.cy0 - M, v.cx1 + M, v.cy1 + M);
+  if (v.ax >= 0) add(v.ax - M, v.ay - M, v.ax + M, v.ay + M);   // the body too, in case the camera lags it
+  for (const p of e.subs) if (!want.has(p)) e.mark.set(p, chunkHash(room, p));       // left view: remember how it looked
+  for (const p of want) if (!e.subs.has(p)) {                                        // came back: repair if it moved
+    if (e.mark.has(p)) { if (e.mark.get(p) !== chunkHash(room, p)) e.pending.add(p); e.mark.delete(p); }
+  }
+  e.subs = want;
+  if (e.pending.size) flushPending(room, sid, e);
+}
+function flushPending(room, sid, e) {
+  const sock = io.sockets.sockets.get(sid); if (!sock) return;
+  const take = [];
+  for (const p of e.pending) { take.push(p); if (take.length >= Math.max(1, interestCfg.pushPerBeacon | 0)) break; }
+  for (const p of take) e.pending.delete(p);
+  sendChunkContent(sock, room, take);
+}
+// Fan a cell-addressed diff out per socket, each getting only the records inside the chunks it subscribes to.
+// Cells are bucketed by chunk ONCE (O(cells)) and each socket then concatenates its own buckets (O(delivered)), so
+// this is linear in what actually goes out rather than sockets × cells.
+function interestFanout(room, ev, payload) {
+  const step = CELL_WIRE[ev], here = roomSubs[room];
+  if (!interestCfg.chunks || !step || !here || !here.size) return io.to(room).emit(ev, payload);
+  const members = io.sockets.adapter.rooms.get(room);
+  if (!members || !members.size) return;
+  const a = payload.cells; if (!Array.isArray(a) || !a.length) return;
+  // The fine wire carries FINE indices, which are terrain indices only while SUB === 1 (every caller passes 1).
+  // If that ever changes, the index space differs from WORLD_GEOM's and bucketing would be wrong — so bail to a
+  // plain broadcast rather than mis-route it.
+  const geom = WORLD_GEOM();
+  if (ev === 'liquid-fine-cells' && (payload.cols | 0) !== geom.cols) return io.to(room).emit(ev, payload);
+  const bucket = new Map();
+  for (let k = 0; k < a.length;) {
+    const n = step(a, k), i = a[k];
+    if (i >= 0 && i < geom.cells) {
+      const p = geom.pageOf[i]; let b = bucket.get(p); if (!b) bucket.set(p, b = []);
+      for (let q = 0; q < n; q++) b.push(a[k + q]);
+    }
+    k += n;
+  }
+  for (const sid of members) {
+    const e = here.get(sid);
+    const sock = io.sockets.sockets.get(sid); if (!sock) continue;
+    if (!e) { sock.emit(ev, payload); continue; }   // ⚠️ no beacon yet ⇒ EVERYTHING (see the gate note above)
+    let out = null;
+    for (const [p, b] of bucket) if (e.subs.has(p)) { if (!out) out = []; for (let q = 0; q < b.length; q++) out.push(b[q]); }
+    if (out) sock.emit(ev, { ...payload, cells: out });
+  }
+}
+// ==INTEREST_BLOCK_END==
+wireFanout = interestFanout;   // ⇐ the one line that turns the sim's broadcasts into interest-limited fan-out
 
 // ── FINE-CELL LIQUID: coarse↔fine conversion + placement + wire helpers (inc 1). All outside the sim block, so the
 // harness never sees them. Volume mapping: a coarse cell holds up to LIQUID_MAX units; a full coarse cell = SUB² full fine
@@ -4972,6 +5126,24 @@ io.on('connection', (socket) => {
     }
     if ('chunkMargin' in patch) chunkCfg.margin = Math.max(0, Math.min(64, patch.chunkMargin | 0));
     if ('chunkGraceMs' in patch) chunkCfg.graceMs = Math.max(0, Math.min(600000, patch.chunkGraceMs | 0));
+    // INTEREST-LIMITED REPLICATION (Phase 4) — same reasoning as chunkEvict: it has to be A/B-able live, because
+    // "is that a bug or is that just a chunk I am not subscribed to?" is otherwise unanswerable from inside the game.
+    // ⚠️ TURNING IT OFF MUST REPAIR, not merely resume broadcasting. Every client with a subscription set has chunks
+    // it stopped hearing about, so going back to broadcast would leave those stale FOREVER — the diffs that would
+    // have fixed them have already been and gone. So the marks are flushed as content before the sets are dropped.
+    if ('interestChunks' in patch) {
+      const on = !!patch.interestChunks;
+      if (!on && interestCfg.chunks) for (const room of Object.keys(roomSubs)) {
+        for (const [sid, e] of roomSubs[room]) {
+          const all = new Set([...e.mark.keys(), ...e.pending]);          // UNBOUNDED on purpose — pushPerBeacon
+          const sock = io.sockets.sockets.get(sid);                       // paces a live camera; this is a one-off
+          if (sock && all.size) sendChunkContent(sock, room, [...all]);   // admin action and must leave nothing stale
+        }
+        delete roomSubs[room];
+      }
+      interestCfg.chunks = on;
+    }
+    if ('interestMargin' in patch) interestCfg.margin = Math.max(0, Math.min(64, patch.interestMargin | 0));
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
   });
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
@@ -5515,13 +5687,20 @@ io.on('connection', (socket) => {
     }
     if (currentAvatarRoom) socket.leave(currentAvatarRoom);
     if (currentAvatarRoom && roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);   // Phase 3: stop holding chunks resident for someone who left
+    if (currentAvatarRoom) dropSubs(currentAvatarRoom, socket.id);                                          // Phase 4: and stop tracking what they were subscribed to
     delete socketToAvatarRoom[socket.id];
   });
   // ── CHUNK RESIDENCY BEACON (SHARED-WORLD.md §7, Phase 3). A coarse, low-rate position so the server knows which
   // chunks to keep resident. Avatar positions otherwise travel P2P and never reach the server at all (see the
   // chunkCfg block). Deliberately not used for anything authoritative — it decides what is in MEMORY, nothing else,
   // so a client lying about it can only make its own world load differently.
-  socket.on('avt-where', (v) => { if (currentAvatarRoom) noteWhere(currentAvatarRoom, socket.id, v); });
+  // Phase 4 rides the SAME beacon: what has to be replicated to a client and what has to be resident on the server
+  // are both "what that player can see", so a second signal would only be a second thing to get out of step.
+  socket.on('avt-where', (v) => {
+    if (!currentAvatarRoom) return;
+    const rect = noteWhere(currentAvatarRoom, socket.id, v);
+    if (rect) updateSubs(currentAvatarRoom, socket.id, rect);
+  });
   // ── CHUNK RESYNC. The client sends the hashes it believes each chunk has; the server answers with the content of
   // the ones that disagree, over the SAME `terrain-set` / `liquid-fine-cells` wires it already parses. This is the
   // repair path for a dropped diff, and it is per-chunk rather than whole-world, which is the point of hashing.
@@ -5531,19 +5710,10 @@ io.on('connection', (socket) => {
     const geom = WORLD_GEOM(), mine = chunkHashes(room), bad = [];
     for (let p = 0; p < geom.nPages && p < hashes.length; p++) if ((hashes[p] >>> 0) !== mine[p]) bad.push(p);
     socket.emit('chunk-verify-result', { mismatch: bad, total: geom.nPages });
-    const s = peekCells(room), tc = [], fine = [];
-    for (const p of bad.slice(0, 12)) {
-      rehydrateChunk(room, p);   // a chunk we are about to READ OUT must not be sitting in a blob                     // bounded: a badly out-of-date client repairs over several passes
-      const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
-      for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
-        for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
-          const i = (r0 + lr) * geom.cols + c0 + lc;
-          tc.push(i, s.terrain.g(i));
-          if (s.fineTotal && s.fineTotal.g(i) > 0) fine.push(i);
-        }
-    }
-    if (tc.length) socket.emit('terrain-set', { cells: tc });
-    if (fine.length) { const cells = []; fineWirePush(room, fine, cells); socket.emit('liquid-fine-cells', { sub: 1, cols: TERRAIN_COLS, cells }); }
+    // Bounded: a badly out-of-date client repairs over several passes. The body of this used to be written out here;
+    // Phase 4 needs exactly the same operation on every re-subscribe, so it moved into sendChunkContent and both
+    // paths now share it (including the `clear` fix, which resync silently needed too).
+    sendChunkContent(socket, room, bad.slice(0, 12));
   });
   socket.on('avt-offer',  ({ to, sdp })       => { socket.to(to).emit('avt-offer',  { from: socket.id, sdp }); });
   socket.on('avt-answer', ({ to, sdp })       => { socket.to(to).emit('avt-answer', { from: socket.id, sdp }); });
@@ -5705,7 +5875,7 @@ io.on('connection', (socket) => {
       }
       emitFineCells(currentAvatarRoom, changedFine);
     }
-    if (changed) io.to(currentAvatarRoom).emit('terrain-set', { cells });
+    if (changed) wireFanout(currentAvatarRoom, 'terrain-set', { cells });   // Phase 4: a player's edit is a cell diff like any other
   });
   // Custom material registry: define a new custom mat (or match an identical existing one). Dedups by signature,
   // assigns the next free id (16..255), stores per-room + broadcasts so every client can render/paint it. Acks {id, def}.
@@ -6215,6 +6385,13 @@ io.on('connection', (socket) => {
       broadcastPagePresence(currentRoom);
       io.to(currentPageRoom).emit('cursor-leave', { id: socket.id });
       io.to(currentRoom).emit('avatar-leave', { id: socket.id });
+    }
+    // Phase 3/4 — release the residency claim and the subscription bookkeeping. OUTSIDE the `currentRoom` guard
+    // above on purpose: both are keyed on the AVATAR room, which is a different key. The residency sweep prunes
+    // dead sockets from roomWhere every 5s as a backstop, but roomSubs has no sweep of its own.
+    if (currentAvatarRoom) {
+      if (roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);
+      dropSubs(currentAvatarRoom, socket.id);
     }
     if (socketDmRooms[socket.id]) {
       for (const roomId of socketDmRooms[socket.id]) {
