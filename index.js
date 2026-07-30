@@ -1928,6 +1928,12 @@ const isFluidId = (v) => LIQUID_IDS.has(v);
 // probe_fine_identity's 500-tick bit-identity claim about the SIM rather than about the netcode wrapped around it.
 // The interest layer (==INTEREST_BLOCK==, further down) reassigns this at load; probe_subscriptions tests THAT.
 let wireFanout = (room, ev, payload) => io.to(room).emit(ev, payload);
+// PER-TICK BATCHING (§3: "batch all of a player's incoming updates into one packet per tick"). One tick can produce
+// seven or more cell diffs — powder terrain, reaction FX, reaction terrain, several liquid pages, soil — and once
+// the fan-out above is per-socket rather than one `io.to(room)`, each of those is a separate write per client.
+// Between these two calls the diffs are collected and delivered as ONE packet each. Same no-op-by-default trick as
+// wireFanout: the sliced sim batches nothing, so the probes still see the wire they have always seen.
+let beginWireBatch = () => {}, endWireBatch = () => {};
 // ---- SOURCE + SINK (test/scene tooling, but real world features) ------------------------------------------------
 // SINK = material id 17 ("Drain"): an ordinary SOLID block that DESTROYS liquid touching it, at liquidCfg.sinkRate
 // units per tick per touching cell. Put a row of them under a pool instead of clearing it by hand.
@@ -3196,6 +3202,7 @@ const runLiquidTick = () => {
   if (liquidCfg.paused) { if (liquidStepsPending <= 0) return; liquidStepsPending--; }
   const _t0 = liquidCfg.perfLog ? performance.now() : 0; let _active = 0;
   liquidTickCount++;
+  beginWireBatch();   // ⇓ everything this tick broadcasts is collected and sent as one packet per client (see the hook)
   // ── PLAN THE ROSTER. Admit rooms in rotating order until their predicted cost fills the budget; the rest
   // are deferred whole. At least one room is ALWAYS admitted, so a single room bigger than the whole budget
   // still makes progress (slowly) rather than deadlocking.
@@ -3291,6 +3298,7 @@ const runLiquidTick = () => {
       liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0 };
     }
   }
+  endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
 };
 function restartLiquidLoop() { if (liquidTimer) clearInterval(liquidTimer); liquidTimer = setInterval(runLiquidTick, Math.max(8, Math.min(500, liquidCfg.tickMs | 0))); }
 restartLiquidLoop();
@@ -3440,6 +3448,7 @@ const interestCfg = {
   chunks: true,        // filter cell-addressed world diffs to the chunks a socket can see
   margin: 1,           // replication rings beyond the viewport (see above — MEASURED, not guessed)
   pushPerBeacon: 16,   // chunks repaired per beacon when re-subscribing; the rest carry over to the next one
+  batch: true,         // collect a whole tick's diffs into one packet per client (per-socket opt-in — see below)
 };
 // The CELL-ADDRESSED wires, and how to walk one record. Anything not listed here is broadcast untouched.
 // ⚠️ `liquid-src` is deliberately NOT here. It is a low-rate MARKER toggle with no re-subscribe repair path, so
@@ -3489,17 +3498,15 @@ function flushPending(room, sid, e) {
 // Fan a cell-addressed diff out per socket, each getting only the records inside the chunks it subscribes to.
 // Cells are bucketed by chunk ONCE (O(cells)) and each socket then concatenates its own buckets (O(delivered)), so
 // this is linear in what actually goes out rather than sockets × cells.
-function interestFanout(room, ev, payload) {
-  const step = CELL_WIRE[ev], here = roomSubs[room];
-  if (!interestCfg.chunks || !step || !here || !here.size) return io.to(room).emit(ev, payload);
-  const members = io.sockets.adapter.rooms.get(room);
-  if (!members || !members.size) return;
-  const a = payload.cells; if (!Array.isArray(a) || !a.length) return;
-  // The fine wire carries FINE indices, which are terrain indices only while SUB === 1 (every caller passes 1).
-  // If that ever changes, the index space differs from WORLD_GEOM's and bucketing would be wrong — so bail to a
-  // plain broadcast rather than mis-route it.
+// Split one payload's cells by chunk. `null` means "this cannot be split, send it whole to everyone" — used for
+// events with no cell layout, and for a fine payload whose index space is not the terrain one.
+// ⚠️ The fine wire carries FINE indices, which equal terrain indices only while SUB === 1 (every caller passes 1).
+// If that ever changes the bucketing would be silently wrong, so it declines rather than guesses.
+function bucketize(ev, payload) {
+  const step = CELL_WIRE[ev]; if (!step) return null;
+  const a = payload.cells; if (!Array.isArray(a) || !a.length) return null;
   const geom = WORLD_GEOM();
-  if (ev === 'liquid-fine-cells' && (payload.cols | 0) !== geom.cols) return io.to(room).emit(ev, payload);
+  if (ev === 'liquid-fine-cells' && (payload.cols | 0) !== geom.cols) return null;
   const bucket = new Map();
   for (let k = 0; k < a.length;) {
     const n = step(a, k), i = a[k];
@@ -3509,17 +3516,62 @@ function interestFanout(room, ev, payload) {
     }
     k += n;
   }
+  return bucket;
+}
+function sliceFor(payload, bucket, subs) {   // the part of a bucketed payload one subscription set is owed
+  let out = null;
+  for (const [p, b] of bucket) if (subs.has(p)) { if (!out) out = []; for (let q = 0; q < b.length; q++) out.push(b[q]); }
+  return out && { ...payload, cells: out };
+}
+function interestFanout(room, ev, payload) {
+  if (wireBatch) { let l = wireBatch.get(room); if (!l) wireBatch.set(room, l = []); l.push([ev, payload]); return; }
+  const here = roomSubs[room];
+  const bucket = interestCfg.chunks && here && here.size ? bucketize(ev, payload) : null;
+  if (!bucket) return io.to(room).emit(ev, payload);
+  const members = io.sockets.adapter.rooms.get(room); if (!members || !members.size) return;
   for (const sid of members) {
-    const e = here.get(sid);
     const sock = io.sockets.sockets.get(sid); if (!sock) continue;
+    const e = here.get(sid);
     if (!e) { sock.emit(ev, payload); continue; }   // ⚠️ no beacon yet ⇒ EVERYTHING (see the gate note above)
-    let out = null;
-    for (const [p, b] of bucket) if (e.subs.has(p)) { if (!out) out = []; for (let q = 0; q < b.length; q++) out.push(b[q]); }
-    if (out) sock.emit(ev, { ...payload, cells: out });
+    const cut = sliceFor(payload, bucket, e.subs);
+    if (cut) sock.emit(ev, cut);
+  }
+}
+// ── PER-TICK BATCHING (§3) ────────────────────────────────────────────────────────────────────────────────────
+// One tick's worth of diffs, delivered as ONE packet per client. Without it, per-socket fan-out costs a socket
+// write per event per client where the old `io.to(room)` cost one write per event for the whole room — so
+// interest-limiting would have traded bytes for syscalls. MEASURED (probe_interest part C): a batched packet costs
+// ~10µs regardless of its size up to ~1.5KB, so the number of PACKETS is what matters, not their contents.
+// ⚠️ AN OLD CLIENT MUST NOT GO DARK. A page that has not been reloaded since this shipped has no `world-batch`
+// handler, and would silently stop receiving the world — which looks exactly like a frozen server. So batching is
+// per-socket OPT-IN: a client says `wire-caps {batch:1}` and only then is its traffic wrapped.
+let wireBatch = null;
+const wireBatchOk = new Set();   // socket ids that have declared they can unwrap a batch
+function flushRoomBatch(room, evs) {
+  const members = io.sockets.adapter.rooms.get(room); if (!members || !members.size) return;
+  const here = interestCfg.chunks ? roomSubs[room] : null;
+  const buckets = (here && here.size) ? evs.map(([ev, pl]) => bucketize(ev, pl)) : null;
+  for (const sid of members) {
+    const sock = io.sockets.sockets.get(sid); if (!sock) continue;
+    const e = here && here.get(sid);
+    // Unsubscribed-but-known socket ⇒ its slice; unknown socket ⇒ everything (the open gate again).
+    const mine = [];
+    for (let n = 0; n < evs.length; n++) {
+      const [ev, pl] = evs[n], bk = buckets && buckets[n];
+      if (!e || !bk) { mine.push([ev, pl]); continue; }   // no subs entry, or an unsplittable event
+      const cut = sliceFor(pl, bk, e.subs);
+      if (cut) mine.push([ev, cut]);
+    }
+    if (!mine.length) continue;
+    if (wireBatchOk.has(sid)) sock.emit('world-batch', { evs: mine });
+    else for (const [ev, pl] of mine) sock.emit(ev, pl);
   }
 }
 // ==INTEREST_BLOCK_END==
-wireFanout = interestFanout;   // ⇐ the one line that turns the sim's broadcasts into interest-limited fan-out
+// ⇓ the three lines that turn the sim's broadcasts into interest-limited, per-tick-batched fan-out
+wireFanout = interestFanout;
+beginWireBatch = () => { if (interestCfg.batch) wireBatch = new Map(); };
+endWireBatch = () => { const b = wireBatch; wireBatch = null; if (b) for (const [room, evs] of b) flushRoomBatch(room, evs); };
 
 // ═══ VISIBILITY CAP — which PLAYERS you are told about (SHARED-WORLD.md §3, §7 Phase 4) ═════════════════════════
 // Chunk subscriptions above bound WORLD state. This bounds PLAYER state, which is the quadratic one: §3 measured 50
@@ -5259,6 +5311,9 @@ io.on('connection', (socket) => {
       if (nv) for (const room of Object.keys(roomAvt)) for (const sid of roomAvt[room]) updatePeers(room, sid);
     }
     if ('peerFriendRings' in patch) peerCfg.friendRings = Math.max(0, Math.min(999, +patch.peerFriendRings || 0));
+    // Batching is behaviour-preserving (same events, same order, one envelope), so unlike the two above it needs
+    // no repair when toggled — the next tick simply arrives unwrapped.
+    if ('interestBatch' in patch) interestCfg.batch = !!patch.interestBatch;
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
   });
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
@@ -5815,6 +5870,10 @@ io.on('connection', (socket) => {
   // chunks to keep resident. Avatar positions otherwise travel P2P and never reach the server at all (see the
   // chunkCfg block). Deliberately not used for anything authoritative — it decides what is in MEMORY, nothing else,
   // so a client lying about it can only make its own world load differently.
+  // Phase 4 per-tick batching is per-socket OPT-IN. A page that has not been reloaded since it shipped has no
+  // `world-batch` handler and would silently stop receiving the world — indistinguishable from a dead server. So a
+  // client declares what it can unwrap, and until it does its traffic is sent the old way, event by event.
+  socket.on('wire-caps', (c) => { if (c && c.batch) wireBatchOk.add(socket.id); else wireBatchOk.delete(socket.id); });
   // Phase 4 rides the SAME beacon: what has to be replicated to a client and what has to be resident on the server
   // are both "what that player can see", so a second signal would only be a second thing to get out of step.
   socket.on('avt-where', (v) => {
@@ -6516,6 +6575,7 @@ io.on('connection', (socket) => {
       dropSubs(currentAvatarRoom, socket.id);
       dropPeers(currentAvatarRoom, socket.id);
     }
+    wireBatchOk.delete(socket.id);
     if (socketDmRooms[socket.id]) {
       for (const roomId of socketDmRooms[socket.id]) {
         socket.to(roomId).emit('dm-user-left', { roomId, from: currentUsername });
