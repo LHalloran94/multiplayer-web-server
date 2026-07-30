@@ -1516,13 +1516,11 @@ const CELLS_PER_WORLD = TERRAIN_COLS * TERRAIN_ROWS;
 function RoomCells() {
   this.terrain = null; this.terrainHp = null;            // solidity grid + per-cell remaining hits
   this.sat = null; this.dilute = null;                   // absorbed water in solids + water soaked into acid
-  this.levelAcc = null;                                  // coarse-era levelling carry (no live caller; see ensureLevelAcc)
   this.fineSub = 0;                                      // fine:terrain ratio these arrays were built at (1 everywhere)
   this.fineAmt = null; this.fineTotal = null;            // THE LIQUID: per-rank units per cell + cached per-cell total
   this.fineLevelAcc = null; this.fineStill = null;       // levelling carry + quiescence counters
   this.fineActive = null; this.fineReact = null; this.fineFire = null;   // Sets of cell indices
-  this.fluxSeen = null; this.fluxStack = null;           // flux-levelling flood-fill scratch, coarse-sized (no live caller)
-  this.fineFluxSeen = null; this.fineFluxStack = null;   // ...and fine-sized (the live pair)
+  this.fineFluxSeen = null; this.fineFluxStack = null;   // flux-levelling flood-fill scratch
   this.powderActive = null; this.soilActive = null;      // Sets of cell indices
   this.src = null;                                       // Map(cell → {rank, rate}) of liquid source cells
   this.srcAdded = null; this.sinkEaten = null;           // per-rank mass ledgers (per-room liquid state, not per-cell)
@@ -1870,12 +1868,11 @@ const ACID_SOAK_TICKS = 2;   // soak 1 water into dilution every N ticks (rate �
 const ACID_CONVERT_TICKS = 2;// convert 1 acid → water every N ticks once saturated (rate ≈ 0.5/tick)
 let liquidTickCount = 0;
 let liquidQuiet = false;                              // when true, the sim runs but suppresses broadcasts (used to pre-settle at gen time)
-// Per-cell LEVELING carry (reduced-amount density throttle): holds the SUB-UNIT remainder of each throttled leveling move so
-// a fractional per-tick amount still adds up to whole units over time (see `reduce` in liquidTickRoom). Sub-unit (<1/LIQUID_MAX
-// of a cell) so it's never visible; seeded with a small per-cell phase so the invisible 1-unit fine steps don't all align.
-// (`levelAcc` on the cell store. ⚠️ No live caller — the coarse sim was its only one. Kept as-is by the Phase 2
-//  consolidation, which was mechanical on purpose; deleting it is a separate, easy call.)
-function ensureLevelAcc(room) { const s = cellsOf(room); if (!s.levelAcc) { const a = new Float32Array(CELLS_PER_WORLD); for (let i = 0; i < a.length; i++) a[i] = ((Math.imul(i, 2654435761)) >>> 0) / 4294967296; s.levelAcc = a; } return s.levelAcc; }
+// ⭐ `roomLevelAcc` / `ensureLevelAcc` DELETED 2026-07-31. The coarse per-cell LEVELING carry: the sub-unit remainder
+// of each throttled levelling move, phase-seeded so the invisible 1-unit steps did not all align. Its only consumer
+// was `reduce` inside liquidTickRoom, so it went unreferenced the day the coarse sim was cut (2026-07-29) and simply
+// was not noticed — a full-world Float32Array per room, allocated by nobody. The FINE sim has its own carry
+// (`fineLevelAcc`), which is live and untouched. Found by the Phase 2 consolidation, which had to name every array.
 // ── FINE-CELL LIQUID (experimental, gated by 1) — a parallel liquid grid at SUB× resolution, in SEPARATE
 // arrays so the coarse system is UNTOUCHED. Same layout as the coarse arrays but sized FCOLS*FROWS. Terrain is read from
 // the coarse grid via coarseOf() (map-on-read; the fine sim never writes terrain), and liquid lives only in these arrays.
@@ -1944,10 +1941,11 @@ function fineSyncGrid(room, i) {
 // Reaction amounts are FRACTIONS OF A CELL, resolved against the live capacity, so they keep meaning the same thing
 // when cellCap is changed. Hard-coded unit counts were calibrated at cap 64 and silently became 2.7× stronger at 24.
 const capFrac = (f) => { const v = Math.round(LIQUID_MAX * f); return v < 1 ? 1 : v; };
-// scratch for the flux-levelling flood fill (`fluxSeen`/`fluxStack` + the fine-sized pair on the cell store, reused
-// per room so the pass allocates nothing per tick). ⚠️ The coarse pair has no live caller — same note as ensureLevelAcc.
-function ensureFluxSeen(room) { const s = cellsOf(room); return s.fluxSeen || (s.fluxSeen = new Uint8Array(CELLS_PER_WORLD)); }
-function ensureFluxStack(room) { const s = cellsOf(room); return s.fluxStack || (s.fluxStack = new Int32Array(CELLS_PER_WORLD)); }
+// Scratch for the flux-levelling flood fill (`fineFluxSeen`/`fineFluxStack` on the cell store, reused per room so the
+// pass allocates nothing per tick). ⭐ The COARSE pair — `roomFluxSeen`/`roomFluxStack` + ensureFluxSeen/ensureFluxStack
+// — was DELETED 2026-07-31 for the same reason as roomLevelAcc: the coarse flux pass was its only caller and went with
+// liquidTickRoom on 2026-07-29, leaving two more full-world arrays nobody allocated. The fine pair below is live
+// (`fineLiquidTickRoom`'s flux pass), though note flux levelling itself is SHELVED behind `liquidCfg.fluxLevel`, off.
 function ensureFineFluxSeen(room, cells) { const s = cellsOf(room), a = s.fineFluxSeen; return (a && a.length === cells) ? a : (s.fineFluxSeen = new Uint8Array(cells)); }
 function ensureFineFluxStack(room, cells) { const s = cellsOf(room), a = s.fineFluxStack; return (a && a.length === cells) ? a : (s.fineFluxStack = new Int32Array(cells)); }
 // `isSolid` inside liquidTickRoom is a closure over that call; callers outside it need their own.
