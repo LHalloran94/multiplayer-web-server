@@ -1561,6 +1561,12 @@ function PagedArray(geom, Ctor, stride, seedFn) {
   this.zero = new Ctor(CHUNK_CELLS * this.T);     // read-through for an unallocated page — NEVER written
   this.length = geom.cells * this.T;              // exactly what the old flat array reported
   this.live = 0;                                  // pages currently faulted in (memory accounting + probes)
+  // PER-CHUNK REVISION. Bumped by every wp() — i.e. at the ONE choke point every write in the server goes through,
+  // which is why dirty tracking did not have to be threaded through the sim by hand. It OVER-approximates (wp() is
+  // called to get a writable page, not because a byte definitely changed), which is exactly the right direction: a
+  // hash may be recomputed needlessly, but it can never be served stale. Wraparound is harmless — it is only ever
+  // compared for equality. ~840 bytes per field per room.
+  this.rev = new Uint32Array(geom.nPages);
 }
 PagedArray.prototype._alloc = function (p) {
   const a = new this.Ctor(CHUNK_CELLS * this.T);
@@ -1568,18 +1574,19 @@ PagedArray.prototype._alloc = function (p) {
   this.pages[p] = a; this.live++; return a;
 };
 PagedArray.prototype.rp = function (i) { const p = this.geom.pageOf[i]; return this.pages[p] || (this.seedFn ? this._alloc(p) : this.zero); };
-PagedArray.prototype.wp = function (i) { const p = this.geom.pageOf[i]; return this.pages[p] || this._alloc(p); };
+PagedArray.prototype.wp = function (i) { const p = this.geom.pageOf[i]; this.rev[p]++; return this.pages[p] || this._alloc(p); };
 PagedArray.prototype.o = function (i) { return this.geom.offOf[i] * this.T; };
 PagedArray.prototype.g = function (i) { return this.rp(i)[this.geom.offOf[i] * this.T]; };
 PagedArray.prototype.s = function (i, v) { this.wp(i)[this.geom.offOf[i] * this.T] = v; };
 // `.fill(0)` on an unseeded array DROPS every page — the old flat `.fill(0)` meant "this is now empty everywhere",
 // and dropping is both faster and the point of the exercise.
 PagedArray.prototype.fill = function (v) {
+  for (let p = 0; p < this.pages.length; p++) this.rev[p]++;
   if (v === 0 && !this.seedFn) { this.pages.fill(null); this.live = 0; return this; }
   for (let p = 0; p < this.pages.length; p++) (this.pages[p] || this._alloc(p)).fill(v);
   return this;
 };
-PagedArray.prototype.dropPage = function (p) { if (this.pages[p]) { this.pages[p] = null; this.live--; } };
+PagedArray.prototype.dropPage = function (p) { this.rev[p]++; if (this.pages[p]) { this.pages[p] = null; this.live--; } };
 // ⭐ WHOLE-GRID SCANS GO THROUGH THIS. Iterates only the pages that EXIST, yielding (flat cell index, offset base in
 // the page, page). An unallocated page holds nothing but zeros, so skipping it is exact — and it is what keeps
 // terrainRLE / buildFineInit / seedLiquidActivity / rescaleAllLiquid from walking 777,600 cells of mostly nothing.
@@ -1616,6 +1623,7 @@ function RoomCells() {
   this.powderActive = null; this.soilActive = null;      // Sets of cell indices
   this.src = null;                                       // Map(cell → {rank, rate}) of liquid source cells
   this.srcAdded = null; this.sinkEaten = null;           // per-rank mass ledgers (per-room liquid state, not per-cell)
+  this.chunks = null;                                    // RoomChunks: per-chunk hashes + evicted blobs + residency
 }
 const roomCells = new Map();          // room → RoomCells. THE registry of a room's per-cell state.
 function cellsOf(room) { let s = roomCells.get(room); if (s === undefined) roomCells.set(room, s = new RoomCells()); return s; }
@@ -1638,6 +1646,116 @@ function dropFineFire(room)   { const s = roomCells.get(room); if (s) s.fineFire
 function dropPowderSet(room)  { const s = roomCells.get(room); if (s) s.powderActive = null; cellRooms.powder.delete(room); }
 function dropSoilSet(room)    { const s = roomCells.get(room); if (s) s.soilActive = null; cellRooms.soil.delete(room); }
 function dropSrcMap(room)     { const s = roomCells.get(room); if (s) s.src = null; cellRooms.src.delete(room); }
+// ═══ CHUNK LIFECYCLE ════════════════════════════════════════════════════════════════════════════════════════════
+// Storage became sparse above; this is what manages it — which chunks are kept live, what has changed in them, and
+// how one is put away and brought back.
+// ⚠️ The fields hashed/evicted here are the ones that DEFINE WHAT A CLIENT SEES. `sat`/`dilute`/`fineLevelAcc`/
+// `fineStill` are internal sim scratch: they are dropped with the chunk (their default is the correct cold state)
+// but deliberately NOT hashed, or a resync would churn on invisible differences.
+const CHUNK_CONTENT = ['terrain', 'terrainHp', 'fineAmt', 'fineTotal'];
+const CHUNK_SCRATCH = ['sat', 'dilute', 'fineLevelAcc', 'fineStill', 'fineFluxSeen'];
+function RoomChunks(nPages) {
+  this.hash = new Uint32Array(nPages);        // cached content hash per chunk
+  this.stamp = new Float64Array(nPages);      // Σ rev of the content fields when that hash was taken (-1 = never)
+  this.blob = new Array(nPages).fill(null);   // an evicted chunk's content, compacted
+  this.lastNear = new Float64Array(nPages);   // ms a player was last within the residency radius
+  this.stamp.fill(-1);
+}
+function chunksOf(room) { const s = cellsOf(room); return s.chunks || (s.chunks = new RoomChunks(WORLD_GEOM().nPages)); }
+// CONTENT HASH of one chunk — the unit of resync. FNV-1a over the content fields, cached against the summed page
+// revisions so a settled chunk is hashed once and then answered for free.
+// ⚠️ Only meaningful at the all-fine ratio (SUB=1), where the terrain and liquid grids share an index space and
+// therefore a chunk grid. At SUB≠1 (probe rigs only) it declines to answer rather than hashing mismatched pages.
+// ⚠️ THE HASH IS OF CONTENT, NEVER OF REPRESENTATION. An absent page and a page of zeros MUST hash the same: a
+// client has no idea which pages the server happens to have faulted in, and evicting then rehydrating a chunk
+// changes which pages exist while changing nothing anyone can see. Getting this wrong made a round-tripped chunk
+// look like a mismatch and would have had resync re-sending unchanged chunks forever (caught by probe_chunking B/C).
+// Folding N zeros into FNV-1a is just multiplying by 0x01000193^N, since `h ^= 0` is a no-op — so it is one
+// multiply per absent field, not a loop over 4096 zeros.
+const _zeroFoldMul = new Map();
+function foldZeros(h, n) {
+  let m = _zeroFoldMul.get(n);
+  if (m === undefined) { m = 1; for (let k = 0; k < n; k++) m = Math.imul(m, 0x01000193) >>> 0; _zeroFoldMul.set(n, m); }
+  return Math.imul(h, m) >>> 0;
+}
+const CHUNK_CONTENT_STRIDE = { terrain: 1, terrainHp: 1, fineAmt: 0, fineTotal: 1 };   // 0 ⇒ LIQ_T (not in scope yet)
+function chunkHash(room, p) {
+  const s = peekCells(room); if (!s.terrain || (s.fineSub || 1) !== 1) return 0;
+  const ch = chunksOf(room);
+  let stamp = 0; for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) stamp += pa.rev[p]; }
+  if (ch.stamp[p] === stamp) return ch.hash[p];
+  let h = 0x811c9dc5;
+  for (const f of CHUNK_CONTENT) {
+    const pa = s[f], page = pa && pa.pages[p];
+    if (!page) { h = foldZeros(h, CHUNK_CELLS * (CHUNK_CONTENT_STRIDE[f] || LIQ_T)); continue; }
+    for (let k = 0; k < page.length; k++) { h ^= page[k]; h = Math.imul(h, 0x01000193) >>> 0; }
+  }
+  ch.hash[p] = h; ch.stamp[p] = stamp; return h;
+}
+function chunkHashes(room) { const n = WORLD_GEOM().nPages, out = new Array(n); for (let p = 0; p < n; p++) out[p] = chunkHash(room, p); return out; }
+// ── EVICTION ── a chunk nobody is near is compacted into a blob and its pages released. The blob is the DELTA from
+// an empty chunk (RLE for the byte grids, a sparse index→stack list for liquid), which is typically 10–100× smaller
+// than the 80KB of raw pages a fully-populated chunk costs.
+// ⚠️ Cells inside an evicted chunk are removed from every activity Set as well. Leaving them would keep the room in
+// `cellRooms.fine` with indices whose pages no longer exist — the sim would read them back as zeros and churn.
+function encodeChunk(s, p) {
+  const out = { r: [], a: null };
+  for (const f of ['terrain', 'terrainHp']) {                     // RLE — a chunk is mostly one material or empty
+    const page = s[f] && s[f].pages[p];
+    if (!page) { out.r.push(null); continue; }
+    const runs = []; let v = page[0], n = 0;
+    for (let k = 0; k < page.length; k++) { if (page[k] === v) n++; else { runs.push(v, n); v = page[k]; n = 1; } }
+    runs.push(v, n); out.r.push(runs);
+  }
+  const amt = s.fineAmt && s.fineAmt.pages[p];                    // sparse — liquid occupies few cells of a chunk
+  if (amt) { const a = []; for (let c = 0; c < CHUNK_CELLS; c++) { const b = c * LIQ_T; let any = 0; for (let k = 0; k < LIQ_T; k++) any |= amt[b + k];
+    if (any) { a.push(c); for (let k = 0; k < LIQ_T; k++) a.push(amt[b + k]); } } out.a = a; }
+  return out;
+}
+function decodeChunk(s, p, blob) {
+  for (let fi = 0; fi < 2; fi++) {
+    const runs = blob.r[fi], f = ['terrain', 'terrainHp'][fi];
+    if (!runs || !s[f]) continue;
+    const page = s[f].pages[p] || s[f]._alloc(p); s[f].rev[p]++;
+    let k = 0; for (let q = 0; q + 1 < runs.length; q += 2) { const v = runs[q], n = runs[q + 1]; for (let z = 0; z < n && k < page.length; z++) page[k++] = v; }
+  }
+  if (blob.a && blob.a.length && s.fineAmt && s.fineTotal) {
+    const amt = s.fineAmt.pages[p] || s.fineAmt._alloc(p); s.fineAmt.rev[p]++;
+    const tot = s.fineTotal.pages[p] || s.fineTotal._alloc(p); s.fineTotal.rev[p]++;
+    for (let q = 0; q < blob.a.length; q += (1 + LIQ_T)) { const c = blob.a[q], b = c * LIQ_T; let sum = 0;
+      for (let k = 0; k < LIQ_T; k++) { const v = blob.a[q + 1 + k]; amt[b + k] = v; sum += v; } tot[c] = sum > 255 ? 255 : sum; }
+  }
+}
+function evictChunk(room, p) {
+  const s = roomCells.get(room); if (!s || !s.terrain) return false;
+  const ch = chunksOf(room);
+  const anyLive = CHUNK_CONTENT.some(f => s[f] && s[f].pages[p]);
+  if (anyLive) ch.blob[p] = encodeChunk(s, p);
+  for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
+  for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === WORLD_GEOM().nPages) s[f].dropPage(p);
+  // Drop this chunk's cells from the work sets, and release a set that empties (same contract as dropFineActive).
+  const geom = WORLD_GEOM();
+  const prune = (set, drop) => { if (!set) return; for (const i of Array.from(set)) if (geom.pageOf[i] === p) set.delete(i); if (!set.size) drop(room); };
+  prune(s.fineActive, dropFineActive); prune(s.fineReact, dropFineReact); prune(s.fineFire, dropFineFire);
+  prune(s.powderActive, dropPowderSet); prune(s.soilActive, dropSoilSet);
+  if (s.src) { for (const i of Array.from(s.src.keys())) if (geom.pageOf[i] === p) s.src.delete(i); if (!s.src.size) dropSrcMap(room); }
+  return true;
+}
+function rehydrateChunk(room, p) {
+  const s = roomCells.get(room); if (!s) return false;
+  const ch = chunksOf(room), blob = ch.blob[p];
+  if (!blob) return false;
+  ch.blob[p] = null;
+  decodeChunk(s, p, blob);
+  // Liquid that comes back is WOKEN, not re-seeded: it resumes flowing from exactly the state it was put away in.
+  const amt = s.fineAmt, tot = s.fineTotal;
+  if (blob.a && blob.a.length && amt && tot) { const act = fineSet(room), geom = WORLD_GEOM();
+    for (let q = 0; q < blob.a.length; q += (1 + LIQ_T)) { const c = blob.a[q];
+      const lr = (c / CHUNK_SIDE) | 0, lc = c % CHUNK_SIDE;
+      const gr = ((p / geom.cx) | 0) * CHUNK_SIDE + lr, gc = (p % geom.cx) * CHUNK_SIDE + lc;
+      if (gr < geom.rows && gc < geom.cols) act.add(gr * geom.cols + gc); } }
+  return true;
+}
 // ── HARNESS SEAM ── the probe rigs build scenes by assigning whole arrays per room (`roomTerrain[R] = new
 // Uint8Array(…)`) and read them back the same way. `cellView` hands back an object with exactly that shape, backed by
 // the store, so those rigs keep their scene code and their assertions verbatim — the guards go on guarding the sim
@@ -3127,6 +3245,58 @@ restartLiquidLoop();
 // ==LIQUID_TICK_BLOCK_END== (probe_budget.js slices to HERE — it needs runLiquidTick itself, which the
 //  narrower ==LIQUID_SIM_BLOCK_END== above deliberately excludes. Stub setInterval when slicing this far.)
 
+// ═══ CHUNK RESIDENCY (SHARED-WORLD.md §7, Phase 3) ══════════════════════════════════════════════════════════════
+// Sparse allocation gets a world down to what has been TOUCHED. Residency gets it down to what is NEAR SOMEONE:
+// a chunk no player has been near for a while is compacted into a blob and its pages released, and it comes back
+// the moment somebody approaches. This is also Phase 1 lever 2 — a lake breached two kilometres away stops costing
+// anything, because its cells are no longer in any activity set.
+//
+// ⚠️⚠️ DEFAULT OFF, DELIBERATELY. Phase 3's whole constraint is that behaviour stays identical so it can be diffed
+// against known-good, and eviction is the one part that is NOT behaviour-preserving by construction: liquid inside
+// an evicted chunk stops flowing until someone returns. The storage win (85.9%, measured) is already delivered by
+// lazy paging with this off. Turn it on once it has been eyeballed in-browser, not before.
+//
+// ⚠️ THE SERVER DOES NOT OTHERWISE KNOW WHERE PLAYERS ARE. The live avatar path is the P2P DataChannel mesh
+// (`avt-join`), so positions never reach the server; `roomSim` — the relay — stays dormant until Phase 5. Hence the
+// `avt-where` beacon below: a coarse, low-rate position, which is all residency needs and is cheap enough that it
+// costs nothing when eviction is off.
+const chunkCfg = {
+  evict: false,        // master switch (see above) — off = pages are only ever faulted in, never released
+  radius: 3,           // chunks around a player kept resident (3 ⇒ ±1536px at 64×8px chunks)
+  graceMs: 30000,      // how long a chunk stays resident after the last player left its radius
+  sweepMs: 5000,       // how often residency is recomputed
+};
+const roomWhere = {};  // avRoom → Map(socketId → { cx, cy })
+function noteWhere(avRoom, sid, x, y) {
+  if (!avRoom || !isFinite(x) || !isFinite(y)) return;
+  const span = CHUNK_SIDE * TERRAIN_CELL;
+  const m = roomWhere[avRoom] || (roomWhere[avRoom] = new Map());
+  m.set(sid, { cx: Math.floor(x / span), cy: Math.floor(y / span) });
+}
+function chunkResidencySweep() {
+  if (!chunkCfg.evict) return;
+  const now = Date.now(), geom = WORLD_GEOM(), R = Math.max(0, chunkCfg.radius | 0);
+  for (const room of Array.from(roomCells.keys())) {
+    const s = roomCells.get(room); if (!s || !s.terrain || (s.fineSub || 1) !== 1) continue;
+    const ch = chunksOf(room), here = roomWhere[room];
+    if (here) for (const sid of Array.from(here.keys())) if (!io.sockets.sockets.has(sid)) here.delete(sid);
+    // 1) mark everything within R chunks of somebody, and fault back in anything that was put away
+    if (here) for (const { cx, cy } of here.values())
+      for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+        const gx = cx + dx, gy = cy + dy; if (gx < 0 || gy < 0 || gx >= geom.cx || gy >= geom.cy) continue;
+        const p = gy * geom.cx + gx; ch.lastNear[p] = now;
+        if (ch.blob[p]) rehydrateChunk(room, p);
+      }
+    // 2) evict what has been out of everyone's radius for longer than the grace period
+    for (let p = 0; p < geom.nPages; p++) {
+      if (ch.blob[p] || now - ch.lastNear[p] <= chunkCfg.graceMs) continue;
+      if (!CHUNK_CONTENT.some(f => s[f] && s[f].pages[p])) continue;   // nothing there to put away
+      evictChunk(room, p);
+    }
+  }
+}
+setInterval(chunkResidencySweep, Math.max(1000, chunkCfg.sweepMs | 0));
+
 // ── FINE-CELL LIQUID: coarse↔fine conversion + placement + wire helpers (inc 1). All outside the sim block, so the
 // harness never sees them. Volume mapping: a coarse cell holds up to LIQUID_MAX units; a full coarse cell = SUB² full fine
 // cells, so upscale multiplies units by SUB² and downscale divides by SUB².
@@ -4513,16 +4683,40 @@ function snapshotObjSrv(o) {                            // server twin of the cl
   if (o.hp === null) obj.breakable = false;
   return obj;
 }
+// One number standing for "has ANY cell in this room changed" — a fold over the per-chunk content hashes, each of
+// which is itself cached against its chunk's page revisions. A settled room therefore costs one pass over ~210
+// cached u32s, not a walk of 777,600 cells. -1 = cannot answer (see the note in captureRoomBlob).
+const _terrBlobCache = new Map();                       // avRoom → { sig, terrain, mats }
+function roomChunkSig(avRoom) {
+  const s = peekCells(avRoom); if (!s.terrain || (s.fineSub || 1) !== 1) return -1;
+  const n = WORLD_GEOM().nPages; let h = 0x811c9dc5;
+  for (let p = 0; p < n; p++) { h = (h ^ chunkHash(avRoom, p)) >>> 0; h = Math.imul(h, 0x01000193) >>> 0; }
+  return h;
+}
 function captureRoomBlob(avRoom) {                      // → a Lvl blob (terrain RLE + used mats + objects), or null if empty
   const grid = peekCells(avRoom).terrain, objs = roomObjects[avRoom];
   const hasTerr = grid && grid.some(v => v !== 0), hasObj = objs && objs.size;
   if (!hasTerr && !hasObj) return null;
   const g = grid || ensureTerrain(avRoom);
-  const mats = {}, mm = roomMats[avRoom] || {};
-  if (hasTerr) { const used = new Set(); g.scan((_i, o, page) => { const v = page[o]; if (v >= CUSTOM_MAT_MIN) used.add(v); }); for (const v of used) if (mm[v]) mats[v] = mm[v]; }
+  // ⭐ DELTA PERSISTENCE (SHARED-WORLD.md §7, Phase 3). The terrain half is by far the expensive part of a snapshot
+  // — a full-world RLE plus a scan for the custom materials it uses — and autosave runs it every 30s per persistent
+  // Level whether or not anything moved. The chunk hashes answer exactly that question, so an unchanged world reuses
+  // its previous encoding instead of recomputing it.
+  // ⚠️ OBJECTS ARE NOT COVERED BY CHUNK HASHES (they are not cell state), so they are still rebuilt every pass —
+  // ≤190 per room, cheap. Caching them off a terrain signature would silently miss an object edit.
+  // ⚠️ `roomChunkSig` returns -1 when it cannot answer (no terrain yet, or SUB≠1 where the terrain and liquid grids
+  // do not share a chunk grid); that bypasses the cache rather than pinning it at a constant signature forever.
+  const sig = roomChunkSig(avRoom);
+  let cached = _terrBlobCache.get(avRoom);
+  if (sig < 0 || !cached || cached.sig !== sig) {
+    const mats = {}, mm = roomMats[avRoom] || {};
+    if (hasTerr) { const used = new Set(); g.scan((_i, o, page) => { const v = page[o]; if (v >= CUSTOM_MAT_MIN) used.add(v); }); for (const v of used) if (mm[v]) mats[v] = mm[v]; }
+    cached = { sig, mats, terrain: { cols: TERRAIN_COLS, rows: TERRAIN_ROWS, cell: TERRAIN_CELL, runs: terrainRLE(g).runs, hpRuns: peekCells(avRoom).terrainHp ? terrainRLE(peekCells(avRoom).terrainHp).runs : undefined } };
+    if (sig >= 0) _terrBlobCache.set(avRoom, cached); else _terrBlobCache.delete(avRoom);
+  }
   return {
-    terrain: { cols: TERRAIN_COLS, rows: TERRAIN_ROWS, cell: TERRAIN_CELL, runs: terrainRLE(g).runs, hpRuns: peekCells(avRoom).terrainHp ? terrainRLE(peekCells(avRoom).terrainHp).runs : undefined },
-    mats,
+    terrain: cached.terrain,
+    mats: cached.mats,
     objects: objs ? [...objs.values()].filter(o => !(typeof o.id === 'string' && o.id.startsWith('world-'))).map(snapshotObjSrv) : [],
   };
 }
@@ -5238,7 +5432,35 @@ io.on('connection', (socket) => {
       socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
     }
     if (currentAvatarRoom) socket.leave(currentAvatarRoom);
+    if (currentAvatarRoom && roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);   // Phase 3: stop holding chunks resident for someone who left
     delete socketToAvatarRoom[socket.id];
+  });
+  // ── CHUNK RESIDENCY BEACON (SHARED-WORLD.md §7, Phase 3). A coarse, low-rate position so the server knows which
+  // chunks to keep resident. Avatar positions otherwise travel P2P and never reach the server at all (see the
+  // chunkCfg block). Deliberately not used for anything authoritative — it decides what is in MEMORY, nothing else,
+  // so a client lying about it can only make its own world load differently.
+  socket.on('avt-where', ({ x, y }) => { if (currentAvatarRoom) noteWhere(currentAvatarRoom, socket.id, +x, +y); });
+  // ── CHUNK RESYNC. The client sends the hashes it believes each chunk has; the server answers with the content of
+  // the ones that disagree, over the SAME `terrain-set` / `liquid-fine-cells` wires it already parses. This is the
+  // repair path for a dropped diff, and it is per-chunk rather than whole-world, which is the point of hashing.
+  socket.on('chunk-verify', ({ hashes }) => {
+    const room = currentAvatarRoom;
+    if (!room || !Array.isArray(hashes) || !peekCells(room).terrain) return;
+    const geom = WORLD_GEOM(), mine = chunkHashes(room), bad = [];
+    for (let p = 0; p < geom.nPages && p < hashes.length; p++) if ((hashes[p] >>> 0) !== mine[p]) bad.push(p);
+    socket.emit('chunk-verify-result', { mismatch: bad, total: geom.nPages });
+    const s = peekCells(room), tc = [], fine = [];
+    for (const p of bad.slice(0, 12)) {                     // bounded: a badly out-of-date client repairs over several passes
+      const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
+      for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
+        for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
+          const i = (r0 + lr) * geom.cols + c0 + lc;
+          tc.push(i, s.terrain.g(i));
+          if (s.fineTotal && s.fineTotal.g(i) > 0) fine.push(i);
+        }
+    }
+    if (tc.length) socket.emit('terrain-set', { cells: tc });
+    if (fine.length) { const cells = []; fineWirePush(room, fine, cells); socket.emit('liquid-fine-cells', { sub: 1, cols: TERRAIN_COLS, cells }); }
   });
   socket.on('avt-offer',  ({ to, sdp })       => { socket.to(to).emit('avt-offer',  { from: socket.id, sdp }); });
   socket.on('avt-answer', ({ to, sdp })       => { socket.to(to).emit('avt-answer', { from: socket.id, sdp }); });
