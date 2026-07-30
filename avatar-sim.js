@@ -42,10 +42,15 @@
   // Stage 6: the built-in floating platforms were removed — players build their own with the
   // hotbar Platform tool. Only the ground floor remains so there's footing at spawn. (Three
   // identical entries are kept so layoutIndex/urlHash callers still resolve.)
+  // ⚠️ ALL THREE MUST SPAN THE FULL WORLD_W. Entry [2] was left at the old 5120 when the world widened to 15360
+  // (Stage 6) and [0]/[1] were updated — so on the ~1/3 of URLs whose hash picks it, the world floor stopped at
+  // x=5120 and the BEDROCK BAND (drawPlatform's avBgMode-3 render of this platform) simply was not there for the
+  // remaining two thirds of the world. Reported as "the bedrock is visually missing" on 2026-07-31; the comment
+  // above already claimed the three were identical, so this restores the stated intent rather than changing it.
   const STAGE_LAYOUTS = [
     [ { x: 0, y: 648, w: 15360, h: 70 } ],
     [ { x: 0, y: 648, w: 15360, h: 70 } ],
-    [ { x: 0, y: 648, w: 5120, h: 70 } ]
+    [ { x: 0, y: 648, w: 15360, h: 70 } ]
   ];
 
   // Stage 6 — taller world for building. Shift each authored 720-tall layout down so
