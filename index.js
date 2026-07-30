@@ -1555,8 +1555,15 @@ function chunkGeom(cols, rows) {
 // `seedFn` = how a freshly faulted page is initialised when its default is NOT zero (only fineLevelAcc, whose cells
 // carry a per-index hash so the invisible sub-unit levelling steps do not all align). A seeded array must fault its
 // page on READ too, or an untouched cell would read 0 instead of its phase — hence the branch in `g()`.
-function PagedArray(geom, Ctor, stride, seedFn) {
+function PagedArray(geom, Ctor, stride, seedFn, room) {
   this.geom = geom; this.Ctor = Ctor; this.T = (stride | 0) || 1; this.seedFn = seedFn || null;
+  // ⭐ EVICTION MUST BE TRANSPARENT TO ACCESS. An evicted chunk has no pages, so without this every read would hand
+  // back the shared ZERO page and the chunk would look like EMPTY WORLD — which is exactly what it did: liquid at a
+  // chunk seam saw air where solid ground was evicted and poured through it, one cell wide, and a write into an
+  // evicted chunk was later clobbered by the stale blob (reported from play as invisible-but-solid terrain).
+  // `room` + `ev` let a page fault restore the blob first. The flags array is referenced DIRECTLY (not looked up
+  // per miss) because a miss is common — an air cell in a chunk that has never held liquid misses every read.
+  this.room = room || null; this.ev = null;
   this.pages = new Array(geom.nPages).fill(null);
   this.zero = new Ctor(CHUNK_CELLS * this.T);     // read-through for an unallocated page — NEVER written
   this.length = geom.cells * this.T;              // exactly what the old flat array reported
@@ -1571,9 +1578,18 @@ function PagedArray(geom, Ctor, stride, seedFn) {
 PagedArray.prototype._alloc = function (p) {
   const a = new this.Ctor(CHUNK_CELLS * this.T);
   if (this.seedFn) this.seedFn(a, p, this.geom, this.T);
-  this.pages[p] = a; this.live++; return a;
+  this.pages[p] = a; this.live++;
+  // ⚠️ Ordering: the page is installed BEFORE the restore, and rehydrateChunk clears the evicted flag and takes the
+  // blob before decoding — so the decode's own writes re-enter here and see a normal, un-evicted chunk.
+  if (this.ev !== null && this.ev[p]) rehydrateChunk(this.room, p);
+  return a;
 };
-PagedArray.prototype.rp = function (i) { const p = this.geom.pageOf[i]; return this.pages[p] || (this.seedFn ? this._alloc(p) : this.zero); };
+PagedArray.prototype.rp = function (i) { const p = this.geom.pageOf[i], a = this.pages[p]; return a || this._miss(p); };
+// The cold half of rp, kept out of line so the hot path is just "load the page and return it".
+PagedArray.prototype._miss = function (p) {
+  if (this.ev !== null && this.ev[p]) return this._alloc(p);       // evicted → fault it back, blob and all
+  return this.seedFn ? this._alloc(p) : this.zero;                 // genuinely empty → the shared zero page
+};
 PagedArray.prototype.wp = function (i) { const p = this.geom.pageOf[i]; this.rev[p]++; return this.pages[p] || this._alloc(p); };
 PagedArray.prototype.o = function (i) { return this.geom.offOf[i] * this.T; };
 PagedArray.prototype.g = function (i) { return this.rp(i)[this.geom.offOf[i] * this.T]; };
@@ -1811,15 +1827,20 @@ function seedLevelAcc(page, p, geom, _T) {
     for (let lc = 0; lc < CHUNK_SIDE; lc++) { const gc = cx0 + lc; if (gc >= geom.cols) break;
       page[lr * CHUNK_SIDE + lc] = ((Math.imul(gr * geom.cols + gc, 2654435761)) >>> 0) / 4294967296; } }
 }
-function newPagedField(field, geom) {
+function newPagedField(field, geom, room) {
+  let pa = null;
   switch (field) {
-    case 'terrain': case 'terrainHp': case 'sat': case 'fineTotal': case 'fineFluxSeen': return new PagedArray(geom, Uint8Array, 1);
-    case 'dilute': return new PagedArray(geom, Float32Array, 1);
-    case 'fineAmt': return new PagedArray(geom, Uint8Array, LIQ_T);
-    case 'fineLevelAcc': return new PagedArray(geom, Float32Array, 1, seedLevelAcc);
-    case 'fineStill': return new PagedArray(geom, Uint16Array, 1);
+    case 'terrain': case 'terrainHp': case 'sat': case 'fineTotal': case 'fineFluxSeen': pa = new PagedArray(geom, Uint8Array, 1, null, room); break;
+    case 'dilute': pa = new PagedArray(geom, Float32Array, 1, null, room); break;
+    case 'fineAmt': pa = new PagedArray(geom, Uint8Array, LIQ_T, null, room); break;
+    case 'fineLevelAcc': pa = new PagedArray(geom, Float32Array, 1, seedLevelAcc, room); break;
+    case 'fineStill': pa = new PagedArray(geom, Uint16Array, 1, null, room); break;
     default: return null;
   }
+  // Only wire the evicted flags when this field is on the CHUNK GRID. A fine field built at SUB≠1 (probe rigs) has a
+  // different page count, so indexing the room's flags with its page numbers would be nonsense.
+  if (pa && room && geom.nPages === WORLD_GEOM().nPages) pa.ev = chunksOf(room).evicted;
+  return pa;
 }
 const FINE_FIELDS = new Set(['fineAmt', 'fineTotal', 'fineLevelAcc', 'fineStill', 'fineFluxSeen']);
 function fieldGeom(field, s) {
@@ -1836,7 +1857,7 @@ function cellView(field) {
       // field into existence first if it is not there yet. Only non-zero cells are written, so an empty scene costs
       // no pages — which is also what makes the rigs a fair test of the sparse path.
       if (v && v.length !== undefined && !(v instanceof PagedArray) && typeof v !== 'string') {
-        const pa = (s[field] instanceof PagedArray) ? s[field].fill(0) : (s[field] = newPagedField(field, fieldGeom(field, s)));
+        const pa = (s[field] instanceof PagedArray) ? s[field].fill(0) : (s[field] = newPagedField(field, fieldGeom(field, s), room));
         if (pa) { for (let n = 0; n < v.length; n++) if (v[n]) { const c = (n / pa.T) | 0; pa.wp(c)[pa.o(c) + (n % pa.T)] = v[n]; } return true; }
       }
       s[field] = v; return true;
@@ -1845,8 +1866,8 @@ function cellView(field) {
 }
 const WORLD_GEOM = () => chunkGeom(TERRAIN_COLS, TERRAIN_ROWS);   // the terrain-resolution geometry (SUB=1), for the fields that are not fine-grid ones
 // ==CELL_STORE_BLOCK_END==
-function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', WORLD_GEOM())); }
-function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', WORLD_GEOM())); }
+function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', WORLD_GEOM(), room)); }
+function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', WORLD_GEOM(), room)); }
 // Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
 const BUILTIN_STRENGTH = { 2: 3, 4: 2, 5: 2, 17: 2 };  // stone tough, ice/mud/drain middling (matches client TERRAIN_MATS); others 1
 function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return BUILTIN_STRENGTH[v] || 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
@@ -2150,7 +2171,7 @@ const LIQUID_MAX_PER_TICK = 9000;                     // process at most this ma
 // accumulator, and only once saturated (dilution ≥ acid·K) does the acid CONVERT to water — both rate-limited, so a drop can't
 // clear a pool and it's never instant. Water is consumed (volume drops), which is the accepted tradeoff for "limited water".
 // (`dilute` on the cell store: water soaked into an acid cell, awaiting conversion — Float32 because K can be non-integer.)
-function ensureDilute(room) { const s = cellsOf(room); return s.dilute || (s.dilute = newPagedField('dilute', WORLD_GEOM())); }
+function ensureDilute(room) { const s = cellsOf(room); return s.dilute || (s.dilute = newPagedField('dilute', WORLD_GEOM(), room)); }
 const ACID_K = 1.5;          // water soaked (consumed) to saturate + convert 1 acid unit
 const ACID_SOAK_TICKS = 2;   // soak 1 water into dilution every N ticks (rate ≈ 1/N ≈ 0.5/tick)
 const ACID_CONVERT_TICKS = 2;// convert 1 acid → water every N ticks once saturated (rate ≈ 0.5/tick)
@@ -2184,12 +2205,12 @@ function ensureFineArrays(room, SUB) {
   if (s.fineSub !== SUB || !s.fineAmt || s.fineTotal.length !== cells) {
     s.fineSub = SUB;
     const geom = chunkGeom(TERRAIN_COLS * SUB, TERRAIN_ROWS * SUB);
-    s.fineAmt = newPagedField('fineAmt', geom);
-    s.fineTotal = newPagedField('fineTotal', geom);
+    s.fineAmt = newPagedField('fineAmt', geom, room);
+    s.fineTotal = newPagedField('fineTotal', geom, room);
     cellRooms.fineArr.add(room);
     // The levelling carry's per-index phase is applied PER PAGE as it faults in (seedLevelAcc), not by writing
     // `cells` floats up front — same values at the same indices, but an untouched region costs nothing.
-    s.fineLevelAcc = newPagedField('fineLevelAcc', geom);
+    s.fineLevelAcc = newPagedField('fineLevelAcc', geom, room);
     fineSet(room);
   }
   return s.fineAmt;
@@ -2237,7 +2258,7 @@ const capFrac = (f) => { const v = Math.round(LIQUID_MAX * f); return v < 1 ? 1 
 // — was DELETED 2026-07-31 for the same reason as roomLevelAcc: the coarse flux pass was its only caller and went with
 // liquidTickRoom on 2026-07-29, leaving two more full-world arrays nobody allocated. The fine pair below is live
 // (`fineLiquidTickRoom`'s flux pass), though note flux levelling itself is SHELVED behind `liquidCfg.fluxLevel`, off.
-function ensureFineFluxSeen(room, cells) { const s = cellsOf(room), a = s.fineFluxSeen; return (a && a.length === cells) ? a : (s.fineFluxSeen = newPagedField('fineFluxSeen', chunkGeom(TERRAIN_COLS * (s.fineSub || 1), TERRAIN_ROWS * (s.fineSub || 1)))); }
+function ensureFineFluxSeen(room, cells) { const s = cellsOf(room), a = s.fineFluxSeen; return (a && a.length === cells) ? a : (s.fineFluxSeen = newPagedField('fineFluxSeen', chunkGeom(TERRAIN_COLS * (s.fineSub || 1), TERRAIN_ROWS * (s.fineSub || 1)), room)); }
 // ⚠️ NOT paged: this is a flood-fill STACK, indexed by stack position, not by cell — paging it would be meaningless.
 // It is only allocated when `liquidCfg.fluxLevel` is on, which is SHELVED and off by default.
 function ensureFineFluxStack(room, cells) { const s = cellsOf(room), a = s.fineFluxStack; return (a && a.length === cells) ? a : (s.fineFluxStack = new Int32Array(cells)); }
@@ -2277,7 +2298,7 @@ function activatePowderRect(room, grid, c0, r0, c1, r1) {
 // SATURATION tuning (terrain reactions). SAT_MAX ≈ "a cell's worth" of water; ABSORB per absorb-tick; DRY per soil-tick when
 // away from water; a saturated sand cell needs ≥ CLUMP saturated-sand/quicksand neighbours to turn (keeps beach edges dry).
 const SAT_MAX_F = 0.1875, SAT_ABSORB_F = 0.0625, SAT_DRY = 1, SAT_CLUMP_MIN = 3;   // low SAT_MAX: earth saturates fast + absorbs little water → flow barely slowed, pre-gen lakes barely shrink
-function ensureSat(room) { const s = cellsOf(room); return s.sat || (s.sat = newPagedField('sat', WORLD_GEOM())); }
+function ensureSat(room) { const s = cellsOf(room); return s.sat || (s.sat = newPagedField('sat', WORLD_GEOM(), room)); }
 // (`soilActive` on the cell store: Set<cellIndex> of absorbent/wet solid cells worth ticking — earth/sand soaking, mud drying.)
 function soilSet(room) { const s = cellsOf(room); if (!s.soilActive) { s.soilActive = new Set(); cellRooms.soil.add(room); } return s.soilActive; }
 // Seed the soil set so soilTickRoom processes absorption/drying around water. Called on PAINT and at GEN (not just when a
@@ -2472,7 +2493,7 @@ function fineLiquidTickRoom(room, SUB) {
   const sinkRate = Math.max(0, Math.min(cap, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
   const changedSet = new Set(), airborneWire = new Set();   // accumulate across the physics sub-steps below; broadcast once
   // QUIESCENCE scratch (only when enabled): per-fine-cell counter of consecutive ticks the cell did NOT move. Reallocated if NCELL changed (sub switch).
-  const quiesce = liquidCfg.fineQuiesce ? ((st.fineStill && st.fineStill.length === NCELL) ? st.fineStill : (st.fineStill = newPagedField('fineStill', chunkGeom(COLS, FROWS)))) : null;
+  const quiesce = liquidCfg.fineQuiesce ? ((st.fineStill && st.fineStill.length === NCELL) ? st.fineStill : (st.fineStill = newPagedField('fineStill', chunkGeom(COLS, FROWS), room))) : null;
   let stepMoves = 0;   // cell-changes in the current sub-step (adaptive-K activity proxy)
   const wake = (j) => { if (j >= 0 && j < NCELL && !isSolid(j) && tot.g(j) > 0) active.add(j); };
   const wakeN = (j) => { const x = j % COLS; wake(j - COLS); wake(j + COLS); if (x > 0) wake(j - 1); if (x < COLS - 1) wake(j + 1); };
