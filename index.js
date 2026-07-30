@@ -3521,6 +3521,104 @@ function interestFanout(room, ev, payload) {
 // ==INTEREST_BLOCK_END==
 wireFanout = interestFanout;   // ⇐ the one line that turns the sim's broadcasts into interest-limited fan-out
 
+// ═══ VISIBILITY CAP — which PLAYERS you are told about (SHARED-WORLD.md §3, §7 Phase 4) ═════════════════════════
+// Chunk subscriptions above bound WORLD state. This bounds PLAYER state, which is the quadratic one: §3 measured 50
+// mutually-visible players at ≈49k msg/s and 200 at ≈800k, and in a page room the mesh makes it worse than that,
+// because every pair is a DataChannel rather than a message.
+//
+// ⚠️ ~40 WAS A PLACEHOLDER AND SO WAS THE METHOD. What the measurement actually said
+// (scratchpad/probe_interest.js, part C — real WebSockets carrying socket.io's own framing):
+//   · ~100,000 batched sends/s on one core, essentially flat up to ~1.5KB per packet.
+//   · With per-tick batching a room costs P × tickrate messages REGARDLESS of the cap, so that ceiling bounds
+//     CONCURRENT PLAYERS (~1,000 at 20Hz on a fifth of a core), not the cap.
+//   · The cap bounds PACKET SIZE, i.e. per-client bandwidth: 40 peers is 2965 B ⇒ 0.47 Mbit/s at 20Hz, and even
+//     160 peers is only 1.9 Mbit/s.
+// ⇒ **BANDWIDTH DOES NOT PICK THE NUMBER.** 40 is comfortable and so is twice that. What actually binds in a page
+// room is the MESH: a peer is an RTCPeerConnection with two DataChannels, ICE and a keepalive, which is nothing
+// like 74 bytes of position. So the cap here is a mesh-degree limit, and the honest position is that the exact
+// value is not yet measurable from the server — it wants a browser measurement of peer-connection cost, which is
+// Phase 5 territory. It is therefore CONFIGURABLE and ships OFF, with 32 as the default when switched on.
+//
+// ⚠️ NO MIDDLE TIER YET. §3 wants "nearest N at full rate, the rest degraded to slow updates or an aggregate".
+// A page room has no relay to carry a slow tier — positions travel peer-to-peer or not at all — so this is full
+// rate or nothing. The degraded tier arrives with Phase 5, which is where it can exist.
+// ==PEER_CAP_BLOCK_START==
+const peerCfg = {
+  cap: 0,              // 0 = OFF. Ships off, like chunkCfg.evict did: turn it on after eyeballing it in-browser.
+  friendRings: 6,      // ⭐ a friend counts as this many chunks CLOSER, rather than jumping the queue outright —
+  followRings: 3,      //   §3 says favour friends "when they are nearby", so it is a discount, not an override.
+  stickyRings: 2,      // hysteresis: someone already meshed is held slightly, or the set flaps at the boundary and
+  affinityTtlMs: 60000,//   WebRTC connections are torn down and rebuilt every beacon for no reason at all
+};
+// discordId → { at, friends:Set, follows:Set }. One query per user per TTL instead of areFriends() per PAIR, which
+// at 2Hz over 60 players would be 7,200 SQLite round-trips a second.
+const _affinity = new Map();
+function affinityOf(discordId) {
+  if (!discordId) return null;
+  const hit = _affinity.get(discordId);
+  if (hit && Date.now() - hit.at < peerCfg.affinityTtlMs) return hit;
+  const friends = new Set(), follows = new Set();
+  try {
+    for (const r of db.prepare(`SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END AS o
+                                FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`).all(discordId, discordId, discordId)) friends.add(r.o);
+    for (const r of db.prepare(`SELECT followee_id AS o FROM follows WHERE follower_id=?`).all(discordId)) follows.add(r.o);
+  } catch {}
+  const rec = { at: Date.now(), friends, follows };
+  _affinity.set(discordId, rec); return rec;
+}
+// Where a player IS, in chunk coordinates. The avatar point when there is a body, the middle of the viewport when
+// there is not — cursor mode has no body at all and must still be placed somewhere sensible.
+function anchorOf(room, sid) {
+  const w = roomWhere[room] && roomWhere[room].get(sid); if (!w) return null;
+  if (w.ax >= 0) return [w.ax, w.ay];
+  return [(w.cx0 + w.cx1) / 2, (w.cy0 + w.cy1) / 2];
+}
+const roomPeers = {};   // avRoom → Map(sid → Set(peer sid)) — the set each socket is currently meshed with
+// Score a candidate for `sid`. LOWER IS BETTER; it is a distance in chunks with social discounts applied.
+function peerCost(room, sid, aff, cur, other) {
+  const a = anchorOf(room, sid), b = anchorOf(room, other);
+  // ⚠️ UNKNOWN POSITION ⇒ INCLUDE, never exclude. Someone who has not beaconed yet (just joined, or an older
+  // client) has no anchor, and dropping them would make new arrivals invisible to everyone — the same "absent
+  // reads as empty" mistake that Phase 3 made with evicted chunks, wearing a player's face.
+  if (!a || !b) return -Infinity;
+  let d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+  const od = socketToDiscordId[other];
+  if (aff && od) { if (aff.friends.has(od)) d -= peerCfg.friendRings; else if (aff.follows.has(od)) d -= peerCfg.followRings; }
+  if (cur && cur.has(other)) d -= peerCfg.stickyRings;
+  return d;
+}
+function peerSelect(room, sid) {
+  const pool = roomAvt[room];
+  if (!pool || !peerCfg.cap) return null;                                  // cap 0 ⇒ no selection at all: mesh with everyone
+  const cand = [...pool].filter(o => o !== sid);
+  if (cand.length <= peerCfg.cap) return new Set(cand);                    // under the cap ⇒ nothing to choose
+  const aff = affinityOf(socketToDiscordId[sid]), cur = (roomPeers[room] || new Map()).get(sid);
+  cand.sort((x, y) => peerCost(room, sid, aff, cur, x) - peerCost(room, sid, aff, cur, y));
+  return new Set(cand.slice(0, peerCfg.cap));
+}
+// Recompute one socket's peer set and tell it what changed. Driven by the same beacon as everything else.
+// ⚠️ THE MESH IS SYMMETRIC EVEN WHEN INTEREST IS NOT. If A wants B, A offers and B answers, so B ends up connected
+// to someone outside its own selection. That is deliberate and it is the safe direction: the alternative is A
+// seeing B while B cannot see A, which in a game with combat in it is worse than an extra connection.
+function updatePeers(room, sid) {
+  if (!peerCfg.cap) return;
+  const want = peerSelect(room, sid); if (!want) return;
+  const m = roomPeers[room] || (roomPeers[room] = new Map());
+  const had = m.get(sid) || new Set();
+  const add = [...want].filter(p => !had.has(p)), mute = [...had].filter(p => !want.has(p));
+  m.set(sid, want);
+  if (!add.length && !mute.length) return;
+  const sock = io.sockets.sockets.get(sid); if (!sock) return;
+  sock.emit('avt-peers', { add, mute });
+}
+function dropPeers(room, sid) {
+  const m = roomPeers[room]; if (!m) return;
+  m.delete(sid);
+  for (const s of m.values()) s.delete(sid);
+  if (!m.size) delete roomPeers[room];
+}
+// ==PEER_CAP_BLOCK_END==
+
 // ── FINE-CELL LIQUID: coarse↔fine conversion + placement + wire helpers (inc 1). All outside the sim block, so the
 // harness never sees them. Volume mapping: a coarse cell holds up to LIQUID_MAX units; a full coarse cell = SUB² full fine
 // cells, so upscale multiplies units by SUB² and downscale divides by SUB².
@@ -5144,6 +5242,23 @@ io.on('connection', (socket) => {
       interestCfg.chunks = on;
     }
     if ('interestMargin' in patch) interestCfg.margin = Math.max(0, Math.min(64, patch.interestMargin | 0));
+    // VISIBILITY CAP (Phase 4). ⚠️ TURNING IT OFF MUST RE-OFFER, not merely stop selecting: every socket has peers
+    //  it was told to mute, and those DataChannels are CLOSED. Going back to "everyone" without saying so would
+    //  leave the mesh permanently short of exactly the connections the cap tore down.
+    if ('peerCap' in patch) {
+      const nv = Math.max(0, Math.min(512, patch.peerCap | 0));
+      if (!nv && peerCfg.cap) for (const room of Object.keys(roomPeers)) {
+        for (const [sid, had] of roomPeers[room]) {
+          const sock = io.sockets.sockets.get(sid); if (!sock) continue;
+          const add = [...(roomAvt[room] || [])].filter(p => p !== sid && !had.has(p));
+          if (add.length) sock.emit('avt-peers', { add, mute: [] });
+        }
+        delete roomPeers[room];
+      }
+      peerCfg.cap = nv;
+      if (nv) for (const room of Object.keys(roomAvt)) for (const sid of roomAvt[room]) updatePeers(room, sid);
+    }
+    if ('peerFriendRings' in patch) peerCfg.friendRings = Math.max(0, Math.min(999, +patch.peerFriendRings || 0));
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
   });
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
@@ -5654,8 +5769,14 @@ io.on('connection', (socket) => {
     if (type === 'world') ensureWorldGenerated(avRoom, roomId, levelIndex);   // seed keyed by roomId (=URL for the default room → identical worlds), once per server lifetime; band from the Level's size preset
     maybeHydratePublished(avRoom, roomId, levelIndex);   // Phase 7b: server-load a published World's content (no host needed); runs before the replay below
     if (!roomAvt[avRoom]) roomAvt[avRoom] = new Set();
-    const existingPeers = [...roomAvt[avRoom]];
     roomAvt[avRoom].add(socket.id);
+    // Phase 4 visibility cap: who this joiner offers to. With peerCfg.cap = 0 this is every existing peer, i.e.
+    // exactly what it has always been. `peerSelect` runs AFTER the add above so the pool is the real one, and it
+    // filters the joiner out itself. The record is seeded here so the first beacon diffs against something real
+    // rather than re-offering to everyone it just offered to.
+    const _sel = peerSelect(avRoom, socket.id);
+    const existingPeers = [...(_sel || roomAvt[avRoom])].filter(id => id !== socket.id);
+    if (_sel) (roomPeers[avRoom] || (roomPeers[avRoom] = new Map())).set(socket.id, new Set(existingPeers));
     socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, spawn: (type === 'world') ? worldSpawnFor(avRoom) : null });
     // Replay the current world objects to the new joiner (late-joiner sync). `levelIndex` lets the client
     // drop a replay that arrives AFTER it has switched Levels again (rapid switching → stale cross-Level bleed).
@@ -5687,7 +5808,7 @@ io.on('connection', (socket) => {
     }
     if (currentAvatarRoom) socket.leave(currentAvatarRoom);
     if (currentAvatarRoom && roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);   // Phase 3: stop holding chunks resident for someone who left
-    if (currentAvatarRoom) dropSubs(currentAvatarRoom, socket.id);                                          // Phase 4: and stop tracking what they were subscribed to
+    if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); }        // Phase 4: and stop tracking what they were subscribed/meshed to
     delete socketToAvatarRoom[socket.id];
   });
   // ── CHUNK RESIDENCY BEACON (SHARED-WORLD.md §7, Phase 3). A coarse, low-rate position so the server knows which
@@ -5700,6 +5821,7 @@ io.on('connection', (socket) => {
     if (!currentAvatarRoom) return;
     const rect = noteWhere(currentAvatarRoom, socket.id, v);
     if (rect) updateSubs(currentAvatarRoom, socket.id, rect);
+    updatePeers(currentAvatarRoom, socket.id);   // Phase 4: and re-select who is worth being meshed with
   });
   // ── CHUNK RESYNC. The client sends the hashes it believes each chunk has; the server answers with the content of
   // the ones that disagree, over the SAME `terrain-set` / `liquid-fine-cells` wires it already parses. This is the
@@ -6392,6 +6514,7 @@ io.on('connection', (socket) => {
     if (currentAvatarRoom) {
       if (roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);
       dropSubs(currentAvatarRoom, socket.id);
+      dropPeers(currentAvatarRoom, socket.id);
     }
     if (socketDmRooms[socket.id]) {
       for (const roomId of socketDmRooms[socket.id]) {
