@@ -1659,6 +1659,11 @@ function RoomChunks(nPages) {
   this.stamp = new Float64Array(nPages);      // Σ rev of the content fields when that hash was taken (-1 = never)
   this.blob = new Array(nPages).fill(null);   // an evicted chunk's content, compacted
   this.lastNear = new Float64Array(nPages);   // ms a player was last within the residency radius
+  // An evicted chunk has NO pages, so its hash cannot be recomputed from them — it would come out as "empty" and
+  // chunk-verify would then "repair" every client to empty. The hash is therefore taken BEFORE the pages are
+  // dropped and served from here until the chunk comes back.
+  this.evHash = new Uint32Array(nPages);
+  this.evicted = new Uint8Array(nPages);
   this.stamp.fill(-1);
 }
 function chunksOf(room) { const s = cellsOf(room); return s.chunks || (s.chunks = new RoomChunks(WORLD_GEOM().nPages)); }
@@ -1682,6 +1687,7 @@ const CHUNK_CONTENT_STRIDE = { terrain: 1, terrainHp: 1, fineAmt: 0, fineTotal: 
 function chunkHash(room, p) {
   const s = peekCells(room); if (!s.terrain || (s.fineSub || 1) !== 1) return 0;
   const ch = chunksOf(room);
+  if (ch.evicted[p]) return ch.evHash[p];     // pages are gone; the content is in the blob (see RoomChunks)
   let stamp = 0; for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) stamp += pa.rev[p]; }
   if (ch.stamp[p] === stamp) return ch.hash[p];
   let h = 0x811c9dc5;
@@ -1730,7 +1736,10 @@ function evictChunk(room, p) {
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
   const ch = chunksOf(room);
   const anyLive = CHUNK_CONTENT.some(f => s[f] && s[f].pages[p]);
-  if (anyLive) ch.blob[p] = encodeChunk(s, p);
+  if (!anyLive) return false;                // nothing to put away; do not mark it evicted (it has no blob)
+  ch.evHash[p] = chunkHash(room, p);         // ⚠️ BEFORE the pages go — see RoomChunks.evHash
+  ch.blob[p] = encodeChunk(s, p);
+  ch.evicted[p] = 1;
   for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
   for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === WORLD_GEOM().nPages) s[f].dropPage(p);
   // Drop this chunk's cells from the work sets, and release a set that empties (same contract as dropFineActive).
@@ -1741,11 +1750,25 @@ function evictChunk(room, p) {
   if (s.src) { for (const i of Array.from(s.src.keys())) if (geom.pageOf[i] === p) s.src.delete(i); if (!s.src.size) dropSrcMap(room); }
   return true;
 }
+// ⚠️⚠️ ANYTHING THAT READS THE WHOLE WORLD MUST CALL THIS FIRST. An evicted chunk has no pages, so it reads as
+// ZEROS — which would serve a joining client empty terrain and, through autosave, WRITE EMPTINESS TO THE DB for a
+// persistent published world. That is data loss, and it is why eviction stayed off until this existed.
+// (`chunkHash` does not need it: it serves the hash taken before the pages went. That matters — it keeps the
+//  delta-persistence signature stable, so autosave SKIPS an unchanged evicted world instead of materialising it
+//  every 30s and undoing eviction entirely.)
+// ⚠️ It does undo eviction for the room. That is correct rather than wasteful — these callers genuinely need the
+// whole world today — and the residency sweep re-evicts on its next pass. Phase 4 (interest-limited replication)
+// removes the whole-world join replay that is the main caller.
+function materializeRoom(room) {
+  const s = roomCells.get(room); if (!s || !s.chunks) return;
+  const ch = s.chunks;
+  for (let p = 0; p < ch.blob.length; p++) if (ch.blob[p]) rehydrateChunk(room, p);
+}
 function rehydrateChunk(room, p) {
   const s = roomCells.get(room); if (!s) return false;
   const ch = chunksOf(room), blob = ch.blob[p];
   if (!blob) return false;
-  ch.blob[p] = null;
+  ch.blob[p] = null; ch.evicted[p] = 0;
   decodeChunk(s, p, blob);
   // Liquid that comes back is WOKEN, not re-seeded: it resumes flowing from exactly the state it was put away in.
   const amt = s.fineAmt, tot = s.fineTotal;
@@ -3251,42 +3274,67 @@ restartLiquidLoop();
 // the moment somebody approaches. This is also Phase 1 lever 2 — a lake breached two kilometres away stops costing
 // anything, because its cells are no longer in any activity set.
 //
-// ⚠️⚠️ DEFAULT OFF, DELIBERATELY. Phase 3's whole constraint is that behaviour stays identical so it can be diffed
-// against known-good, and eviction is the one part that is NOT behaviour-preserving by construction: liquid inside
-// an evicted chunk stops flowing until someone returns. The storage win (85.9%, measured) is already delivered by
-// lazy paging with this off. Turn it on once it has been eyeballed in-browser, not before.
+// ⚠️ ON since 2026-07-31, after the paged storage layer was verified in-browser and the two things that made
+// eviction unsafe were fixed and guarded (probe_chunking G and H):
+//   · every whole-world READER now calls materializeRoom first — an evicted chunk reads as zeros, so join replay
+//     would have served empty terrain and autosave would have WRITTEN EMPTINESS TO THE DB;
+//   · residency is keyed on the VIEWPORT, not the avatar, so cursor mode (no body, free-panned camera) and
+//     zoomed-out play hold the right chunks.
+// It remains the one part of Phase 3 that is not behaviour-preserving by construction — liquid inside an evicted
+// chunk stops flowing until someone returns, which IS the intent (Phase 1 lever 2) but is visible. Toggle it live
+// with `chunkEvict` on the liquid-cfg wire; turning it off materialises every room for an A/B.
 //
 // ⚠️ THE SERVER DOES NOT OTHERWISE KNOW WHERE PLAYERS ARE. The live avatar path is the P2P DataChannel mesh
 // (`avt-join`), so positions never reach the server; `roomSim` — the relay — stays dormant until Phase 5. Hence the
 // `avt-where` beacon below: a coarse, low-rate position, which is all residency needs and is cheap enough that it
 // costs nothing when eviction is off.
+// ==CHUNK_RESIDENCY_BLOCK_START== (probe_chunking slices this out — stub MWSim/io when you do)
 const chunkCfg = {
-  evict: false,        // master switch (see above) — off = pages are only ever faulted in, never released
-  radius: 3,           // chunks around a player kept resident (3 ⇒ ±1536px at 64×8px chunks)
-  graceMs: 30000,      // how long a chunk stays resident after the last player left its radius
+  evict: true,         // master switch (see above); `chunkEvict` on the liquid-cfg wire toggles it live
+  margin: 2,           // chunks kept resident BEYOND the edge of what a player can see (2 ⇒ 1024px of headroom)
+  graceMs: 30000,      // how long a chunk stays resident after the last player stopped looking near it
   sweepMs: 5000,       // how often residency is recomputed
 };
-const roomWhere = {};  // avRoom → Map(socketId → { cx, cy })
-function noteWhere(avRoom, sid, x, y) {
-  if (!avRoom || !isFinite(x) || !isFinite(y)) return;
+// avRoom → Map(socketId → the chunk rect that socket can see, plus its avatar chunk if it has a body).
+// ⚠️ KEYED ON THE VIEWPORT, NOT THE AVATAR — cursor mode has no body and free-pans the camera, and zooming out
+// shows more world per screen. See the beacon comment in extension/src/16e_avatars_net.js.
+const roomWhere = {};
+function noteWhere(avRoom, sid, v) {
+  if (!avRoom || !v) return;
   const span = CHUNK_SIDE * TERRAIN_CELL;
+  const x = +v.x, y = +v.y;
+  if (!isFinite(x) || !isFinite(y)) return;
+  // Clamp the claimed viewport to the world. It is client-asserted and decides how much memory we hold, so a
+  // client cannot ask us to make the entire world resident by claiming an enormous screen.
+  const w = Math.max(0, Math.min(MWSim.C.WORLD_W, +v.w || 0));
+  const h = Math.max(0, Math.min(MWSim.C.WORLD_H, +v.h || 0));
   const m = roomWhere[avRoom] || (roomWhere[avRoom] = new Map());
-  m.set(sid, { cx: Math.floor(x / span), cy: Math.floor(y / span) });
+  m.set(sid, {
+    cx0: Math.floor(x / span), cy0: Math.floor(y / span),
+    cx1: Math.floor((x + w) / span), cy1: Math.floor((y + h) / span),
+    ax: isFinite(+v.ax) ? Math.floor(+v.ax / span) : -1,
+    ay: isFinite(+v.ay) ? Math.floor(+v.ay / span) : -1,
+  });
 }
 function chunkResidencySweep() {
   if (!chunkCfg.evict) return;
-  const now = Date.now(), geom = WORLD_GEOM(), R = Math.max(0, chunkCfg.radius | 0);
+  const now = Date.now(), geom = WORLD_GEOM(), M = Math.max(0, chunkCfg.margin | 0);
   for (const room of Array.from(roomCells.keys())) {
     const s = roomCells.get(room); if (!s || !s.terrain || (s.fineSub || 1) !== 1) continue;
     const ch = chunksOf(room), here = roomWhere[room];
     if (here) for (const sid of Array.from(here.keys())) if (!io.sockets.sockets.has(sid)) here.delete(sid);
-    // 1) mark everything within R chunks of somebody, and fault back in anything that was put away
-    if (here) for (const { cx, cy } of here.values())
-      for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
-        const gx = cx + dx, gy = cy + dy; if (gx < 0 || gy < 0 || gx >= geom.cx || gy >= geom.cy) continue;
-        const p = gy * geom.cx + gx; ch.lastNear[p] = now;
-        if (ch.blob[p]) rehydrateChunk(room, p);
-      }
+    // 1) mark everything anybody can SEE (plus a margin), and fault back in anything that was put away
+    const mark = (x0, y0, x1, y1) => {
+      for (let gy = Math.max(0, y0); gy <= Math.min(geom.cy - 1, y1); gy++)
+        for (let gx = Math.max(0, x0); gx <= Math.min(geom.cx - 1, x1); gx++) {
+          const p = gy * geom.cx + gx; ch.lastNear[p] = now;
+          if (ch.blob[p]) rehydrateChunk(room, p);
+        }
+    };
+    if (here) for (const v of here.values()) {
+      mark(v.cx0 - M, v.cy0 - M, v.cx1 + M, v.cy1 + M);
+      if (v.ax >= 0) mark(v.ax - M, v.ay - M, v.ax + M, v.ay + M);   // the body too, in case the camera lags it
+    }
     // 2) evict what has been out of everyone's radius for longer than the grace period
     for (let p = 0; p < geom.nPages; p++) {
       if (ch.blob[p] || now - ch.lastNear[p] <= chunkCfg.graceMs) continue;
@@ -3295,6 +3343,7 @@ function chunkResidencySweep() {
     }
   }
 }
+// ==CHUNK_RESIDENCY_BLOCK_END==
 setInterval(chunkResidencySweep, Math.max(1000, chunkCfg.sweepMs | 0));
 
 // ── FINE-CELL LIQUID: coarse↔fine conversion + placement + wire helpers (inc 1). All outside the sim block, so the
@@ -3331,6 +3380,7 @@ function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back do
 // (upscaleRoomToFine / downscaleRoomToCoarse converted a room between the two liquid grids. With the coarse sim gone
 //  there is nothing to convert to or from; seedLiquidActivity now seeds the fine grid directly.)
 function buildFineInit(room) {   // join replay: every non-empty fine cell (same mask encoding)
+  materializeRoom(room);         // an evicted chunk would replay as empty — see materializeRoom
   const st = cellsOf(room), tot = st.fineTotal; if (!tot) return null;
   const SUB = st.fineSub || 1, idx = []; tot.scan((i, o, page) => { if (page[o] > 0) idx.push(i); });   // only faulted pages can hold liquid
   idx.sort((a, b) => a - b);   // page order is chunk-major; the wire and the old flat scan were index-ascending
@@ -4694,6 +4744,7 @@ function roomChunkSig(avRoom) {
   return h;
 }
 function captureRoomBlob(avRoom) {                      // → a Lvl blob (terrain RLE + used mats + objects), or null if empty
+  materializeRoom(avRoom);   // ⚠️ an evicted chunk reads as zeros; persisting that would be silent DATA LOSS
   const grid = peekCells(avRoom).terrain, objs = roomObjects[avRoom];
   const hasTerr = grid && grid.some(v => v !== 0), hasObj = objs && objs.size;
   if (!hasTerr && !hasObj) return null;
@@ -4891,6 +4942,15 @@ io.on('connection', (socket) => {
     if ('sinkRate' in patch) liquidCfg.sinkRate = Math.max(0, Math.min(64, patch.sinkRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     if ('simBudgetPct' in patch) liquidCfg.simBudgetPct = Math.max(0, Math.min(100, patch.simBudgetPct | 0));
+    // CHUNK RESIDENCY (Phase 3) rides the same patch wire so eviction can be A/B'd live from the console without a
+    // restart — which is the whole point while it is being eyeballed. Turning it OFF materialises every room, so a
+    // world that looked wrong under eviction can be compared against the same world with everything resident.
+    if ('chunkEvict' in patch) {
+      chunkCfg.evict = !!patch.chunkEvict;
+      if (!chunkCfg.evict) for (const room of Array.from(roomCells.keys())) materializeRoom(room);
+    }
+    if ('chunkMargin' in patch) chunkCfg.margin = Math.max(0, Math.min(64, patch.chunkMargin | 0));
+    if ('chunkGraceMs' in patch) chunkCfg.graceMs = Math.max(0, Math.min(600000, patch.chunkGraceMs | 0));
     io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
   });
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
@@ -5408,6 +5468,7 @@ io.on('connection', (socket) => {
     // drop a replay that arrives AFTER it has switched Levels again (rapid switching → stale cross-Level bleed).
     socket.emit('avatar-objects-init', { levelIndex, objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
     // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
+    materializeRoom(avRoom);   // join replay reads the whole world — an evicted chunk would arrive empty
     const _cs = cellsOf(avRoom), tg = _cs.terrain;
     if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: _cs.terrainHp ? terrainRLE(_cs.terrainHp).runs : undefined });
     // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
@@ -5439,7 +5500,7 @@ io.on('connection', (socket) => {
   // chunks to keep resident. Avatar positions otherwise travel P2P and never reach the server at all (see the
   // chunkCfg block). Deliberately not used for anything authoritative — it decides what is in MEMORY, nothing else,
   // so a client lying about it can only make its own world load differently.
-  socket.on('avt-where', ({ x, y }) => { if (currentAvatarRoom) noteWhere(currentAvatarRoom, socket.id, +x, +y); });
+  socket.on('avt-where', (v) => { if (currentAvatarRoom) noteWhere(currentAvatarRoom, socket.id, v); });
   // ── CHUNK RESYNC. The client sends the hashes it believes each chunk has; the server answers with the content of
   // the ones that disagree, over the SAME `terrain-set` / `liquid-fine-cells` wires it already parses. This is the
   // repair path for a dropped diff, and it is per-chunk rather than whole-world, which is the point of hashing.
@@ -5450,7 +5511,8 @@ io.on('connection', (socket) => {
     for (let p = 0; p < geom.nPages && p < hashes.length; p++) if ((hashes[p] >>> 0) !== mine[p]) bad.push(p);
     socket.emit('chunk-verify-result', { mismatch: bad, total: geom.nPages });
     const s = peekCells(room), tc = [], fine = [];
-    for (const p of bad.slice(0, 12)) {                     // bounded: a badly out-of-date client repairs over several passes
+    for (const p of bad.slice(0, 12)) {
+      rehydrateChunk(room, p);   // a chunk we are about to READ OUT must not be sitting in a blob                     // bounded: a badly out-of-date client repairs over several passes
       const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
       for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
         for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
