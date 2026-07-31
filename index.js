@@ -3473,7 +3473,9 @@ function dropSubs(room, sid) { const m = roomSubs[room]; if (m) { m.delete(sid);
 // entire mode's worth of players nothing.
 function updateSubs(room, sid, v) {
   if (!interestCfg.chunks) return;
-  const geom = WORLD_GEOM(), M = Math.max(0, interestCfg.margin | 0), e = subsEntry(room, sid);
+  const geom = WORLD_GEOM(), M = Math.max(0, interestCfg.margin | 0);
+  const fresh = !roomSubs[room] || !roomSubs[room].has(sid);
+  const e = subsEntry(room, sid);
   const want = new Set();
   const add = (x0, y0, x1, y1) => {
     for (let gy = Math.max(0, y0); gy <= Math.min(geom.cy - 1, y1); gy++)
@@ -3481,6 +3483,14 @@ function updateSubs(room, sid, v) {
   };
   add(v.cx0 - M, v.cy0 - M, v.cx1 + M, v.cy1 + M);
   if (v.ax >= 0) add(v.ax - M, v.ay - M, v.ax + M, v.ay + M);   // the body too, in case the camera lags it
+  // ⚠️⚠️ EVERY CHUNK OUTSIDE THE FIRST SUBSCRIPTION IS ALREADY DRIFTING. The client's mirror is complete only at
+  // the INSTANT it joins (the join replay is the whole world), and from the first diff onward anything it is not
+  // subscribed to goes stale — including chunks it has NEVER been near. Without this, walking into new territory
+  // handed back the world as it was at join: liquid frozen mid-flow, and a pool drawn half-current, half-stale
+  // across a chunk seam. Reported from play, guarded by probe_subscriptions P. Marking the whole grid is cheap
+  // because an absent page folds into the hash as ONE multiply and the results are cached against page revisions
+  // (and shared with chunk-verify), so a sparse world costs almost nothing here.
+  if (fresh) for (let p = 0; p < geom.nPages; p++) if (!want.has(p)) e.mark.set(p, chunkHash(room, p));
   for (const p of e.subs) if (!want.has(p)) e.mark.set(p, chunkHash(room, p));       // left view: remember how it looked
   for (const p of want) if (!e.subs.has(p)) {                                        // came back: repair if it moved
     if (e.mark.has(p)) { if (e.mark.get(p) !== chunkHash(room, p)) e.pending.add(p); e.mark.delete(p); }
