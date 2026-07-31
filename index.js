@@ -2046,6 +2046,42 @@ const liquidCfg = {
   // 40ms tick on its own. See SHARED-WORLD.md Phase 1 — the goal is that no single player action can
   // exceed the budget, so the server degrades instead of breaking.
   simBudgetPct: 70,
+  // ── THE TWO HOLES THE §7(b) RE-DECISION MEASURED (scratchpad/probe_resolution_redecide.js, 2026-08-01).
+  // That measurement closed §7(b) as "resolution is NOT the problem": the budget's SUSTAINED clamp works at
+  // 8px (mean 22–26ms against a 28ms budget while tier 2 cut K 9→6→4) and cost is FLAT from 1 to 16
+  // simultaneously-disturbing rooms, which is exactly the Phase 1 property. What it also found is that the
+  // PEAK is bounded by nothing — and that coarsening does not fix it, so these two dials do.
+  // ⚠️ BOTH SHIP OFF. They change scheduling behaviour, and the convention on this branch is that anything
+  // not behaviour-preserving ships default OFF behind a live toggle. `budgetSeed`/`budgetRate` on the
+  // liquid-cfg wire, plus System-tab controls. probe_budget.js guards both states.
+  //
+  // (1) COLD START. `roomLiqCost` is an EMA that is EMPTY on a room's first tick, and a disturbance is at
+  // its LARGEST the instant a player creates it — so both the roster planner and tier 2 see est=0, decline
+  // to throttle, and the room runs at full K on its worst tick. MEASURED: every mid-size overshoot landed at
+  // t0 (8px 1024×384px = 60.9ms against a 28ms budget, at K=9/9). Cost per active cell is known and stable
+  // (21–26µs at K=9, Phase 0), so a room with no EMA yet is estimated from `fineActive.size` instead. It is
+  // a SEED only — one real tick replaces it with the measured EMA.
+  budgetSeed: 0,         // 0 = off (old behaviour: an unmeasured room is estimated at zero and never throttled)
+  cellCostUs: 23,        // µs per active cell at FULL K, the seed constant. Phase 0 measured 21–26.
+  // (2) THE K=1 FLOOR. Tier 2 cuts sub-steps in proportion, but K cannot go below 1, and a room bigger than
+  // the whole budget AT K=1 is bounded by nothing — the "always admit one room" rule runs it anyway.
+  // MEASURED on a full-resident-band spill: 8px floored at K=1/9 and still cost 144ms/tick, i.e. 3.4× the
+  // ENTIRE 40ms tick interval, sustained on 100% of ticks. 16px lands in the same place (135ms at K=2/9),
+  // which is why coarsening to 16px was NOT the answer.
+  // TIER 3 = WHOLE-ROOM RATE LIMITING. Such a room is ticked once every N ticks instead of every tick, N
+  // chosen so its AMORTISED cost fits the budget. It keeps the invariant the whole design rests on — whole
+  // rooms, never part of one — because a rate-limited room still advances all at once, just less often.
+  // ⚠️ HONEST LIMIT, and it is the same one tier 1 already documents: this bounds AMORTISED cost, not
+  // instantaneous. The room still costs its full ms on the tick it does run. Bounding the instant would mean
+  // splitting a room across ticks, which would advance one end of a pool and not the other and would break
+  // powder's lockstep — the thing this scheduler refuses to do by construction.
+  budgetRate: 0,         // 0 = off. Works best with budgetSeed on, or a brand-new huge room has no estimate to act on.
+  budgetRateMax: 8,      // cap on N, so liquid never slows so far that it reads as frozen rather than slow
+  // Cost is ~linear in K (the tier-2 comment measures 18 sub-steps at ~2× 9), but NOT all the way down:
+  // Phase 0's dial sweep measured fineLevelSteps 9→1 as 6.5× cheaper per unit work, not 9×. So the cost of a
+  // room AT K=1 is estimated as its full-K EMA divided by this, not by K. Using K would under-estimate by
+  // ~1.4× and fire tier 3 later than it should.
+  budgetKGain: 6.5,
   // DEBUG slow motion for AVATARS, mirrored to every client so it is a UNIVERSAL time scale rather than one
   // player's local lens. Clients run their avatar sim every Nth frame while still rendering every frame. 1 = off.
   // It rides this wire for the same reason `tickMs` does: it has to be the same for everyone or what you are
@@ -3201,6 +3237,23 @@ let liquidStepsPending = 0;                           // ticks the debug panel h
 // `liqRoomCursor` rotates the starting point so the same rooms are not starved every tick.
 const roomLiqCost = {};
 let liqRoomCursor = 0;
+// How many room-ticks tier 3 has skipped. Reported in the perf line, and it is what probe_budget asserts
+// against — "did the mechanism fire?" is a fact, where "did the tick count change?" turned out to be wall-clock
+// luck (the budget's hard stop is timed, so a loaded machine changes the tick count on its own).
+let liqRateSkips = 0;
+// ── THE ONE ESTIMATOR. Both the roster planner and tier 2 used to read `roomLiqCost[room] || 0` directly,
+// which is why an unmeasured room was treated as FREE by both at once (see liquidCfg.budgetSeed). They now
+// share this, so a change to how a room is estimated cannot apply to one and not the other.
+function estRoomCost(room) {
+  const ema = roomLiqCost[room];
+  if (ema) return ema;
+  if (!liquidCfg.budgetSeed) return 0;                 // OFF ⇒ byte-for-byte the old behaviour
+  const a = cellsOf(room).fineActive;
+  return a && a.size ? a.size * liquidCfg.cellCostUs / 1000 : 0;
+}
+// Stagger for tier 3, so two rate-limited rooms do not pick the same tick and stack their spikes. Any stable
+// per-room number does; this is the cheapest one that does not need state.
+function roomPhase(room) { let h = 0; for (let i = 0; i < room.length; i++) h = (h * 31 + room.charCodeAt(i)) | 0; return Math.abs(h); }
 const runLiquidTick = () => {
   // FROZEN. Nothing advances — not the grid, not droplets in flight, not powder or soil — until either the pause is
   // lifted or a step is requested, so what you are looking at is exactly what the sim last produced.
@@ -3215,13 +3268,29 @@ const runLiquidTick = () => {
   const _tickT0 = _budgetMs ? performance.now() : 0;
   const _deferred = _budgetMs ? new Set() : null;
   if (_budgetMs) {
-    const _keys = []; for (const r of cellRooms.fine) { const _a = cellsOf(r).fineActive; if (_a && _a.size) _keys.push(r); }
+    const _keys = [];
+    for (const r of cellRooms.fine) {
+      const _a = cellsOf(r).fineActive; if (!_a || !_a.size) continue;
+      // TIER 3 — rate-limit a room that cannot fit even at K=1 (see liquidCfg.budgetRate). Deferring it HERE,
+      // in the roster, is what keeps sources, reactions, flow, powder and soil all skipping it together: every
+      // one of those loops tests `_deferred`. Doing it in the flow loop instead would tick a room's reactions
+      // without its flow. It is also NOT starvation — the room runs on a fixed period, and it is deliberately
+      // taken out of `_keys` so the "always admit one room" rule below cannot drag it back in on its off ticks.
+      if (liquidCfg.budgetRate) {
+        const _k1 = estRoomCost(r) / Math.max(1, liquidCfg.budgetKGain);
+        if (_k1 > _budgetMs) {
+          const _per = Math.max(2, Math.min(liquidCfg.budgetRateMax | 0 || 8, Math.ceil(_k1 / _budgetMs)));
+          if ((liquidTickCount + roomPhase(r)) % _per !== 0) { _deferred.add(r); liqRateSkips++; continue; }
+        }
+      }
+      _keys.push(r);
+    }
     if (_keys.length) {
       const _start = liqRoomCursor % _keys.length;
       let _acc = 0, _admitted = 0;
       for (let n = 0; n < _keys.length; n++) {
         const room = _keys[(_start + n) % _keys.length];
-        const est = roomLiqCost[room] || 0;
+        const est = estRoomCost(room);
         if (_admitted > 0 && _acc + est > _budgetMs) { _deferred.add(room); continue; }
         _acc += est; _admitted++;
       }
@@ -3265,7 +3334,7 @@ const runLiquidTick = () => {
     const _kFull = liquidCfg.fineLevelSteps;
     let _kUsed = _kFull;
     if (_budgetMs && _kFull > 1) {
-      const est = roomLiqCost[room] || 0;
+      const est = estRoomCost(room);   // ⭐ seeded for a room with no EMA yet — its first tick is its biggest
       if (est > _budgetMs) { _kUsed = Math.max(1, Math.floor(_kFull * _budgetMs / est)); liquidCfg.fineLevelSteps = _kUsed; }
     }
     fineLiquidTickRoom(room, cellsOf(room).fineSub || 1);
@@ -3297,7 +3366,8 @@ const runLiquidTick = () => {
         deferred: +(liqPerf.deferred / liqPerf.ticks).toFixed(2), simBudgetPct: liquidCfg.simBudgetPct };
       console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
         (`  |  LIQUID K=${_stat.steps} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
-        (_stat.simBudgetPct ? `  |  BUDGET ${_stat.simBudgetPct}% deferred-rooms/tick=${_stat.deferred}` : '') +
+        (_stat.simBudgetPct ? `  |  BUDGET ${_stat.simBudgetPct}% deferred-rooms/tick=${_stat.deferred}` +
+          (liquidCfg.budgetRate ? ` tier3-skips=${liqRateSkips}` : '') + (liquidCfg.budgetSeed ? ' seed=on' : '') : '') +
         ` (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
       io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
       liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0 };
@@ -5472,6 +5542,13 @@ io.on('connection', (socket) => {
     if ('sinkRate' in patch) liquidCfg.sinkRate = Math.max(0, Math.min(64, patch.sinkRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     if ('simBudgetPct' in patch) liquidCfg.simBudgetPct = Math.max(0, Math.min(100, patch.simBudgetPct | 0));
+    // The two §7(b) budget fixes ride the same wire as the budget itself, for the same reason chunkEvict does:
+    // they have to be A/B-able live, because "is the liquid slow because of tier 3 or because it is 8px?" is
+    // otherwise unanswerable from inside the game.
+    if ('budgetSeed' in patch) liquidCfg.budgetSeed = patch.budgetSeed ? 1 : 0;
+    if ('budgetRate' in patch) liquidCfg.budgetRate = patch.budgetRate ? 1 : 0;
+    if ('cellCostUs' in patch) liquidCfg.cellCostUs = Math.max(1, Math.min(500, +patch.cellCostUs || 23));
+    if ('budgetRateMax' in patch) liquidCfg.budgetRateMax = Math.max(2, Math.min(64, patch.budgetRateMax | 0));
     if ('avSlow' in patch) liquidCfg.avSlow = Math.max(1, Math.min(16, patch.avSlow | 0));   // universal avatar slow-motion (debug)
     // CHUNK RESIDENCY (Phase 3) rides the same patch wire so eviction can be A/B'd live from the console without a
     // restart — which is the whole point while it is being eyeballed. Turning it OFF materialises every room, so a
