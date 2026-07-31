@@ -3738,6 +3738,9 @@ const roomPos = {};
 // 50Hz — free-ish peer-to-peer, but over a relay that is server egress multiplied by the cap. So it is
 // sent once at join, held here, and replayed to joiners.
 const roomProfile = {};
+// avRoom → Map(receiverSid → Map(peerSid → the `_q` that receiver has already been sent for that peer)).
+// This is what makes the fan-out send only NEW samples; see the `take` closure in runRelayTick.
+const roomAck = {};
 
 // Rank everyone else for `sid` and split into the full-rate set and the degraded set. Reuses the Phase 4
 // scoring wholesale — `peerCost` (distance in chunks, with friendship as a DISCOUNT on distance rather
@@ -3771,13 +3774,34 @@ function runRelayTick() {
     // guards) bit Phases 3 and 4 four separate times, always this way round. Someone who has JOINED
     // but not yet sent a position has no `roomPos` entry and must still RECEIVE — otherwise a joiner
     // sees a frozen world until they happen to move.
+    const acks = roomAck[room] || (roomAck[room] = new Map());
     for (const sid of roomAvt[room] || []) {
       const sock = io.sockets.sockets.get(sid);
       if (!sock) continue;
       const sel = relaySelect(room, sid);
+      const seen = acks.get(sid) || (acks.set(sid, new Map()), acks.get(sid));
       const a = [];
-      for (const other of sel.near) { const p = pos.get(other); if (p) a.push(p); }
-      if (sendFar) for (const other of sel.far) { const p = pos.get(other); if (p) a.push(p); }
+      // 🟥 ONLY SEND WHAT HAS CHANGED FOR THIS RECEIVER — a fix, and the reason is not bandwidth.
+      // Re-sending an unchanged record every tick republishes the SAME sender timestamp 20×/second, and
+      // the client pushes each one into the interpolation buffer (`av.buf.push({ t: m.t, … })`). A player
+      // who has stopped sending — tabbed out, idle, or mid-disconnect — therefore floods a 90-entry buffer
+      // with identical-timestamp samples, which is not a timeline the interpolator can play: `latestT`
+      // stops advancing while the playhead keeps moving, so it thrashes against INTERP_RESYNC_MS.
+      // ⚠️ "Changed since last tick" alone would be bug shape #1 (absent reads as empty): a receiver who
+      // has never been told about a peer must still get them. Hence per-PAIR versions — no entry ⇒ send.
+      const take = (other) => {
+        const p = pos.get(other); if (!p) return;
+        if (seen.get(other) === p._q) return;      // this receiver already has this exact sample
+        seen.set(other, p._q); a.push(p);
+      };
+      for (const other of sel.near) take(other);
+      if (sendFar) for (const other of sel.far) take(other);
+      // Forget peers this receiver can no longer see, so the map cannot grow without bound as players
+      // move around; they are re-sent in full the moment they come back into view.
+      if (seen.size > (relayCfg.cap || 64) + relayCfg.farCap + 16) {
+        const keep = new Set([...sel.near, ...sel.far]);
+        for (const k of seen.keys()) if (!keep.has(k)) seen.delete(k);
+      }
       if (a.length) sock.emit('avt-batch', { t: Date.now(), a });
     }
   }
@@ -3789,16 +3813,32 @@ function restartRelayLoop() {
 // Record one socket's latest position. `id` is stamped in HERE rather than trusted from the client:
 // over P2P the DataChannel identifies the sender implicitly, and a relay must not let a client label
 // its packets with somebody else's id.
+//
+// 🟥 PASS-THROUGH, NOT A WHITELIST — AND THIS IS A FIX, NOT A STYLE CHOICE. The first version listed the
+// motion fields by name, which silently dropped every field it had not been told about. `mode` was one of
+// them, and `mode:'cursor'` is exactly how the client decides a peer is a cursor rather than a body
+// (`av.isCursor = m.mode === 'cursor'`), so cursor-mode players came through the relay as full blobs that
+// could still be punched and shoved. A relay must not know the motion schema: any field the P2P mesh
+// carries has to survive it, or every future field silently breaks the same way.
+// What is stripped is only what does NOT belong on a position packet: identity (`username`/`fill`, which
+// go once via roomProfile — at 50Hz × the cap they would dominate egress) and a client-supplied `id`.
+const RELAY_POS_DROP = new Set(['username', 'fill', 'id']);
+let relaySeqCounter = 0;
 function relayPos(room, sid, msg) {
-  if (!room || !msg) return;
-  const m = roomPos[room] || (roomPos[room] = new Map());
-  m.set(sid, {
-    id: sid,
-    x: +msg.x || 0, y: +msg.y || 0, t: +msg.t || 0,
-    facingLeft: !!msg.facingLeft, onGround: !!msg.onGround, crouch: !!msg.crouch,
-    inflate: +msg.inflate || 0,
-    block: msg.block ? 1 : undefined, tumble: msg.tumble ? 1 : undefined, ghost: msg.ghost ? 1 : undefined,
-  });
+  if (!room || !msg || typeof msg !== 'object') return;
+  const rec = { id: sid };
+  let n = 0;
+  for (const k in msg) {
+    if (RELAY_POS_DROP.has(k)) continue;
+    if (++n > 32) break;                      // a bound, so a client cannot inflate the packet without limit
+    const v = msg[k];
+    const t = typeof v;
+    if (t === 'number' || t === 'boolean' || v === null) rec[k] = v;
+    else if (t === 'string' && v.length <= 32) rec[k] = v;   // `mode` and friends; long strings are not motion
+  }
+  // Monotonic per-record version, so the fan-out can tell a NEW sample from one it has already delivered.
+  rec._q = ++relaySeqCounter;
+  (roomPos[room] || (roomPos[room] = new Map())).set(sid, rec);
 }
 function relayProfile(room, sid, msg) {
   if (!room || !msg) return;
@@ -3809,6 +3849,11 @@ function relayProfile(room, sid, msg) {
 function dropRelay(room, sid) {
   const p = roomPos[room]; if (p) { p.delete(sid); if (!p.size) delete roomPos[room]; }
   const f = roomProfile[room]; if (f) { f.delete(sid); if (!f.size) delete roomProfile[room]; }
+  // BOTH DIRECTIONS. The leaver's own ack map goes, and so does every mention of them in everyone
+  // else's — otherwise a socket id that is later reused would inherit a stale "already sent" version
+  // and its first samples would be silently dropped.
+  const k = roomAck[room];
+  if (k) { k.delete(sid); for (const m of k.values()) m.delete(sid); if (!k.size) delete roomAck[room]; }
 }
 // ==RELAY_BLOCK_END==
 restartRelayLoop();   // no-op while relayCfg.on is 0 — no timer is created at all until it is switched on
@@ -5477,7 +5522,7 @@ io.on('connection', (socket) => {
         restartRelayLoop();
         // Turning it OFF drops the held state rather than leaving it to rot: every entry is a position
         // that will never be updated again, and a stale one is worse than none.
-        if (!on) { for (const k of Object.keys(roomPos)) delete roomPos[k]; for (const k of Object.keys(roomProfile)) delete roomProfile[k]; }
+        if (!on) { for (const k of Object.keys(roomPos)) delete roomPos[k]; for (const k of Object.keys(roomProfile)) delete roomProfile[k]; for (const k of Object.keys(roomAck)) delete roomAck[k]; }
         io.emit('avt-retransport', { relay: relayCfg.on });   // client re-joins its avatar room on the new transport
       }
     }
