@@ -3837,7 +3837,10 @@ function relayPos(room, sid, msg) {
     else if (t === 'string' && v.length <= 32) rec[k] = v;   // `mode` and friends; long strings are not motion
   }
   // Monotonic per-record version, so the fan-out can tell a NEW sample from one it has already delivered.
-  rec._q = ++relaySeqCounter;
+  // NON-ENUMERABLE on purpose: the record IS the wire object, and an enumerable `_q` would be serialised
+  // into every entry of every batch — pure waste, and it would quietly inflate the per-player bandwidth
+  // figure the visibility cap was chosen from.
+  Object.defineProperty(rec, '_q', { value: ++relaySeqCounter, enumerable: false, writable: true });
   (roomPos[room] || (roomPos[room] = new Map())).set(sid, rec);
 }
 function relayProfile(room, sid, msg) {
