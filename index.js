@@ -3685,6 +3685,134 @@ function dropPeers(room, sid) {
 }
 // ==PEER_CAP_BLOCK_END==
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SERVER-RELAYED AVATARS (SHARED-WORLD.md §7 Phase 5a)
+//
+// ⚠️ READ THIS BEFORE ASSUMING THIS IS `roomSim` COMING BACK. IT IS NOT, AND THE DIFFERENCE IS THE
+// WHOLE POINT OF THE PHASE. This relay FORWARDS positions that clients own. It does not simulate
+// anybody, it does not step MWSim, and nothing here is ever reconciled against. `roomSim` — the
+// Stage 1b authoritative re-sim — stays OFF and is not revived. See the Phase 5 decision box in
+// SHARED-WORLD.md and the full analysis in scratchpad/phase5_analysis.md.
+//
+// WHY A RELAY AT ALL, when the P2P mesh works: a mesh cannot interest-limit, because peers connect to
+// everyone. The Overworld needs to tell each player about a SUBSET. That is the only thing the mesh
+// structurally cannot do, and it is why this exists.
+//
+// ⭐ WHY IT IS SAFE OVER SOCKET.IO (TCP), which is what shelved `roomSim` in 2026-06 — MEASURED, not
+// assumed (scratchpad/probe_phase5_relay.js part C). A relayed position feeds the client's buffered
+// INTERPOLATOR, which already renders remotes INTERP_DELAY_MS (100ms) in the past. A TCP retransmit
+// costs ~1 RTT, so below ~60ms RTT a head-of-line stall lands INSIDE the buffer and is invisible:
+// TCP measured identical to UDP at RTT 20 and 60 even at 5% loss. What TCP genuinely does ruin is
+// RECONCILIATION of your own blob — and that is authority's problem, which this file no longer has.
+// ⚠️ It degrades at RTT ~120 (a cross-region number). Transport and hosting are the same question;
+// when hosting moves, re-measure and — if needed — re-point this behind `AvatarNet` at geckos.io or
+// WebTransport. That wrapper exists precisely so this code does not care.
+//
+// ⚠️ WHY A FIXED-RATE TIMER IS ACCEPTABLE HERE WHEN A 60Hz SIM TICK WAS NOT. The same measurement
+// (part A) shows one liquid tick blocks this single thread past a whole snapshot interval at ~2,911
+// active cells, which ordinary play reaches. A 60Hz AUTHORITATIVE tick cannot survive that, because a
+// late snapshot is a stale correction. A late FORWARD is just a packet arriving inside a 100ms buffer.
+// So the relay is allowed to be jittery, and deliberately runs at 20Hz rather than 60.
+// ==RELAY_BLOCK_START==
+const relayCfg = {
+  on: 0,          // 0 = OFF. Ships off like chunkEvict and peerCap did. Page rooms keep the P2P mesh.
+                  // ⚠️ GLOBAL FOR NOW. Phase 6 makes this PER-ROOM (Overworld relayed, page rooms meshed);
+                  //    the seam for that is already right — the client is told which transport to use by
+                  //    the server in `avt-joined`, so the decision is server-side from day one.
+  hz: 20,         // forward rate. NOT a simulation rate; nothing here steps.
+  cap: 32,        // full-rate visibility cap. ⭐ UNLIKE peerCfg.cap THIS DEFAULTS ON, and the number is
+                  //   measured rather than guessed: over a mesh a peer costs an RTCPeerConnection, which
+                  //   is unmeasurable from the server (hence peerCfg.cap = 0). Over a relay there are no
+                  //   peer connections, only messages, so the budget is per-player DOWNSTREAM bandwidth:
+                  //   cap 32 = 3,059 B/packet = 0.49 Mbit/s at 20Hz. Cap 128 would be 2.93 Mbit/s, which
+                  //   is not reasonable for an extension on someone's ordinary connection.
+  farHz: 4,       // ⭐ §3's DEGRADED MIDDLE TIER, which Phase 4 could not build: "nearest N at full rate,
+  farCap: 96,     //   the rest on slow updates". Peers ranked beyond `cap` are still sent, at farHz, up to
+                  //   farCap of them. farHz 0 ⇒ no middle tier (drop them outright, Phase 4's behaviour).
+};
+// avRoom → Map(sid → motion payload). The LATEST position only: this is a relay, not a queue — a
+// superseded position has no value and buffering them would just add latency.
+const roomPos = {};
+// avRoom → Map(sid → { username, fill }). ⚠️ IDENTITY IS NOT MOTION AND MUST NOT RIDE THE POSITION
+// PACKET. The P2P sender puts `username` and `fill` (which can carry an imageUrl) in EVERY message at
+// 50Hz — free-ish peer-to-peer, but over a relay that is server egress multiplied by the cap. So it is
+// sent once at join, held here, and replayed to joiners.
+const roomProfile = {};
+
+// Rank everyone else for `sid` and split into the full-rate set and the degraded set. Reuses the Phase 4
+// scoring wholesale — `peerCost` (distance in chunks, with friendship as a DISCOUNT on distance rather
+// than an override, plus stickiness) and `affinityOf`'s cached lookups. Only the CONSEQUENCE differs:
+// Phase 4 turned this into WebRTC offers, and here it picks who goes in the outgoing packet.
+// ⚠️ `cur` is deliberately null: stickiness exists to stop a WebRTC mesh being torn down and rebuilt at
+// the boundary. A relay has nothing to tear down, so holding a stale peer would be pure lag.
+function relaySelect(room, sid) {
+  const pool = roomAvt[room];
+  if (!pool) return { near: [], far: [] };
+  const cand = [...pool].filter(o => o !== sid);
+  if (!relayCfg.cap || cand.length <= relayCfg.cap) return { near: cand, far: [] };
+  const aff = affinityOf(socketToDiscordId[sid]);
+  cand.sort((x, y) => peerCost(room, sid, aff, null, x) - peerCost(room, sid, aff, null, y));
+  return {
+    near: cand.slice(0, relayCfg.cap),
+    far: relayCfg.farHz > 0 ? cand.slice(relayCfg.cap, relayCfg.cap + relayCfg.farCap) : [],
+  };
+}
+
+let relayTimer = null, relayTickCount = 0;
+function runRelayTick() {
+  if (!relayCfg.on) return;
+  relayTickCount++;
+  const farEvery = relayCfg.farHz > 0 ? Math.max(1, Math.round(relayCfg.hz / relayCfg.farHz)) : 0;
+  const sendFar = farEvery > 0 && (relayTickCount % farEvery === 0);
+  for (const room of Object.keys(roomPos)) {
+    const pos = roomPos[room];
+    if (!pos || !pos.size) continue;
+    // ⚠️ ITERATE THE ROOM'S SOCKETS, NOT `roomPos`. Bug shape #3 (a gate out of step with what it
+    // guards) bit Phases 3 and 4 four separate times, always this way round. Someone who has JOINED
+    // but not yet sent a position has no `roomPos` entry and must still RECEIVE — otherwise a joiner
+    // sees a frozen world until they happen to move.
+    for (const sid of roomAvt[room] || []) {
+      const sock = io.sockets.sockets.get(sid);
+      if (!sock) continue;
+      const sel = relaySelect(room, sid);
+      const a = [];
+      for (const other of sel.near) { const p = pos.get(other); if (p) a.push(p); }
+      if (sendFar) for (const other of sel.far) { const p = pos.get(other); if (p) a.push(p); }
+      if (a.length) sock.emit('avt-batch', { t: Date.now(), a });
+    }
+  }
+}
+function restartRelayLoop() {
+  if (relayTimer) clearInterval(relayTimer);
+  relayTimer = relayCfg.on ? setInterval(runRelayTick, Math.max(20, Math.min(500, Math.round(1000 / relayCfg.hz)))) : null;
+}
+// Record one socket's latest position. `id` is stamped in HERE rather than trusted from the client:
+// over P2P the DataChannel identifies the sender implicitly, and a relay must not let a client label
+// its packets with somebody else's id.
+function relayPos(room, sid, msg) {
+  if (!room || !msg) return;
+  const m = roomPos[room] || (roomPos[room] = new Map());
+  m.set(sid, {
+    id: sid,
+    x: +msg.x || 0, y: +msg.y || 0, t: +msg.t || 0,
+    facingLeft: !!msg.facingLeft, onGround: !!msg.onGround, crouch: !!msg.crouch,
+    inflate: +msg.inflate || 0,
+    block: msg.block ? 1 : undefined, tumble: msg.tumble ? 1 : undefined, ghost: msg.ghost ? 1 : undefined,
+  });
+}
+function relayProfile(room, sid, msg) {
+  if (!room || !msg) return;
+  const m = roomProfile[room] || (roomProfile[room] = new Map());
+  m.set(sid, { id: sid, username: String(msg.username || '').slice(0, 64), fill: msg.fill || null });
+  return m.get(sid);
+}
+function dropRelay(room, sid) {
+  const p = roomPos[room]; if (p) { p.delete(sid); if (!p.size) delete roomPos[room]; }
+  const f = roomProfile[room]; if (f) { f.delete(sid); if (!f.size) delete roomProfile[room]; }
+}
+// ==RELAY_BLOCK_END==
+restartRelayLoop();   // no-op while relayCfg.on is 0 — no timer is created at all until it is switched on
+
 // ── FINE-CELL LIQUID: coarse↔fine conversion + placement + wire helpers (inc 1). All outside the sim block, so the
 // harness never sees them. Volume mapping: a coarse cell holds up to LIQUID_MAX units; a full coarse cell = SUB² full fine
 // cells, so upscale multiplies units by SUB² and downscale divides by SUB².
@@ -5325,6 +5453,28 @@ io.on('connection', (socket) => {
       if (nv) for (const room of Object.keys(roomAvt)) for (const sid of roomAvt[room]) updatePeers(room, sid);
     }
     if ('peerFriendRings' in patch) peerCfg.friendRings = Math.max(0, Math.min(999, +patch.peerFriendRings || 0));
+    // SERVER-RELAYED AVATARS (Phase 5a) — same reasoning again: it has to be A/B-able live against the mesh,
+    // because "is the relay worse?" is only answerable by flipping it while looking at the same world.
+    // ⚠️ TOGGLING IT IS A TRANSPORT SWITCH, AND CLIENTS ARE MID-FLIGHT. A client meshes or relays according
+    // to what `avt-joined` told it, so flipping this at runtime does NOT re-transport anyone already in a
+    // room — they keep the transport they joined with until they re-join. That is deliberate: the
+    // alternative is tearing down live WebRTC connections and re-handshaking everyone at once, which is a
+    // far worse failure mode than "the change applies to the next join". Clients are asked to re-join.
+    if ('relayOn' in patch) {
+      const on = !!patch.relayOn;
+      if (on !== !!relayCfg.on) {
+        relayCfg.on = on ? 1 : 0;
+        restartRelayLoop();
+        // Turning it OFF drops the held state rather than leaving it to rot: every entry is a position
+        // that will never be updated again, and a stale one is worse than none.
+        if (!on) { for (const k of Object.keys(roomPos)) delete roomPos[k]; for (const k of Object.keys(roomProfile)) delete roomProfile[k]; }
+        io.emit('avt-retransport', { relay: relayCfg.on });   // client re-joins its avatar room on the new transport
+      }
+    }
+    if ('relayHz' in patch) { relayCfg.hz = Math.max(2, Math.min(50, patch.relayHz | 0)); restartRelayLoop(); }
+    if ('relayCap' in patch) relayCfg.cap = Math.max(0, Math.min(512, patch.relayCap | 0));
+    if ('relayFarHz' in patch) relayCfg.farHz = Math.max(0, Math.min(50, patch.relayFarHz | 0));
+    if ('relayFarCap' in patch) relayCfg.farCap = Math.max(0, Math.min(512, patch.relayFarCap | 0));
     // Batching is behaviour-preserving (same events, same order, one envelope), so unlike the two above it needs
     // no repair when toggled — the next tick simply arrives unwrapped.
     if ('interestBatch' in patch) interestCfg.batch = !!patch.interestBatch;
@@ -5415,6 +5565,7 @@ io.on('connection', (socket) => {
         removeSimAvatar(currentRoom, oldSid);
         const oldAv = socketToAvatarRoom[oldSid];   // the evicted socket's avatar-world room (mode-scoped, may differ from this one)
         if (oldAv && roomAvt[oldAv] && roomAvt[oldAv].delete(oldSid)) { socket.to(oldAv).emit('avt-peer-left', { id: oldSid }); delete socketToAvatarRoom[oldSid]; }
+        if (oldAv) dropRelay(oldAv, oldSid);   // Phase 5a: and stop relaying a socket that is gone
         io.to(currentPageRoom).emit('cursor-leave', { id: oldSid });
         io.to(currentRoom).emit('avatar-leave', { id: oldSid });
         const oldSock = io.sockets.sockets.get(oldSid);
@@ -5820,6 +5971,7 @@ io.on('connection', (socket) => {
     if (dupSockets.length) {
       for (const other of dupSockets) {
         if (roomAvt[avRoom] && roomAvt[avRoom].delete(other)) socket.to(avRoom).emit('avt-peer-left', { id: other });
+        dropRelay(avRoom, other);   // Phase 5a
         if (socketToAvatarRoom[other] === avRoom) delete socketToAvatarRoom[other];
         try { io.sockets.sockets.get(other)?.leave(avRoom); } catch {}
         io.to(other).emit('avt-evicted', { levelIndex });
@@ -5831,6 +5983,7 @@ io.on('connection', (socket) => {
     if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
       socket.leave(currentAvatarRoom);
       if (roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
+      dropRelay(currentAvatarRoom, socket.id);   // Phase 5a: a Level switch must not leave a ghost being relayed
     }
     currentAvatarRoom = avRoom;
     socketToAvatarRoom[socket.id] = avRoom;
@@ -5843,10 +5996,23 @@ io.on('connection', (socket) => {
     // exactly what it has always been. `peerSelect` runs AFTER the add above so the pool is the real one, and it
     // filters the joiner out itself. The record is seeded here so the first beacon diffs against something real
     // rather than re-offering to everyone it just offered to.
-    const _sel = peerSelect(avRoom, socket.id);
-    const existingPeers = [...(_sel || roomAvt[avRoom])].filter(id => id !== socket.id);
+    // ⭐ PHASE 5a — THE SERVER PICKS THE TRANSPORT, and says so here. `relay:1` tells the client to send
+    // positions to us instead of meshing, and NOT to open DataChannels. That matters twice: it keeps the
+    // decision server-side, which is what Phase 6 needs when the Overworld is relayed and page rooms are
+    // not; and it prevents a DOUBLE-FEED, since a client that both meshed and relayed would push two
+    // copies of every remote into the same `av.buf` the interpolator consumes.
+    const _relayed = !!relayCfg.on;
+    const _sel = _relayed ? null : peerSelect(avRoom, socket.id);
+    const existingPeers = _relayed ? [] : [...(_sel || roomAvt[avRoom])].filter(id => id !== socket.id);
     if (_sel) (roomPeers[avRoom] || (roomPeers[avRoom] = new Map())).set(socket.id, new Set(existingPeers));
-    socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, spawn: (type === 'world') ? worldSpawnFor(avRoom) : null });
+    socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: (type === 'world') ? worldSpawnFor(avRoom) : null });
+    // Identity, once, rather than on every position packet — see roomProfile. Both directions: the joiner
+    // needs everyone already here, and everyone here needs the joiner. Harmless when the relay is off (an
+    // un-relayed client simply has no handler for these, and gets names off the mesh as it always has).
+    if (_relayed) {
+      const _pf = roomProfile[avRoom];
+      if (_pf && _pf.size) socket.emit('avt-profiles', { profiles: [..._pf.values()].filter(p => p.id !== socket.id) });
+    }
     // Replay the current world objects to the new joiner (late-joiner sync). `levelIndex` lets the client
     // drop a replay that arrives AFTER it has switched Levels again (rapid switching → stale cross-Level bleed).
     socket.emit('avatar-objects-init', { levelIndex, objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
@@ -5877,7 +6043,7 @@ io.on('connection', (socket) => {
     }
     if (currentAvatarRoom) socket.leave(currentAvatarRoom);
     if (currentAvatarRoom && roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);   // Phase 3: stop holding chunks resident for someone who left
-    if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); }        // Phase 4: and stop tracking what they were subscribed/meshed to
+    if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); dropRelay(currentAvatarRoom, socket.id); }   // Phase 4: stop tracking what they were subscribed/meshed to · Phase 5a: and stop relaying them
     delete socketToAvatarRoom[socket.id];
   });
   // ── CHUNK RESIDENCY BEACON (SHARED-WORLD.md §7, Phase 3). A coarse, low-rate position so the server knows which
@@ -5894,7 +6060,39 @@ io.on('connection', (socket) => {
     if (!currentAvatarRoom) return;
     const rect = noteWhere(currentAvatarRoom, socket.id, v);
     if (rect) updateSubs(currentAvatarRoom, socket.id, rect);
-    updatePeers(currentAvatarRoom, socket.id);   // Phase 4: and re-select who is worth being meshed with
+    if (!relayCfg.on) updatePeers(currentAvatarRoom, socket.id);   // Phase 4: re-select who is worth being meshed with.
+    // ⚠️ Phase 5a: NOT while relaying — there is no mesh to maintain, and `relaySelect` re-ranks from the
+    // same beacon on every relay tick anyway. Emitting `avt-peers` here would tell a relayed client to
+    // open WebRTC connections it must not have.
+  });
+
+  // ── PHASE 5a: THE RELAY WIRE. All three handlers are no-ops unless `relayCfg.on`, so a client that
+  // starts sending these against a server with the relay off costs nothing and breaks nothing.
+  // ⚠️ NOT AUTHORITATIVE. Nothing here is validated as physics, because nothing here IS physics — the
+  // client owns its own blob, exactly as it does over the mesh. What IS enforced is identity: the sender's
+  // id is stamped server-side (see relayPos), so a client cannot relay a packet wearing someone else's id.
+  socket.on('avt-pos', (msg) => {
+    if (!relayCfg.on || !currentAvatarRoom) return;
+    relayPos(currentAvatarRoom, socket.id, msg);
+  });
+  socket.on('avt-profile', (msg) => {
+    if (!relayCfg.on || !currentAvatarRoom) return;
+    const p = relayProfile(currentAvatarRoom, socket.id, msg);
+    if (p) socket.to(currentAvatarRoom).emit('avt-profiles', { profiles: [p] });
+  });
+  // One-shot directed events (Tier 2 — punch/shock/stomp/boop/spin). Sent immediately rather than batched:
+  // they are rare, they are the ones that must not be late, and over the mesh they already ride a separate
+  // RELIABLE channel for exactly that reason. ⚠️ Interest-filtered like positions — an event from someone
+  // you cannot see is an event about a blob you do not have.
+  socket.on('avt-evt', (msg) => {
+    if (!relayCfg.on || !currentAvatarRoom || !msg) return;
+    const out = Object.assign({}, msg, { from: socket.id });
+    // A directed hit goes to its target even if the target ranked outside the sender's visible set —
+    // being punched by someone you cannot see is strange, but silently dropping the hit desyncs the
+    // attacker (who has already played the swing) from the target (who never gets knocked back).
+    const targets = new Set(relaySelect(currentAvatarRoom, socket.id).near);
+    if (msg.target && roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].has(msg.target)) targets.add(msg.target);
+    for (const sid of targets) io.to(sid).emit('avt-evt', out);
   });
   // ── CHUNK RESYNC. The client sends the hashes it believes each chunk has; the server answers with the content of
   // the ones that disagree, over the SAME `terrain-set` / `liquid-fine-cells` wires it already parses. This is the
@@ -6588,6 +6786,7 @@ io.on('connection', (socket) => {
       if (roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);
       dropSubs(currentAvatarRoom, socket.id);
       dropPeers(currentAvatarRoom, socket.id);
+      dropRelay(currentAvatarRoom, socket.id);   // Phase 5a
     }
     wireBatchOk.delete(socket.id);
     if (socketDmRooms[socket.id]) {
