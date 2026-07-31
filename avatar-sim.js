@@ -289,7 +289,16 @@
   // momentum exchange). Because it mirrors the server's own-side update, the predicting
   // client's trajectory matches authority → no pass-through, no reconciliation jitter.
   // obstacles: [{ id, x, y, vx, vy }] — usually the interpolated remote avatars.
-  function resolveOwnCollision(s, obstacles) {
+  // `solidAt(x, y) -> bool` is OPTIONAL and asks whether a body with its feet at (x, y) is inside solid terrain.
+  // 🟥 WHY A CALLBACK AND NOT A TERRAIN LOOKUP: this file is shared by the client and the server, and neither
+  // holds terrain the same way (client = terrainGrid, server = chunked PagedArrays). Injecting the predicate
+  // keeps the sim terrain-agnostic, which is the only reason it can be shared at all.
+  // 🟥 WHY IT IS NEEDED: separation moves the body with NO velocity, and nothing downstream can undo a vertical
+  // move — `depenetrate` resolves horizontally only, and the terrain landing scan requires a downward crossing
+  // that a teleport never satisfies. So a shove of more than a few px into the floor is PERMANENT. Rather than
+  // trying to repair that afterwards, refuse to make the move: an unresolved blob overlap is a cosmetic problem,
+  // being inside the world is not.
+  function resolveOwnCollision(s, obstacles, solidAt) {
     if (s.grabbedBy) return;
     const minDist = C.BLOB_R * 2.1;
     const SLOP = 3;                                      // resting tolerance: don't correct tiny overlaps →
@@ -301,7 +310,16 @@
       const dist = Math.hypot(dx, dy);
       if (dist >= minDist || dist <= 0.5) continue;
       const nx = dx / dist, ny = dy / dist, overlap = minDist - dist;
-      if (overlap > SLOP) { s.x -= nx * (overlap - SLOP) * 0.5; s.y -= ny * (overlap - SLOP) * 0.3; }
+      if (overlap > SLOP) {
+        const px = s.x, py = s.y;
+        s.x -= nx * (overlap - SLOP) * 0.5; s.y -= ny * (overlap - SLOP) * 0.3;
+        // Only ever VETO a move that puts us somewhere bad; never veto one that was already bad (being nudged
+        // while stuck must stay possible, or a blob buried by a terrain edit could never be pushed free).
+        if (solidAt && solidAt(s.x, s.y) && !solidAt(px, py)) {
+          s.y = py;                                      // vertical is the unrecoverable axis — drop it first
+          if (solidAt(s.x, s.y)) s.x = px;               // still inside → abandon the separation entirely
+        }
+      }
       const ovx = o.vx || 0, ovy = o.vy || 0;
       const vn = (ovx - s.vx) * nx + (ovy - s.vy) * ny;
       if (vn < -0.6) { const imp = -vn * 0.6; s.vx -= nx * imp; s.vy -= ny * imp * 0.5; } // ignore interpolation-jitter rel-vel
