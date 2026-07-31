@@ -2046,6 +2046,11 @@ const liquidCfg = {
   // 40ms tick on its own. See SHARED-WORLD.md Phase 1 — the goal is that no single player action can
   // exceed the budget, so the server degrades instead of breaking.
   simBudgetPct: 70,
+  // DEBUG slow motion for AVATARS, mirrored to every client so it is a UNIVERSAL time scale rather than one
+  // player's local lens. Clients run their avatar sim every Nth frame while still rendering every frame. 1 = off.
+  // It rides this wire for the same reason `tickMs` does: it has to be the same for everyone or what you are
+  // watching is two different worlds.
+  avSlow: 1,
   // DEBUG: freeze the whole sim (liquid, droplets, powder, soil) where it stands, so behaviour can be inspected and
   // screenshotted without it moving under you. `liquid-step` then advances it a fixed number of ticks. GLOBAL, like
   // every other sim switch — it stops the world for everyone in the room, not just the person who pressed it.
@@ -5467,6 +5472,7 @@ io.on('connection', (socket) => {
     if ('sinkRate' in patch) liquidCfg.sinkRate = Math.max(0, Math.min(64, patch.sinkRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
     if ('simBudgetPct' in patch) liquidCfg.simBudgetPct = Math.max(0, Math.min(100, patch.simBudgetPct | 0));
+    if ('avSlow' in patch) liquidCfg.avSlow = Math.max(1, Math.min(16, patch.avSlow | 0));   // universal avatar slow-motion (debug)
     // CHUNK RESIDENCY (Phase 3) rides the same patch wire so eviction can be A/B'd live from the console without a
     // restart — which is the whole point while it is being eyeballed. Turning it OFF materialises every room, so a
     // world that looked wrong under eviction can be compared against the same world with everything resident.
