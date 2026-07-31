@@ -3812,6 +3812,16 @@ function dropRelay(room, sid) {
 }
 // ==RELAY_BLOCK_END==
 restartRelayLoop();   // no-op while relayCfg.on is 0 — no timer is created at all until it is switched on
+// What the debug panel's config wire carries. `liquidCfg` alone would leave the relay switches
+// console-only, which is exactly the friction this exists to remove — the panel can only show a control
+// as live if the server tells it the current value. Flattened into the same object so the panel's
+// existing `if (!(k in cfg)) continue` sync loop picks them up with no special-casing.
+function cfgWire() {
+  return Object.assign({}, liquidCfg, {
+    relayOn: !!relayCfg.on, relayHz: relayCfg.hz, relayCap: relayCfg.cap,
+    relayFarHz: relayCfg.farHz, relayFarCap: relayCfg.farCap,
+  });
+}
 
 // ── FINE-CELL LIQUID: coarse↔fine conversion + placement + wire helpers (inc 1). All outside the sim block, so the
 // harness never sees them. Volume mapping: a coarse cell holds up to LIQUID_MAX units; a full coarse cell = SUB² full fine
@@ -5269,8 +5279,8 @@ io.on('connection', (socket) => {
   let currentEntered = false;
   let currentColor = null;        // this socket's chosen name colour — tracked separately so every roomUsers entry we (re)build (join, room-presence, ctx-room) carries it
   // ---- Liquid Debug config (GLOBAL, live-tunable sim switches driven by the client's Liquid Debug menu) ----
-  socket.emit('liquid-cfg', liquidCfg);                     // send current state so a joining client's menu reflects it
-  socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', liquidCfg));
+  socket.emit('liquid-cfg', cfgWire());                     // send current state so a joining client's menu reflects it
+  socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', cfgWire()));
   // DEBUG single-step: advance the frozen sim by a few ticks. Only meaningful while paused; ignored otherwise, so a
   // stray press can never make the sim run fast.
   // DEBUG resync: re-send this socket the FULL liquid state for the room it is in. The client compares it against its
@@ -5478,7 +5488,7 @@ io.on('connection', (socket) => {
     // Batching is behaviour-preserving (same events, same order, one envelope), so unlike the two above it needs
     // no repair when toggled — the next tick simply arrives unwrapped.
     if ('interestBatch' in patch) interestCfg.batch = !!patch.interestBatch;
-    io.emit('liquid-cfg', liquidCfg);                       // broadcast (config is global) so every open menu stays in sync
+    io.emit('liquid-cfg', cfgWire());                       // broadcast (config is global) so every open menu stays in sync
   });
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
   let currentAvBuildRoomId = null; // Phase 3: real roomId for L2 build-perm checks (null = page/URL room → open build)
