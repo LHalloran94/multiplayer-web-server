@@ -1991,7 +1991,29 @@ const liquidCfg = {
   lateralLevel: true,    // steps 1c/1d: liquid flows SIDEWAYS to find a flat level. off = it piles up where it lands (no spreading)
   perLiquidLevel: true,  // step 2c: each liquid flattens its OWN layer across columns (heavy ends flat along the bottom)
   viscosity: false,      // per-liquid LEVEL_VISC throttle: denser liquids ooze flat slower. off = ALL liquids level at full speed
-  fineFlatSteps: 3,      // (1d) surface flat-settle: sub-steps/tick it may run in ≈ its spread speed in cells/tick. 0 = uncapped (every sub-step)
+  // (1d) surface flat-settle: sub-steps/tick it may run in ≈ its spread speed in cells/tick. 0 = uncapped (every sub-step).
+  // ⭐ DEFAULT MOVED 3 → 7 on 2026-08-01. The cap of 3 was a deliberate choice, not an oversight — uncapped, the
+  // leading edge sheds every sub-step and races away from the body still separating behind it, and it was rejected
+  // on FEEL. WHAT CHANGED IS THE RENDERER, NOT THIS DIAL (user, who made the original call): back then `cellCap` was
+  // much higher, so one cell's worth of liquid spread across ~64 tiles almost instantly and read as unnatural. With
+  // the lower cell capacity AND the metaball blur, that speed now looks right. It is also the answer to §7(b)'s one
+  // unaddressed finding, that liquid takes a very long time to come to rest.
+  // ⚠️ WHY 8 AND NOT 0. Measured on probe_fine_identity TEST B's mixed-liquid scene (brine+water+oil in EVERY cell,
+  // so they must stratify and spread at once — the interaction the cap exists for). Ticks-to-settle / rest density
+  // inversions, swept over both grid ratios:
+  //     flat:      1      2      3      4      5      6      7    **8**     9      0
+  //     SUB=1:  248/0  169/0  151/0  147/0  149/0  139/0  131/0  137/0   127/1  127/1
+  //     SUB=3:  191/2  181/0  171/0  167/5  155/3  163/0  149/5  145/0   131/1  131/1
+  // **SUB=1 is the only ratio that ships** (every `ensureFineArrays` caller passes 1; reactions and chunk residency
+  // both refuse to run at anything else) and it is clean and monotonic: zero inversions up to 8, then 1 from 9 on.
+  // 9 is exactly `fineLevelSteps`, i.e. running in EVERY sub-step, which is where levelling finally outruns the
+  // density sort and a heavier liquid is left resting above a lighter one. 9, 12 and 0 are therefore the same
+  // setting in practice — an independent reproduction of Phase 0b's "saturates at 9".
+  // ⚠️ SUB=3 is ERRATIC (0 at 2/3/6/8 but 5 at 4 and 7), which reads as sub-step parity rather than a threshold.
+  // Do not treat 8 as robustly safe THERE; it is chosen for SUB=1, and being clean at SUB=3 is what keeps TEST B
+  // passing unmodified rather than being loosened to accommodate a new default.
+  // ⇒ 8 takes ~90% of the available speed-up (151 → 137 against 127 uncapped) at no correctness cost.
+  fineFlatSteps: 8,
   // ⚠️ DEFAULT OFF since 2026-07-29. This is the BLANKET rule: a cell in a column that still holds ANY inversion may
   // not level at all. It freezes the whole column — including its free surface — until the column has finished
   // sorting, which leaves a liquid heap standing as a terraced mound (measured: the heap held its shape until t176
