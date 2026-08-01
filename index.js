@@ -1512,7 +1512,23 @@ const TERRAIN_ROWS = Math.ceil(MWSim.C.WORLD_H / TERRAIN_CELL);
 // that knows how big a world's grid is.
 // ⚠️ `null` is the "not allocated" state where `undefined` used to be. Every consumer tests truthiness, so the two are
 // interchangeable — but do not "tidy" one of those tests into `=== undefined`.
-const CELLS_PER_WORLD = TERRAIN_COLS * TERRAIN_ROWS;
+// ═══ PER-ROOM WORLD SHAPE (SHARED-WORLD.md §7, Phase 6) ═════════════════════════════════════════════════════
+// A room's grid shape used to be two module constants, which is the same assumption as "there is one world".
+// The Overworld is a different shape from a page room and both must be live in ONE process, so the shape is now
+// a per-room fact. Declared HERE, above the cell store, because `NO_CELLS` constructs a RoomCells at module load
+// and a `const` declared further down would still be in its temporal dead zone at that point.
+// ⚠️ `roomDims` is keyed on the ROOM KEY ALONE, deliberately — so it can be asked without materialising a cell
+// store. That distinction is the whole reason `peekCells` exists beside `cellsOf`, and under chunking it is the
+// difference between probing a chunk and faulting one in.
+// ⚠️ The old zero-argument `WORLD_GEOM()` was RENAMED rather than given an optional parameter. An optional room
+// would let a missed call site keep working today and break silently the day a second shape exists; a rename
+// turns every missed site into an immediate ReferenceError instead.
+// (`CELLS_PER_WORLD` used to sit here. It was referenced by nothing — server, probes or client — a fourth
+//  orphaned full-world constant of exactly the kind Phase 2 turned up three of. Deleted with this block.)
+const PAGE_DIMS = Object.freeze({ cols: TERRAIN_COLS, rows: TERRAIN_ROWS });
+function roomDims(room) { return PAGE_DIMS; }   // every room today — the Overworld's own shape lands in a later increment
+// The terrain-resolution geometry (SUB=1) for a room, i.e. the one the fields that are not fine-grid ones use.
+const worldGeom = (room) => { const d = roomDims(room); return chunkGeom(d.cols, d.rows); };
 // ═══ CHUNKING (SHARED-WORLD.md §7, Phase 3) ═════════════════════════════════════════════════════════════════════
 // A room's per-cell state is no longer one flat full-world typed array per field. Each field is a PagedArray: an
 // array of CHUNK_SIDE² -cell PAGES, allocated on first WRITE and released on eviction. A world costs what is near
@@ -1555,8 +1571,24 @@ const _chunkGeoms = new Map();
 function chunkGeom(cols, rows) {
   const key = cols + 'x' + rows; let g = _chunkGeoms.get(key); if (g) return g;
   const cx = Math.ceil(cols / CHUNK_SIDE), cy = Math.ceil(rows / CHUNK_SIDE), cells = cols * rows;
-  if (cx * cy > 65535) throw new Error('chunkGeom: page index overflows Uint16 (' + cx * cy + ')');
+  // ⚠️ THE WORLD-EXTENT CEILING, ASSERTED HERE BECAUSE THIS IS THE ONE PLACE THAT KNOWS THE SHAPE (Phase 6).
+  // A flat cell index is a JS number and stays exact to 2^53, and "(i / cols) | 0" is safe at ANY size because it
+  // truncates i/cols — a ROW — which is tiny. What is NOT safe is a bitwise op applied to the index ITSELF:
+  //   · the wire handlers do "cells[k] | 0" (ToInt32, wraps negative above 2^31);
+  //   · "fineFluxStack" is an Int32Array OF INDICES (same limit);
+  //   · the arithmetic paging below uses "i >>> K6" / "i & 63" (ToUint32, exact only to 2^32-1).
+  // 2^31 is therefore the real ceiling, and it is what makes an Overworld height trade against its width.
+  // Silently wrapping would corrupt terrain at a coordinate nobody would think to test, so: throw.
+  if (cells > 2147483647) throw new Error(`chunkGeom: ${cols}x${rows} = ${cells} cells exceeds the 2^31 flat-index ceiling`);
   const p2 = cols >= CHUNK_SIDE && (cols & (cols - 1)) === 0;
+  // ⚠️ THE Uint16 PAGE INDEX IS A PROPERTY OF THE TABLES, NOT OF THE GEOMETRY — a distinction that did not exist
+  // before there were two addressing modes, and getting it wrong made a legal Overworld shape throw. `pageOf`
+  // stores a page number in a Uint16, so a TABLE geometry is capped at 65,535 pages (= 2.68e8 cells, EIGHT TIMES
+  // below the 2^31 flat-index ceiling above — so this, not the index, is what binds a table world). An ARITHMETIC
+  // geometry builds no tables and computes the page number as a plain JS number, so it has no such cap.
+  // ⚠️ A big arithmetic geometry is legal but not yet CHEAP: `PagedArray.pages`/`.rev` are still one slot per page
+  // PER FIELD PER ROOM, so an empty room is still linear in world area. That is the next increment's job.
+  if (!p2 && cx * cy > 65535) throw new Error('chunkGeom: page index overflows Uint16 (' + cx * cy + ') — a table geometry this large needs a power-of-two column count');
   const K = p2 ? (Math.log2(cols) | 0) : -1, CXM = cx - 1, K6 = K + 6;
   const pageOf = p2 ? null : new Uint16Array(cells), offOf = p2 ? null : new Uint16Array(cells);
   if (!p2) for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
@@ -1647,7 +1679,12 @@ PagedArray.prototype.scan = function (cb) {
   }
 };
 PagedArray.prototype.bytes = function () { return this.live * CHUNK_CELLS * this.T * this.Ctor.BYTES_PER_ELEMENT; };
-function RoomCells() {
+// ⚠️ `cols`/`rows` are the room's GRID SHAPE, copied here from `roomDims` when the store is created. They are on
+// the store as well as behind `roomDims` on purpose: the sim's hot functions already hold a store, so they read
+// the shape with one property load instead of a lookup. NO_CELLS has 0/0 — a caller that only PEEKED has no
+// store and must ask `roomDims` rather than read a shape off the shared empty.
+function RoomCells(cols, rows) {
+  this.cols = cols | 0; this.rows = rows | 0;            // this room's grid shape (0/0 on the shared empty)
   this.terrain = null; this.terrainHp = null;            // solidity grid + per-cell remaining hits
   this.sat = null; this.dilute = null;                   // absorbed water in solids + water soaked into acid
   this.fineSub = 0;                                      // fine:terrain ratio these arrays were built at (1 everywhere)
@@ -1661,7 +1698,7 @@ function RoomCells() {
   this.chunks = null;                                    // RoomChunks: per-chunk hashes + evicted blobs + residency
 }
 const roomCells = new Map();          // room → RoomCells. THE registry of a room's per-cell state.
-function cellsOf(room) { let s = roomCells.get(room); if (s === undefined) roomCells.set(room, s = new RoomCells()); return s; }
+function cellsOf(room) { let s = roomCells.get(room); if (s === undefined) { const d = roomDims(room); roomCells.set(room, s = new RoomCells(d.cols, d.rows)); } return s; }
 // ...and the READ-ONLY form, for callers that only want to look (does a room have terrain? is it empty?) and must not
 // bring a store into existence by asking. It reads identically — every field of the shared empty is null. Under
 // Phase 3 this is the difference between probing a chunk and faulting one in, so the split is worth having now.
@@ -1862,9 +1899,10 @@ function newPagedField(field, geom, room) {
   return pa;
 }
 const FINE_FIELDS = new Set(['fineAmt', 'fineTotal', 'fineLevelAcc', 'fineStill', 'fineFluxSeen']);
+// Phase 6: the shape comes off the STORE, not the module constants — `s` is the room's own RoomCells.
 function fieldGeom(field, s) {
   const SUB = (FINE_FIELDS.has(field) ? (s.fineSub || 1) : 1);
-  return chunkGeom(TERRAIN_COLS * SUB, TERRAIN_ROWS * SUB);
+  return chunkGeom(s.cols * SUB, s.rows * SUB);
 }
 function cellView(field) {
   return new Proxy({}, {
@@ -1883,20 +1921,6 @@ function cellView(field) {
     },
   });
 }
-// ═══ PER-ROOM WORLD SHAPE (SHARED-WORLD.md §7, Phase 6) ═════════════════════════════════════════════════════
-// A room's grid shape used to be two module constants, which is the same assumption as "there is one world".
-// The Overworld is a different shape from a page room and both must be live in ONE process, so the shape is now
-// a per-room fact.
-// ⚠️ `roomDims` is keyed on the ROOM KEY ALONE, deliberately — so it can be asked without materialising a cell
-// store. That distinction is the whole reason `peekCells` exists beside `cellsOf`, and under chunking it is the
-// difference between probing a chunk and faulting one in.
-// ⚠️ The old zero-argument `WORLD_GEOM()` was RENAMED rather than given an optional parameter. An optional room
-// would let a missed call site keep working today and break silently the day a second shape exists; a rename
-// turns every missed site into an immediate ReferenceError instead.
-const PAGE_DIMS = Object.freeze({ cols: TERRAIN_COLS, rows: TERRAIN_ROWS });
-function roomDims(room) { return PAGE_DIMS; }   // every room today — the Overworld's own shape lands in a later increment
-// The terrain-resolution geometry (SUB=1) for a room, i.e. the one the fields that are not fine-grid ones use.
-const worldGeom = (room) => { const d = roomDims(room); return chunkGeom(d.cols, d.rows); };
 // ==CELL_STORE_BLOCK_END==
 function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', worldGeom(room), room)); }
 function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', worldGeom(room), room)); }
@@ -1917,13 +1941,14 @@ function carveCellSrv(grid, hp, mats, i, hard) {
   grid.s(i, 0); hp.s(i, 0); return true;
 }
 function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard) {
-  const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(TERRAIN_COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
-  const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(TERRAIN_ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows;                 // Phase 6: the grid carries its own shape
+  const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
+  const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
   const r2 = r * r; let changed = false;
   for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) > r2) continue;
-    const i = ry * TERRAIN_COLS + cx;
+    const i = ry * COLS + cx;
     if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed = true; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed = true;
   }
@@ -1931,13 +1956,14 @@ function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard) {
 }
 // Axis-aligned square fill (the manual brush; r = half-extent). Carves/paints blocky, grid-aligned terrain.
 function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard) {
-  const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(TERRAIN_COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
-  const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(TERRAIN_ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows;                 // Phase 6: the grid carries its own shape
+  const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
+  const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
   let changed = false;
   for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if (Math.abs(ccx - wx) > r || Math.abs(ccy - wy) > r) continue;
-    const i = ry * TERRAIN_COLS + cx;
+    const i = ry * COLS + cx;
     if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed = true; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed = true;
   }
@@ -1991,7 +2017,8 @@ function dropSource(room, i) { const s = cellsOf(room).src; if (s && s.delete(i)
 function dropSourcesInRect(room, c0, r0, c1, r1) {
   const s = cellsOf(room).src; if (!s || !s.size) return;
   const gone = [];
-  for (const i of s.keys()) { const r = (i / TERRAIN_COLS) | 0, c = i - r * TERRAIN_COLS; if (c >= c0 && c <= c1 && r >= r0 && r <= r1) gone.push(i); }
+  const COLS = cellsOf(room).cols;
+  for (const i of s.keys()) { const r = Math.floor(i / COLS), c = i - r * COLS; if (c >= c0 && c <= c1 && r >= r0 && r <= r1) gone.push(i); }
   for (const i of gone) s.delete(i);
   if (!s.size) dropSrcMap(room);
   if (gone.length) io.to(room).emit('liquid-src', { cells: gone, on: false });
@@ -2315,10 +2342,10 @@ function clearFineRoom(room) {
 }
 function ensureFineArrays(room, SUB) {
   const s = cellsOf(room);
-  const cells = (TERRAIN_COLS * SUB) * (TERRAIN_ROWS * SUB);
+  const cells = (s.cols * SUB) * (s.rows * SUB);                        // Phase 6: this room's shape, not the module constants
   if (s.fineSub !== SUB || !s.fineAmt || s.fineTotal.length !== cells) {
     s.fineSub = SUB;
-    const geom = chunkGeom(TERRAIN_COLS * SUB, TERRAIN_ROWS * SUB);
+    const geom = chunkGeom(s.cols * SUB, s.rows * SUB);
     s.fineAmt = newPagedField('fineAmt', geom, room);
     s.fineTotal = newPagedField('fineTotal', geom, room);
     cellRooms.fineArr.add(room);
@@ -2340,7 +2367,7 @@ function fineSet(room) { const s = cellsOf(room); if (!s.fineActive) { s.fineAct
 function fineWakeAround(room, i) {
   const s = cellsOf(room), tot = s.fineTotal, grid = s.terrain;
   if (!tot || !grid) return;
-  const N = grid.length, COLS = TERRAIN_COLS, c = i % COLS, act = fineSet(room);
+  const N = grid.length, COLS = s.cols, c = i % COLS, act = fineSet(room);
   for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) {
     if (j < 0 || j >= N || tot.g(j) <= 0) continue;
     const v = grid.g(j); if (v !== 0 && !isFluidId(v)) continue;
@@ -2372,9 +2399,13 @@ const capFrac = (f) => { const v = Math.round(LIQUID_MAX * f); return v < 1 ? 1 
 // — was DELETED 2026-07-31 for the same reason as roomLevelAcc: the coarse flux pass was its only caller and went with
 // liquidTickRoom on 2026-07-29, leaving two more full-world arrays nobody allocated. The fine pair below is live
 // (`fineLiquidTickRoom`'s flux pass), though note flux levelling itself is SHELVED behind `liquidCfg.fluxLevel`, off.
-function ensureFineFluxSeen(room, cells) { const s = cellsOf(room), a = s.fineFluxSeen; return (a && a.length === cells) ? a : (s.fineFluxSeen = newPagedField('fineFluxSeen', chunkGeom(TERRAIN_COLS * (s.fineSub || 1), TERRAIN_ROWS * (s.fineSub || 1)), room)); }
+function ensureFineFluxSeen(room, cells) { const s = cellsOf(room), a = s.fineFluxSeen; return (a && a.length === cells) ? a : (s.fineFluxSeen = newPagedField('fineFluxSeen', chunkGeom(s.cols * (s.fineSub || 1), s.rows * (s.fineSub || 1)), room)); }
 // ⚠️ NOT paged: this is a flood-fill STACK, indexed by stack position, not by cell — paging it would be meaningless.
 // It is only allocated when `liquidCfg.fluxLevel` is on, which is SHELVED and off by default.
+// ⚠️ THE ONE PER-CELL FIELD THAT IS NOT PAGED — a flat full-world Int32Array, i.e. 4 bytes per world cell, which is
+// exactly the area-linear cost Phase 6 is removing everywhere else. It costs nothing TODAY only because flux
+// levelling is shelved (liquidCfg.fluxLevel default off), so this is never called. It is a stack, not a grid, so
+// paging is the wrong fix — it wants to grow on demand instead. Deliberately left for whenever flux is revived.
 function ensureFineFluxStack(room, cells) { const s = cellsOf(room), a = s.fineFluxStack; return (a && a.length === cells) ? a : (s.fineFluxStack = new Int32Array(cells)); }
 // `isSolid` inside liquidTickRoom is a closure over that call; callers outside it need their own.
 const isSolidCell = (v) => v !== 0 && !isFluidId(v);
@@ -2404,9 +2435,10 @@ function powderSet(room) { const s = cellsOf(room); if (!s.powderActive) { s.pow
 // Wake powder in + just above a rect after a terrain edit: a dig removes support (grains above cascade down), a paint drops
 // unsupported grains. The r0-1 margin seeds the cascade — each moving grain then wakes the one above it.
 function activatePowderRect(room, grid, c0, r0, c1, r1) {
-  c0 = Math.max(0, c0); r0 = Math.max(0, r0 - 1); c1 = Math.min(TERRAIN_COLS - 1, c1); r1 = Math.min(TERRAIN_ROWS - 1, r1);
+  const COLS = grid.geom.cols;
+  c0 = Math.max(0, c0); r0 = Math.max(0, r0 - 1); c1 = Math.min(COLS - 1, c1); r1 = Math.min(grid.geom.rows - 1, r1);
   const s = powderSet(room);
-  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * TERRAIN_COLS + c; if (isPowderId(grid.g(i))) s.add(i); }
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * COLS + c; if (isPowderId(grid.g(i))) s.add(i); }
   if (!s.size) dropPowderSet(room);
 }
 // SATURATION tuning (terrain reactions). SAT_MAX ≈ "a cell's worth" of water; ABSORB per absorb-tick; DRY per soil-tick when
@@ -2418,7 +2450,7 @@ function soilSet(room) { const s = cellsOf(room); if (!s.soilActive) { s.soilAct
 // Seed the soil set so soilTickRoom processes absorption/drying around water. Called on PAINT and at GEN (not just when a
 // water cell happens to be "active") → placement + pre-generated lakes reliably + consistently start absorbing.
 function seedSoilAround(room, grid, i) {
-  const nn = grid.length, COLS = TERRAIN_COLS, c = i % COLS, N = [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
+  const nn = grid.length, COLS = grid.geom.cols, c = i % COLS, N = [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
   // In fine mode water is not a grid id — it is rank 4 of the fine stack — so both tests below have to read the fine
   // arrays or nothing is ever seeded and the whole saturation model stays asleep.
   const st = cellsOf(room);
@@ -2468,7 +2500,7 @@ function seedLiquidActivity(room) {
 function powderTickRoom(room) {
   const st = cellsOf(room), grid = st.terrain, hp = st.terrainHp, active = st.powderActive;
   if (!grid || !hp || !active || !active.size) { if (active && !active.size) dropPowderSet(room); return; }
-  const mats = roomMats[room] || {}, T = LIQ_T, COLS = TERRAIN_COLS, tick = powderTickCount, nn = grid.length;
+  const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, tick = powderTickCount, nn = grid.length;
   const FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // grains may not enter the bedrock floor row (same as liquid)
   // FINE mode: liquid lives in the roomFine* arrays and the terrain grid holds SOLIDS ONLY, so `isFluidId(grid[j])`
   // never matches and a grain read a liquid cell as plain AIR — it fell straight through the pool and, worse, the
@@ -2524,7 +2556,7 @@ function soilTickRoom(room) {
   const st = cellsOf(room), ss = st.soilActive; if (!ss || !ss.size) { if (ss) dropSoilSet(room); return; }
   const grid = st.terrain, hp = st.terrainHp;
   if (!grid) { dropSoilSet(room); return; }
-  const sat = ensureSat(room), mats = roomMats[room] || {}, COLS = TERRAIN_COLS, nn = grid.length, T = LIQ_T;
+  const sat = ensureSat(room), mats = roomMats[room] || {}, COLS = st.cols, nn = grid.length, T = LIQ_T;
   const SAT_MAX = capFrac(SAT_MAX_F), SAT_ABSORB = capFrac(SAT_ABSORB_F);   // fractions of a cell → they track cellCap
   // ── SAME SATURATION LOGIC, FINE DATA SOURCE. In fine mode liquid lives in the roomFine* arrays and the terrain grid
   // holds solids only, so every `grid[j] === 9` water test and every coarse amt/tot read below found nothing and the
@@ -2598,10 +2630,11 @@ function fineLiquidTickRoom(room, SUB) {
   if (!grid || !amt || !tot || !active || !active.size) { if (active && !active.size) dropFineActive(room); return; }
   const lvlAcc = st.fineLevelAcc;
   const tick = liquidTickCount, cap = LIQUID_MAX, T = LIQ_T;
-  const COLS = TERRAIN_COLS * SUB, FROWS = TERRAIN_ROWS * SUB, NCELL = COLS * FROWS;
+  const COLS = st.cols * SUB, FROWS = st.rows * SUB, NCELL = COLS * FROWS;   // Phase 6: this room's shape
   const LIQUID_FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL) * SUB;   // liquid may not descend into/below the bedrock row (scaled to fine rows)
   const SCAN = LIQUID_LEVEL_SCAN * SUB;                                  // levelling scan reach in CELLS → scaled so PHYSICAL reach is unchanged
-  const coarseOf = (k) => { const fr = (k / COLS) | 0, fc = k - fr * COLS; return ((fr / SUB) | 0) * TERRAIN_COLS + ((fc / SUB) | 0); };
+  const TCOLS = st.cols;
+  const coarseOf = (k) => { const fr = (k / COLS) | 0, fc = k - fr * COLS; return ((fr / SUB) | 0) * TCOLS + ((fc / SUB) | 0); };
   const isSolid = (k) => { if (k < 0 || k >= NCELL) return true; const v = grid.g(coarseOf(k)); return v !== 0 && !isFluidId(v); };   // fine solid = the coarse terrain cell it sits in
   const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; return isSinkId(grid.g(coarseOf(k))); };   // a fine cell whose coarse cell is a DRAIN block
   const sinkRate = Math.max(0, Math.min(cap, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
@@ -2891,7 +2924,7 @@ function fineLiquidTickRoom(room, SUB) {
   // bounded rate BETWEEN ADJACENT cells only. Faster on wide pools; shelved for its sliding-slab look + it levels streams
   // it absorbs. Behind the same toggle so it can be A/B'd on the fine grid. No secondary lane here (fine has none).
   if (liquidCfg.fluxLevel) {
-    const ROWS = TERRAIN_ROWS * SUB, NCELL2 = COLS * ROWS, RATE = liquidCfg.fluxRate | 0;
+    const ROWS = st.rows * SUB, NCELL2 = COLS * ROWS, RATE = liquidCfg.fluxRate | 0;
     const lvlMove = liquidCfg.levelMix ? moveProp : moveTop;
     const seen = ensureFineFluxSeen(room, NCELL2); seen.fill(0);
     const stack = ensureFineFluxStack(room, NCELL2);
@@ -3022,7 +3055,7 @@ function fineReactSet(room) { const s = cellsOf(room); if (!s.fineReact) { s.fin
 // digging the wall between them), so terrain edits seed the cell + its 4 neighbours explicitly.
 function seedFineReactAround(room, i) {
   if (!liquidCfg.reactions) return;
-  const COLS = TERRAIN_COLS, N = COLS * TERRAIN_ROWS; if (i < 0 || i >= N) return;
+  const d = roomDims(room), COLS = d.cols, N = COLS * d.rows; if (i < 0 || i >= N) return;
   const s = fineReactSet(room), c = i % COLS;
   s.add(i); if (i - COLS >= 0) s.add(i - COLS); if (i + COLS < N) s.add(i + COLS);
   if (c > 0) s.add(i - 1); if (c < COLS - 1) s.add(i + 1);
@@ -3064,7 +3097,7 @@ function fineReactTickRoom(room, SUB) {
   if (!grid || !hp || !amt || !tot) return;
   const active = st.fineActive, seeded = st.fineReact, burning = st.fineFire;
   if ((!active || !active.size) && (!seeded || !seeded.size) && (!burning || !burning.size)) { if (seeded) dropFineReact(room); return; }
-  const mats = roomMats[room] || {}, T = LIQ_T, COLS = TERRAIN_COLS, N = grid.length;
+  const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, N = grid.length;
   const tick = liquidTickCount, FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // acid may not eat the bedrock row
   const act = fineSet(room), liqChanged = new Set(), terrCells = [], fx = [];
   // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
@@ -3276,7 +3309,7 @@ function emitFineCells(room, idxList) {   // broadcast a set of fine cells immed
   const st = cellsOf(room);
   if (!idxList.length || !st.fineAmt) return;
   const SUB = st.fineSub || 1, cells = []; fineWirePush(room, idxList, cells);
-  if (cells.length) wireFanout(room, 'liquid-fine-cells', { sub: SUB, cols: TERRAIN_COLS * SUB, cells });
+  if (cells.length) wireFanout(room, 'liquid-fine-cells', { sub: SUB, cols: st.cols * SUB, cells });
 }
 // ==LIQUID_SIM_BLOCK_END== (test harness slices the sim to this marker)
 // Restartable sim loop — the tick rate is liquidCfg.tickMs so the Liquid Debug menu can speed it up/slow it down live.
@@ -3576,7 +3609,7 @@ function sendChunkContent(sock, room, chunks) {
   }
   if (tc.length) sock.emit('terrain-set', { cells: tc });
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
-  sock.emit('liquid-fine-cells', { sub: 1, cols: TERRAIN_COLS, cells, clear: chunks.slice() });
+  sock.emit('liquid-fine-cells', { sub: 1, cols: geom.cols, cells, clear: chunks.slice() });
 }
 // ==INTEREST_BLOCK_START== (probe_subscriptions slices this out — stub io/chunkHash/worldGeom/geomPage when you do)
 const interestCfg = {
@@ -4014,7 +4047,7 @@ function cfgWire() {
 // harness never sees them. Volume mapping: a coarse cell holds up to LIQUID_MAX units; a full coarse cell = SUB² full fine
 // cells, so upscale multiplies units by SUB² and downscale divides by SUB².
 function fineSetBlock(room, SUB, cc, cr, coarseAmt) {   // distribute a coarse rank-stack into the SUB×SUB fine block (heaviest at the floor, bottom-up); returns the filled fine indices
-  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, FCOLS = TERRAIN_COLS * SUB, act = fineSet(room);
+  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, FCOLS = st.cols * SUB, act = fineSet(room);
   const per = new Array(LIQ_T); let totalUnits = 0;
   for (let rk = 0; rk < LIQ_T; rk++) { per[rk] = coarseAmt[rk] * SUB * SUB; totalUnits += per[rk]; }
   const fx0 = cc * SUB, fy0 = cr * SUB, filled = [];
@@ -4029,13 +4062,13 @@ function fineSetBlock(room, SUB, cc, cr, coarseAmt) {   // distribute a coarse r
   return filled;
 }
 function fineClearBlock(room, SUB, cc, cr) {   // clear the SUB×SUB fine block; returns the fine indices that changed
-  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, FCOLS = TERRAIN_COLS * SUB, act = fineSet(room);
+  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, FCOLS = st.cols * SUB, act = fineSet(room);
   const fx0 = cc * SUB, fy0 = cr * SUB, changed = [];
   for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx); if (tot.g(i) > 0) { const p = amt.wp(i), b = amt.o(i); for (let k = 0; k < LIQ_T; k++) p[b + k] = 0; tot.s(i, 0); act.delete(i); changed.push(i); fineSyncGrid(room, i); fineWakeAround(room, i); } }
   return changed;
 }
 function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back down to a coarse rank-stack (÷SUB²), clamped to CAP
-  const amt = cellsOf(room).fineAmt, FCOLS = TERRAIN_COLS * SUB, out = new Array(LIQ_T).fill(0), fx0 = cc * SUB, fy0 = cr * SUB;
+  const amt = cellsOf(room).fineAmt, FCOLS = cellsOf(room).cols * SUB, out = new Array(LIQ_T).fill(0), fx0 = cc * SUB, fy0 = cr * SUB;
   for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), p = amt.rp(i), b = amt.o(i); for (let k = 0; k < LIQ_T; k++) out[k] += p[b + k]; }
   const div = SUB * SUB; let ct = 0; for (let k = 0; k < LIQ_T; k++) { out[k] = Math.round(out[k] / div); ct += out[k]; }
   let ex = ct - LIQUID_MAX; for (let k = LIQ_T - 1; k >= 0 && ex > 0; k--) { const d = Math.min(out[k], ex); out[k] -= d; ex -= d; }   // trim overflow from the lightest
@@ -4049,21 +4082,22 @@ function buildFineInit(room) {   // join replay: every non-empty fine cell (same
   const SUB = st.fineSub || 1, idx = []; tot.scan((i, o, page) => { if (page[o] > 0) idx.push(i); });   // only faulted pages can hold liquid
   idx.sort((a, b) => a - b);   // page order is chunk-major; the wire and the old flat scan were index-ascending
   const cells = []; fineWirePush(room, idx, cells);
-  return { sub: SUB, cols: TERRAIN_COLS * SUB, cells };
+  return { sub: SUB, cols: st.cols * SUB, cells };
 }
 function fineActivateRect(room, grid, c0, r0, c1, r1) {   // placement in fine mode: seed/clear the fine block for each painted coarse cell + broadcast
   const SUB = 1; ensureFineArrays(room, SUB);
-  c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(TERRAIN_COLS - 1, c1); r1 = Math.min(TERRAIN_ROWS - 1, r1);
+  const COLS = grid.geom.cols;
+  c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(COLS - 1, c1); r1 = Math.min(grid.geom.rows - 1, r1);
   const changed = [];
-  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * TERRAIN_COLS + c;
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * COLS + c;
     if (isFluidId(grid.g(i))) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid.g(i)]] = LIQUID_MAX; for (const x of fineSetBlock(room, SUB, c, r, ca)) changed.push(x); }
     else for (const x of fineClearBlock(room, SUB, c, r)) changed.push(x);
     seedFineReactAround(room, i);   // an edit is the only way a SETTLED pair (lava beside painted snow/water) starts reacting
   }
   // ...and the same for SATURATION. This used to sit in activateLiquidRect's coarse tail, which fine mode returns before
   // reaching — so painting water beside earth never started it absorbing. +1 margin so an edit on either side seeds.
-  for (let r = Math.max(0, r0 - 1); r <= Math.min(TERRAIN_ROWS - 1, r1 + 1); r++)
-    for (let c = Math.max(0, c0 - 1); c <= Math.min(TERRAIN_COLS - 1, c1 + 1); c++) seedSoilAround(room, grid, r * TERRAIN_COLS + c);
+  for (let r = Math.max(0, r0 - 1); r <= Math.min(grid.geom.rows - 1, r1 + 1); r++)
+    for (let c = Math.max(0, c0 - 1); c <= Math.min(COLS - 1, c1 + 1); c++) seedSoilAround(room, grid, r * COLS + c);
   emitFineCells(room, changed);
 }
 // SOURCE tick for the fine grid: each source coarse cell tops up its SUB×SUB fine block (bottom-fill) by rate·SUB² units
@@ -4072,12 +4106,12 @@ function sourceTickRoomFine(room, SUB) {
   const st = cellsOf(room), src = st.src; if (!src || !src.size) return;
   const grid = st.terrain; if (!grid) return;
   ensureFineArrays(room, SUB);
-  const amt = st.fineAmt, tot = st.fineTotal, act = fineSet(room), led = srcLedger(room), FCOLS = TERRAIN_COLS * SUB, cap = LIQUID_MAX, touched = new Set();
+  const amt = st.fineAmt, tot = st.fineTotal, act = fineSet(room), led = srcLedger(room), FCOLS = st.cols * SUB, cap = LIQUID_MAX, touched = new Set();
   for (const [ci, s] of src) {
     if (ci < 0 || ci >= grid.length || isSinkId(grid.g(ci)) || isSolidCell(grid.g(ci))) { src.delete(ci); continue; }
     const rank = s.rank | 0, rate = Math.max(0, Math.min(cap, (s.rate === undefined ? liquidCfg.srcRate : s.rate) | 0));
     if (!rate) continue;
-    let toAdd = rate * SUB * SUB; const cc = ci % TERRAIN_COLS, cr = (ci / TERRAIN_COLS) | 0, fx0 = cc * SUB, fy0 = cr * SUB;
+    let toAdd = rate * SUB * SUB; const cc = ci % st.cols, cr = Math.floor(ci / st.cols), fx0 = cc * SUB, fy0 = cr * SUB;
     for (let dy = SUB - 1; dy >= 0 && toAdd > 0; dy--) for (let dx = 0; dx < SUB && toAdd > 0; dx++) {
       const i = (fy0 + dy) * FCOLS + (fx0 + dx), free = cap - tot.g(i); if (free <= 0) continue;
       const add = free < toAdd ? free : toAdd; amt.wp(i)[amt.o(i) + rank] += add; tot.s(i, tot.g(i) + add); led[rank] += add; toAdd -= add; act.add(i); touched.add(i); fineSyncGrid(room, i);
@@ -4090,7 +4124,7 @@ function sourceTickRoomFine(room, SUB) {
 // or clear (seeding/clearing is done explicitly by placement). Grid is decoupled in fine mode, so this reads only fine state.
 function fineWakeRect(room, c0, r0, c1, r1) {
   const st = cellsOf(room), tot = st.fineTotal; if (!tot) return;
-  const SUB = st.fineSub || 1, FCOLS = TERRAIN_COLS * SUB, FROWS = TERRAIN_ROWS * SUB, act = fineSet(room);
+  const SUB = st.fineSub || 1, FCOLS = st.cols * SUB, FROWS = st.rows * SUB, act = fineSet(room);
   const fc0 = Math.max(0, c0 * SUB), fc1 = Math.min(FCOLS - 1, (c1 + 1) * SUB - 1), fr0 = Math.max(0, r0 * SUB), fr1 = Math.min(FROWS - 1, (r1 + 1) * SUB - 1);
   for (let r = fr0; r <= fr1; r++) for (let c = fc0; c <= fc1; c++) { const i = r * FCOLS + c; if (tot.g(i) > 0) act.add(i); }
 }
@@ -4332,7 +4366,9 @@ function validatePublishContent(levels) {
   if (!Array.isArray(levels) || !levels.length || levels.length > ROOM_LEVEL_CAP) return null;
   for (const l of levels) {
     if (!l || typeof l !== 'object' || !l.terrain || typeof l.terrain !== 'object') return null;
-    if ((l.terrain.cols | 0) !== TERRAIN_COLS || (l.terrain.rows | 0) !== TERRAIN_ROWS) return null;  // foreign world size
+    // Publishing is a page-room/Level operation, so the page shape is the right yardstick here — deliberately
+    // PAGE_DIMS rather than a per-room lookup, since a published World is replayed into page rooms.
+    if ((l.terrain.cols | 0) !== PAGE_DIMS.cols || (l.terrain.rows | 0) !== PAGE_DIMS.rows) return null;  // foreign world size
   }
   return levels;
 }
@@ -4759,15 +4795,16 @@ function mulberry32(a) {                              // tiny deterministic PRNG
 const MAT = { EARTH: 1, STONE: 2, SAND: 3, ICE: 4, MUD: 5, BOUNCY: 6, SNOW: 8, WATER: 9, QUICKSAND: 10, LAVA: 11, ACID: 12, BRINE: 14, OIL: 15 };
 function generateWorld(avatarRoom, seed, band) {
   const grid = ensureTerrain(avatarRoom), hp = ensureTerrainHp(avatarRoom);
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows;   // Phase 6: generate at THIS room's shape, not the module constants
   grid.fill(0); hp.fill(0);
   // Phase 6: confine generation to the playable band + margin (null band = full world). Terrain/scatter
   // outside [genC0, genC1] is skipped so a small Level doesn't gen (or save) ground it can't reach.
   const genC0 = band ? Math.max(0, band.c0) : 0;
-  const genC1 = band ? Math.min(TERRAIN_COLS - 1, band.c1) : TERRAIN_COLS - 1;
+  const genC1 = band ? Math.min(COLS - 1, band.c1) : COLS - 1;
   const inBand = (c) => c >= genC0 && c <= genC1;
   const rng = mulberry32(seed);
-  const set = (c, r, v) => { if (c < 0 || c >= TERRAIN_COLS || r < 0 || r >= TERRAIN_ROWS) return; const i = r * TERRAIN_COLS + c; grid.s(i, v); hp.s(i, v ? matStrengthSrv({}, v) : 0); };
-  const at = (c, r) => (c < 0 || c >= TERRAIN_COLS || r < 0 || r >= TERRAIN_ROWS) ? 0 : grid.g(r * TERRAIN_COLS + c);
+  const set = (c, r, v) => { if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return; const i = r * COLS + c; grid.s(i, v); hp.s(i, v ? matStrengthSrv({}, v) : 0); };
+  const at = (c, r) => (c < 0 || c >= COLS || r < 0 || r >= ROWS) ? 0 : grid.g(r * COLS + c);
   const bottomRow = Math.ceil(FLOOR_TOP / TERRAIN_CELL) - 1;            // last terrain row resting on the floor
   const baseRow = Math.round(bottomRow * 0.47);                        // mean surface row ≈ mid-height (deep underground below)
   // ALL-FINE gen scale: the feature sizes below were tuned in ROWS/COLUMNS for the 24px cell. As the cell shrank to 8px
@@ -4793,11 +4830,11 @@ function generateWorld(avatarRoom, seed, band) {
   const centerCol = Math.floor((MWSim.C.WORLD_W / 2) / TERRAIN_CELL);
   const plateauHalf = Math.ceil(SPAWN_CLEAR_HALF_W / TERRAIN_CELL) + Math.round(3 * G);
   let plateauSurf = heightAt(centerCol); if (plateauSurf > seaRow - 3 * G) plateauSurf = seaRow - 3 * G; if (plateauSurf < 6 * G) plateauSurf = 6 * G;
-  const surf = new Int16Array(TERRAIN_COLS);
-  for (let c = 0; c < TERRAIN_COLS; c++) surf[c] = (Math.abs(c - centerCol) <= plateauHalf) ? plateauSurf : heightAt(c);
+  const surf = new Int16Array(COLS);
+  for (let c = 0; c < COLS; c++) surf[c] = (Math.abs(c - centerCol) <= plateauHalf) ? plateauSurf : heightAt(c);
   const crustMat = (biome, r, s) => biome === 'desert' ? MAT.SAND : biome === 'snow' ? (r === s ? MAT.SNOW : MAT.EARTH) : biome === 'swamp' ? MAT.MUD : biome === 'volcanic' ? MAT.STONE : MAT.EARTH;
   // ---- 1. Solid fill: biome crust over a depth-layered underground (dirt → stone+veins → deep) ----
-  for (let c = 0; c < TERRAIN_COLS; c++) {
+  for (let c = 0; c < COLS; c++) {
     if (!inBand(c)) continue;
     const sB = (Math.abs(c - centerCol) <= plateauHalf) ? 'plains' : surfBiome(c);
     const uB = ugBiome(c);
@@ -4824,11 +4861,11 @@ function generateWorld(avatarRoom, seed, band) {
   // opens the rare wider pocket. Kept tight on purpose so the underground reads as tunnels to squeeze through,
   // not one big open void. Biome crust is left intact. ----
   const cp0 = rng() * Math.PI * 2, cp1 = rng() * Math.PI * 2, cp2 = rng() * Math.PI * 2, cp3 = rng() * Math.PI * 2, cp4 = rng() * Math.PI * 2;
-  for (let c = 0; c < TERRAIN_COLS; c++) {
+  for (let c = 0; c < COLS; c++) {
     if (!inBand(c)) continue;
     const top = surf[c] + CRUST + 1;
     for (let r = top; r <= bottomRow; r++) {
-      const i = r * TERRAIN_COLS + c; if (!grid.g(i)) continue;
+      const i = r * COLS + c; if (!grid.g(i)) continue;
       const depth = (r - top) / Math.max(1, bottomRow - top);
       const worm = Math.abs(Math.sin((c * 0.06 + r * 0.033) / G + cp0) + Math.sin((c * 0.025 - r * 0.052) / G + cp1) + Math.sin((c + r) * 0.041 / G + cp2));
       const chamber = Math.sin((c * 0.018 + r * 0.022) / G + cp3) + Math.sin((c * 0.034 - r * 0.013) / G + cp4);   // rare small pockets
@@ -4836,13 +4873,13 @@ function generateWorld(avatarRoom, seed, band) {
     }
   }
   // ---- 3a. Surface lakes: flood valley air below sea level with Water ----
-  for (let c = 0; c < TERRAIN_COLS; c++) if (inBand(c) && surf[c] > seaRow) for (let r = seaRow; r < surf[c]; r++) set(c, r, MAT.WATER);
+  for (let c = 0; c < COLS; c++) if (inBand(c) && surf[c] > seaRow) for (let r = seaRow; r < surf[c]; r++) set(c, r, MAT.WATER);
   // ---- 3b. Cave pools: shallow fluid resting on cave floors. ONE liquid per underground region (no random
   // mixing) so each area reads coherently — molten→Lava, sandstone→Quicksand, fungal→Brine, everywhere
   // else→Water. Patchy along the width via a wet field; molten always seeps at the very bottom. ----
   const wp = rng() * Math.PI * 2, wp2 = rng() * Math.PI * 2, POOL_DEPTH = Math.round(4 * G);
   const regionFluid = { molten: MAT.LAVA, sandstone: MAT.QUICKSAND, fungal: MAT.BRINE, frozen: MAT.WATER, crystal: MAT.WATER, caverns: MAT.WATER };
-  for (let c = 0; c < TERRAIN_COLS; c++) {
+  for (let c = 0; c < COLS; c++) {
     if (!inBand(c)) continue;
     const uB = ugBiome(c);
     const fluid = regionFluid[uB] || MAT.WATER;
@@ -4851,11 +4888,11 @@ function generateWorld(avatarRoom, seed, band) {
     const tableRow = uB === 'molten' ? bottomRow - Math.round(10 * G) : surf[c] + CRUST + Math.round(14 * G);   // no cave pools too near the surface
     if (!wetOK) continue;
     for (let r = bottomRow; r >= tableRow;) {
-      if (grid.g(r * TERRAIN_COLS + c) !== 0) { r--; continue; }         // solid — skip
+      if (grid.g(r * COLS + c) !== 0) { r--; continue; }         // solid — skip
       if (at(c, r + 1) === 0 && r < bottomRow) { r--; continue; }      // open with no floor below — air, skip
       let d = 0;                                                       // fill a shallow pool up from the floor
-      while (r >= tableRow && grid.g(r * TERRAIN_COLS + c) === 0 && d < POOL_DEPTH) { set(c, r, fluid); r--; d++; }
-      while (r >= 0 && grid.g(r * TERRAIN_COLS + c) === 0) r--;          // skip the air gap above until the next solid
+      while (r >= tableRow && grid.g(r * COLS + c) === 0 && d < POOL_DEPTH) { set(c, r, fluid); r--; d++; }
+      while (r >= 0 && grid.g(r * COLS + c) === 0) r--;          // skip the air gap above until the next solid
     }
   }
   // ---- 4. Objects ('world'-owned, FIFO-exempt): surface trees/rocks + sky platforms, then underground scatter ----
@@ -4863,23 +4900,23 @@ function generateWorld(avatarRoom, seed, band) {
   const objs = roomObjects[avatarRoom];
   const OBJ_CAP = 190;
   const clearX0 = MWSim.C.WORLD_W / 2 - SPAWN_CLEAR_HALF_W - 64, clearX1 = MWSim.C.WORLD_W / 2 + SPAWN_CLEAR_HALF_W + 64;
-  const dryLand = (c) => surf[c] <= seaRow && !!grid.g(surf[c] * TERRAIN_COLS + c);   // solid, non-flooded surface
+  const dryLand = (c) => surf[c] <= seaRow && !!grid.g(surf[c] * COLS + c);   // solid, non-flooded surface
   const outsideSpawn = (wx) => wx < clearX0 || wx > clearX1;
   const treeFor = { plains: '🌳', forest: '🌲', desert: '🌵', snow: '🌲', swamp: '🌿', volcanic: '🪨' };
   let wn = 0;
   const addObj = (o) => { if (wn >= OBJ_CAP) return false; o.id = 'world-' + wn; o.ownerId = 'world'; o.owner = 'world'; objs.set(o.id, o); wn++; return true; };
-  for (let c = Math.max(8, genC0); c < Math.min(TERRAIN_COLS - 8, genC1); c += Math.round(6 * G)) {   // surface rock mounds (terrain); step ×G keeps physical spacing
+  for (let c = Math.max(8, genC0); c < Math.min(COLS - 8, genC1); c += Math.round(6 * G)) {   // surface rock mounds (terrain); step ×G keeps physical spacing
     if (rng() > 0.10 || !dryLand(c) || !outsideSpawn((c + 0.5) * TERRAIN_CELL)) continue;
     const hgt = (1 + (rng() * 2 | 0)) * G;
     for (let k = 0; k < hgt; k++) { set(c, surf[c] - 1 - k, MAT.STONE); if (rng() > 0.5) set(c + 1, surf[c + 1] - 1 - k, MAT.STONE); }
   }
-  for (let c = Math.max(5, genC0); c < Math.min(TERRAIN_COLS - 5, genC1); c += Math.round(4 * G)) {   // surface trees (narrow solid stamps); step ×G keeps physical spacing
+  for (let c = Math.max(5, genC0); c < Math.min(COLS - 5, genC1); c += Math.round(4 * G)) {   // surface trees (narrow solid stamps); step ×G keeps physical spacing
     if (rng() > 0.16 || !dryLand(c) || !outsideSpawn((c + 0.5) * TERRAIN_CELL)) continue;
     const h = 58 + (rng() * 28 | 0), w = Math.round(h * 0.5);
     addObj({ type: 'stamp', x: (c + 0.5) * TERRAIN_CELL, y: surf[c] * TERRAIN_CELL - h / 2,
       content: treeFor[surfBiome(c)] || '🌳', w, h, shape: 'rect', angle: 0, stretch: false, hp: 3 });
   }
-  const platLo = Math.max(10, genC0), platHi = Math.min(TERRAIN_COLS - 10, genC1);   // sky platforms (indestructible) for traversal
+  const platLo = Math.max(10, genC0), platHi = Math.min(COLS - 10, genC1);   // sky platforms (indestructible) for traversal
   const plats = platHi > platLo ? 8 + (rng() * 6 | 0) : 0;
   for (let k = 0; k < plats; k++) {
     const c = platLo + (rng() * (platHi - platLo) | 0), wx = (c + 0.5) * TERRAIN_CELL;
@@ -4889,11 +4926,11 @@ function generateWorld(avatarRoom, seed, band) {
   }
   // Underground scatter: props + the occasional bouncy fungus/crystal platform, resting on cave floors.
   const cryFor = { frozen: '❄️', crystal: '💎', fungal: '🍄', sandstone: '🪨', caverns: '💧', molten: '' };
-  for (let c = Math.max(4, genC0); c < Math.min(TERRAIN_COLS - 4, genC1); c += Math.round(3 * G)) {   // underground scatter; step ×G keeps physical spacing
+  for (let c = Math.max(4, genC0); c < Math.min(COLS - 4, genC1); c += Math.round(3 * G)) {   // underground scatter; step ×G keeps physical spacing
     if (wn >= OBJ_CAP) break;
     const uB = ugBiome(c);
     for (let r = surf[c] + CRUST + Math.round(6 * G); r <= bottomRow - 1; r++) {
-      const here = grid.g(r * TERRAIN_COLS + c), below = at(c, r + 1);
+      const here = grid.g(r * COLS + c), below = at(c, r + 1);
       if (here !== 0) continue;                                        // need an open cell…
       if (below === 0 || TERRAIN_MATS_FLUID(below)) continue;         // …resting on a SOLID floor (not fluid/air)
       const wx = (c + 0.5) * TERRAIN_CELL;
@@ -4994,8 +5031,9 @@ function worldSpawnFor(avatarRoom) {
   const x = MWSim.C.WORLD_W / 2;
   const grid = peekCells(avatarRoom).terrain;
   if (!grid) return { x, y: FLOOR_TOP };
-  const col = Math.max(0, Math.min(TERRAIN_COLS - 1, Math.floor(x / TERRAIN_CELL)));
-  for (let r = 0; r < TERRAIN_ROWS; r++) if (grid.g(r * TERRAIN_COLS + col)) return { x, y: r * TERRAIN_CELL };
+  const COLS = grid.geom.cols;
+  const col = Math.max(0, Math.min(COLS - 1, Math.floor(x / TERRAIN_CELL)));
+  for (let r = 0; r < grid.geom.rows; r++) if (grid.g(r * COLS + col)) return { x, y: r * TERRAIN_CELL };
   return { x, y: FLOOR_TOP };
 }
 // Keep-clear no-build box above the spawn surface — world mode only (sandbox has no protection).
@@ -5342,11 +5380,12 @@ function hydrateRoomFromBlob(avRoom, blob) {
   // published/persistent rooms empty AND let autosave overwrite their live_state with nothing).
   const src = new Uint8Array(sc * sr); { let i = 0; for (const run of terr.runs || []) { const v = run[0] | 0, n = run[1] | 0; for (let k = 0; k < n && i < src.length; k++, i++) src[i] = v; } }
   const srcHp = new Uint8Array(sc * sr); if (Array.isArray(terr.hpRuns)) { let j = 0; for (const run of terr.hpRuns) { const val = run[0] | 0, n = run[1] | 0; for (let k = 0; k < n && j < srcHp.length; k++, j++) srcHp[j] = val; } }
-  if (sc === TERRAIN_COLS && sr === TERRAIN_ROWS) {
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows;                   // Phase 6: resample into THIS room's shape
+  if (sc === COLS && sr === ROWS) {
     for (let idx = 0; idx < grid.length; idx++) { const v = src[idx]; if (v) { grid.s(idx, v); hp.s(idx, srcHp[idx] || matStrengthSrv(mats, v)); } }
   } else {
-    for (let r = 0; r < TERRAIN_ROWS; r++) { const rs = Math.min(sr - 1, (r * sr / TERRAIN_ROWS) | 0);
-      for (let c = 0; c < TERRAIN_COLS; c++) { const cs = Math.min(sc - 1, (c * sc / TERRAIN_COLS) | 0); const si = rs * sc + cs, v = src[si]; if (v) { const di = r * TERRAIN_COLS + c; grid.s(di, v); hp.s(di, srcHp[si] || matStrengthSrv(mats, v)); } } }
+    for (let r = 0; r < ROWS; r++) { const rs = Math.min(sr - 1, (r * sr / ROWS) | 0);
+      for (let c = 0; c < COLS; c++) { const cs = Math.min(sc - 1, (c * sc / COLS) | 0); const si = rs * sc + cs, v = src[si]; if (v) { const di = r * COLS + c; grid.s(di, v); hp.s(di, srcHp[si] || matStrengthSrv(mats, v)); } } }
   }
   const map = roomObjects[avRoom] || (roomObjects[avRoom] = new Map());
   let placed = 0;
@@ -5426,7 +5465,7 @@ function captureRoomBlob(avRoom) {                      // → a Lvl blob (terra
   if (sig < 0 || !cached || cached.sig !== sig) {
     const mats = {}, mm = roomMats[avRoom] || {};
     if (hasTerr) { const used = new Set(); g.scan((_i, o, page) => { const v = page[o]; if (v >= CUSTOM_MAT_MIN) used.add(v); }); for (const v of used) if (mm[v]) mats[v] = mm[v]; }
-    cached = { sig, mats, terrain: { cols: TERRAIN_COLS, rows: TERRAIN_ROWS, cell: TERRAIN_CELL, runs: terrainRLE(g).runs, hpRuns: peekCells(avRoom).terrainHp ? terrainRLE(peekCells(avRoom).terrainHp).runs : undefined } };
+    cached = { sig, mats, terrain: { cols: g.geom.cols, rows: g.geom.rows, cell: TERRAIN_CELL, runs: terrainRLE(g).runs, hpRuns: peekCells(avRoom).terrainHp ? terrainRLE(peekCells(avRoom).terrainHp).runs : undefined } };
     if (sig >= 0) _terrBlobCache.set(avRoom, cached); else _terrBlobCache.delete(avRoom);
   }
   return {
@@ -5530,7 +5569,7 @@ io.on('connection', (socket) => {
     if (!room || !rect || typeof rect !== 'object') return;
     const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, grid = st.terrain;
     if (!amt || !tot || !grid) { socket.emit('liquid-mirror-state', { err: 'no fine state for this room' }); return; }
-    const SUB = st.fineSub || 1 || 1, FCOLS = TERRAIN_COLS * SUB, FROWS = TERRAIN_ROWS * SUB;
+    const SUB = st.fineSub || 1 || 1, FCOLS = st.cols * SUB, FROWS = st.rows * SUB;
     const cl = (v, hi) => Math.max(0, Math.min(hi, v | 0));
     const c0 = cl(rect.c0, FCOLS - 1), c1 = cl(rect.c1, FCOLS - 1), r0 = cl(rect.r0, FROWS - 1), r1 = cl(rect.r1, FROWS - 1);
     if (c1 < c0 || r1 < r0) return;
@@ -5551,7 +5590,7 @@ io.on('connection', (socket) => {
     // standing pair. Mirrors the conditions on step (2) in fineLiquidTickRoom verbatim — keep the two in step.
     const FROW_FLOOR = Math.floor(FLOOR_TOP / TERRAIN_CELL) * SUB;
     const isSolidF = (k) => { if (k < 0 || k >= FCOLS * FROWS) return true; const fr = (k / FCOLS) | 0, fc = k - fr * FCOLS;
-      const v = grid.g(((fr / SUB) | 0) * TERRAIN_COLS + ((fc / SUB) | 0)); return v !== 0 && !isFluidId(v); };
+      const v = grid.g(((fr / SUB) | 0) * st.cols + ((fc / SUB) | 0)); return v !== 0 && !isFluidId(v); };
     const floorRk = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) return rk; return -1; };
     const ceilRk = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = T - 1; rk >= 0; rk--) if (p[b + rk] > 0) return rk; return -1; };
     const stk = (j) => { const p = amt.rp(j), b = amt.o(j), o = []; for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) o.push(rk + ':' + p[b + rk]); return '{' + o.join(' ') + '}'; };
@@ -6224,7 +6263,7 @@ io.on('connection', (socket) => {
     // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
     materializeRoom(avRoom);   // join replay reads the whole world — an evicted chunk would arrive empty
     const _cs = cellsOf(avRoom), tg = _cs.terrain;
-    if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: TERRAIN_COLS, rows: TERRAIN_ROWS, ...terrainRLE(tg), hpRuns: _cs.terrainHp ? terrainRLE(_cs.terrainHp).runs : undefined });
+    if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: tg.geom.cols, rows: tg.geom.rows, ...terrainRLE(tg), hpRuns: _cs.terrainHp ? terrainRLE(_cs.terrainHp).runs : undefined });
     // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
     if (tg) { const fi = buildFineInit(avRoom); if (fi && fi.cells.length) socket.emit('liquid-fine-init', fi); }
     if (_cs.src && _cs.src.size) socket.emit('liquid-src', { cells: Array.from(_cs.src.keys()), on: true, init: true });   // join replay: which cells are sources (marker only; the sim owns the behaviour)
@@ -6421,10 +6460,11 @@ io.on('connection', (socket) => {
         // (no fluid-id litter → no phantom FX / "can't place" / re-seed on the next edit). Solid-over-liquid + carve clear
         // the fine block; surrounding fine liquid is only WOKEN, never re-seeded from the grid.
         ensureFineArrays(currentAvatarRoom, 1);
-        const bc0 = Math.max(0, Math.floor((cx - rr) / TERRAIN_CELL)), bc1 = Math.min(TERRAIN_COLS - 1, Math.floor((cx + rr) / TERRAIN_CELL));
-        const br0 = Math.max(0, Math.floor((cy - rr) / TERRAIN_CELL)), br1 = Math.min(TERRAIN_ROWS - 1, Math.floor((cy + rr) / TERRAIN_CELL));
+        const ECOLS = grid.geom.cols;
+        const bc0 = Math.max(0, Math.floor((cx - rr) / TERRAIN_CELL)), bc1 = Math.min(ECOLS - 1, Math.floor((cx + rr) / TERRAIN_CELL));
+        const br0 = Math.max(0, Math.floor((cy - rr) / TERRAIN_CELL)), br1 = Math.min(grid.geom.rows - 1, Math.floor((cy + rr) / TERRAIN_CELL));
         const changedFine = [];
-        for (let r = br0; r <= br1; r++) for (let c = bc0; c <= bc1; c++) { const i = r * TERRAIN_COLS + c;
+        for (let r = br0; r <= br1; r++) for (let c = bc0; c <= bc1; c++) { const i = r * ECOLS + c;
           if (op === 'paint' && isFluidId(m) && grid.g(i) === m) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[m]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, 1, c, r, ca)) changedFine.push(x); grid.s(i, 0); hp.s(i, 0); }
           else if (op === 'carve' || (op === 'paint' && isSolidCell(grid.g(i)))) for (const x of fineClearBlock(currentAvatarRoom, 1, c, r)) changedFine.push(x);
         }
@@ -6451,7 +6491,7 @@ io.on('connection', (socket) => {
       const i = cells[k] | 0;
       let v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
       if (v && clear) {
-        const cc = (i % TERRAIN_COLS + 0.5) * TERRAIN_CELL, cr = (Math.floor(i / TERRAIN_COLS) + 0.5) * TERRAIN_CELL;
+        const cc = (i % grid.geom.cols + 0.5) * TERRAIN_CELL, cr = (Math.floor(i / grid.geom.cols) + 0.5) * TERRAIN_CELL;
         if (aabbHitsClear(clear, cc, cr, cc, cr)) { v = 0; cells[k + 1] = 0; }
       }
       if (i >= 0 && i < grid.length) { if (grid.g(i) !== v) { grid.s(i, v); changed = true; } hp.s(i, v ? matStrengthSrv(mats, v) : 0); }
@@ -6465,10 +6505,10 @@ io.on('connection', (socket) => {
       ensureFineArrays(currentAvatarRoom, 1); const changedFine = [];
       for (let k = 0; k + 1 < cells.length; k += 2) {
         const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
-        const cc = i % TERRAIN_COLS, cr = (i / TERRAIN_COLS) | 0;
+        const SCOLS = grid.geom.cols, cc = i % SCOLS, cr = Math.floor(i / SCOLS);
         if (isFluidId(grid.g(i))) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid.g(i)]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, 1, cc, cr, ca)) changedFine.push(x); hp.s(i, 0); }   // the painted fluid id STAYS in the grid (re-coupled)
         else for (const x of fineClearBlock(currentAvatarRoom, 1, cc, cr)) changedFine.push(x);   // a solid/empty coarse cell clears its fine block
-        if (isPowderId(grid.g(i))) powderSet(currentAvatarRoom).add(i); const up = i - TERRAIN_COLS; if (up >= 0 && isPowderId(grid.g(up))) powderSet(currentAvatarRoom).add(up);
+        if (isPowderId(grid.g(i))) powderSet(currentAvatarRoom).add(i); const up = i - SCOLS; if (up >= 0 && isPowderId(grid.g(up))) powderSet(currentAvatarRoom).add(up);
         seedFineReactAround(currentAvatarRoom, i);   // explicit cell write (undo/paste/scene) can put a solid next to settled liquid
       }
       emitFineCells(currentAvatarRoom, changedFine);
