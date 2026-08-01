@@ -1679,6 +1679,14 @@ PagedArray.prototype.scan = function (cb) {
   }
 };
 PagedArray.prototype.bytes = function () { return this.live * CHUNK_CELLS * this.T * this.Ctor.BYTES_PER_ELEMENT; };
+// ── THE PAGE-DIRECTORY INTERFACE ── everything OUTSIDE the hot accessors reaches pages and revisions through these
+// four, never through `.pages[p]` / `.rev[p]` directly. That is what makes the directory's REPRESENTATION a local
+// decision (Phase 6 increment 2 measured a Map and a two-level directory against the dense array behind exactly
+// this seam). The hot paths — rp/wp/g/s/o above — deliberately stay inlined and are the only sites that know.
+// `wpPage` is "wp, but you already have the page number": the get-or-fault-and-bump that chunk decoding does.
+PagedArray.prototype.pageAt = function (p) { return this.pages[p] || null; };
+PagedArray.prototype.revAt = function (p) { return this.rev[p]; };
+PagedArray.prototype.wpPage = function (p) { this.rev[p]++; return this.pages[p] || this._alloc(p); };
 // ⚠️ `cols`/`rows` are the room's GRID SHAPE, copied here from `roomDims` when the store is created. They are on
 // the store as well as behind `roomDims` on purpose: the sim's hot functions already hold a store, so they read
 // the shape with one property load instead of a lookup. NO_CELLS has 0/0 — a caller that only PEEKED has no
@@ -1760,11 +1768,11 @@ function chunkHash(room, p) {
   const s = peekCells(room); if (!s.terrain || (s.fineSub || 1) !== 1) return 0;
   const ch = chunksOf(room);
   if (ch.evicted[p]) return ch.evHash[p];     // pages are gone; the content is in the blob (see RoomChunks)
-  let stamp = 0; for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) stamp += pa.rev[p]; }
+  let stamp = 0; for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) stamp += pa.revAt(p); }
   if (ch.stamp[p] === stamp) return ch.hash[p];
   let h = 0x811c9dc5;
   for (const f of CHUNK_CONTENT) {
-    const pa = s[f], page = pa && pa.pages[p];
+    const pa = s[f], page = pa && pa.pageAt(p);
     if (!page) { h = foldZeros(h, CHUNK_CELLS * (CHUNK_CONTENT_STRIDE[f] || LIQ_T)); continue; }
     for (let k = 0; k < page.length; k++) { h ^= page[k]; h = Math.imul(h, 0x01000193) >>> 0; }
   }
@@ -1779,13 +1787,13 @@ function chunkHashes(room) { const n = worldGeom(room).nPages, out = new Array(n
 function encodeChunk(s, p) {
   const out = { r: [], a: null };
   for (const f of ['terrain', 'terrainHp']) {                     // RLE — a chunk is mostly one material or empty
-    const page = s[f] && s[f].pages[p];
+    const page = s[f] && s[f].pageAt(p);
     if (!page) { out.r.push(null); continue; }
     const runs = []; let v = page[0], n = 0;
     for (let k = 0; k < page.length; k++) { if (page[k] === v) n++; else { runs.push(v, n); v = page[k]; n = 1; } }
     runs.push(v, n); out.r.push(runs);
   }
-  const amt = s.fineAmt && s.fineAmt.pages[p];                    // sparse — liquid occupies few cells of a chunk
+  const amt = s.fineAmt && s.fineAmt.pageAt(p);                   // sparse — liquid occupies few cells of a chunk
   if (amt) { const a = []; for (let c = 0; c < CHUNK_CELLS; c++) { const b = c * LIQ_T; let any = 0; for (let k = 0; k < LIQ_T; k++) any |= amt[b + k];
     if (any) { a.push(c); for (let k = 0; k < LIQ_T; k++) a.push(amt[b + k]); } } out.a = a; }
   return out;
@@ -1794,12 +1802,11 @@ function decodeChunk(s, p, blob) {
   for (let fi = 0; fi < 2; fi++) {
     const runs = blob.r[fi], f = ['terrain', 'terrainHp'][fi];
     if (!runs || !s[f]) continue;
-    const page = s[f].pages[p] || s[f]._alloc(p); s[f].rev[p]++;
+    const page = s[f].wpPage(p);
     let k = 0; for (let q = 0; q + 1 < runs.length; q += 2) { const v = runs[q], n = runs[q + 1]; for (let z = 0; z < n && k < page.length; z++) page[k++] = v; }
   }
   if (blob.a && blob.a.length && s.fineAmt && s.fineTotal) {
-    const amt = s.fineAmt.pages[p] || s.fineAmt._alloc(p); s.fineAmt.rev[p]++;
-    const tot = s.fineTotal.pages[p] || s.fineTotal._alloc(p); s.fineTotal.rev[p]++;
+    const amt = s.fineAmt.wpPage(p), tot = s.fineTotal.wpPage(p);
     for (let q = 0; q < blob.a.length; q += (1 + LIQ_T)) { const c = blob.a[q], b = c * LIQ_T; let sum = 0;
       for (let k = 0; k < LIQ_T; k++) { const v = blob.a[q + 1 + k]; amt[b + k] = v; sum += v; } tot[c] = sum > 255 ? 255 : sum; }
   }
@@ -1807,7 +1814,7 @@ function decodeChunk(s, p, blob) {
 function evictChunk(room, p) {
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
   const ch = chunksOf(room);
-  const anyLive = CHUNK_CONTENT.some(f => s[f] && s[f].pages[p]);
+  const anyLive = CHUNK_CONTENT.some(f => s[f] && s[f].pageAt(p));
   if (!anyLive) return false;                // nothing to put away; do not mark it evicted (it has no blob)
   ch.evHash[p] = chunkHash(room, p);         // ⚠️ BEFORE the pages go — see RoomChunks.evHash
   ch.blob[p] = encodeChunk(s, p);
@@ -3545,7 +3552,7 @@ function chunkResidencySweep() {
     // 2) evict what has been out of everyone's radius for longer than the grace period
     for (let p = 0; p < geom.nPages; p++) {
       if (ch.blob[p] || now - ch.lastNear[p] <= chunkCfg.graceMs) continue;
-      if (!CHUNK_CONTENT.some(f => s[f] && s[f].pages[p])) continue;   // nothing there to put away
+      if (!CHUNK_CONTENT.some(f => s[f] && s[f].pageAt(p))) continue;   // nothing there to put away
       evictChunk(room, p);
     }
   }
@@ -5084,7 +5091,7 @@ function terrainRLE(grid) {                          // [value, count] runs (val
   const g = grid.geom, runs = []; let v = -1, n = 0;
   for (let r = 0; r < g.rows; r++) {
     for (let c0 = 0; c0 < g.cols;) {
-      const i = r * g.cols + c0, page = grid.pages[geomPage(g, i)], off = grid.o(i) / grid.T;
+      const i = r * g.cols + c0, page = grid.pageAt(geomPage(g, i)), off = grid.o(i) / grid.T;
       const len = Math.min(CHUNK_SIDE - (off % CHUNK_SIDE), g.cols - c0);
       if (!page) { if (v === 0) n += len; else { if (n) runs.push([v, n]); v = 0; n = len; } }
       else for (let k = 0; k < len; k++) { const val = page[off + k]; if (val === v) n++; else { if (n) runs.push([v, n]); v = val; n = 1; } }
