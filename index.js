@@ -2061,7 +2061,7 @@ const liquidCfg = {
   // t0 (8px 1024×384px = 60.9ms against a 28ms budget, at K=9/9). Cost per active cell is known and stable
   // (21–26µs at K=9, Phase 0), so a room with no EMA yet is estimated from `fineActive.size` instead. It is
   // a SEED only — one real tick replaces it with the measured EMA.
-  budgetSeed: 0,         // 0 = off (old behaviour: an unmeasured room is estimated at zero and never throttled)
+  budgetSeed: 1,         // ✅ ON since 2026-08-01 — see the verification note on budgetRate. 0 = old behaviour.
   cellCostUs: 23,        // µs per active cell at FULL K, the seed constant. Phase 0 measured 21–26.
   // (2) THE K=1 FLOOR. Tier 2 cuts sub-steps in proportion, but K cannot go below 1, and a room bigger than
   // the whole budget AT K=1 is bounded by nothing — the "always admit one room" rule runs it anyway.
@@ -2075,7 +2075,12 @@ const liquidCfg = {
   // instantaneous. The room still costs its full ms on the tick it does run. Bounding the instant would mean
   // splitting a room across ticks, which would advance one end of a pool and not the other and would break
   // powder's lockstep — the thing this scheduler refuses to do by construction.
-  budgetRate: 0,         // 0 = off. Works best with budgetSeed on, or a brand-new huge room has no estimate to act on.
+  // ✅ BOTH ON SINCE 2026-08-01 — VERIFIED IN-BROWSER by the user against a live server, which is the only place
+  // this could be settled. They shipped off (branch convention: anything not behaviour-preserving ships off behind
+  // a live toggle) and were turned on once someone had actually watched them work. What was watched, on the Perf
+  // tab's sim/tick readout with a deliberately huge body of water in motion: **80–90ms with them off, 20ms avg /
+  // 25ms max with them on.** The toggles stay, so this is still A/B-able live if liquid ever feels wrong.
+  budgetRate: 1,         // 0 = off. Needs budgetSeed on, or a brand-new huge room has no estimate to act on.
   budgetRateMax: 8,      // cap on N, so liquid never slows so far that it reads as frozen rather than slow
   // Cost is ~linear in K (the tier-2 comment measures 18 sub-steps at ~2× 9), but NOT all the way down:
   // Phase 0's dial sweep measured fineLevelSteps 9→1 as 6.5× cheaper per unit work, not 9×. So the cost of a
