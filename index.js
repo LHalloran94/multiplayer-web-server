@@ -1538,19 +1538,38 @@ const CHUNK_SIDE = 64, CHUNK_CELLS = CHUNK_SIDE * CHUNK_SIDE;   // 64×64 cells 
 // Per (cols × rows) grid shape — memoised, because the fine grid can be built at SUB≠1 (the probe rigs drive SUB=3),
 // which is a different index space and therefore a different set of tables.
 const _chunkGeoms = new Map();
+// ⭐ TWO ADDRESSING MODES (Phase 6, measured by `scratchpad/probe_overworld_scale.js`).
+// The lookup tables below are 4 bytes PER WORLD CELL, held for the process — fine at the page world's ~3MB,
+// and the reason SHARED-WORLD §4's "world size is free" is true of the SIM and false of the STORAGE. Measured:
+// a 256MB table budget reaches ~43 domains at 30,720px spacing, against §2's "thousands".
+// So when `cols` is a POWER OF TWO, page and offset are recovered from the flat index with shifts and masks
+// and the tables are never built:
+//     c = i & (cols-1)   r = i >> K        page = (i >>> K6) * cx + ((i >>> 6) & CXM)
+//     off = (((i >>> K) & 63) << 6) | (i & 63)      ← `c & 63 === i & 63`, since a pow2 cols ≥ 64 is a multiple of 64
+// K = -1 is the "no shortcut, use the tables" sentinel, which is what a page room (1920 cols) takes.
+// ⚠️ Phase 3 rejected a branch in `rp()` on principle ("the hottest read in the server"). MEASURED, it is
+// affordable and mostly a win: bit-identical to the mode it dispatches to on both geometries, 7.4% CHEAPER
+// than the tables on a power-of-two geometry and 4.5% dearer on a page room. The 4.5% is the price of NOT
+// re-striding the page world — which would mean splitting TERRAIN_COLS (today it means BOTH "playable columns"
+// AND "row stride") across 208 sites, and re-striding every blob in published_worlds.
 function chunkGeom(cols, rows) {
   const key = cols + 'x' + rows; let g = _chunkGeoms.get(key); if (g) return g;
   const cx = Math.ceil(cols / CHUNK_SIDE), cy = Math.ceil(rows / CHUNK_SIDE), cells = cols * rows;
   if (cx * cy > 65535) throw new Error('chunkGeom: page index overflows Uint16 (' + cx * cy + ')');
-  const pageOf = new Uint16Array(cells), offOf = new Uint16Array(cells);
-  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+  const p2 = cols >= CHUNK_SIDE && (cols & (cols - 1)) === 0;
+  const K = p2 ? (Math.log2(cols) | 0) : -1, CXM = cx - 1, K6 = K + 6;
+  const pageOf = p2 ? null : new Uint16Array(cells), offOf = p2 ? null : new Uint16Array(cells);
+  if (!p2) for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
     const i = r * cols + c;
     pageOf[i] = ((r / CHUNK_SIDE) | 0) * cx + ((c / CHUNK_SIDE) | 0);
     offOf[i] = (r % CHUNK_SIDE) * CHUNK_SIDE + (c % CHUNK_SIDE);
   }
-  g = { cols, rows, cells, cx, cy, nPages: cx * cy, pageOf, offOf };
+  g = { cols, rows, cells, cx, cy, nPages: cx * cy, pageOf, offOf, K, CXM, K6 };
   _chunkGeoms.set(key, g); return g;
 }
+// The page number of a flat cell index, in whichever mode this geometry uses. Kept as a named helper for the
+// COLD callers (chunk pruning); the hot accessors below inline it deliberately.
+function geomPage(g, i) { return g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i]; }
 // `stride` = values per cell (1 for everything except fineAmt, which is LIQ_T per cell).
 // `seedFn` = how a freshly faulted page is initialised when its default is NOT zero (only fineLevelAcc, whose cells
 // carry a per-index hash so the invisible sub-unit levelling steps do not all align). A seeded array must fault its
@@ -1584,16 +1603,16 @@ PagedArray.prototype._alloc = function (p) {
   if (this.ev !== null && this.ev[p]) rehydrateChunk(this.room, p);
   return a;
 };
-PagedArray.prototype.rp = function (i) { const p = this.geom.pageOf[i], a = this.pages[p]; return a || this._miss(p); };
+PagedArray.prototype.rp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i], a = this.pages[p]; return a || this._miss(p); };
 // The cold half of rp, kept out of line so the hot path is just "load the page and return it".
 PagedArray.prototype._miss = function (p) {
   if (this.ev !== null && this.ev[p]) return this._alloc(p);       // evicted → fault it back, blob and all
   return this.seedFn ? this._alloc(p) : this.zero;                 // genuinely empty → the shared zero page
 };
-PagedArray.prototype.wp = function (i) { const p = this.geom.pageOf[i]; this.rev[p]++; return this.pages[p] || this._alloc(p); };
-PagedArray.prototype.o = function (i) { return this.geom.offOf[i] * this.T; };
-PagedArray.prototype.g = function (i) { return this.rp(i)[this.geom.offOf[i] * this.T]; };
-PagedArray.prototype.s = function (i, v) { this.wp(i)[this.geom.offOf[i] * this.T] = v; };
+PagedArray.prototype.wp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i]; this.rev[p]++; return this.pages[p] || this._alloc(p); };
+PagedArray.prototype.o = function (i) { const g = this.geom; return (g.K >= 0 ? ((((i >>> g.K) & 63) << 6) | (i & 63)) : g.offOf[i]) * this.T; };
+PagedArray.prototype.g = function (i) { const g = this.geom; return this.rp(i)[(g.K >= 0 ? ((((i >>> g.K) & 63) << 6) | (i & 63)) : g.offOf[i]) * this.T]; };
+PagedArray.prototype.s = function (i, v) { const g = this.geom; this.wp(i)[(g.K >= 0 ? ((((i >>> g.K) & 63) << 6) | (i & 63)) : g.offOf[i]) * this.T] = v; };
 // `.fill(0)` on an unseeded array DROPS every page — the old flat `.fill(0)` meant "this is now empty everywhere",
 // and dropping is both faster and the point of the exercise.
 PagedArray.prototype.fill = function (v) {
@@ -1682,7 +1701,7 @@ function RoomChunks(nPages) {
   this.evicted = new Uint8Array(nPages);
   this.stamp.fill(-1);
 }
-function chunksOf(room) { const s = cellsOf(room); return s.chunks || (s.chunks = new RoomChunks(WORLD_GEOM().nPages)); }
+function chunksOf(room) { const s = cellsOf(room); return s.chunks || (s.chunks = new RoomChunks(worldGeom(room).nPages)); }
 // CONTENT HASH of one chunk — the unit of resync. FNV-1a over the content fields, cached against the summed page
 // revisions so a settled chunk is hashed once and then answered for free.
 // ⚠️ Only meaningful at the all-fine ratio (SUB=1), where the terrain and liquid grids share an index space and
@@ -1714,7 +1733,7 @@ function chunkHash(room, p) {
   }
   ch.hash[p] = h; ch.stamp[p] = stamp; return h;
 }
-function chunkHashes(room) { const n = WORLD_GEOM().nPages, out = new Array(n); for (let p = 0; p < n; p++) out[p] = chunkHash(room, p); return out; }
+function chunkHashes(room) { const n = worldGeom(room).nPages, out = new Array(n); for (let p = 0; p < n; p++) out[p] = chunkHash(room, p); return out; }
 // ── EVICTION ── a chunk nobody is near is compacted into a blob and its pages released. The blob is the DELTA from
 // an empty chunk (RLE for the byte grids, a sparse index→stack list for liquid), which is typically 10–100× smaller
 // than the 80KB of raw pages a fully-populated chunk costs.
@@ -1757,13 +1776,13 @@ function evictChunk(room, p) {
   ch.blob[p] = encodeChunk(s, p);
   ch.evicted[p] = 1;
   for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
-  for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === WORLD_GEOM().nPages) s[f].dropPage(p);
+  for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === worldGeom(room).nPages) s[f].dropPage(p);
   // Drop this chunk's cells from the work sets, and release a set that empties (same contract as dropFineActive).
-  const geom = WORLD_GEOM();
-  const prune = (set, drop) => { if (!set) return; for (const i of Array.from(set)) if (geom.pageOf[i] === p) set.delete(i); if (!set.size) drop(room); };
+  const geom = worldGeom(room);
+  const prune = (set, drop) => { if (!set) return; for (const i of Array.from(set)) if (geomPage(geom, i) === p) set.delete(i); if (!set.size) drop(room); };
   prune(s.fineActive, dropFineActive); prune(s.fineReact, dropFineReact); prune(s.fineFire, dropFineFire);
   prune(s.powderActive, dropPowderSet); prune(s.soilActive, dropSoilSet);
-  if (s.src) { for (const i of Array.from(s.src.keys())) if (geom.pageOf[i] === p) s.src.delete(i); if (!s.src.size) dropSrcMap(room); }
+  if (s.src) { for (const i of Array.from(s.src.keys())) if (geomPage(geom, i) === p) s.src.delete(i); if (!s.src.size) dropSrcMap(room); }
   return true;
 }
 // ⚠️⚠️ ANYTHING THAT READS THE WHOLE WORLD MUST CALL THIS FIRST. An evicted chunk has no pages, so it reads as
@@ -1788,7 +1807,7 @@ function rehydrateChunk(room, p) {
   decodeChunk(s, p, blob);
   // Liquid that comes back is WOKEN, not re-seeded: it resumes flowing from exactly the state it was put away in.
   const amt = s.fineAmt, tot = s.fineTotal;
-  if (blob.a && blob.a.length && amt && tot) { const act = fineSet(room), geom = WORLD_GEOM();
+  if (blob.a && blob.a.length && amt && tot) { const act = fineSet(room), geom = worldGeom(room);
     for (let q = 0; q < blob.a.length; q += (1 + LIQ_T)) { const c = blob.a[q];
       const lr = (c / CHUNK_SIDE) | 0, lc = c % CHUNK_SIDE;
       const gr = ((p / geom.cx) | 0) * CHUNK_SIDE + lr, gc = (p % geom.cx) * CHUNK_SIDE + lc;
@@ -1839,7 +1858,7 @@ function newPagedField(field, geom, room) {
   }
   // Only wire the evicted flags when this field is on the CHUNK GRID. A fine field built at SUB≠1 (probe rigs) has a
   // different page count, so indexing the room's flags with its page numbers would be nonsense.
-  if (pa && room && geom.nPages === WORLD_GEOM().nPages) pa.ev = chunksOf(room).evicted;
+  if (pa && room && geom.nPages === worldGeom(room).nPages) pa.ev = chunksOf(room).evicted;
   return pa;
 }
 const FINE_FIELDS = new Set(['fineAmt', 'fineTotal', 'fineLevelAcc', 'fineStill', 'fineFluxSeen']);
@@ -1864,10 +1883,23 @@ function cellView(field) {
     },
   });
 }
-const WORLD_GEOM = () => chunkGeom(TERRAIN_COLS, TERRAIN_ROWS);   // the terrain-resolution geometry (SUB=1), for the fields that are not fine-grid ones
+// ═══ PER-ROOM WORLD SHAPE (SHARED-WORLD.md §7, Phase 6) ═════════════════════════════════════════════════════
+// A room's grid shape used to be two module constants, which is the same assumption as "there is one world".
+// The Overworld is a different shape from a page room and both must be live in ONE process, so the shape is now
+// a per-room fact.
+// ⚠️ `roomDims` is keyed on the ROOM KEY ALONE, deliberately — so it can be asked without materialising a cell
+// store. That distinction is the whole reason `peekCells` exists beside `cellsOf`, and under chunking it is the
+// difference between probing a chunk and faulting one in.
+// ⚠️ The old zero-argument `WORLD_GEOM()` was RENAMED rather than given an optional parameter. An optional room
+// would let a missed call site keep working today and break silently the day a second shape exists; a rename
+// turns every missed site into an immediate ReferenceError instead.
+const PAGE_DIMS = Object.freeze({ cols: TERRAIN_COLS, rows: TERRAIN_ROWS });
+function roomDims(room) { return PAGE_DIMS; }   // every room today — the Overworld's own shape lands in a later increment
+// The terrain-resolution geometry (SUB=1) for a room, i.e. the one the fields that are not fine-grid ones use.
+const worldGeom = (room) => { const d = roomDims(room); return chunkGeom(d.cols, d.rows); };
 // ==CELL_STORE_BLOCK_END==
-function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', WORLD_GEOM(), room)); }
-function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', WORLD_GEOM(), room)); }
+function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', worldGeom(room), room)); }
+function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', worldGeom(room), room)); }
 // Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
 const BUILTIN_STRENGTH = { 2: 3, 4: 2, 5: 2, 17: 2 };  // stone tough, ice/mud/drain middling (matches client TERRAIN_MATS); others 1
 function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return BUILTIN_STRENGTH[v] || 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
@@ -2253,7 +2285,7 @@ const LIQUID_MAX_PER_TICK = 9000;                     // process at most this ma
 // accumulator, and only once saturated (dilution ≥ acid·K) does the acid CONVERT to water — both rate-limited, so a drop can't
 // clear a pool and it's never instant. Water is consumed (volume drops), which is the accepted tradeoff for "limited water".
 // (`dilute` on the cell store: water soaked into an acid cell, awaiting conversion — Float32 because K can be non-integer.)
-function ensureDilute(room) { const s = cellsOf(room); return s.dilute || (s.dilute = newPagedField('dilute', WORLD_GEOM(), room)); }
+function ensureDilute(room) { const s = cellsOf(room); return s.dilute || (s.dilute = newPagedField('dilute', worldGeom(room), room)); }
 const ACID_K = 1.5;          // water soaked (consumed) to saturate + convert 1 acid unit
 const ACID_SOAK_TICKS = 2;   // soak 1 water into dilution every N ticks (rate ≈ 1/N ≈ 0.5/tick)
 const ACID_CONVERT_TICKS = 2;// convert 1 acid → water every N ticks once saturated (rate ≈ 0.5/tick)
@@ -2380,7 +2412,7 @@ function activatePowderRect(room, grid, c0, r0, c1, r1) {
 // SATURATION tuning (terrain reactions). SAT_MAX ≈ "a cell's worth" of water; ABSORB per absorb-tick; DRY per soil-tick when
 // away from water; a saturated sand cell needs ≥ CLUMP saturated-sand/quicksand neighbours to turn (keeps beach edges dry).
 const SAT_MAX_F = 0.1875, SAT_ABSORB_F = 0.0625, SAT_DRY = 1, SAT_CLUMP_MIN = 3;   // low SAT_MAX: earth saturates fast + absorbs little water → flow barely slowed, pre-gen lakes barely shrink
-function ensureSat(room) { const s = cellsOf(room); return s.sat || (s.sat = newPagedField('sat', WORLD_GEOM(), room)); }
+function ensureSat(room) { const s = cellsOf(room); return s.sat || (s.sat = newPagedField('sat', worldGeom(room), room)); }
 // (`soilActive` on the cell store: Set<cellIndex> of absorbent/wet solid cells worth ticking — earth/sand soaking, mud drying.)
 function soilSet(room) { const s = cellsOf(room); if (!s.soilActive) { s.soilActive = new Set(); cellRooms.soil.add(room); } return s.soilActive; }
 // Seed the soil set so soilTickRoom processes absorption/drying around water. Called on PAINT and at GEN (not just when a
@@ -3459,9 +3491,10 @@ function noteWhere(avRoom, sid, v) {
 }
 function chunkResidencySweep() {
   if (!chunkCfg.evict) return;
-  const now = Date.now(), geom = WORLD_GEOM(), M = Math.max(0, chunkCfg.margin | 0);
+  const now = Date.now(), M = Math.max(0, chunkCfg.margin | 0);
   for (const room of Array.from(roomCells.keys())) {
     const s = roomCells.get(room); if (!s || !s.terrain || (s.fineSub || 1) !== 1) continue;
+    const geom = worldGeom(room);              // Phase 6: per ROOM — the sweep spans rooms of different shapes
     const ch = chunksOf(room), here = roomWhere[room];
     if (here) for (const sid of Array.from(here.keys())) if (!io.sockets.sockets.has(sid)) here.delete(sid);
     // 1) mark everything anybody can SEE (plus a margin), and fault back in anything that was put away
@@ -3530,7 +3563,7 @@ setInterval(chunkResidencySweep, Math.max(1000, chunkCfg.sweepMs | 0));
 function sendChunkContent(sock, room, chunks) {
   if (!chunks || !chunks.length) return;
   const s = peekCells(room); if (!s.terrain) return;
-  const geom = WORLD_GEOM(), tc = [], fine = [];
+  const geom = worldGeom(room), tc = [], fine = [];
   for (const p of chunks) {
     rehydrateChunk(room, p);   // a chunk we are about to READ OUT must not be sitting in a blob
     const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
@@ -3545,7 +3578,7 @@ function sendChunkContent(sock, room, chunks) {
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
   sock.emit('liquid-fine-cells', { sub: 1, cols: TERRAIN_COLS, cells, clear: chunks.slice() });
 }
-// ==INTEREST_BLOCK_START== (probe_subscriptions slices this out — stub io/chunkHash/WORLD_GEOM when you do)
+// ==INTEREST_BLOCK_START== (probe_subscriptions slices this out — stub io/chunkHash/worldGeom/geomPage when you do)
 const interestCfg = {
   chunks: true,        // filter cell-addressed world diffs to the chunks a socket can see
   margin: 1,           // replication rings beyond the viewport (see above — MEASURED, not guessed)
@@ -3575,7 +3608,7 @@ function dropSubs(room, sid) { const m = roomSubs[room]; if (m) { m.delete(sid);
 // entire mode's worth of players nothing.
 function updateSubs(room, sid, v) {
   if (!interestCfg.chunks) return;
-  const geom = WORLD_GEOM(), M = Math.max(0, interestCfg.margin | 0);
+  const geom = worldGeom(room), M = Math.max(0, interestCfg.margin | 0);
   const fresh = !roomSubs[room] || !roomSubs[room].has(sid);
   const e = subsEntry(room, sid);
   const want = new Set();
@@ -3614,16 +3647,20 @@ function flushPending(room, sid, e) {
 // events with no cell layout, and for a fine payload whose index space is not the terrain one.
 // ⚠️ The fine wire carries FINE indices, which equal terrain indices only while SUB === 1 (every caller passes 1).
 // If that ever changes the bucketing would be silently wrong, so it declines rather than guesses.
-function bucketize(ev, payload) {
+// ⚠️ Takes the ROOM (Phase 6): which chunk a flat index falls in depends on the room's grid shape, and the
+// payload only carries `cols` for the fine wire. Bucketing against the wrong shape would file cells under
+// chunks nobody is subscribed to — a silent, per-room-shaped version of "the gate out of step with what it
+// guards", which is the bug shape that has already cost this track three separate rounds.
+function bucketize(room, ev, payload) {
   const step = CELL_WIRE[ev]; if (!step) return null;
   const a = payload.cells; if (!Array.isArray(a) || !a.length) return null;
-  const geom = WORLD_GEOM();
+  const geom = worldGeom(room);
   if (ev === 'liquid-fine-cells' && (payload.cols | 0) !== geom.cols) return null;
   const bucket = new Map();
   for (let k = 0; k < a.length;) {
     const n = step(a, k), i = a[k];
     if (i >= 0 && i < geom.cells) {
-      const p = geom.pageOf[i]; let b = bucket.get(p); if (!b) bucket.set(p, b = []);
+      const p = geomPage(geom, i); let b = bucket.get(p); if (!b) bucket.set(p, b = []);
       for (let q = 0; q < n; q++) b.push(a[k + q]);
     }
     k += n;
@@ -3638,7 +3675,7 @@ function sliceFor(payload, bucket, subs) {   // the part of a bucketed payload o
 function interestFanout(room, ev, payload) {
   if (wireBatch) { let l = wireBatch.get(room); if (!l) wireBatch.set(room, l = []); l.push([ev, payload]); return; }
   const here = roomSubs[room];
-  const bucket = interestCfg.chunks && here && here.size ? bucketize(ev, payload) : null;
+  const bucket = interestCfg.chunks && here && here.size ? bucketize(room, ev, payload) : null;
   if (!bucket) return io.to(room).emit(ev, payload);
   const members = io.sockets.adapter.rooms.get(room); if (!members || !members.size) return;
   for (const sid of members) {
@@ -3662,7 +3699,7 @@ const wireBatchOk = new Set();   // socket ids that have declared they can unwra
 function flushRoomBatch(room, evs) {
   const members = io.sockets.adapter.rooms.get(room); if (!members || !members.size) return;
   const here = interestCfg.chunks ? roomSubs[room] : null;
-  const buckets = (here && here.size) ? evs.map(([ev, pl]) => bucketize(ev, pl)) : null;
+  const buckets = (here && here.size) ? evs.map(([ev, pl]) => bucketize(room, ev, pl)) : null;
   for (const sid of members) {
     const sock = io.sockets.sockets.get(sid); if (!sock) continue;
     const e = here && here.get(sid);
@@ -5009,7 +5046,7 @@ function terrainRLE(grid) {                          // [value, count] runs (val
   const g = grid.geom, runs = []; let v = -1, n = 0;
   for (let r = 0; r < g.rows; r++) {
     for (let c0 = 0; c0 < g.cols;) {
-      const i = r * g.cols + c0, page = grid.pages[g.pageOf[i]], off = g.offOf[i];
+      const i = r * g.cols + c0, page = grid.pages[geomPage(g, i)], off = grid.o(i) / grid.T;
       const len = Math.min(CHUNK_SIDE - (off % CHUNK_SIDE), g.cols - c0);
       if (!page) { if (v === 0) n += len; else { if (n) runs.push([v, n]); v = 0; n = len; } }
       else for (let k = 0; k < len; k++) { const val = page[off + k]; if (val === v) n++; else { if (n) runs.push([v, n]); v = val; n = 1; } }
@@ -5366,7 +5403,7 @@ function snapshotObjSrv(o) {                            // server twin of the cl
 const _terrBlobCache = new Map();                       // avRoom → { sig, terrain, mats }
 function roomChunkSig(avRoom) {
   const s = peekCells(avRoom); if (!s.terrain || (s.fineSub || 1) !== 1) return -1;
-  const n = WORLD_GEOM().nPages; let h = 0x811c9dc5;
+  const n = worldGeom(avRoom).nPages; let h = 0x811c9dc5;
   for (let p = 0; p < n; p++) { h = (h ^ chunkHash(avRoom, p)) >>> 0; h = Math.imul(h, 0x01000193) >>> 0; }
   return h;
 }
@@ -6268,7 +6305,7 @@ io.on('connection', (socket) => {
   socket.on('chunk-verify', ({ hashes }) => {
     const room = currentAvatarRoom;
     if (!room || !Array.isArray(hashes) || !peekCells(room).terrain) return;
-    const geom = WORLD_GEOM(), mine = chunkHashes(room), bad = [];
+    const geom = worldGeom(room), mine = chunkHashes(room), bad = [];
     for (let p = 0; p < geom.nPages && p < hashes.length; p++) if ((hashes[p] >>> 0) !== mine[p]) bad.push(p);
     socket.emit('chunk-verify-result', { mismatch: bad, total: geom.nPages });
     // Bounded: a badly out-of-date client repairs over several passes. The body of this used to be written out here;
