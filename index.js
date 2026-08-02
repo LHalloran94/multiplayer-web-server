@@ -1586,8 +1586,8 @@ function chunkGeom(cols, rows) {
   // stores a page number in a Uint16, so a TABLE geometry is capped at 65,535 pages (= 2.68e8 cells, EIGHT TIMES
   // below the 2^31 flat-index ceiling above — so this, not the index, is what binds a table world). An ARITHMETIC
   // geometry builds no tables and computes the page number as a plain JS number, so it has no such cap.
-  // ⚠️ A big arithmetic geometry is legal but not yet CHEAP: `PagedArray.pages`/`.rev` are still one slot per page
-  // PER FIELD PER ROOM, so an empty room is still linear in world area. That is the next increment's job.
+  // (A big arithmetic geometry used to be legal but not CHEAP — `PagedArray`'s directory was one slot per page per
+  //  field per room. Increment 2 made it a two-level directory; an empty world now costs ~nothing. See PagedArray.)
   if (!p2 && cx * cy > 65535) throw new Error('chunkGeom: page index overflows Uint16 (' + cx * cy + ') — a table geometry this large needs a power-of-two column count');
   const K = p2 ? (Math.log2(cols) | 0) : -1, CXM = cx - 1, K6 = K + 6;
   const pageOf = p2 ? null : new Uint16Array(cells), offOf = p2 ? null : new Uint16Array(cells);
@@ -1602,6 +1602,10 @@ function chunkGeom(cols, rows) {
 // The page number of a flat cell index, in whichever mode this geometry uses. Kept as a named helper for the
 // COLD callers (chunk pruning); the hot accessors below inline it deliberately.
 function geomPage(g, i) { return g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i]; }
+// How many pages one directory group covers (Phase 6 increment 2 — see the constructor). 256 pages is a group of
+// ~3KB, and it divides the outer directory by the same factor: 425,984 pages become 1,664 outer slots per field.
+// Row-major, so a group is a horizontal strip of 256 chunks — which is how players spread out along a side-scroller.
+const PAGE_GRP_SH = 8, PAGE_GRP = 1 << PAGE_GRP_SH, PAGE_GRP_M = PAGE_GRP - 1;
 // `stride` = values per cell (1 for everything except fineAmt, which is LIQ_T per cell).
 // `seedFn` = how a freshly faulted page is initialised when its default is NOT zero (only fineLevelAcc, whose cells
 // carry a per-index hash so the invisible sub-unit levelling steps do not all align). A seeded array must fault its
@@ -1615,7 +1619,16 @@ function PagedArray(geom, Ctor, stride, seedFn, room) {
   // `room` + `ev` let a page fault restore the blob first. The flags array is referenced DIRECTLY (not looked up
   // per miss) because a miss is common — an air cell in a chunk that has never held liquid misses every read.
   this.room = room || null; this.ev = null;
-  this.pages = new Array(geom.nPages).fill(null);
+  // ⭐ A TWO-LEVEL PAGE DIRECTORY (Phase 6 increment 2). `pages` used to be `new Array(nPages).fill(null)` and
+  // `rev` a `Uint32Array(nPages)` — one slot per world page PER FIELD PER ROOM, whether or not anything was
+  // there. At the page world that is 22KB and invisible; at 273 domains it is 43.9MB of pure null pointers for an
+  // EMPTY room, and it was the last area-linear cost in the server after increments 1a/1b. Now the directory is
+  // an outer array of GROUPS, each holding PAGE_GRP page pointers and allocated on first use, so an untouched
+  // region of the world costs one null in the outer array. The outer arrays are area-linear at 1/PAGE_GRP, which
+  // is the difference between 3.4MB and 13KB per field.
+  const nG = (((geom.nPages - 1) >> PAGE_GRP_SH) | 0) + 1;
+  this.dir = new Array(nG).fill(null);            // group index → Array(PAGE_GRP) of pages
+  this.rdir = new Array(nG).fill(null);           // group index → Uint32Array(PAGE_GRP) of revisions (see below)
   this.zero = new Ctor(CHUNK_CELLS * this.T);     // read-through for an unallocated page — NEVER written
   this.length = geom.cells * this.T;              // exactly what the old flat array reported
   this.live = 0;                                  // pages currently faulted in (memory accounting + probes)
@@ -1623,60 +1636,98 @@ function PagedArray(geom, Ctor, stride, seedFn, room) {
   // which is why dirty tracking did not have to be threaded through the sim by hand. It OVER-approximates (wp() is
   // called to get a writable page, not because a byte definitely changed), which is exactly the right direction: a
   // hash may be recomputed needlessly, but it can never be served stale. Wraparound is harmless — it is only ever
-  // compared for equality. ~840 bytes per field per room.
-  this.rev = new Uint32Array(geom.nPages);
+  // compared for equality. Kept in `rdir` beside the pages, so it is nowhere near the hot READ path.
+  // ⚠️ `epoch` is what `fill()` bumps instead of touching every revision. A whole-array fill has to make every
+  // chunk's stamp change, and walking nPages to do it would put back the cost this increment removes — so the
+  // epoch is ADDED to every revAt, which changes all of them at once. Stamps are only ever compared for equality.
+  this.epoch = 0;
 }
 PagedArray.prototype._alloc = function (p) {
   const a = new this.Ctor(CHUNK_CELLS * this.T);
   if (this.seedFn) this.seedFn(a, p, this.geom, this.T);
-  this.pages[p] = a; this.live++;
+  (this.dir[p >> PAGE_GRP_SH] || this._grp(p))[p & PAGE_GRP_M] = a; this.live++;
   // ⚠️ Ordering: the page is installed BEFORE the restore, and rehydrateChunk clears the evicted flag and takes the
   // blob before decoding — so the decode's own writes re-enter here and see a normal, un-evicted chunk.
   if (this.ev !== null && this.ev[p]) rehydrateChunk(this.room, p);
   return a;
 };
-PagedArray.prototype.rp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i], a = this.pages[p]; return a || this._miss(p); };
+// Fault in one GROUP of the directory (pages + revisions together, so the two can never disagree about existing).
+PagedArray.prototype._grp = function (p) {
+  const gi = p >> PAGE_GRP_SH;
+  this.rdir[gi] = new Uint32Array(PAGE_GRP);
+  return (this.dir[gi] = new Array(PAGE_GRP).fill(null));
+};
+// ⭐ THE HOTTEST READ IN THE SERVER. Two dependent DENSE loads — group, then page. MEASURED against the dense
+// array it replaces (`scratchpad/probe_sparse_pages.js` B4, same scene at the far corner of a 273-domain world):
+// 1.042x, i.e. 4.2% dearer, bit-identical, and the same wherever in the world you stand. The kickoff's suggested
+// Map measured 1.315x — a hash lookup does not belong here — and a plain holey array measured 1.009x but is NOT
+// SPARSE (Part C: 58.6MB for an empty room, worse than the dense array), which is why it is fast.
+PagedArray.prototype.rp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i], d = this.dir[p >> PAGE_GRP_SH], a = d !== null && d[p & PAGE_GRP_M]; return a || this._miss(p); };
 // The cold half of rp, kept out of line so the hot path is just "load the page and return it".
 PagedArray.prototype._miss = function (p) {
   if (this.ev !== null && this.ev[p]) return this._alloc(p);       // evicted → fault it back, blob and all
   return this.seedFn ? this._alloc(p) : this.zero;                 // genuinely empty → the shared zero page
 };
-PagedArray.prototype.wp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i]; this.rev[p]++; return this.pages[p] || this._alloc(p); };
+PagedArray.prototype.wp = function (i) {
+  const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i], gi = p >> PAGE_GRP_SH;
+  if (this.dir[gi] === null) { this._grp(p); this.rdir[gi][p & PAGE_GRP_M]++; return this._alloc(p); }
+  this.rdir[gi][p & PAGE_GRP_M]++;
+  return this.dir[gi][p & PAGE_GRP_M] || this._alloc(p);
+};
 PagedArray.prototype.o = function (i) { const g = this.geom; return (g.K >= 0 ? ((((i >>> g.K) & 63) << 6) | (i & 63)) : g.offOf[i]) * this.T; };
 PagedArray.prototype.g = function (i) { const g = this.geom; return this.rp(i)[(g.K >= 0 ? ((((i >>> g.K) & 63) << 6) | (i & 63)) : g.offOf[i]) * this.T]; };
 PagedArray.prototype.s = function (i, v) { const g = this.geom; this.wp(i)[(g.K >= 0 ? ((((i >>> g.K) & 63) << 6) | (i & 63)) : g.offOf[i]) * this.T] = v; };
 // `.fill(0)` on an unseeded array DROPS every page — the old flat `.fill(0)` meant "this is now empty everywhere",
 // and dropping is both faster and the point of the exercise.
 PagedArray.prototype.fill = function (v) {
-  for (let p = 0; p < this.pages.length; p++) this.rev[p]++;
-  if (v === 0 && !this.seedFn) { this.pages.fill(null); this.live = 0; return this; }
-  for (let p = 0; p < this.pages.length; p++) (this.pages[p] || this._alloc(p)).fill(v);
+  this.epoch++;                                   // one bump stands for "every chunk's revision changed" — see above
+  if (v === 0 && !this.seedFn) { this.dir.fill(null); this.rdir.fill(null); this.live = 0; return this; }
+  // ⚠️ The non-zero branch MATERIALISES THE WHOLE WORLD and is area-linear by nature — there is no sparse way to
+  // say "every cell is 7". Nothing calls it: every `.fill()` in the server is `.fill(0)` (checked 2026-08-02), and
+  // the only seeded field, fineLevelAcc, is never filled. Left as a correct fallback, not a path anything takes.
+  for (let p = 0; p < this.geom.nPages; p++) (this.pageAt(p) || this._alloc(p)).fill(v);
   return this;
 };
-PagedArray.prototype.dropPage = function (p) { this.rev[p]++; if (this.pages[p]) { this.pages[p] = null; this.live--; } };
+PagedArray.prototype.dropPage = function (p) {
+  const gi = p >> PAGE_GRP_SH; if (this.dir[gi] === null) this._grp(p);
+  this.rdir[gi][p & PAGE_GRP_M]++;
+  if (this.dir[gi][p & PAGE_GRP_M] !== null) { this.dir[gi][p & PAGE_GRP_M] = null; this.live--; }
+};
 // ⭐ WHOLE-GRID SCANS GO THROUGH THIS. Iterates only the pages that EXIST, yielding (flat cell index, offset base in
 // the page, page). An unallocated page holds nothing but zeros, so skipping it is exact — and it is what keeps
 // terrainRLE / buildFineInit / seedLiquidActivity / rescaleAllLiquid from walking 777,600 cells of mostly nothing.
 // Early-exit form of scan (mirrors TypedArray#some, which is what the flat arrays used). cb(value, flatIndex).
-PagedArray.prototype.some = function (cb) {
-  const g = this.geom, T = this.T;
-  for (let p = 0; p < this.pages.length; p++) {
-    const a = this.pages[p]; if (!a) continue;
-    const c0 = (p % g.cx) * CHUNK_SIDE, r0 = ((p / g.cx) | 0) * CHUNK_SIDE;
-    const rN = Math.min(CHUNK_SIDE, g.rows - r0), cN = Math.min(CHUNK_SIDE, g.cols - c0);
-    for (let lr = 0; lr < rN; lr++) for (let lc = 0; lc < cN; lc++) if (cb(a[(lr * CHUNK_SIDE + lc) * T], (r0 + lr) * g.cols + c0 + lc)) return true;
+// ⚠️ `eachPage` is the ONE place that walks the directory in page order — `some`, `scan` and the whole-world
+// sweeps all go through it rather than writing their own `for (p = 0; p < pages.length)`. That is what stops the
+// directory's REPRESENTATION leaking into six call sites (Phase 6 increment 2 measured three alternatives to the
+// dense array behind exactly this seam). cb(p, page); return truthy to stop early — which is what `some` needs.
+// ⚠️ It walks the GROUPS THAT EXIST, not 0..nPages — which is the whole-world sweep in its time dimension, and
+// measured (probe_sparse_pages D) at 0.911ms → 0.110ms for a scan of a 425,984-page world with four live pages.
+PagedArray.prototype.eachPage = function (cb) {
+  for (let gi = 0; gi < this.dir.length; gi++) {
+    const d = this.dir[gi]; if (d === null) continue;
+    for (let k = 0; k < PAGE_GRP; k++) { const a = d[k]; if (a !== null && cb((gi << PAGE_GRP_SH) | k, a)) return true; }
   }
   return false;
 };
+PagedArray.prototype.some = function (cb) {
+  const g = this.geom, T = this.T;
+  return this.eachPage((p, a) => {
+    const c0 = (p % g.cx) * CHUNK_SIDE, r0 = ((p / g.cx) | 0) * CHUNK_SIDE;
+    const rN = Math.min(CHUNK_SIDE, g.rows - r0), cN = Math.min(CHUNK_SIDE, g.cols - c0);
+    for (let lr = 0; lr < rN; lr++) for (let lc = 0; lc < cN; lc++) if (cb(a[(lr * CHUNK_SIDE + lc) * T], (r0 + lr) * g.cols + c0 + lc)) return true;
+    return false;
+  });
+};
 PagedArray.prototype.scan = function (cb) {
   const g = this.geom, T = this.T;
-  for (let p = 0; p < this.pages.length; p++) {
-    const a = this.pages[p]; if (!a) continue;
+  this.eachPage((p, a) => {
     const c0 = (p % g.cx) * CHUNK_SIDE, r0 = ((p / g.cx) | 0) * CHUNK_SIDE;
     const rN = Math.min(CHUNK_SIDE, g.rows - r0), cN = Math.min(CHUNK_SIDE, g.cols - c0);
     for (let lr = 0; lr < rN; lr++) { const rowBase = (r0 + lr) * g.cols + c0, off = lr * CHUNK_SIDE;
       for (let lc = 0; lc < cN; lc++) cb(rowBase + lc, (off + lc) * T, a); }
-  }
+    return false;
+  });
 };
 PagedArray.prototype.bytes = function () { return this.live * CHUNK_CELLS * this.T * this.Ctor.BYTES_PER_ELEMENT; };
 // ── THE PAGE-DIRECTORY INTERFACE ── everything OUTSIDE the hot accessors reaches pages and revisions through these
@@ -1684,9 +1735,13 @@ PagedArray.prototype.bytes = function () { return this.live * CHUNK_CELLS * this
 // decision (Phase 6 increment 2 measured a Map and a two-level directory against the dense array behind exactly
 // this seam). The hot paths — rp/wp/g/s/o above — deliberately stay inlined and are the only sites that know.
 // `wpPage` is "wp, but you already have the page number": the get-or-fault-and-bump that chunk decoding does.
-PagedArray.prototype.pageAt = function (p) { return this.pages[p] || null; };
-PagedArray.prototype.revAt = function (p) { return this.rev[p]; };
-PagedArray.prototype.wpPage = function (p) { this.rev[p]++; return this.pages[p] || this._alloc(p); };
+PagedArray.prototype.pageAt = function (p) { const d = this.dir[p >> PAGE_GRP_SH]; return (d !== null && d[p & PAGE_GRP_M]) || null; };
+PagedArray.prototype.revAt = function (p) { const r = this.rdir[p >> PAGE_GRP_SH]; return (r !== null ? r[p & PAGE_GRP_M] : 0) + this.epoch; };
+PagedArray.prototype.wpPage = function (p) {
+  const gi = p >> PAGE_GRP_SH; if (this.dir[gi] === null) this._grp(p);
+  this.rdir[gi][p & PAGE_GRP_M]++;
+  return this.dir[gi][p & PAGE_GRP_M] || this._alloc(p);
+};
 // ⚠️ `cols`/`rows` are the room's GRID SHAPE, copied here from `roomDims` when the store is created. They are on
 // the store as well as behind `roomDims` on purpose: the sim's hot functions already hold a store, so they read
 // the shape with one property load instead of a lookup. NO_CELLS has 0/0 — a caller that only PEEKED has no
@@ -1734,18 +1789,32 @@ function dropSrcMap(room)     { const s = roomCells.get(room); if (s) s.src = nu
 // but deliberately NOT hashed, or a resync would churn on invisible differences.
 const CHUNK_CONTENT = ['terrain', 'terrainHp', 'fineAmt', 'fineTotal'];
 const CHUNK_SCRATCH = ['sat', 'dilute', 'fineLevelAcc', 'fineStill', 'fineFluxSeen'];
-function RoomChunks(nPages) {
-  this.hash = new Uint32Array(nPages);        // cached content hash per chunk
-  this.stamp = new Float64Array(nPages);      // Σ rev of the content fields when that hash was taken (-1 = never)
-  this.blob = new Array(nPages).fill(null);   // an evicted chunk's content, compacted
-  this.lastNear = new Float64Array(nPages);   // ms a player was last within the residency radius
+// ⚠️ SPARSE, for exactly the reason PagedArray's directory is (Phase 6 increment 2). These were SIX arrays of one
+// slot per world page, held for the life of the room — 33 bytes per page, which at 273 domains is 13.4MB of an
+// EMPTY room and 23% of its whole skeleton. Measured by `scratchpad/probe_sparse_pages.js` Part A, which found it;
+// the kickoff had not named it, and sparsifying PagedArray alone would have left a quarter of the problem standing.
+// A record now exists only for a chunk something has actually happened to.
+function ChunkRec() {
+  this.hash = 0;          // cached content hash
+  this.stamp = -1;        // Σ rev of the content fields when that hash was taken (-1 = never)
+  this.blob = null;       // an evicted chunk's content, compacted
+  this.lastNear = 0;      // ms a player was last within the residency radius
   // An evicted chunk has NO pages, so its hash cannot be recomputed from them — it would come out as "empty" and
   // chunk-verify would then "repair" every client to empty. The hash is therefore taken BEFORE the pages are
   // dropped and served from here until the chunk comes back.
-  this.evHash = new Uint32Array(nPages);
-  this.evicted = new Uint8Array(nPages);
-  this.stamp.fill(-1);
+  this.evHash = 0;
 }
+const NO_CHUNK_REC = Object.freeze(new ChunkRec());   // what `peek` answers for a chunk nothing has happened to
+function RoomChunks(nPages) {
+  // ⚠️ `evicted` STAYS DENSE, and it is the deliberate exception. `PagedArray._miss` reads it DIRECTLY on every
+  // page miss — and a miss is common, not rare: an air cell in a chunk that has never held liquid misses every
+  // read. Making that a Map get would put a hash lookup on the one path the whole of Phase 3 was careful about.
+  // One byte per page is 416KB for a 273-domain world, which is the trade, made knowingly.
+  this.evicted = new Uint8Array(nPages);
+  this.rec = new Map();                       // page → ChunkRec, created on first need
+}
+RoomChunks.prototype.at = function (p) { let r = this.rec.get(p); if (r === undefined) this.rec.set(p, r = new ChunkRec()); return r; };
+RoomChunks.prototype.peek = function (p) { const r = this.rec.get(p); return r === undefined ? NO_CHUNK_REC : r; };
 function chunksOf(room) { const s = cellsOf(room); return s.chunks || (s.chunks = new RoomChunks(worldGeom(room).nPages)); }
 // CONTENT HASH of one chunk — the unit of resync. FNV-1a over the content fields, cached against the summed page
 // revisions so a settled chunk is hashed once and then answered for free.
@@ -1764,19 +1833,35 @@ function foldZeros(h, n) {
   return Math.imul(h, m) >>> 0;
 }
 const CHUNK_CONTENT_STRIDE = { terrain: 1, terrainHp: 1, fineAmt: 0, fineTotal: 1 };   // 0 ⇒ LIQ_T (not in scope yet)
+// The hash of a chunk with no pages at all, which is a CONSTANT: the loop below folds zeros for every absent
+// field, and which fields are absent does not depend on `p`. Computed on first use because LIQ_T is defined below.
+let _emptyChunkHash = -1;
+function emptyChunkHash() {
+  if (_emptyChunkHash < 0) { let h = 0x811c9dc5;
+    for (const f of CHUNK_CONTENT) h = foldZeros(h, CHUNK_CELLS * (CHUNK_CONTENT_STRIDE[f] || LIQ_T));
+    _emptyChunkHash = h; }
+  return _emptyChunkHash;
+}
 function chunkHash(room, p) {
   const s = peekCells(room); if (!s.terrain || (s.fineSub || 1) !== 1) return 0;
   const ch = chunksOf(room);
-  if (ch.evicted[p]) return ch.evHash[p];     // pages are gone; the content is in the blob (see RoomChunks)
-  let stamp = 0; for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) stamp += pa.revAt(p); }
-  if (ch.stamp[p] === stamp) return ch.hash[p];
+  if (ch.evicted[p]) return ch.peek(p).evHash;   // pages are gone; the content is in the blob (see ChunkRec)
+  let stamp = 0, any = false;
+  for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) { stamp += pa.revAt(p); if (pa.pageAt(p)) any = true; } }
+  // ⚠️⚠️ AN ABSENT CHUNK ANSWERS THE CONSTANT AND IS NOT CACHED. Every whole-world sweep (roomChunkSig, chunkHashes,
+  // updateSubs' first visit) asks for the hash of EVERY page, so caching the empty answer would create one record
+  // per page in the world — reintroducing through the CACHE precisely the area-linear cost this increment removes.
+  // The answer is identical either way: the loop below folds zeros for every absent field.
+  if (!any) return emptyChunkHash();
+  const r = ch.peek(p);
+  if (r.stamp === stamp) return r.hash;
   let h = 0x811c9dc5;
   for (const f of CHUNK_CONTENT) {
     const pa = s[f], page = pa && pa.pageAt(p);
     if (!page) { h = foldZeros(h, CHUNK_CELLS * (CHUNK_CONTENT_STRIDE[f] || LIQ_T)); continue; }
     for (let k = 0; k < page.length; k++) { h ^= page[k]; h = Math.imul(h, 0x01000193) >>> 0; }
   }
-  ch.hash[p] = h; ch.stamp[p] = stamp; return h;
+  const w = ch.at(p); w.hash = h; w.stamp = stamp; return h;
 }
 function chunkHashes(room) { const n = worldGeom(room).nPages, out = new Array(n); for (let p = 0; p < n; p++) out[p] = chunkHash(room, p); return out; }
 // ── EVICTION ── a chunk nobody is near is compacted into a blob and its pages released. The blob is the DELTA from
@@ -1816,8 +1901,9 @@ function evictChunk(room, p) {
   const ch = chunksOf(room);
   const anyLive = CHUNK_CONTENT.some(f => s[f] && s[f].pageAt(p));
   if (!anyLive) return false;                // nothing to put away; do not mark it evicted (it has no blob)
-  ch.evHash[p] = chunkHash(room, p);         // ⚠️ BEFORE the pages go — see RoomChunks.evHash
-  ch.blob[p] = encodeChunk(s, p);
+  const rec = ch.at(p);
+  rec.evHash = chunkHash(room, p);           // ⚠️ BEFORE the pages go — see ChunkRec.evHash
+  rec.blob = encodeChunk(s, p);
   ch.evicted[p] = 1;
   for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
   for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === worldGeom(room).nPages) s[f].dropPage(p);
@@ -1841,13 +1927,14 @@ function evictChunk(room, p) {
 function materializeRoom(room) {
   const s = roomCells.get(room); if (!s || !s.chunks) return;
   const ch = s.chunks;
-  for (let p = 0; p < ch.blob.length; p++) if (ch.blob[p]) rehydrateChunk(room, p);
+  // Only chunks something has happened to have a record, so this is O(touched chunks), not O(world area).
+  for (const [p, r] of Array.from(ch.rec)) if (r.blob) rehydrateChunk(room, p);
 }
 function rehydrateChunk(room, p) {
   const s = roomCells.get(room); if (!s) return false;
-  const ch = chunksOf(room), blob = ch.blob[p];
-  if (!blob) return false;
-  ch.blob[p] = null; ch.evicted[p] = 0;
+  const ch = chunksOf(room), rec = ch.peek(p), blob = rec.blob;
+  if (!blob) return false;                   // (a blob implies a record, so `rec` here is never the shared empty)
+  rec.blob = null; ch.evicted[p] = 0;
   decodeChunk(s, p, blob);
   // Liquid that comes back is WOKEN, not re-seeded: it resumes flowing from exactly the state it was put away in.
   const amt = s.fineAmt, tot = s.fineTotal;
@@ -3541,8 +3628,8 @@ function chunkResidencySweep() {
     const mark = (x0, y0, x1, y1) => {
       for (let gy = Math.max(0, y0); gy <= Math.min(geom.cy - 1, y1); gy++)
         for (let gx = Math.max(0, x0); gx <= Math.min(geom.cx - 1, x1); gx++) {
-          const p = gy * geom.cx + gx; ch.lastNear[p] = now;
-          if (ch.blob[p]) rehydrateChunk(room, p);
+          const p = gy * geom.cx + gx; ch.at(p).lastNear = now;
+          rehydrateChunk(room, p);           // no-op unless this chunk was put away (it checks its own blob)
         }
     };
     if (here) for (const v of here.values()) {
@@ -3550,9 +3637,15 @@ function chunkResidencySweep() {
       if (v.ax >= 0) mark(v.ax - M, v.ay - M, v.ax + M, v.ay + M);   // the body too, in case the camera lags it
     }
     // 2) evict what has been out of everyone's radius for longer than the grace period
-    for (let p = 0; p < geom.nPages; p++) {
-      if (ch.blob[p] || now - ch.lastNear[p] <= chunkCfg.graceMs) continue;
-      if (!CHUNK_CONTENT.some(f => s[f] && s[f].pageAt(p))) continue;   // nothing there to put away
+    // ⚠️ DRIVEN BY THE PAGES THAT EXIST, not by 0..nPages (Phase 6 increment 2). The old loop asked every page in
+    // the world whether it had anything to put away — 425,984 questions at 273 domains, almost all answered "no",
+    // every 5 seconds. The candidates are exactly the chunks that HAVE a live page, which is what `eachPage`
+    // enumerates; a chunk already evicted has no live pages and so is not a candidate, which is correct.
+    // Ascending order is preserved (the union is sorted) so eviction order is unchanged.
+    const cand = new Set();
+    for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) pa.eachPage((p) => { cand.add(p); return false; }); }
+    for (const p of Array.from(cand).sort((a, b) => a - b)) {
+      if (now - ch.peek(p).lastNear <= chunkCfg.graceMs) continue;
       evictChunk(room, p);
     }
   }
