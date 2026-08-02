@@ -3733,11 +3733,12 @@ const CELL_WIRE = {
   // [i, repId, flags, mask, ...one amount per set rank bit] — see the WIRE comment in fineLiquidTickRoom.
   'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n; },
 };
-// avRoom → Map(socketId → { subs: Set<chunk>, mark: Map<chunk, hash-when-it-left>, pending: Set<chunk> })
+// avRoom → Map(socketId → { subs: Set<chunk>, pending: Set<chunk> })
+// (`mark` — the hash a chunk had when the socket left it — went with increment 3d; see updateSubs.)
 const roomSubs = {};
 function subsEntry(room, sid) {
   const m = roomSubs[room] || (roomSubs[room] = new Map());
-  let e = m.get(sid); if (!e) m.set(sid, e = { subs: new Set(), mark: new Map(), pending: new Set() });
+  let e = m.get(sid); if (!e) m.set(sid, e = { subs: new Set(), pending: new Set() });
   return e;
 }
 function dropSubs(room, sid) { const m = roomSubs[room]; if (m) { m.delete(sid); if (!m.size) delete roomSubs[room]; } }
@@ -3764,11 +3765,18 @@ function updateSubs(room, sid, v) {
   // across a chunk seam. Reported from play, guarded by probe_subscriptions P. Marking the whole grid is cheap
   // because an absent page folds into the hash as ONE multiply and the results are cached against page revisions
   // (and shared with chunk-verify), so a sparse world costs almost nothing here.
-  if (fresh) for (let p = 0; p < geom.nPages; p++) if (!want.has(p)) e.mark.set(p, chunkHash(room, p));
-  for (const p of e.subs) if (!want.has(p)) e.mark.set(p, chunkHash(room, p));       // left view: remember how it looked
-  for (const p of want) if (!e.subs.has(p)) {                                        // came back: repair if it moved
-    if (e.mark.has(p)) { if (e.mark.get(p) !== chunkHash(room, p)) e.pending.add(p); e.mark.delete(p); }
-  }
+  // 🟥 REPLACED THE `mark` SCHEME OUTRIGHT (Phase 6 increment 3d). It remembered each chunk's hash as the socket
+  // left it and re-sent only if the hash had CHANGED by the time it came back. That was correct while every
+  // client held the whole world in a flat array — "unchanged" really did mean "you still have it". Increment 3b
+  // makes the client's mirror a WINDOW, and a windowed client FORGETS a chunk the moment it leaves: it zeroes the
+  // slots so the wrapped-in column cannot read as its neighbour. So "the chunk did not change" now says nothing
+  // about whether the client has it, and the old scheme would hand back a permanently empty region.
+  // Re-entry therefore always re-sends. It costs bytes that the hash comparison used to save, which is what
+  // `pushPerBeacon` is for — and it buys back three things at once:
+  //   · the O(nPages) FIRST-VISIT WALK is gone (increment 2 named it as the largest of the three remaining ones),
+  //   · so is the Map entry PER PAGE PER SOCKET it built, which is the one that actually bit at Overworld scale,
+  //   · and `chunkHash` is no longer called on every chunk in the world every time a socket appears.
+  for (const p of want) if (!e.subs.has(p)) e.pending.add(p);   // came back (or arrived): you do not have it, here it is
   e.subs = want;
   if (e.pending.size) flushPending(room, sid, e);
 }
@@ -5772,14 +5780,18 @@ io.on('connection', (socket) => {
     // "is that a bug or is that just a chunk I am not subscribed to?" is otherwise unanswerable from inside the game.
     // ⚠️ TURNING IT OFF MUST REPAIR, not merely resume broadcasting. Every client with a subscription set has chunks
     // it stopped hearing about, so going back to broadcast would leave those stale FOREVER — the diffs that would
-    // have fixed them have already been and gone. So the marks are flushed as content before the sets are dropped.
+    // have fixed them have already been and gone.
+    // ⚠️ REWORKED with increment 3d, which deleted the `mark` map this used to flush. Dropping `roomSubs[room]`
+    // is now the repair: with re-entry always re-sending, an empty subscription set means the next beacon files
+    // every chunk the socket can see as pending and pushes it. A windowed client only HAS what it can see, so
+    // that is complete for it; a flat client repairs the rest as it visits, which is the same guarantee walking
+    // into new territory already gives. Anything already queued still goes out first.
     if ('interestChunks' in patch) {
       const on = !!patch.interestChunks;
       if (!on && interestCfg.chunks) for (const room of Object.keys(roomSubs)) {
         for (const [sid, e] of roomSubs[room]) {
-          const all = new Set([...e.mark.keys(), ...e.pending]);          // UNBOUNDED on purpose — pushPerBeacon
-          const sock = io.sockets.sockets.get(sid);                       // paces a live camera; this is a one-off
-          if (sock && all.size) sendChunkContent(sock, room, [...all]);   // admin action and must leave nothing stale
+          const sock = io.sockets.sockets.get(sid);
+          if (sock && e.pending.size) sendChunkContent(sock, room, [...e.pending]);
         }
         delete roomSubs[room];
       }
