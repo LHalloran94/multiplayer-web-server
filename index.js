@@ -6476,6 +6476,21 @@ io.on('connection', (socket) => {
     // paths now share it (including the `clear` fix, which resync silently needed too).
     sendChunkContent(socket, room, bad.slice(0, 12));
   });
+  // ── CHUNK-WANT (Phase 6 increment 3b) — "send me these chunks, now" ─────────────────────────────────────────
+  // 🟥 THE WINDOWED CLIENT NEEDED THIS AND ITS ABSENCE IS WHAT MADE THE FIRST BROWSER TEST LOOK BROKEN. A window
+  // that moves DISCARDS the chunks that wrapped out, and it is much larger than the viewport the subscription is
+  // built from — so the chunks it drops are mostly ones the server still believes the client has, and neither
+  // `updateSubs` (which only reacts to the subscription set changing) nor `chunk-verify` (bounded to twelve
+  // chunks a pass, which is why the client logged "139/210 repaired" and stayed full of holes) would refill them.
+  // The client knows exactly what it dropped, so it says so. Bounded generously rather than tightly: this fires
+  // on a window move, not on a timer, and a half-filled world is the failure it exists to prevent.
+  socket.on('chunk-want', ({ chunks }) => {
+    const room = currentAvatarRoom;
+    if (!room || !Array.isArray(chunks) || !chunks.length || !peekCells(room).terrain) return;
+    const geom = worldGeom(room), want = [];
+    for (const p of chunks) { const q = p | 0; if (q >= 0 && q < geom.nPages && !want.includes(q)) want.push(q); }
+    sendChunkContent(socket, room, want.slice(0, 512));
+  });
   socket.on('avt-offer',  ({ to, sdp })       => { socket.to(to).emit('avt-offer',  { from: socket.id, sdp }); });
   socket.on('avt-answer', ({ to, sdp })       => { socket.to(to).emit('avt-answer', { from: socket.id, sdp }); });
   socket.on('avt-ice',    ({ to, candidate }) => { socket.to(to).emit('avt-ice',    { from: socket.id, candidate }); });
