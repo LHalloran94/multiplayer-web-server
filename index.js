@@ -3427,6 +3427,12 @@ let liqRoomCursor = 0;
 // against — "did the mechanism fire?" is a fact, where "did the tick count change?" turned out to be wall-clock
 // luck (the budget's hard stop is timed, so a loaded machine changes the tick count on its own).
 let liqRateSkips = 0;
+// ...and the same thing for TIER 2, for the same reason, added 2026-08-02. `probe_budget`'s cold-start check
+// asserted "WITH the seed, tick 0 is CHEAPER" by comparing two wall-clock readings — but the effect it is
+// testing is ~1ms against several ms of run-to-run spread, so it failed about one run in five REGARDLESS of
+// what the code did (measured: 1/5 on the pre-increment tree as well). That is not a guard, it is a coin flip
+// wearing one's clothes. The CLAIM is "tier 2 throttled K on the room's first tick", and that is a fact.
+let liqK2Throttles = 0;
 // ── THE ONE ESTIMATOR. Both the roster planner and tier 2 used to read `roomLiqCost[room] || 0` directly,
 // which is why an unmeasured room was treated as FREE by both at once (see liquidCfg.budgetSeed). They now
 // share this, so a change to how a room is estimated cannot apply to one and not the other.
@@ -3524,7 +3530,7 @@ const runLiquidTick = () => {
       if (est > _budgetMs) { _kUsed = Math.max(1, Math.floor(_kFull * _budgetMs / est)); liquidCfg.fineLevelSteps = _kUsed; }
     }
     fineLiquidTickRoom(room, cellsOf(room).fineSub || 1);
-    if (_kUsed !== _kFull) liquidCfg.fineLevelSteps = _kFull;
+    if (_kUsed !== _kFull) { liquidCfg.fineLevelSteps = _kFull; liqK2Throttles++; }
     // EMA is kept NORMALISED TO FULL K, so a throttled room does not report a small cost, get its K
     // restored, blow the budget again and oscillate.
     if (_budgetMs) { const _d = (performance.now() - _r0) * (_kFull / _kUsed); roomLiqCost[room] = roomLiqCost[room] ? roomLiqCost[room] * 0.7 + _d * 0.3 : _d; }
@@ -6349,7 +6355,13 @@ io.on('connection', (socket) => {
     const _sel = _relayed ? null : peerSelect(avRoom, socket.id);
     const existingPeers = _relayed ? [] : [...(_sel || roomAvt[avRoom])].filter(id => id !== socket.id);
     if (_sel) (roomPeers[avRoom] || (roomPeers[avRoom] = new Map())).set(socket.id, new Set(existingPeers));
-    socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: (type === 'world') ? worldSpawnFor(avRoom) : null });
+    // ⚠️ `dims` (Phase 6 increment 3a) — the room's WORLD SIZE IN PIXELS, decided server-side like `spawn` and
+    // `relay` and delivered on the same seam. The client's terrain mirror used to derive its shape from a module
+    // constant, so a second world shape was not expressible at all; it now reshapes to whatever this says.
+    // `roomDims` returns the page shape for every room today, so this is the value the client already had.
+    const _rd = roomDims(avRoom);
+    socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: (type === 'world') ? worldSpawnFor(avRoom) : null,
+      dims: { w: _rd.cols * TERRAIN_CELL, h: _rd.rows * TERRAIN_CELL, cell: TERRAIN_CELL } });
     // Identity, once, rather than on every position packet — see roomProfile. Both directions: the joiner
     // needs everyone already here, and everyone here needs the joiner. Harmless when the relay is off (an
     // un-relayed client simply has no handler for these, and gets names off the mesh as it always has).
