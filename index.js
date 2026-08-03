@@ -1527,7 +1527,22 @@ const TERRAIN_ROWS = Math.ceil(MWSim.C.WORLD_H / TERRAIN_CELL);
 // (`CELLS_PER_WORLD` used to sit here. It was referenced by nothing — server, probes or client — a fourth
 //  orphaned full-world constant of exactly the kind Phase 2 turned up three of. Deleted with this block.)
 const PAGE_DIMS = Object.freeze({ cols: TERRAIN_COLS, rows: TERRAIN_ROWS });
-function roomDims(room) { return PAGE_DIMS; }   // every room today — the Overworld's own shape lands in a later increment
+// ⭐ THE OVERWORLD'S SHAPE (user decision, 2026-08-04 — worldgen_redesign_proposal.md ADDENDUM 6).
+// DEPTH is the decided, permanent number: 4,096 rows = 32,768 px, ~364 player-heights, 0.44× Noita. It is a POWER
+// OF TWO on purpose — that is what puts every Overworld geometry on the shift-and-mask paging path, at any width.
+// WIDTH is NOT a decision and is deliberately not treated as one. Since increment 5 the stride is the depth, so
+// widening the world appends columns and renumbers nothing: this number can be raised later without touching a
+// single stored edit. 262,144 columns = 2,097,152 px is simply a generous starting extent (2^30 cells, which
+// keeps a flat index inside V8's unboxed-integer range — see chunkGeom's ceiling note).
+// ⚠️ NOTHING USES THIS YET. Domain placement and turning the Overworld on are later increments; declaring the
+// shape here is what lets them be about placement rather than about arithmetic, and it is what
+// probe_overworld_scale checks against instead of a number copied out of a document.
+const OVERWORLD_DIMS = Object.freeze({ cols: 262144, rows: 4096 });
+// Rooms that are part of the Overworld rather than a page world. EMPTY, and the Overworld cannot be entered yet —
+// so `roomDims` returns the page shape for every real room and behaviour is unchanged. A Set rather than a key
+// test so the eventual sector split (§7: N scheduling rooms over one cell store) has somewhere to register.
+const overworldRooms = new Set();
+function roomDims(room) { return overworldRooms.has(room) ? OVERWORLD_DIMS : PAGE_DIMS; }
 // The terrain-resolution geometry (SUB=1) for a room, i.e. the one the fields that are not fine-grid ones use.
 const worldGeom = (room) => { const d = roomDims(room); return chunkGeom(d.cols, d.rows); };
 // ═══ CHUNKING (SHARED-WORLD.md §7, Phase 3) ═════════════════════════════════════════════════════════════════════
