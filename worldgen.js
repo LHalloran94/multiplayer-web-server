@@ -240,7 +240,8 @@ function makeGen(cfg) {
   let scratch = new Uint8Array(CHUNK_SIDE + POOL_DEPTH + 2);
   function fillPage(page, hpPage, p, geom, T) {
     const stride = (T | 0) || 1;
-    const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
+    // Chunks are numbered down-then-across (page = chunkCol * cy + chunkRow) — see chunkGeom, increment 5.
+    const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
     const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
     if (rN <= 0 || cN <= 0) return;
     const SPAN = rN + POOL_DEPTH + 1;
@@ -282,7 +283,7 @@ function makeGen(cfg) {
   // and the world floor is at `bottomRow`. Costs 64 `surfAt` calls (~3 sines each) against a 4KB allocation
   // plus a full page generation, so it pays for itself many times over.
   function pageEmpty(p, geom) {
-    const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
+    const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
     const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
     if (rN <= 0 || cN <= 0) return true;
     if (r0 > bottomRow) return true;                       // below the bedrock floor — nothing is generated there

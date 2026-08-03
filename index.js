@@ -1535,9 +1535,8 @@ const worldGeom = (room) => { const d = roomDims(room); return chunkGeom(d.cols,
 // array of CHUNK_SIDE² -cell PAGES, allocated on first WRITE and released on eviction. A world costs what is near
 // players instead of ~15–20MB flat.
 //
-// ⭐ THE FLAT INDEX SPACE IS UNCHANGED. `i`, `i ± 1`, `i ± COLS`, `i % COLS`, `(i / COLS) | 0` still mean exactly
-// what they meant — paging is resolved by two GLOBAL lookup tables (flat index → page, flat index → offset in page)
-// rather than by re-numbering cells. That is deliberate and load-bearing:
+// ⭐ THE FLAT INDEX SPACE IS A PURE STORAGE SUBSTITUTION. Paging is resolved from the flat index (by lookup tables
+// or by shifts — see chunkGeom) rather than by re-numbering cells. That is deliberate and load-bearing:
 //   · the `liquid-fine-cells` / `terrain-set` wires still carry the same indices, so no client change and no
 //     translation layer at the emit boundary;
 //   · `golden_fine_flow.json` still compares, so TEST A2 stays a real bit-identity proof rather than a re-recording;
@@ -1555,54 +1554,74 @@ const CHUNK_SIDE = 64, CHUNK_CELLS = CHUNK_SIDE * CHUNK_SIDE;   // 64×64 cells 
 // Per (cols × rows) grid shape — memoised, because the fine grid can be built at SUB≠1 (the probe rigs drive SUB=3),
 // which is a different index space and therefore a different set of tables.
 const _chunkGeoms = new Map();
-// ⭐ TWO ADDRESSING MODES (Phase 6, measured by `scratchpad/probe_overworld_scale.js`).
+// ⭐⭐ THE INDEX IS COLUMN-MAJOR: `i = col * rows + row`. THE STRIDE IS THE WORLD'S DEPTH, NOT ITS WIDTH.
+// (Phase 6 increment 5 — `scratchpad/phase6_inc5_address_space.md`, ADDENDUM 6 of the worldgen proposal.)
+// It used to be `row * cols + col`, which makes the stride the very dimension the Overworld has to GROW: adding
+// a column at the world's edge would renumber every cell in it. Depth is DECIDED and fixed (4,096 rows); width
+// is free and now multiplies nothing. So:
+//     ROW is the minor axis   →  the cell BELOW is `i + 1`,      row = i % rows
+//     COL is the major axis   →  the cell to the RIGHT is `i + rows`,  col = (i / rows) | 0
+// ⚠️ `(i / rows) | 0` truncates a COLUMN NUMBER, which is small, so it is exact at any world size — the same
+// argument increment 1 recorded for `(i / cols) | 0` truncating a row. What is NOT safe above 2^31 is a bitwise
+// op on the index ITSELF, and after this change the arithmetic mode is the only place left that does one.
+//
+// ⭐ TWO ADDRESSING MODES (measured by `scratchpad/probe_overworld_scale.js`).
 // The lookup tables below are 4 bytes PER WORLD CELL, held for the process — fine at the page world's ~3MB,
-// and the reason SHARED-WORLD §4's "world size is free" is true of the SIM and false of the STORAGE. Measured:
-// a 256MB table budget reaches ~43 domains at 30,720px spacing, against §2's "thousands".
-// So when `cols` is a POWER OF TWO, page and offset are recovered from the flat index with shifts and masks
-// and the tables are never built:
-//     c = i & (cols-1)   r = i >> K        page = (i >>> K6) * cx + ((i >>> 6) & CXM)
-//     off = (((i >>> K) & 63) << 6) | (i & 63)      ← `c & 63 === i & 63`, since a pow2 cols ≥ 64 is a multiple of 64
-// K = -1 is the "no shortcut, use the tables" sentinel, which is what a page room (1920 cols) takes.
+// and the reason SHARED-WORLD §4's "world size is free" is true of the SIM and false of the STORAGE.
+// So when the STRIDE (= `rows`) is a POWER OF TWO, page and offset are recovered from the flat index with
+// shifts and masks and the tables are never built:
+//     r = i & (rows-1)   c = i >>> K        page = (i >>> K6) * cy + ((i >>> 6) & PGM)
+//     off = ((i & 63) << 6) | ((i >>> K) & 63)   ← row-major WITHIN the page; `r & 63 === i & 63`, since a
+//                                                  pow2 rows ≥ 64 is a multiple of 64
+// K = -1 is the "no shortcut, use the tables" sentinel, which is what a page room (405 rows) takes.
+// ⚠️ Keying the shortcut on the DEPTH rather than the width is the quiet win here: the Overworld's depth is a
+// power of two by decision, so EVERY Overworld shape is arithmetic-paged however wide it grows — and the
+// playable width is freed from having to be a power of two at all.
+// ⚠️ PAGES STAY ROW-MAJOR INTERNALLY even though the world is column-major. It costs the same two shifts, and it
+// means chunk payloads, chunkHash and the client's chunk decode keep their meaning across this change.
 // ⚠️ Phase 3 rejected a branch in `rp()` on principle ("the hottest read in the server"). MEASURED, it is
 // affordable and mostly a win: bit-identical to the mode it dispatches to on both geometries, 7.4% CHEAPER
-// than the tables on a power-of-two geometry and 4.5% dearer on a page room. The 4.5% is the price of NOT
-// re-striding the page world — which would mean splitting TERRAIN_COLS (today it means BOTH "playable columns"
-// AND "row stride") across 208 sites, and re-striding every blob in published_worlds.
+// than the tables on a shortcut geometry and 4.5% dearer on a page room.
 function chunkGeom(cols, rows) {
   const key = cols + 'x' + rows; let g = _chunkGeoms.get(key); if (g) return g;
   const cx = Math.ceil(cols / CHUNK_SIDE), cy = Math.ceil(rows / CHUNK_SIDE), cells = cols * rows;
   // ⚠️ THE WORLD-EXTENT CEILING, ASSERTED HERE BECAUSE THIS IS THE ONE PLACE THAT KNOWS THE SHAPE (Phase 6).
-  // A flat cell index is a JS number and stays exact to 2^53, and "(i / cols) | 0" is safe at ANY size because it
-  // truncates i/cols — a ROW — which is tiny. What is NOT safe is a bitwise op applied to the index ITSELF:
-  //   · the wire handlers do "cells[k] | 0" (ToInt32, wraps negative above 2^31);
-  //   · "fineFluxStack" is an Int32Array OF INDICES (same limit);
-  //   · the arithmetic paging below uses "i >>> K6" / "i & 63" (ToUint32, exact only to 2^32-1).
-  // 2^31 is therefore the real ceiling, and it is what makes an Overworld height trade against its width.
-  // Silently wrapping would corrupt terrain at a coordinate nobody would think to test, so: throw.
+  // A flat cell index is a JS number and stays exact to 2^53. What is not exact past 2^31 is a bitwise op
+  // applied to the index ITSELF: the wire handlers' "cells[k] | 0", "fineFluxStack" being an Int32Array OF
+  // INDICES, and the arithmetic paging below ("i >>> K6" / "i & 63", ToUint32, exact only to 2^32-1).
+  // ⚠️ This is now a SOFT boundary in one further sense: V8 stores integers below 2^31 unboxed, so an index past
+  // it is still exact but slower. At 4,096 rows that is 524,288 columns = 4.19M px of width. The world does not
+  // break there; it gets gradually dearer — which is the difference between a ceiling and a horizon.
+  // Silently wrapping WOULD corrupt terrain at a coordinate nobody would think to test, so: throw.
   if (cells > 2147483647) throw new Error(`chunkGeom: ${cols}x${rows} = ${cells} cells exceeds the 2^31 flat-index ceiling`);
-  const p2 = cols >= CHUNK_SIDE && (cols & (cols - 1)) === 0;
+  const p2 = rows >= CHUNK_SIDE && (rows & (rows - 1)) === 0;
   // ⚠️ THE Uint16 PAGE INDEX IS A PROPERTY OF THE TABLES, NOT OF THE GEOMETRY — a distinction that did not exist
   // before there were two addressing modes, and getting it wrong made a legal Overworld shape throw. `pageOf`
-  // stores a page number in a Uint16, so a TABLE geometry is capped at 65,535 pages (= 2.68e8 cells, EIGHT TIMES
-  // below the 2^31 flat-index ceiling above — so this, not the index, is what binds a table world). An ARITHMETIC
-  // geometry builds no tables and computes the page number as a plain JS number, so it has no such cap.
+  // stores a page number in a Uint16, so a TABLE geometry is capped at 65,535 pages. An ARITHMETIC geometry
+  // builds no tables and computes the page number as a plain JS number, so it has no such cap.
   // (A big arithmetic geometry used to be legal but not CHEAP — `PagedArray`'s directory was one slot per page per
   //  field per room. Increment 2 made it a two-level directory; an empty world now costs ~nothing. See PagedArray.)
-  if (!p2 && cx * cy > 65535) throw new Error('chunkGeom: page index overflows Uint16 (' + cx * cy + ') — a table geometry this large needs a power-of-two column count');
-  const K = p2 ? (Math.log2(cols) | 0) : -1, CXM = cx - 1, K6 = K + 6;
+  if (!p2 && cx * cy > 65535) throw new Error('chunkGeom: page index overflows Uint16 (' + cx * cy + ') — a table geometry this large needs a power-of-two row count');
+  const K = p2 ? (Math.log2(rows) | 0) : -1, PGM = cy - 1, K6 = K + 6;
   const pageOf = p2 ? null : new Uint16Array(cells), offOf = p2 ? null : new Uint16Array(cells);
-  if (!p2) for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-    const i = r * cols + c;
-    pageOf[i] = ((r / CHUNK_SIDE) | 0) * cx + ((c / CHUNK_SIDE) | 0);
+  // ⚠️ CHUNKS ARE NUMBERED DOWN-THEN-ACROSS, matching the cells: page = chunkCol * cy + chunkRow. The client's
+  // chunkHashesClient() decomposes page numbers the same way and MUST agree (probe_chunking F checks it).
+  if (!p2) for (let c = 0; c < cols; c++) for (let r = 0; r < rows; r++) {
+    const i = c * rows + r;
+    pageOf[i] = ((c / CHUNK_SIDE) | 0) * cy + ((r / CHUNK_SIDE) | 0);
     offOf[i] = (r % CHUNK_SIDE) * CHUNK_SIDE + (c % CHUNK_SIDE);
   }
-  g = { cols, rows, cells, cx, cy, nPages: cx * cy, pageOf, offOf, K, CXM, K6 };
+  g = { cols, rows, cells, cx, cy, nPages: cx * cy, pageOf, offOf, K, PGM, K6 };
   _chunkGeoms.set(key, g); return g;
 }
 // The page number of a flat cell index, in whichever mode this geometry uses. Kept as a named helper for the
 // COLD callers (chunk pruning); the hot accessors below inline it deliberately.
-function geomPage(g, i) { return g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i]; }
+function geomPage(g, i) { return g.K >= 0 ? ((i >>> g.K6) * g.cy + ((i >>> 6) & g.PGM)) : g.pageOf[i]; }
+// (col, row) → flat index, and back. The COLD/readable form; hot loops hoist `rows` and write the arithmetic
+// out, exactly as they used to hoist `cols`.
+function geomIdx(g, c, r) { return c * g.rows + r; }
+function geomCol(g, i) { return (i / g.rows) | 0; }
+function geomRow(g, i) { return i % g.rows; }
 // How many pages one directory group covers (Phase 6 increment 2 — see the constructor). 256 pages is a group of
 // ~3KB, and it divides the outer directory by the same factor: 425,984 pages become 1,664 outer slots per field.
 // Row-major, so a group is a horizontal strip of 256 chunks — which is how players spread out along a side-scroller.
@@ -1664,7 +1683,7 @@ PagedArray.prototype._grp = function (p) {
 // 1.042x, i.e. 4.2% dearer, bit-identical, and the same wherever in the world you stand. The kickoff's suggested
 // Map measured 1.315x — a hash lookup does not belong here — and a plain holey array measured 1.009x but is NOT
 // SPARSE (Part C: 58.6MB for an empty room, worse than the dense array), which is why it is fast.
-PagedArray.prototype.rp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i], d = this.dir[p >> PAGE_GRP_SH], a = d !== null && d[p & PAGE_GRP_M]; return a || this._miss(p); };
+PagedArray.prototype.rp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cy + ((i >>> 6) & g.PGM)) : g.pageOf[i], d = this.dir[p >> PAGE_GRP_SH], a = d !== null && d[p & PAGE_GRP_M]; return a || this._miss(p); };
 // The cold half of rp, kept out of line so the hot path is just "load the page and return it".
 PagedArray.prototype._miss = function (p) {
   if (this.ev !== null && this.ev[p]) return this._alloc(p);       // evicted → fault it back, blob and all
@@ -1678,14 +1697,14 @@ PagedArray.prototype._miss = function (p) {
   return this.zero;                                               // genuinely empty → the shared zero page
 };
 PagedArray.prototype.wp = function (i) {
-  const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i], gi = p >> PAGE_GRP_SH;
+  const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cy + ((i >>> 6) & g.PGM)) : g.pageOf[i], gi = p >> PAGE_GRP_SH;
   if (this.dir[gi] === null) { this._grp(p); this.rdir[gi][p & PAGE_GRP_M]++; return this._alloc(p); }
   this.rdir[gi][p & PAGE_GRP_M]++;
   return this.dir[gi][p & PAGE_GRP_M] || this._alloc(p);
 };
-PagedArray.prototype.o = function (i) { const g = this.geom; return (g.K >= 0 ? ((((i >>> g.K) & 63) << 6) | (i & 63)) : g.offOf[i]) * this.T; };
-PagedArray.prototype.g = function (i) { const g = this.geom; return this.rp(i)[(g.K >= 0 ? ((((i >>> g.K) & 63) << 6) | (i & 63)) : g.offOf[i]) * this.T]; };
-PagedArray.prototype.s = function (i, v) { const g = this.geom; this.wp(i)[(g.K >= 0 ? ((((i >>> g.K) & 63) << 6) | (i & 63)) : g.offOf[i]) * this.T] = v; };
+PagedArray.prototype.o = function (i) { const g = this.geom; return (g.K >= 0 ? (((i & 63) << 6) | ((i >>> g.K) & 63)) : g.offOf[i]) * this.T; };
+PagedArray.prototype.g = function (i) { const g = this.geom; return this.rp(i)[(g.K >= 0 ? (((i & 63) << 6) | ((i >>> g.K) & 63)) : g.offOf[i]) * this.T]; };
+PagedArray.prototype.s = function (i, v) { const g = this.geom; this.wp(i)[(g.K >= 0 ? (((i & 63) << 6) | ((i >>> g.K) & 63)) : g.offOf[i]) * this.T] = v; };
 // `.fill(0)` on an unseeded array DROPS every page — the old flat `.fill(0)` meant "this is now empty everywhere",
 // and dropping is both faster and the point of the exercise.
 PagedArray.prototype.fill = function (v) {
@@ -1719,22 +1738,25 @@ PagedArray.prototype.eachPage = function (cb) {
   }
   return false;
 };
+// ⚠️ Pages are numbered DOWN then ACROSS (page = chunkCol * cy + chunkRow), matching the column-major cells; the
+// page's own 64×64 payload stays ROW-major (offset = lr * 64 + lc) so chunk wire payloads keep their meaning.
 PagedArray.prototype.some = function (cb) {
-  const g = this.geom, T = this.T;
+  const g = this.geom, T = this.T, ROWS = g.rows;
   return this.eachPage((p, a) => {
-    const c0 = (p % g.cx) * CHUNK_SIDE, r0 = ((p / g.cx) | 0) * CHUNK_SIDE;
+    const c0 = ((p / g.cy) | 0) * CHUNK_SIDE, r0 = (p % g.cy) * CHUNK_SIDE;
     const rN = Math.min(CHUNK_SIDE, g.rows - r0), cN = Math.min(CHUNK_SIDE, g.cols - c0);
-    for (let lr = 0; lr < rN; lr++) for (let lc = 0; lc < cN; lc++) if (cb(a[(lr * CHUNK_SIDE + lc) * T], (r0 + lr) * g.cols + c0 + lc)) return true;
+    for (let lc = 0; lc < cN; lc++) { const colBase = (c0 + lc) * ROWS + r0;
+      for (let lr = 0; lr < rN; lr++) if (cb(a[(lr * CHUNK_SIDE + lc) * T], colBase + lr)) return true; }
     return false;
   });
 };
 PagedArray.prototype.scan = function (cb) {
-  const g = this.geom, T = this.T;
+  const g = this.geom, T = this.T, ROWS = g.rows;
   this.eachPage((p, a) => {
-    const c0 = (p % g.cx) * CHUNK_SIDE, r0 = ((p / g.cx) | 0) * CHUNK_SIDE;
+    const c0 = ((p / g.cy) | 0) * CHUNK_SIDE, r0 = (p % g.cy) * CHUNK_SIDE;
     const rN = Math.min(CHUNK_SIDE, g.rows - r0), cN = Math.min(CHUNK_SIDE, g.cols - c0);
-    for (let lr = 0; lr < rN; lr++) { const rowBase = (r0 + lr) * g.cols + c0, off = lr * CHUNK_SIDE;
-      for (let lc = 0; lc < cN; lc++) cb(rowBase + lc, (off + lc) * T, a); }
+    for (let lc = 0; lc < cN; lc++) { const colBase = (c0 + lc) * ROWS + r0;
+      for (let lr = 0; lr < rN; lr++) cb(colBase + lr, (lr * CHUNK_SIDE + lc) * T, a); }
     return false;
   });
 };
@@ -2057,7 +2079,7 @@ function restoreChunk(room, p) {
   if (!rec.gen) return false;
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
   const g = worldGeom(room);
-  s.terrain.g((((p / g.cx) | 0) * CHUNK_SIDE) * g.cols + (p % g.cx) * CHUNK_SIDE);
+  s.terrain.g((((p / g.cy) | 0) * CHUNK_SIDE) * g.rows + (p % g.cy) * CHUNK_SIDE);
   return true;
 }
 function rehydrateChunk(room, p) {
@@ -2080,8 +2102,8 @@ function rehydrateChunk(room, p) {
   if (blob.a && blob.a.length && amt && tot) { const act = fineSet(room), geom = worldGeom(room);
     for (let q = 0; q < blob.a.length; q += (1 + LIQ_T)) { const c = blob.a[q];
       const lr = (c / CHUNK_SIDE) | 0, lc = c % CHUNK_SIDE;
-      const gr = ((p / geom.cx) | 0) * CHUNK_SIDE + lr, gc = (p % geom.cx) * CHUNK_SIDE + lc;
-      if (gr < geom.rows && gc < geom.cols) act.add(gr * geom.cols + gc); } }
+      const gr = (p % geom.cy) * CHUNK_SIDE + lr, gc = ((p / geom.cy) | 0) * CHUNK_SIDE + lc;
+      if (gr < geom.rows && gc < geom.cols) act.add(gc * geom.rows + gr); } }
   return true;
 }
 // ── HARNESS SEAM ── the probe rigs build scenes by assigning whole arrays per room (`roomTerrain[R] = new
@@ -2111,10 +2133,10 @@ function flatView(pa) {
 // How each per-cell field is built. One table so the `ensure*` helpers, eviction and the harness seam cannot drift
 // apart on element type or stride. (`fineLevelAcc` carries a per-index phase rather than zero — see seedLevelAcc.)
 function seedLevelAcc(page, p, geom, _T) {
-  const cx0 = (p % geom.cx) * CHUNK_SIDE, cy0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
+  const cx0 = ((p / geom.cy) | 0) * CHUNK_SIDE, cy0 = (p % geom.cy) * CHUNK_SIDE;
   for (let lr = 0; lr < CHUNK_SIDE; lr++) { const gr = cy0 + lr; if (gr >= geom.rows) break;
     for (let lc = 0; lc < CHUNK_SIDE; lc++) { const gc = cx0 + lc; if (gc >= geom.cols) break;
-      page[lr * CHUNK_SIDE + lc] = ((Math.imul(gr * geom.cols + gc, 2654435761)) >>> 0) / 4294967296; } }
+      page[lr * CHUNK_SIDE + lc] = ((Math.imul(gc * geom.rows + gr, 2654435761)) >>> 0) / 4294967296; } }
 }
 function newPagedField(field, geom, room) {
   let pa = null;
@@ -2181,7 +2203,7 @@ function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard) {
   for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) > r2) continue;
-    const i = ry * COLS + cx;
+    const i = cx * ROWS + ry;
     if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed = true; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed = true;
   }
@@ -2196,7 +2218,7 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard) {
   for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if (Math.abs(ccx - wx) > r || Math.abs(ccy - wy) > r) continue;
-    const i = ry * COLS + cx;
+    const i = cx * ROWS + ry;
     if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed = true; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed = true;
   }
@@ -2257,8 +2279,8 @@ function dropSource(room, i) { const s = cellsOf(room).src; if (s && s.delete(i)
 function dropSourcesInRect(room, c0, r0, c1, r1) {
   const s = cellsOf(room).src; if (!s || !s.size) return;
   const gone = [];
-  const COLS = cellsOf(room).cols;
-  for (const i of s.keys()) { const r = Math.floor(i / COLS), c = i - r * COLS; if (c >= c0 && c <= c1 && r >= r0 && r <= r1) gone.push(i); }
+  const ROWS = cellsOf(room).rows;
+  for (const i of s.keys()) { const c = Math.floor(i / ROWS), r = i - c * ROWS; if (c >= c0 && c <= c1 && r >= r0 && r <= r1) gone.push(i); }
   for (const i of gone) s.delete(i);
   if (!s.size) dropSrcMap(room);
   if (gone.length) io.to(room).emit('liquid-src', { cells: gone, on: false });
@@ -2607,8 +2629,8 @@ function fineSet(room) { const s = cellsOf(room); if (!s.fineActive) { s.fineAct
 function fineWakeAround(room, i) {
   const s = cellsOf(room), tot = s.fineTotal, grid = s.terrain;
   if (!tot || !grid) return;
-  const N = grid.length, COLS = s.cols, c = i % COLS, act = fineSet(room);
-  for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) {
+  const N = grid.length, ROWS = s.rows, r = i % ROWS, act = fineSet(room);
+  for (const j of [r > 0 ? i - 1 : -1, r < ROWS - 1 ? i + 1 : -1, i - ROWS, i + ROWS]) {
     if (j < 0 || j >= N || tot.g(j) <= 0) continue;
     const v = grid.g(j); if (v !== 0 && !isFluidId(v)) continue;
     act.add(j);
@@ -2675,10 +2697,10 @@ function powderSet(room) { const s = cellsOf(room); if (!s.powderActive) { s.pow
 // Wake powder in + just above a rect after a terrain edit: a dig removes support (grains above cascade down), a paint drops
 // unsupported grains. The r0-1 margin seeds the cascade — each moving grain then wakes the one above it.
 function activatePowderRect(room, grid, c0, r0, c1, r1) {
-  const COLS = grid.geom.cols;
-  c0 = Math.max(0, c0); r0 = Math.max(0, r0 - 1); c1 = Math.min(COLS - 1, c1); r1 = Math.min(grid.geom.rows - 1, r1);
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows;
+  c0 = Math.max(0, c0); r0 = Math.max(0, r0 - 1); c1 = Math.min(COLS - 1, c1); r1 = Math.min(ROWS - 1, r1);
   const s = powderSet(room);
-  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * COLS + c; if (isPowderId(grid.g(i))) s.add(i); }
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const i = c * ROWS + r; if (isPowderId(grid.g(i))) s.add(i); }
   if (!s.size) dropPowderSet(room);
 }
 // SATURATION tuning (terrain reactions). SAT_MAX ≈ "a cell's worth" of water; ABSORB per absorb-tick; DRY per soil-tick when
@@ -2690,7 +2712,7 @@ function soilSet(room) { const s = cellsOf(room); if (!s.soilActive) { s.soilAct
 // Seed the soil set so soilTickRoom processes absorption/drying around water. Called on PAINT and at GEN (not just when a
 // water cell happens to be "active") → placement + pre-generated lakes reliably + consistently start absorbing.
 function seedSoilAround(room, grid, i) {
-  const nn = grid.length, COLS = grid.geom.cols, c = i % COLS, N = [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
+  const nn = grid.length, ROWS = grid.geom.rows, r = i % ROWS, N = [r > 0 ? i - 1 : -1, r < ROWS - 1 ? i + 1 : -1, i - ROWS, i + ROWS];
   // In fine mode water is not a grid id — it is rank 4 of the fine stack — so both tests below have to read the fine
   // arrays or nothing is ever seeded and the whole saturation model stays asleep.
   const st = cellsOf(room);
@@ -2740,7 +2762,7 @@ function seedLiquidActivity(room) {
 function powderTickRoom(room) {
   const st = cellsOf(room), grid = st.terrain, hp = st.terrainHp, active = st.powderActive;
   if (!grid || !hp || !active || !active.size) { if (active && !active.size) dropPowderSet(room); return; }
-  const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, tick = powderTickCount, nn = grid.length;
+  const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, ROWS = st.rows, tick = powderTickCount, nn = grid.length;
   const FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // grains may not enter the bedrock floor row (same as liquid)
   // FINE mode: liquid lives in the roomFine* arrays and the terrain grid holds SOLIDS ONLY, so `isFluidId(grid[j])`
   // never matches and a grain read a liquid cell as plain AIR — it fell straight through the pool and, worse, the
@@ -2749,9 +2771,9 @@ function powderTickRoom(room) {
   const famt = st.fineAmt, ftot = st.fineTotal;
   const canDisplace = (j) => grid.g(j) === 0;   // liquid is not a grid id, so an empty grid cell covers a pool too
   const list = Array.from(active); active.clear();
-  list.sort((a, b) => ((b / COLS) | 0) - ((a / COLS) | 0));   // bottom-up so a falling column cascades in a single pass
+  list.sort((a, b) => (b % ROWS) - (a % ROWS));   // bottom-up so a falling column cascades in a single pass
   const changedSet = new Set(), fineChanged = new Set();
-  const wakeAround = (i) => { const c = i % COLS; for (const j of [i - COLS, c > 0 ? i - COLS - 1 : -1, c < COLS - 1 ? i - COLS + 1 : -1]) if (j >= 0 && isPowderId(grid.g(j))) active.add(j); };   // wake grains above the vacated cell → column keeps falling
+  const wakeAround = (i) => { const r = i % ROWS; if (r <= 0) return; for (const j of [i - 1, i - ROWS - 1, i + ROWS - 1]) if (j >= 0 && j < nn && isPowderId(grid.g(j))) active.add(j); };   // wake grains above the vacated cell → column keeps falling
   const swapMove = (src, dst) => {
     const P = grid.g(src), hpP = hp.g(src);
     {
@@ -2763,23 +2785,23 @@ function powderTickRoom(room) {
       fineSyncGrid(room, src);                               // the pool that moved up owns this cell now
       if (carried > 0) { fineSet(room).add(src); fineChanged.add(src); fineChanged.add(dst); }
       else fineChanged.add(dst);
-      const sc = src % COLS; for (const j of [src - COLS, src + COLS, sc > 0 ? src - 1 : -1, sc < COLS - 1 ? src + 1 : -1]) if (j >= 0 && j < nn && ftot.g(j) > 0) fineSet(room).add(j);
+      const sr = src % ROWS; for (const j of [sr > 0 ? src - 1 : -1, sr < ROWS - 1 ? src + 1 : -1, src - ROWS, src + ROWS]) if (j >= 0 && j < nn && ftot.g(j) > 0) fineSet(room).add(j);
     }
     changedSet.add(src); changedSet.add(dst); active.add(dst); wakeAround(src);
     if (liquidCfg.reactions) { seedFineReactAround(room, src); seedFineReactAround(room, dst); }   // a grain landing in a pool is a new contact (snow dropped into water → ice)
   };
   for (const i of list) {
     if (!isPowderId(grid.g(i))) continue;
-    const r = (i / COLS) | 0, c = i - r * COLS; if (r + 1 >= FLOOR_ROW) continue;
-    const below = i + COLS;
+    const c = (i / ROWS) | 0, r = i - c * ROWS; if (r + 1 >= FLOOR_ROW) continue;
+    const below = i + 1;
     if (canDisplace(below)) { swapMove(i, below); continue; }
     // DIAGONAL SLIDE — the grain must be able to pass THROUGH the side cell, not just land in the target. Checking only
     // the destination let a grain squeeze between two solids that touch only at their corners: it tunnelled through a
     // sealed diagonal crack, and in a pool it slipped past the ice it had just made and froze a diagonal trail behind it.
-    for (const dc of (((i + tick) & 1) ? [-1, 1] : [1, -1])) {
+    for (const dc of (((c + tick) & 1) ? [-1, 1] : [1, -1])) {   // parity per COLUMN — see increment 5's note in the fine tick
       const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
-      if (!canDisplace(i + dc)) continue;                     // side blocked → no corner-cutting
-      const j = below + dc; if (canDisplace(j)) { swapMove(i, j); break; }
+      if (!canDisplace(i + dc * ROWS)) continue;               // side blocked → no corner-cutting
+      const j = below + dc * ROWS; if (canDisplace(j)) { swapMove(i, j); break; }
     }
     // couldn't fall or slide → rests (not re-added to active)
   }
@@ -2796,7 +2818,7 @@ function soilTickRoom(room) {
   const st = cellsOf(room), ss = st.soilActive; if (!ss || !ss.size) { if (ss) dropSoilSet(room); return; }
   const grid = st.terrain, hp = st.terrainHp;
   if (!grid) { dropSoilSet(room); return; }
-  const sat = ensureSat(room), mats = roomMats[room] || {}, COLS = st.cols, nn = grid.length, T = LIQ_T;
+  const sat = ensureSat(room), mats = roomMats[room] || {}, COLS = st.cols, ROWS = st.rows, nn = grid.length, T = LIQ_T;
   const SAT_MAX = capFrac(SAT_MAX_F), SAT_ABSORB = capFrac(SAT_ABSORB_F);   // fractions of a cell → they track cellCap
   // ── SAME SATURATION LOGIC, FINE DATA SOURCE. In fine mode liquid lives in the roomFine* arrays and the terrain grid
   // holds solids only, so every `grid[j] === 9` water test and every coarse amt/tot read below found nothing and the
@@ -2808,9 +2830,9 @@ function soilTickRoom(room) {
   const addFx = (i, code) => { if (fx.length < 2048) fx.push(i, code); };   // same explicit FX wire as the reaction pass
   const isWater = (j) => lam.rp(j)[lam.o(j) + 4] > 0;   // water = rank 4
   const isLava = (j) => lam.rp(j)[lam.o(j)] > 0;
-  const adj = (i, id) => { const c = i % COLS; if (i - COLS >= 0 && grid.g(i - COLS) === id) return true; if (i + COLS < nn && grid.g(i + COLS) === id) return true; if (c > 0 && grid.g(i - 1) === id) return true; if (c < COLS - 1 && grid.g(i + 1) === id) return true; return false; };
-  const adjFn = (i, fn) => { const c = i % COLS; for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) { if (j < 0 || j >= nn) continue; if (fn(j)) return true; } return false; };
-  const adjWater = (i) => { const c = i % COLS; for (const j of [i - COLS, i + COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1]) { if (j < 0 || j >= nn) continue; if (isWater(j)) return j; } return -1; };
+  const adj = (i, id) => { const r = i % ROWS; if (r > 0 && grid.g(i - 1) === id) return true; if (r < ROWS - 1 && grid.g(i + 1) === id) return true; if (i - ROWS >= 0 && grid.g(i - ROWS) === id) return true; if (i + ROWS < nn && grid.g(i + ROWS) === id) return true; return false; };
+  const adjFn = (i, fn) => { const r = i % ROWS; for (const j of [r > 0 ? i - 1 : -1, r < ROWS - 1 ? i + 1 : -1, i - ROWS, i + ROWS]) { if (j < 0 || j >= nn) continue; if (fn(j)) return true; } return false; };
+  const adjWater = (i) => { const r = i % ROWS; for (const j of [r > 0 ? i - 1 : -1, r < ROWS - 1 ? i + 1 : -1, i - ROWS, i + ROWS]) { if (j < 0 || j >= nn) continue; if (isWater(j)) return j; } return -1; };
   const wakeLiq = (j) => { if (j < 0 || j >= nn || ltot.g(j) <= 0) return; fineSet(room).add(j); };
   for (const i of Array.from(ss)) {
     const v = grid.g(i);
@@ -2824,7 +2846,7 @@ function soilTickRoom(room) {
         if (take > 0) {
           sat.s(i, sat.g(i) + take); wp[wb + 4] -= take; ltot.s(wj, ltot.g(wj) - take);
           fineChanged.add(wj); fineSet(room).add(wj); if (fineSyncGrid(room, wj)) terrChanged.add(wj);
-          const wc = wj % COLS; wakeLiq(wj - COLS); wakeLiq(wj + COLS); if (wc > 0) wakeLiq(wj - 1); if (wc < COLS - 1) wakeLiq(wj + 1);   // re-level: the column above falls into the drained space (no hovering slivers)
+          const wr = wj % ROWS; wakeLiq(wj - ROWS); wakeLiq(wj + ROWS); if (wr > 0) wakeLiq(wj - 1); if (wr < ROWS - 1) wakeLiq(wj + 1);   // re-level: the column above falls into the drained space (no hovering slivers)
         }
       }
     }
@@ -2833,10 +2855,10 @@ function soilTickRoom(room) {
       else if (sat.g(i) === 0 && !adjFn(i, isWater)) ss.delete(i);
     } else if (v === 3) {                                // SAND → QUICKSAND, but only inside a wet CLUMP
       if (sat.g(i) >= SAT_MAX) {
-        const r = (i / COLS) | 0, c = i - r * COLS; let clump = 0;
+        const c = (i / ROWS) | 0, r = i - c * ROWS; let clump = 0;
         for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
-          if (!dr && !dc) continue; const rr = r + dr, cc = c + dc; if (rr < 0 || cc < 0 || cc >= COLS) continue;
-          const j = rr * COLS + cc; if (j < 0 || j >= nn) continue; const g = grid.g(j);
+          if (!dr && !dc) continue; const rr = r + dr, cc = c + dc; if (rr < 0 || rr >= ROWS || cc < 0 || cc >= COLS) continue;
+          const j = cc * ROWS + rr; if (j < 0 || j >= nn) continue; const g = grid.g(j);
           if (g === 10 || (g === 3 && sat.g(j) >= SAT_MAX)) clump++;
         }
         if (clump >= SAT_CLUMP_MIN) {                    // sand becomes the QUICKSAND liquid: in fine mode that means a full fine cell, and the terrain cell empties
@@ -2870,11 +2892,11 @@ function fineLiquidTickRoom(room, SUB) {
   if (!grid || !amt || !tot || !active || !active.size) { if (active && !active.size) dropFineActive(room); return; }
   const lvlAcc = st.fineLevelAcc;
   const tick = liquidTickCount, cap = LIQUID_MAX, T = LIQ_T;
-  const COLS = st.cols * SUB, FROWS = st.rows * SUB, NCELL = COLS * FROWS;   // Phase 6: this room's shape
+  const COLS = st.cols * SUB, FROWS = st.rows * SUB, NCELL = COLS * FROWS;   // Phase 6: this room's shape (FROWS = the STRIDE — increment 5)
   const LIQUID_FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL) * SUB;   // liquid may not descend into/below the bedrock row (scaled to fine rows)
   const SCAN = LIQUID_LEVEL_SCAN * SUB;                                  // levelling scan reach in CELLS → scaled so PHYSICAL reach is unchanged
-  const TCOLS = st.cols;
-  const coarseOf = (k) => { const fr = (k / COLS) | 0, fc = k - fr * COLS; return ((fr / SUB) | 0) * TCOLS + ((fc / SUB) | 0); };
+  const TROWS = st.rows;
+  const coarseOf = (k) => { const fc = (k / FROWS) | 0, fr = k - fc * FROWS; return ((fc / SUB) | 0) * TROWS + ((fr / SUB) | 0); };
   const isSolid = (k) => { if (k < 0 || k >= NCELL) return true; const v = grid.g(coarseOf(k)); return v !== 0 && !isFluidId(v); };   // fine solid = the coarse terrain cell it sits in
   const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; return isSinkId(grid.g(coarseOf(k))); };   // a fine cell whose coarse cell is a DRAIN block
   const sinkRate = Math.max(0, Math.min(cap, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
@@ -2883,8 +2905,8 @@ function fineLiquidTickRoom(room, SUB) {
   const quiesce = liquidCfg.fineQuiesce ? ((st.fineStill && st.fineStill.length === NCELL) ? st.fineStill : (st.fineStill = newPagedField('fineStill', chunkGeom(COLS, FROWS), room))) : null;
   let stepMoves = 0;   // cell-changes in the current sub-step (adaptive-K activity proxy)
   const wake = (j) => { if (j >= 0 && j < NCELL && !isSolid(j) && tot.g(j) > 0) active.add(j); };
-  const wakeN = (j) => { const x = j % COLS; wake(j - COLS); wake(j + COLS); if (x > 0) wake(j - 1); if (x < COLS - 1) wake(j + 1); };
-  const wakeD = (j) => { wakeN(j); const x = j % COLS; if (x > 0) { wake(j - COLS - 1); wake(j + COLS - 1); } if (x < COLS - 1) { wake(j - COLS + 1); wake(j + COLS + 1); } };
+  const wakeN = (j) => { const y = j % FROWS; wake(j - FROWS); wake(j + FROWS); if (y > 0) wake(j - 1); if (y < FROWS - 1) wake(j + 1); };
+  const wakeD = (j) => { wakeN(j); const y = j % FROWS; if (y > 0) { wake(j - FROWS - 1); wake(j + FROWS - 1); } if (y < FROWS - 1) { wake(j - FROWS + 1); wake(j + FROWS + 1); } };
   const mark = (j) => { changedSet.add(j); active.add(j); stepMoves++; };
   // ⚠️ PAGED ACCESS: the page + offset base are hoisted ONCE per cell and the rank loop then indexes the page flat,
   // so a rank loop costs what it always did plus one table lookup. `rp` reads through an unallocated page as zeros;
@@ -2921,7 +2943,7 @@ function fineLiquidTickRoom(room, SUB) {
     if (!liquidCfg.densitySort) return false;
     if (r + 1 >= LIQUID_FLOOR_ROW) return false;                                      // canDown
     const hi = floorRank(i); if (hi < 0) return false;
-    for (const j of [i + COLS, c > 0 ? i + COLS - 1 : -1, c < COLS - 1 ? i + COLS + 1 : -1]) {
+    for (const j of [i + 1, c > 0 ? i + 1 - FROWS : -1, c < COLS - 1 ? i + 1 + FROWS : -1]) {
       if (j < 0 || j >= NCELL || tot.g(j) <= 0 || isSolid(j)) continue;
       if (lavaBlk(i, j)) continue;
       if (hi < ceilRank(j)) return true;     // the sim's own swap rule: floorRank(above) < ceilRank(below)
@@ -2965,7 +2987,7 @@ function fineLiquidTickRoom(room, SUB) {
     const doPerLiq = step < PLSTEPS;    // (2c) per-liquid levelling — capped separately: this IS its sideways spread speed in cells/tick
     stepMoves = 0;
     const list = Array.from(active); active.clear();
-    list.sort((a, b) => { const ra = (a / COLS) | 0, rb = (b / COLS) | 0; if (ra !== rb) return rb - ra; const la = tot.g(a), lb = tot.g(b); if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
+    list.sort((a, b) => { const ra = a % FROWS, rb = b % FROWS; if (ra !== rb) return rb - ra; const la = tot.g(a), lb = tot.g(b); if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
     const fell = new Set(), fellDown = new Set();
     // ⭐⭐ ONE CELL PER PASS (fineSortOnePerPass). `list` is sorted BOTTOM-UP, which is right for falling — a column
     // cascades in a single pass — but for the density sort it means each successively HIGHER cell pulls the same light
@@ -2985,7 +3007,7 @@ function fineLiquidTickRoom(room, SUB) {
       if (v !== undefined) return v;
       v = false;
       for (let r2 = 0; r2 + 1 < FROWS; r2++) {
-        const a2 = r2 * COLS + cc, b2 = a2 + COLS;
+        const a2 = cc * FROWS + r2, b2 = a2 + 1;
         if (tot.g(a2) <= 0 || tot.g(b2) <= 0 || isSolid(a2) || isSolid(b2)) continue;
         const f = floorRank(a2); if (f >= 0 && f < ceilRank(b2)) { v = true; break; }
       }
@@ -2995,11 +3017,11 @@ function fineLiquidTickRoom(room, SUB) {
   for (const i of list) {
     if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); continue; }
     if (isSolid(i)) continue;
-    const r = (i / COLS) | 0, c = i - r * COLS, canDown = r + 1 < LIQUID_FLOOR_ROW;
+    const c = (i / FROWS) | 0, r = i - c * FROWS, canDown = r + 1 < LIQUID_FLOOR_ROW;
     let L = tot.g(i); if (L <= 0) continue;
     processed++;
     // ---- SINK (drain block id 17): a fine cell touching a coarse drain block loses liquid, heaviest first (ledgered).
-    if (sinkRate > 0 && (isSinkF(i + COLS) || isSinkF(i - COLS) || (c > 0 && isSinkF(i - 1)) || (c < COLS - 1 && isSinkF(i + 1)))) {
+    if (sinkRate > 0 && ((r < FROWS - 1 && isSinkF(i + 1)) || (r > 0 && isSinkF(i - 1)) || (c > 0 && isSinkF(i - FROWS)) || (c < COLS - 1 && isSinkF(i + FROWS)))) {
       let need = sinkRate < L ? sinkRate : L; const sp = amt.wp(i), sb = amt.o(i);
       for (let rk = 0; rk < T && need > 0; rk++) { const a = sp[sb + rk]; if (a <= 0) continue; const mv = a < need ? a : need; sp[sb + rk] = a - mv; sinkLed[rk] += mv; need -= mv; }
       recomp(i); mark(i); wakeN(i); L = tot.g(i); if (L <= 0) continue;
@@ -3011,17 +3033,22 @@ function fineLiquidTickRoom(room, SUB) {
     // is merely BLOCKED (stream tag, lavaBlk) must not freeze levelling, or that cell would never settle at all.
     let sortedHere = false;
     // (2) density sort with the cell BELOW
-    if (doSort && liquidCfg.densitySort && canDown && tot.g(i + COLS) > 0 && !isSolid(i + COLS) && !lavaBlk(i, i + COLS)
-        && !(liquidCfg.fineSortOnePerPass && sortedTo.has(i + COLS))) {
-      const j = i + COLS, hi = floorRank(i), lo = ceilRank(j);
+    if (doSort && liquidCfg.densitySort && canDown && tot.g(i + 1) > 0 && !isSolid(i + 1) && !lavaBlk(i, i + 1)
+        && !(liquidCfg.fineSortOnePerPass && sortedTo.has(i + 1))) {
+      const j = i + 1, hi = floorRank(i), lo = ceilRank(j);
       if (hi >= 0 && lo >= 0 && hi < lo) { const pi = amt.wp(i), bi = amt.o(i), pj = amt.wp(j), bj = amt.o(j); const k = Math.min(pi[bi + hi], pj[bj + lo], liquidCfg.sortRate); pi[bi + hi] -= k; pj[bj + hi] += k; pj[bj + lo] -= k; pi[bi + lo] += k; mark(i); mark(j); wakeD(i); wakeD(j); if (k > 0) { sortedHere = true; sortedTo.add(i); } }
     }
     // (2b) diagonal density sort — see fineSortDiagGate/fineSortDiagSteps. `sortedHere` is set by (2) directly above,
     // so gating on it means "the straight-up swap already handled this cell, don't ALSO shove it sideways".
     if (doSort && doSortDiag && liquidCfg.densitySort && canDown && !(liquidCfg.fineSortDiagGate && sortedHere))
-      for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) {
+      // ⚠️ PARITY IS PER COLUMN, NOT PER INDEX (increment 5). This alternates which side is tried first so
+      // lateral flow does not bias one way; it used to read the flat index, which under row-major addressing
+      // WAS the column parity (an even column count). Column-major, the same expression would alternate by
+      // ROW — every cell in a row trying the same side — which is a real behaviour change and is what the
+      // old-vs-new comparison in probe_addressing caught. Stated explicitly now.
+      for (const dc of (((tick + c) & 1) ? [-1, 1] : [1, -1])) {
       const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
-      const j = i + COLS + dc; if (isSolid(j) || tot.g(j) === 0) continue;
+      const j = i + 1 + dc * FROWS; if (isSolid(j) || tot.g(j) === 0) continue;
       if (lavaBlk(i, j)) continue;
       if (liquidCfg.fineSortOnePerPass && sortedTo.has(j)) continue;
       const hi = floorRank(i), lo = ceilRank(j);
@@ -3041,7 +3068,7 @@ function fineLiquidTickRoom(room, SUB) {
     if (!doSort && wouldSort(i, r, c)) active.add(i);
     // (1a) straight down. Gated on doFall so the fall rate can be held constant regardless of the levelling sub-step
     // count (fineConstFall).
-    if (doFall && canDown) { const j = i + COLS; const room2 = cap - tot.g(j); if (!isSolid(j) && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
+    if (doFall && canDown) { const j = i + 1; const room2 = cap - tot.g(j); if (!isSolid(j) && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
     // density throttle (viscosity off by default → lf=1 → reduce is a pass-through)
     const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;
     let pend = false;
@@ -3064,9 +3091,9 @@ function fineLiquidTickRoom(room, SUB) {
     // none of its cells may spread sideways yet.
     const sortingHere = liquidCfg.sortBeforeLevel && (sortedHere || (liquidCfg.densitySort && colStillSorting(c)));
     const roomAt = (j) => !isSolid(j) && tot.g(j) < cap;
-    const canFall = canDown && (roomAt(i + COLS) || fell.has(i + COLS) || (c > 0 && roomAt(i + COLS - 1)) || (c < COLS - 1 && roomAt(i + COLS + 1)));
+    const canFall = canDown && (roomAt(i + 1) || fell.has(i + 1) || (c > 0 && roomAt(i + 1 - FROWS)) || (c < COLS - 1 && roomAt(i + 1 + FROWS)));
     if (canFall) fell.add(i);
-    const airborne = canDown && (roomAt(i + COLS) || fellDown.has(i + COLS));
+    const airborne = canDown && (roomAt(i + 1) || fellDown.has(i + 1));
     // A cell that still has room to fall must NEVER leave the active set. With fineConstFall on, the descent runs in
     // sub-step 0 only; sub-steps 1..K-1 then process an airborne cell that can neither fall (doFall off) nor level
     // (gated off for a stream), so nothing mark()s it, `active` drains to empty and the room is dropped — a lone parcel
@@ -3074,14 +3101,14 @@ function fineLiquidTickRoom(room, SUB) {
     // re-wakes it every tick. Self-limiting: once it lands, roomAt(below) is false ⇒ not airborne ⇒ it settles normally.
     // ...but only while a fall is genuinely still possible. fineMinUnit quantises the descent, so a sub-unit remainder
     // can never move; keeping THAT active spins forever (it never settles, which the mitigations probe caught).
-    const belowRoom = (canDown && !isSolid(i + COLS)) ? cap - tot.g(i + COLS) : 0;
+    const belowRoom = (canDown && !isSolid(i + 1)) ? cap - tot.g(i + 1) : 0;
     const keepFalling = belowRoom > 0 && L > 0 && (MINU <= 1 || (L < belowRoom ? L : belowRoom) >= MINU);
     if (airborne) { fellDown.add(i); airborneWire.add(i); if (keepFalling) active.add(i); }
     // LEVELLING GATE (see liquidCfg.levelGate): 0 = canFall (counts diagonal room too) · 1 = own straight-down room ·
     // 2 = AIRBORNE, i.e. straight-down room propagated up the column. Every mode used to carry an `sd[i] !== 0 ||`
     // term as well, and there was a fourth "tagged-only" mode; both went with the fall tag.
     const isStream = liquidCfg.levelGate === 0 ? canFall
-                   : liquidCfg.levelGate === 1 ? (canDown && roomAt(i + COLS))
+                   : liquidCfg.levelGate === 1 ? (canDown && roomAt(i + 1))
                    : airborne;
     const shedCap = L;
     if (doLevel && !isStream && !sortingHere) {
@@ -3094,9 +3121,9 @@ function fineLiquidTickRoom(room, SUB) {
         if (amt.rp(i)[amt.o(i) + t] <= 0) continue;
         const Ci = cumAt(i, t);
         let dir = 0, best = Infinity;
-        for (const sdir of [-1, 1]) for (let d = 1; d <= PLSCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } }
+        for (const sdir of [-1, 1]) for (let d = 1; d <= PLSCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d * FROWS; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } }
         if (dir === 0) continue;
-        const j = i + dir; if (isSolid(j) || lavaBlk(i, j)) continue;
+        const j = i + dir * FROWS; if (isSolid(j) || lavaBlk(i, j)) continue;
         // ⭐⭐ SYMMETRIC SORT GATE. `sortingHere` stops a cell that is still stratifying from levelling — but it only
         // gates the cell being PROCESSED. 2c is an EXCHANGE, so a settled neighbour was free to reach in and pull the
         // parcel apart from the other side: measured, a 3-column blob of oil buried in a still pool was filmed across
@@ -3128,7 +3155,7 @@ function fineLiquidTickRoom(room, SUB) {
       // (1c) lateral equalise (symmetric)
       if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 1) {
         if (liquidCfg.symLevel) {
-          const jL = c > 0 ? i - 1 : -1, jR = c < COLS - 1 ? i + 1 : -1;
+          const jL = c > 0 ? i - FROWS : -1, jR = c < COLS - 1 ? i + FROWS : -1;
           const okL = jL >= 0 && !isSolid(jL) && L - tot.g(jL) > 1 && !lavaBlk(i, jL);
           const okR = jR >= 0 && !isSolid(jR) && L - tot.g(jR) > 1 && !lavaBlk(i, jR);
           let sum = L, cnt = 1; if (okL) { sum += tot.g(jL); cnt++; } if (okR) { sum += tot.g(jR); cnt++; }
@@ -3145,15 +3172,15 @@ function fineLiquidTickRoom(room, SUB) {
               if (mvR > 0) { lvlMove(i, jR, mvR); L -= mvR; wakeN(i); }
             }
           }
-        } else for (const dc of (((tick + i) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc; if (isSolid(j) || lavaBlk(i, j)) continue; const nl = tot.g(j), room2 = cap - nl; if (L - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((L - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); L -= mv; wakeN(i); } } }
+        } else for (const dc of (((tick + c) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc * FROWS; if (isSolid(j) || lavaBlk(i, j)) continue; const nl = tot.g(j), room2 = cap - nl; if (L - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((L - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); L -= mv; wakeN(i); } } }
       }
       // (1d) surface flat-settle — capped to FLATSTEPS of the K sub-steps (see the budget above). Uncapped it runs
       // every sub-step, and because an EMPTY neighbour always counts as "lower", the leading edge of a puddle sheds
       // onward every time: the front advanced ~9 cells/tick and raced away from the body that was still separating.
       if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0 && step < FLATSTEPS) {
         let dir = 0, best = Infinity;
-        for (const sdir of [-1, 1]) for (let d = 1; d <= SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d; if (isSolid(j)) break; const jl = tot.g(j); if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
-        if (dir !== 0 && shedCap >= 1) { const j = i + dir; if (tot.g(j) < L && tot.g(j) < cap && !lavaBlk(i, j) && reduce(1) > 0) { lvlMove(i, j, 1); L -= 1; wakeN(i); } }
+        for (const sdir of [-1, 1]) for (let d = 1; d <= SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d * FROWS; if (isSolid(j)) break; const jl = tot.g(j); if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
+        if (dir !== 0 && shedCap >= 1) { const j = i + dir * FROWS; if (tot.g(j) < L && tot.g(j) < cap && !lavaBlk(i, j) && reduce(1) > 0) { lvlMove(i, j, 1); L -= 1; wakeN(i); } }
       }
     }
     if (pend) active.add(i);
@@ -3164,7 +3191,7 @@ function fineLiquidTickRoom(room, SUB) {
   // bounded rate BETWEEN ADJACENT cells only. Faster on wide pools; shelved for its sliding-slab look + it levels streams
   // it absorbs. Behind the same toggle so it can be A/B'd on the fine grid. No secondary lane here (fine has none).
   if (liquidCfg.fluxLevel) {
-    const ROWS = st.rows * SUB, NCELL2 = COLS * ROWS, RATE = liquidCfg.fluxRate | 0;
+    const ROWS = FROWS, NCELL2 = COLS * ROWS, RATE = liquidCfg.fluxRate | 0;
     const lvlMove = liquidCfg.levelMix ? moveProp : moveTop;
     const seen = ensureFineFluxSeen(room, NCELL2); seen.fill(0);
     const stack = ensureFineFluxStack(room, NCELL2);
@@ -3174,31 +3201,32 @@ function fineLiquidTickRoom(room, SUB) {
       let sp = 0; stack[sp++] = start; seen.s(start, 1);
       let minC = COLS, maxC = -1;
       while (sp > 0) {
-        const j = stack[--sp], jc = j % COLS;
+        const j = stack[--sp], jc = (j / ROWS) | 0;
         if (jc < minC) minC = jc; if (jc > maxC) maxC = jc;
-        const jr = (j / COLS) | 0;
-        if (jc > 0) { const k = j - 1; if (!seen.g(k) && !isSolid(k) && tot.g(k) > 0) { seen.s(k, 1); stack[sp++] = k; } }
-        if (jc < COLS - 1) { const k = j + 1; if (!seen.g(k) && !isSolid(k) && tot.g(k) > 0) { seen.s(k, 1); stack[sp++] = k; } }
-        if (jr > 0) { const k = j - COLS; if (!seen.g(k) && !isSolid(k) && tot.g(k) > 0) { seen.s(k, 1); stack[sp++] = k; } }
-        if (jr < ROWS - 1) { const k = j + COLS; if (!seen.g(k) && !isSolid(k) && tot.g(k) > 0) { seen.s(k, 1); stack[sp++] = k; } }
+        const jr = j - jc * ROWS;
+        if (jc > 0) { const k = j - ROWS; if (!seen.g(k) && !isSolid(k) && tot.g(k) > 0) { seen.s(k, 1); stack[sp++] = k; } }
+        if (jc < COLS - 1) { const k = j + ROWS; if (!seen.g(k) && !isSolid(k) && tot.g(k) > 0) { seen.s(k, 1); stack[sp++] = k; } }
+        if (jr > 0) { const k = j - 1; if (!seen.g(k) && !isSolid(k) && tot.g(k) > 0) { seen.s(k, 1); stack[sp++] = k; } }
+        if (jr < ROWS - 1) { const k = j + 1; if (!seen.g(k) && !isSolid(k) && tot.g(k) > 0) { seen.s(k, 1); stack[sp++] = k; } }
       }
       if (maxC <= minC) continue;
       const cols = [], part = new Uint8Array(COLS);
       for (let c = minC; c <= maxC; c++) {
         let r = -1;
-        for (let rr = ROWS - 1; rr >= 0; rr--) { const j = rr * COLS + c; if (seen.g(j) && tot.g(j) > 0) { r = rr; break; } }
+        const cb = c * ROWS;
+        for (let rr = ROWS - 1; rr >= 0; rr--) { const j = cb + rr; if (seen.g(j) && tot.g(j) > 0) { r = rr; break; } }
         if (r < 0) continue;
-        while (r + 1 < ROWS && r + 1 < LIQUID_FLOOR_ROW && !isSolid((r + 1) * COLS + c)) r++;
+        while (r + 1 < ROWS && r + 1 < LIQUID_FLOOR_ROW && !isSolid(cb + r + 1)) r++;
         const fl = r + 1;
-        let t = fl; while (t - 1 >= 0 && !isSolid((t - 1) * COLS + c) && tot.g((t - 1) * COLS + c) >= cap) t--;
-        if (t - 1 >= 0 && !isSolid((t - 1) * COLS + c)) { const v = tot.g((t - 1) * COLS + c); if (v > 0 && v < cap) t--; }   // (used to also require an untagged cell; the fall tag is gone and was always 0 here)
+        let t = fl; while (t - 1 >= 0 && !isSolid(cb + t - 1) && tot.g(cb + t - 1) >= cap) t--;
+        if (t - 1 >= 0 && !isSolid(cb + t - 1)) { const v = tot.g(cb + t - 1); if (v > 0 && v < cap) t--; }   // (used to also require an untagged cell; the fall tag is gone and was always 0 here)
         if (t >= fl) continue;
-        let h = 0; for (let rr = t; rr < fl; rr++) h += tot.g(rr * COLS + c);
-        let cl = t; while (cl - 1 >= 0 && !isSolid((cl - 1) * COLS + c) && tot.g((cl - 1) * COLS + c) <= 0) cl--;
+        let h = 0; for (let rr = t; rr < fl; rr++) h += tot.g(cb + rr);
+        let cl = t; while (cl - 1 >= 0 && !isSolid(cb + cl - 1) && tot.g(cb + cl - 1) <= 0) cl--;
         cFloor[c] = fl; cTop[c] = cl; cH[c] = h; part[c] = 1; cols.push(c);
       }
       if (cols.length < 2) continue;
-      const barrier = (c) => part[c] && cTop[c] > 0 && isSolid((cTop[c] - 1) * COLS + c) && cH[c] >= (cFloor[c] - cTop[c]) * cap - 1;
+      const barrier = (c) => part[c] && cTop[c] > 0 && isSolid(c * ROWS + cTop[c] - 1) && cH[c] >= (cFloor[c] - cTop[c]) * cap - 1;
       const levelSegment = (a, b) => {
         let n = 0, M = 0;
         for (let c = a; c <= b; c++) if (part[c]) { n++; M += cH[c]; }
@@ -3217,11 +3245,11 @@ function fineLiquidTickRoom(room, SUB) {
           let need = Math.floor(Math.abs(want));
           let sr = cTop[src], dr = cFloor[dst] - 1;
           while (need > 0) {
-            while (sr < cFloor[src] && (isSolid(sr * COLS + src) || tot.g(sr * COLS + src) <= 0)) sr++;
+            while (sr < cFloor[src] && (isSolid(src * ROWS + sr) || tot.g(src * ROWS + sr) <= 0)) sr++;
             if (sr >= cFloor[src]) break;
-            while (dr >= cTop[dst] && (isSolid(dr * COLS + dst) || cap - tot.g(dr * COLS + dst) <= 0)) dr--;
+            while (dr >= cTop[dst] && (isSolid(dst * ROWS + dr) || cap - tot.g(dst * ROWS + dr) <= 0)) dr--;
             if (dr < cTop[dst] || dr < sr) break;
-            const A = sr * COLS + src, B = dr * COLS + dst; if (A === B || lavaBlk(A, B)) break;
+            const A = src * ROWS + sr, B = dst * ROWS + dr; if (A === B || lavaBlk(A, B)) break;
             const mv = Math.min(tot.g(A), cap - tot.g(B), need); if (mv <= 0) break;
             const did = lvlMove(A, B, mv); if (did <= 0) break;
             need -= did; wakeN(A); wakeN(B);
@@ -3277,7 +3305,7 @@ function fineLiquidTickRoom(room, SUB) {
     // freeze mid-stratification". `fineSortOnePerPass` breaks that premise: a pair whose swap was BLOCKED this pass
     // (the cell below already received liquid) never moves, so it is absent from changedSet and was frozen while still
     // inverted — 4 rest inversions, exactly the failure quiescence was designed to avoid. Ask the sort directly.
-    if (quiesce) { if (changedSet.has(j) || wouldSort(j, (j / COLS) | 0, j % COLS)) quiesce.s(j, 0); else { const qp = quiesce.wp(j), qo = quiesce.o(j); if (++qp[qo] >= QT) active.delete(j); } }
+    if (quiesce) { if (changedSet.has(j) || wouldSort(j, j % FROWS, (j / FROWS) | 0)) quiesce.s(j, 0); else { const qp = quiesce.wp(j), qo = quiesce.o(j); if (++qp[qo] >= QT) active.delete(j); } }
   }
   if (!active.size) dropFineActive(room);
 }
@@ -3295,10 +3323,10 @@ function fineReactSet(room) { const s = cellsOf(room); if (!s.fineReact) { s.fin
 // digging the wall between them), so terrain edits seed the cell + its 4 neighbours explicitly.
 function seedFineReactAround(room, i) {
   if (!liquidCfg.reactions) return;
-  const d = roomDims(room), COLS = d.cols, N = COLS * d.rows; if (i < 0 || i >= N) return;
-  const s = fineReactSet(room), c = i % COLS;
-  s.add(i); if (i - COLS >= 0) s.add(i - COLS); if (i + COLS < N) s.add(i + COLS);
-  if (c > 0) s.add(i - 1); if (c < COLS - 1) s.add(i + 1);
+  const d = roomDims(room), ROWS = d.rows, N = d.cols * ROWS; if (i < 0 || i >= N) return;
+  const s = fineReactSet(room), r = i % ROWS;
+  s.add(i); if (i - ROWS >= 0) s.add(i - ROWS); if (i + ROWS < N) s.add(i + ROWS);
+  if (r > 0) s.add(i - 1); if (r < ROWS - 1) s.add(i + 1);
 }
 // THE REACTION SET, all on 8px contact, all resolving the tick they are seen. Every non-lava liquid must have an
 // outcome here: lavaBlk stops lava entering their cells, so a pair with nothing to resolve it would hover against each
@@ -3337,7 +3365,7 @@ function fineReactTickRoom(room, SUB) {
   if (!grid || !hp || !amt || !tot) return;
   const active = st.fineActive, seeded = st.fineReact, burning = st.fineFire;
   if ((!active || !active.size) && (!seeded || !seeded.size) && (!burning || !burning.size)) { if (seeded) dropFineReact(room); return; }
-  const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, N = grid.length;
+  const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, ROWS = st.rows, N = grid.length;
   const tick = liquidTickCount, FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // acid may not eat the bedrock row
   const act = fineSet(room), liqChanged = new Set(), terrCells = [], fx = [];
   // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
@@ -3345,7 +3373,7 @@ function fineReactTickRoom(room, SUB) {
   // one of those effects is unreachable. The server knows exactly which reaction fired, so it says so: [cell, code].
   const addFx = (i, code) => { if (fx.length < 4096) fx.push(i, code); };
   const wake = (j) => { if (j >= 0 && j < N && tot.g(j) > 0) { const v = grid.g(j); if (v === 0 || isFluidId(v)) act.add(j); } };
-  const wakeN = (j) => { const c = j % COLS; wake(j - COLS); wake(j + COLS); if (c > 0) wake(j - 1); if (c < COLS - 1) wake(j + 1); };
+  const wakeN = (j) => { const r = j % ROWS; wake(j - ROWS); wake(j + ROWS); if (r > 0) wake(j - 1); if (r < ROWS - 1) wake(j + 1); };
   const recomp = (j) => { const p = amt.rp(j), b = amt.o(j); let s = 0; for (let k = 0; k < T; k++) s += p[b + k]; tot.s(j, s); };
   const clearFine = (j) => { const p = amt.wp(j), b = amt.o(j); for (let k = 0; k < T; k++) p[b + k] = 0; tot.s(j, 0); act.delete(j); liqChanged.add(j); };
   // A reaction product that is SOLID: takes the cell whole (any liquid in it goes with it) and rides the terrain wire.
@@ -3357,7 +3385,7 @@ function fineReactTickRoom(room, SUB) {
     const p = amt.wp(j), jb = amt.o(j); for (let k = 0; k < T; k++) p[jb + k] = 0;
     p[jb + rk] = units; tot.s(j, units);
     liqChanged.add(j); act.add(j); wakeN(j);
-    const up = j - COLS; if (up >= 0 && isPowderId(grid.g(up))) powderSet(room).add(up);   // grains resting on the melted cell may now fall
+    const up = j - 1; if (j % ROWS > 0 && isPowderId(grid.g(up))) powderSet(room).add(up);   // grains resting on the melted cell may now fall
   };
   const spendLava = (i, cost) => { const p = amt.wp(i), b = amt.o(i); p[b] = p[b] > cost ? p[b] - cost : 0; recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i); return p[b]; };
   // ⭐ SOLID REACTANT ⇒ THE PRODUCT REPLACES IT IN PLACE, and the liquid partner just pays a cost. A solid cannot
@@ -3371,7 +3399,7 @@ function fineReactTickRoom(room, SUB) {
   const combine = (a, bc, id, code) => {
     // tie-break: the cell that is a REAL solid. `grid[bc] !== 0` no longer means that — since the re-coupling a liquid
     // cell carries its own fluid id too, which silently flipped this to "whichever cell has anything in it".
-    const prod = (bc === a + COLS) ? bc : (a === bc + COLS ? a : (isSolidCell(grid.g(bc)) ? bc : a));
+    const prod = (bc === a + 1) ? bc : (a === bc + 1 ? a : (isSolidCell(grid.g(bc)) ? bc : a));
     const gone = prod === a ? bc : a;
     if (grid.g(gone) !== 0) { grid.s(gone, 0); hp.s(gone, 0); terrCells.push(gone, 0); wakeN(gone); }
     if (tot.g(gone) > 0) clearFine(gone);
@@ -3386,8 +3414,8 @@ function fineReactTickRoom(room, SUB) {
   const seen = new Set(), anchors = [];
   for (const ci of cand) {
     if (ci < 0 || ci >= N) continue;
-    const cc = ci % COLS;
-    for (const i of [ci, ci - COLS, ci + COLS, cc > 0 ? ci - 1 : -1, cc < COLS - 1 ? ci + 1 : -1]) {
+    const cr = ci % ROWS;
+    for (const i of [ci, ci - ROWS, ci + ROWS, cr > 0 ? ci - 1 : -1, cr < ROWS - 1 ? ci + 1 : -1]) {
       if (i < 0 || i >= N || seen.has(i)) continue;
       seen.add(i); anchors.push(i);
     }
@@ -3396,13 +3424,13 @@ function fineReactTickRoom(room, SUB) {
   // water-freezing is evaluated against the state that leaves. Measured before the split: the same lava-on-snow setup
   // gave STONE in one geometry and ICE in another, purely on which cell the pass happened to reach first.
   for (const i of anchors) {
-      const c = i % COLS;                                     // ranks: lava0 quicksand1 brine2 acid3 water4 oil5
+      const r = i % ROWS;                                     // ranks: lava0 quicksand1 brine2 acid3 water4 oil5
       // ⚠️ The page is re-fetched per use rather than hoisted: every cell reached here holds lava (the guard below),
       // so its page is real — but setSolid/setLiquid/spendLava run in between and it must stay obvious that these
       // read live state, not a snapshot.
       if (amt.rp(i)[amt.o(i)] <= 0) continue;
       const lavaAt = () => amt.rp(i)[amt.o(i)];
-      const NB = [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];   // BELOW first: lava resting on a pool crusts INTO it, not one cell above
+      const NB = [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS];   // BELOW first: lava resting on a pool crusts INTO it, not one cell above
       // ── (A) SOLID terrain the lava is touching. Each conversion costs lava, so a pool eats a bounded distance in.
       for (const j of NB) {
         if (lavaAt() <= 0 || j < 0 || j >= N) continue;
@@ -3425,7 +3453,7 @@ function fineReactTickRoom(room, SUB) {
       if (wj < 0) for (const j of NB) { if (j < 0 || j >= N || tot.g(j) <= 0) continue; const pj2 = amt.rp(j), jb = amt.o(j);
         if (pj2[jb + 2] > 0 || pj2[jb + 3] > 0 || pj2[jb + 4] > 0) { wj = j; break; } }
       if (wj >= 0) {
-        const sj = (wj === i + COLS) ? wj : i, pj = sj === i ? wj : i;      // the stone takes the LOWER cell; tie ⇒ the lava cell
+        const sj = (wj === i + 1) ? wj : i, pj = sj === i ? wj : i;      // the stone takes the LOWER cell; tie ⇒ the lava cell
         if (sj !== pj) {
           if (pj === i) { amt.wp(i)[amt.o(i)] = 0; recomp(i); }             // the lava went into making the stone below it
           else { let q = capFrac(FREACT_QUENCH_F); const pp = amt.wp(pj), pb = amt.o(pj);     // ...or the other liquid flashes off above the crust
@@ -3453,8 +3481,8 @@ function fineReactTickRoom(room, SUB) {
     recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
     addFx(i, 7);                                                            // flame, every pass it is alight — not a one-shot
     if (p[b + 5] <= 0) fire.delete(i);
-    const c = i % COLS;
-    for (const j of [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1])
+    const r = i % ROWS;
+    for (const j of [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS])
       if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 5] > 0) fire.add(j);      // the flame front
   }
   if (fire && !fire.size) dropFineFire(room);
@@ -3465,7 +3493,7 @@ function fineReactTickRoom(room, SUB) {
   for (const i of anchors) {
     const pa = amt.rp(i), b = amt.o(i), acid = pa[b + 3];
     if (acid <= 0 || pa[b] > 0) continue;                   // (lava contact already turned this cell to stone in phase 1)
-    const c = i % COLS, NB = [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
+    const r = i % ROWS, NB = [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS];
     const dil = ensureDilute(room);
     let waterSrc = pa[b + 4] > 0 ? i : -1;
     if (waterSrc < 0) for (const j of NB) { if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 4] > 0) { waterSrc = j; break; } }
@@ -3482,7 +3510,7 @@ function fineReactTickRoom(room, SUB) {
       const rs = fineReactSet(room); rs.add(i); if (waterSrc >= 0) rs.add(waterSrc);
     } else {                                                // nothing to neutralise with → eat an adjacent solid
       let solidJ = -1;
-      for (const j of NB) { if (j < 0 || j >= N) continue; if ((j / COLS | 0) >= FLOOR_ROW) continue;
+      for (const j of NB) { if (j < 0 || j >= N) continue; if ((j % ROWS) >= FLOOR_ROW) continue;
         const g = grid.g(j); if (g !== 0 && !isFluidId(g) && hp.g(j) > 0 && g !== 16) { solidJ = j; break; } }   // never bedrock, never glass (acid-immune)
       if (solidJ >= 0) {
         fineReactSet(room).add(i);                          // gradual: keep the contact alive between bites
@@ -3502,7 +3530,7 @@ function fineReactTickRoom(room, SUB) {
   for (const i of anchors) {
     const pa = amt.rp(i), b = amt.o(i);
     if (pa[b] > 0 || pa[b + 4] <= 0) continue;
-    const c = i % COLS, NB = [i + COLS, i - COLS, c > 0 ? i - 1 : -1, c < COLS - 1 ? i + 1 : -1];
+    const r = i % ROWS, NB = [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS];
     let snowJ = -1, ss = null;
     for (const j of NB) {
       if (j < 0 || j >= N) continue;
@@ -3784,7 +3812,7 @@ function chunkResidencySweep() {
     const mark = (x0, y0, x1, y1) => {
       for (let gy = Math.max(0, y0); gy <= Math.min(geom.cy - 1, y1); gy++)
         for (let gx = Math.max(0, x0); gx <= Math.min(geom.cx - 1, x1); gx++) {
-          const p = gy * geom.cx + gx; ch.at(p).lastNear = now;
+          const p = gx * geom.cy + gy; ch.at(p).lastNear = now;
           rehydrateChunk(room, p);           // no-op unless this chunk was put away (it checks its own blob)
         }
     };
@@ -3864,14 +3892,14 @@ function sendChunkContent(sock, room, chunks) {
   // the beacon path, never the liquid tick. Checked, not assumed.
   for (const p of chunks) {
     restoreChunk(room, p);     // a chunk we are about to READ OUT must not be in a blob NOR dropped-as-pristine
-    if (_genRooms.size) s.terrain.g(((((p / geom.cx) | 0) * CHUNK_SIDE) * geom.cols) + (p % geom.cx) * CHUNK_SIDE);
+    if (_genRooms.size) s.terrain.g(((((p / geom.cy) | 0) * CHUNK_SIDE) * geom.rows) + (p % geom.cy) * CHUNK_SIDE);
   }
   drainGenLiquid();
   for (const p of chunks) {
-    const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
+    const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
     for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
       for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
-        const i = (r0 + lr) * geom.cols + c0 + lc;
+        const i = (c0 + lc) * geom.rows + r0 + lr;
         tc.push(i, s.terrain.g(i));
         if (s.fineTotal && s.fineTotal.g(i) > 0) fine.push(i);
       }
@@ -3917,7 +3945,7 @@ function updateSubs(room, sid, v) {
   const want = new Set();
   const add = (x0, y0, x1, y1) => {
     for (let gy = Math.max(0, y0); gy <= Math.min(geom.cy - 1, y1); gy++)
-      for (let gx = Math.max(0, x0); gx <= Math.min(geom.cx - 1, x1); gx++) want.add(gy * geom.cx + gx);
+      for (let gx = Math.max(0, x0); gx <= Math.min(geom.cx - 1, x1); gx++) want.add(gx * geom.cy + gy);
   };
   add(v.cx0 - M, v.cy0 - M, v.cx1 + M, v.cy1 + M);
   if (v.ax >= 0) add(v.ax - M, v.ay - M, v.ax + M, v.ay + M);   // the body too, in case the camera lags it
@@ -4331,14 +4359,14 @@ function cfgWire() {
 // harness never sees them. Volume mapping: a coarse cell holds up to LIQUID_MAX units; a full coarse cell = SUB² full fine
 // cells, so upscale multiplies units by SUB² and downscale divides by SUB².
 function fineSetBlock(room, SUB, cc, cr, coarseAmt) {   // distribute a coarse rank-stack into the SUB×SUB fine block (heaviest at the floor, bottom-up); returns the filled fine indices
-  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, FCOLS = st.cols * SUB, act = fineSet(room);
+  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, FROWS = st.rows * SUB, act = fineSet(room);
   const per = new Array(LIQ_T); let totalUnits = 0;
   for (let rk = 0; rk < LIQ_T; rk++) { per[rk] = coarseAmt[rk] * SUB * SUB; totalUnits += per[rk]; }
   const fx0 = cc * SUB, fy0 = cr * SUB, filled = [];
-  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), p = amt.wp(i), b = amt.o(i); for (let k = 0; k < LIQ_T; k++) p[b + k] = 0; tot.s(i, 0); }
+  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fx0 + dx) * FROWS + (fy0 + dy), p = amt.wp(i), b = amt.o(i); for (let k = 0; k < LIQ_T; k++) p[b + k] = 0; tot.s(i, 0); }
   let rk = 0;
   for (let dy = SUB - 1; dy >= 0 && totalUnits > 0; dy--) for (let dx = 0; dx < SUB && totalUnits > 0; dx++) {
-    const i = (fy0 + dy) * FCOLS + (fx0 + dx), p = amt.wp(i), b = amt.o(i); let room2 = LIQUID_MAX;
+    const i = (fx0 + dx) * FROWS + (fy0 + dy), p = amt.wp(i), b = amt.o(i); let room2 = LIQUID_MAX;
     while (room2 > 0 && totalUnits > 0) { while (rk < LIQ_T && per[rk] <= 0) rk++; if (rk >= LIQ_T) { totalUnits = 0; break; } const mv = Math.min(per[rk], room2); p[b + rk] += mv; per[rk] -= mv; room2 -= mv; totalUnits -= mv; }
     tot.s(i, LIQUID_MAX - room2); if (tot.g(i) > 0) { act.add(i); filled.push(i); }
     fineSyncGrid(room, i); fineWakeAround(room, i);
@@ -4346,14 +4374,14 @@ function fineSetBlock(room, SUB, cc, cr, coarseAmt) {   // distribute a coarse r
   return filled;
 }
 function fineClearBlock(room, SUB, cc, cr) {   // clear the SUB×SUB fine block; returns the fine indices that changed
-  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, FCOLS = st.cols * SUB, act = fineSet(room);
+  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, FROWS = st.rows * SUB, act = fineSet(room);
   const fx0 = cc * SUB, fy0 = cr * SUB, changed = [];
-  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx); if (tot.g(i) > 0) { const p = amt.wp(i), b = amt.o(i); for (let k = 0; k < LIQ_T; k++) p[b + k] = 0; tot.s(i, 0); act.delete(i); changed.push(i); fineSyncGrid(room, i); fineWakeAround(room, i); } }
+  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fx0 + dx) * FROWS + (fy0 + dy); if (tot.g(i) > 0) { const p = amt.wp(i), b = amt.o(i); for (let k = 0; k < LIQ_T; k++) p[b + k] = 0; tot.s(i, 0); act.delete(i); changed.push(i); fineSyncGrid(room, i); fineWakeAround(room, i); } }
   return changed;
 }
 function fineToCoarseCell(room, SUB, cc, cr) {   // average a fine block back down to a coarse rank-stack (÷SUB²), clamped to CAP
-  const amt = cellsOf(room).fineAmt, FCOLS = cellsOf(room).cols * SUB, out = new Array(LIQ_T).fill(0), fx0 = cc * SUB, fy0 = cr * SUB;
-  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fy0 + dy) * FCOLS + (fx0 + dx), p = amt.rp(i), b = amt.o(i); for (let k = 0; k < LIQ_T; k++) out[k] += p[b + k]; }
+  const amt = cellsOf(room).fineAmt, FROWS = cellsOf(room).rows * SUB, out = new Array(LIQ_T).fill(0), fx0 = cc * SUB, fy0 = cr * SUB;
+  for (let dy = 0; dy < SUB; dy++) for (let dx = 0; dx < SUB; dx++) { const i = (fx0 + dx) * FROWS + (fy0 + dy), p = amt.rp(i), b = amt.o(i); for (let k = 0; k < LIQ_T; k++) out[k] += p[b + k]; }
   const div = SUB * SUB; let ct = 0; for (let k = 0; k < LIQ_T; k++) { out[k] = Math.round(out[k] / div); ct += out[k]; }
   let ex = ct - LIQUID_MAX; for (let k = LIQ_T - 1; k >= 0 && ex > 0; k--) { const d = Math.min(out[k], ex); out[k] -= d; ex -= d; }   // trim overflow from the lightest
   return out;
@@ -4370,18 +4398,18 @@ function buildFineInit(room) {   // join replay: every non-empty fine cell (same
 }
 function fineActivateRect(room, grid, c0, r0, c1, r1) {   // placement in fine mode: seed/clear the fine block for each painted coarse cell + broadcast
   const SUB = 1; ensureFineArrays(room, SUB);
-  const COLS = grid.geom.cols;
-  c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(COLS - 1, c1); r1 = Math.min(grid.geom.rows - 1, r1);
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows;
+  c0 = Math.max(0, c0); r0 = Math.max(0, r0); c1 = Math.min(COLS - 1, c1); r1 = Math.min(ROWS - 1, r1);
   const changed = [];
-  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) { const i = r * COLS + c;
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const i = c * ROWS + r;
     if (isFluidId(grid.g(i))) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid.g(i)]] = LIQUID_MAX; for (const x of fineSetBlock(room, SUB, c, r, ca)) changed.push(x); }
     else for (const x of fineClearBlock(room, SUB, c, r)) changed.push(x);
     seedFineReactAround(room, i);   // an edit is the only way a SETTLED pair (lava beside painted snow/water) starts reacting
   }
   // ...and the same for SATURATION. This used to sit in activateLiquidRect's coarse tail, which fine mode returns before
   // reaching — so painting water beside earth never started it absorbing. +1 margin so an edit on either side seeds.
-  for (let r = Math.max(0, r0 - 1); r <= Math.min(grid.geom.rows - 1, r1 + 1); r++)
-    for (let c = Math.max(0, c0 - 1); c <= Math.min(COLS - 1, c1 + 1); c++) seedSoilAround(room, grid, r * COLS + c);
+  for (let r = Math.max(0, r0 - 1); r <= Math.min(ROWS - 1, r1 + 1); r++)
+    for (let c = Math.max(0, c0 - 1); c <= Math.min(COLS - 1, c1 + 1); c++) seedSoilAround(room, grid, c * ROWS + r);
   emitFineCells(room, changed);
 }
 // SOURCE tick for the fine grid: each source coarse cell tops up its SUB×SUB fine block (bottom-fill) by rate·SUB² units
@@ -4390,14 +4418,14 @@ function sourceTickRoomFine(room, SUB) {
   const st = cellsOf(room), src = st.src; if (!src || !src.size) return;
   const grid = st.terrain; if (!grid) return;
   ensureFineArrays(room, SUB);
-  const amt = st.fineAmt, tot = st.fineTotal, act = fineSet(room), led = srcLedger(room), FCOLS = st.cols * SUB, cap = LIQUID_MAX, touched = new Set();
+  const amt = st.fineAmt, tot = st.fineTotal, act = fineSet(room), led = srcLedger(room), FROWS = st.rows * SUB, cap = LIQUID_MAX, touched = new Set();
   for (const [ci, s] of src) {
     if (ci < 0 || ci >= grid.length || isSinkId(grid.g(ci)) || isSolidCell(grid.g(ci))) { src.delete(ci); continue; }
     const rank = s.rank | 0, rate = Math.max(0, Math.min(cap, (s.rate === undefined ? liquidCfg.srcRate : s.rate) | 0));
     if (!rate) continue;
-    let toAdd = rate * SUB * SUB; const cc = ci % st.cols, cr = Math.floor(ci / st.cols), fx0 = cc * SUB, fy0 = cr * SUB;
+    let toAdd = rate * SUB * SUB; const cc = Math.floor(ci / st.rows), cr = ci % st.rows, fx0 = cc * SUB, fy0 = cr * SUB;
     for (let dy = SUB - 1; dy >= 0 && toAdd > 0; dy--) for (let dx = 0; dx < SUB && toAdd > 0; dx++) {
-      const i = (fy0 + dy) * FCOLS + (fx0 + dx), free = cap - tot.g(i); if (free <= 0) continue;
+      const i = (fx0 + dx) * FROWS + (fy0 + dy), free = cap - tot.g(i); if (free <= 0) continue;
       const add = free < toAdd ? free : toAdd; amt.wp(i)[amt.o(i) + rank] += add; tot.s(i, tot.g(i) + add); led[rank] += add; toAdd -= add; act.add(i); touched.add(i); fineSyncGrid(room, i);
     }
   }
@@ -4410,7 +4438,7 @@ function fineWakeRect(room, c0, r0, c1, r1) {
   const st = cellsOf(room), tot = st.fineTotal; if (!tot) return;
   const SUB = st.fineSub || 1, FCOLS = st.cols * SUB, FROWS = st.rows * SUB, act = fineSet(room);
   const fc0 = Math.max(0, c0 * SUB), fc1 = Math.min(FCOLS - 1, (c1 + 1) * SUB - 1), fr0 = Math.max(0, r0 * SUB), fr1 = Math.min(FROWS - 1, (r1 + 1) * SUB - 1);
-  for (let r = fr0; r <= fr1; r++) for (let c = fc0; c <= fc1; c++) { const i = r * FCOLS + c; if (tot.g(i) > 0) act.add(i); }
+  for (let c = fc0; c <= fc1; c++) for (let r = fr0; r <= fr1; r++) { const i = c * FROWS + r; if (tot.g(i) > 0) act.add(i); }
 }
 // Rescale every room's liquid (coarse + fine) from the current LIQUID_MAX to `newCap` so a full cell stays full when the
 // cell-capacity slider changes. Uint8-safe (clamped ≤255). Recomputes totals. Caller then sets LIQUID_MAX + re-broadcasts.
@@ -5087,8 +5115,8 @@ function generateWorld(avatarRoom, seed, band) {
   const genC1 = band ? Math.min(COLS - 1, band.c1) : COLS - 1;
   const inBand = (c) => c >= genC0 && c <= genC1;
   const rng = mulberry32(seed);
-  const set = (c, r, v) => { if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return; const i = r * COLS + c; grid.s(i, v); hp.s(i, v ? matStrengthSrv({}, v) : 0); };
-  const at = (c, r) => (c < 0 || c >= COLS || r < 0 || r >= ROWS) ? 0 : grid.g(r * COLS + c);
+  const set = (c, r, v) => { if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return; const i = c * ROWS + r; grid.s(i, v); hp.s(i, v ? matStrengthSrv({}, v) : 0); };
+  const at = (c, r) => (c < 0 || c >= COLS || r < 0 || r >= ROWS) ? 0 : grid.g(c * ROWS + r);
   const bottomRow = Math.ceil(FLOOR_TOP / TERRAIN_CELL) - 1;            // last terrain row resting on the floor
   const baseRow = Math.round(bottomRow * 0.47);                        // mean surface row ≈ mid-height (deep underground below)
   // ALL-FINE gen scale: the feature sizes below were tuned in ROWS/COLUMNS for the 24px cell. As the cell shrank to 8px
@@ -5149,7 +5177,7 @@ function generateWorld(avatarRoom, seed, band) {
     if (!inBand(c)) continue;
     const top = surf[c] + CRUST + 1;
     for (let r = top; r <= bottomRow; r++) {
-      const i = r * COLS + c; if (!grid.g(i)) continue;
+      const i = c * ROWS + r; if (!grid.g(i)) continue;
       const depth = (r - top) / Math.max(1, bottomRow - top);
       const worm = Math.abs(Math.sin((c * 0.06 + r * 0.033) / G + cp0) + Math.sin((c * 0.025 - r * 0.052) / G + cp1) + Math.sin((c + r) * 0.041 / G + cp2));
       const chamber = Math.sin((c * 0.018 + r * 0.022) / G + cp3) + Math.sin((c * 0.034 - r * 0.013) / G + cp4);   // rare small pockets
@@ -5172,11 +5200,11 @@ function generateWorld(avatarRoom, seed, band) {
     const tableRow = uB === 'molten' ? bottomRow - Math.round(10 * G) : surf[c] + CRUST + Math.round(14 * G);   // no cave pools too near the surface
     if (!wetOK) continue;
     for (let r = bottomRow; r >= tableRow;) {
-      if (grid.g(r * COLS + c) !== 0) { r--; continue; }         // solid — skip
+      if (grid.g(c * ROWS + r) !== 0) { r--; continue; }         // solid — skip
       if (at(c, r + 1) === 0 && r < bottomRow) { r--; continue; }      // open with no floor below — air, skip
       let d = 0;                                                       // fill a shallow pool up from the floor
-      while (r >= tableRow && grid.g(r * COLS + c) === 0 && d < POOL_DEPTH) { set(c, r, fluid); r--; d++; }
-      while (r >= 0 && grid.g(r * COLS + c) === 0) r--;          // skip the air gap above until the next solid
+      while (r >= tableRow && grid.g(c * ROWS + r) === 0 && d < POOL_DEPTH) { set(c, r, fluid); r--; d++; }
+      while (r >= 0 && grid.g(c * ROWS + r) === 0) r--;          // skip the air gap above until the next solid
     }
   }
   // ---- 4. Objects ('world'-owned, FIFO-exempt): surface trees/rocks + sky platforms, then underground scatter ----
@@ -5184,7 +5212,7 @@ function generateWorld(avatarRoom, seed, band) {
   const objs = roomObjects[avatarRoom];
   const OBJ_CAP = 190;
   const clearX0 = MWSim.C.WORLD_W / 2 - SPAWN_CLEAR_HALF_W - 64, clearX1 = MWSim.C.WORLD_W / 2 + SPAWN_CLEAR_HALF_W + 64;
-  const dryLand = (c) => surf[c] <= seaRow && !!grid.g(surf[c] * COLS + c);   // solid, non-flooded surface
+  const dryLand = (c) => surf[c] <= seaRow && !!grid.g(c * ROWS + surf[c]);   // solid, non-flooded surface
   const outsideSpawn = (wx) => wx < clearX0 || wx > clearX1;
   const treeFor = { plains: '🌳', forest: '🌲', desert: '🌵', snow: '🌲', swamp: '🌿', volcanic: '🪨' };
   let wn = 0;
@@ -5214,7 +5242,7 @@ function generateWorld(avatarRoom, seed, band) {
     if (wn >= OBJ_CAP) break;
     const uB = ugBiome(c);
     for (let r = surf[c] + CRUST + Math.round(6 * G); r <= bottomRow - 1; r++) {
-      const here = grid.g(r * COLS + c), below = at(c, r + 1);
+      const here = grid.g(c * ROWS + r), below = at(c, r + 1);
       if (here !== 0) continue;                                        // need an open cell…
       if (below === 0 || TERRAIN_MATS_FLUID(below)) continue;         // …resting on a SOLID floor (not fluid/air)
       const wx = (c + 0.5) * TERRAIN_CELL;
@@ -5373,12 +5401,12 @@ function seedGenChunkLiquid(room, p) {
   ensureFineArrays(room, 1);
   const amt = s.fineAmt, tot = s.fineTotal; if (!amt || !tot) return;
   const act = fineSet(room);
-  const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
+  const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
   let n = 0;
   for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
     for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
       const v = page[lr * CHUNK_SIDE + lc]; if (!isFluidId(v)) continue;
-      const i = (r0 + lr) * geom.cols + c0 + lc;
+      const i = (c0 + lc) * geom.rows + r0 + lr;
       amt.wp(i)[amt.o(i) + LIQ_RANK[v]] = LIQUID_MAX; tot.s(i, LIQUID_MAX);
       if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
       n++;
@@ -5498,9 +5526,9 @@ function worldSpawnFor(avatarRoom) {
   const x = MWSim.C.WORLD_W / 2;
   const grid = peekCells(avatarRoom).terrain;
   if (!grid) return { x, y: FLOOR_TOP };
-  const COLS = grid.geom.cols;
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows;
   const col = Math.max(0, Math.min(COLS - 1, Math.floor(x / TERRAIN_CELL)));
-  for (let r = 0; r < grid.geom.rows; r++) if (grid.g(r * COLS + col)) return { x, y: r * TERRAIN_CELL };
+  for (let r = 0; r < ROWS; r++) if (grid.g(col * ROWS + r)) return { x, y: r * TERRAIN_CELL };
   return { x, y: FLOOR_TOP };
 }
 // Keep-clear no-build box above the spawn surface — world mode only (sandbox has no protection).
@@ -5544,14 +5572,18 @@ function sanitizeMatDef(raw) {
 }
 function matSig(d) { return d.name + '|' + d.base + '|' + d.behavior + '|' + d.surface + '|' + (d.bouncy ? 1 : 0) + '|' + d.conveyor + '|' + (d.dusty ? 1 : 0) + '|' + d.liquid + '|' + d.fill + '|' + d.cap + '|' + d.capShade + '|' + (d.breakable ? 1 : 0) + '|' + (d.strength | 0) + '|' + (d.tex ? d.tex.join('') : '') + '|' + (d.img || ''); }
 function terrainRLE(grid) {                          // [value, count] runs (value = material id, 0 = empty)
-  // Emits in FLAT INDEX ORDER, exactly as it always did (the client rasterises it straight into its own flat grid).
+  // ⚠️ EMITS ROW-MAJOR — READING LEFT-TO-RIGHT, TOP-TO-BOTTOM — AND THAT IS NOW A DELIBERATE SERIALISATION ORDER
+  // RATHER THAN 'flat index order'. Increment 5 made the in-memory index COLUMN-major; this stayed row-major so every
+  // blob already in `published_worlds` keeps its meaning (no migration, no re-stride, no resample) and the client's
+  // rasteriser is unchanged. The two orders differ, so do not 'tidy' this into an index walk.
   // Paged: the page is resolved once per chunk-wide run instead of per cell, and an unallocated page contributes a
   // run of zeros without being faulted in — so a join replay never materialises the parts of the world nobody has
-  // touched, which is the whole point of Phase 3.
+  // touched, which is the whole point of Phase 3. (A page is ROW-major internally, so a row within one is still
+  // contiguous at `off + k` — which is why this walk survives the change untouched below the index itself.)
   const g = grid.geom, runs = []; let v = -1, n = 0;
   for (let r = 0; r < g.rows; r++) {
     for (let c0 = 0; c0 < g.cols;) {
-      const i = r * g.cols + c0, page = grid.pageAt(geomPage(g, i)), off = grid.o(i) / grid.T;
+      const i = c0 * g.rows + r, page = grid.pageAt(geomPage(g, i)), off = grid.o(i) / grid.T;
       const len = Math.min(CHUNK_SIDE - (off % CHUNK_SIDE), g.cols - c0);
       if (!page) { if (v === 0) n += len; else { if (n) runs.push([v, n]); v = 0; n = len; } }
       else for (let k = 0; k < len; k++) { const val = page[off + k]; if (val === v) n++; else { if (n) runs.push([v, n]); v = val; n = 1; } }
@@ -5847,13 +5879,11 @@ function hydrateRoomFromBlob(avRoom, blob) {
   // published/persistent rooms empty AND let autosave overwrite their live_state with nothing).
   const src = new Uint8Array(sc * sr); { let i = 0; for (const run of terr.runs || []) { const v = run[0] | 0, n = run[1] | 0; for (let k = 0; k < n && i < src.length; k++, i++) src[i] = v; } }
   const srcHp = new Uint8Array(sc * sr); if (Array.isArray(terr.hpRuns)) { let j = 0; for (const run of terr.hpRuns) { const val = run[0] | 0, n = run[1] | 0; for (let k = 0; k < n && j < srcHp.length; k++, j++) srcHp[j] = val; } }
+  // ⚠️ A STORED BLOB IS ROW-MAJOR (`si = row * sc + col`) and stays that way — increment 5 changed the in-memory
+  // index, not the serialisation, so every published_worlds row is still valid and needs no migration.
   const COLS = grid.geom.cols, ROWS = grid.geom.rows;                   // Phase 6: resample into THIS room's shape
-  if (sc === COLS && sr === ROWS) {
-    for (let idx = 0; idx < grid.length; idx++) { const v = src[idx]; if (v) { grid.s(idx, v); hp.s(idx, srcHp[idx] || matStrengthSrv(mats, v)); } }
-  } else {
-    for (let r = 0; r < ROWS; r++) { const rs = Math.min(sr - 1, (r * sr / ROWS) | 0);
-      for (let c = 0; c < COLS; c++) { const cs = Math.min(sc - 1, (c * sc / COLS) | 0); const si = rs * sc + cs, v = src[si]; if (v) { const di = r * COLS + c; grid.s(di, v); hp.s(di, srcHp[si] || matStrengthSrv(mats, v)); } } }
-  }
+  for (let r = 0; r < ROWS; r++) { const rs = Math.min(sr - 1, (r * sr / ROWS) | 0);
+    for (let c = 0; c < COLS; c++) { const cs = Math.min(sc - 1, (c * sc / COLS) | 0); const si = rs * sc + cs, v = src[si]; if (v) { const di = c * ROWS + r; grid.s(di, v); hp.s(di, srcHp[si] || matStrengthSrv(mats, v)); } } }
   const map = roomObjects[avRoom] || (roomObjects[avRoom] = new Map());
   let placed = 0;
   for (const src of blob.objects || []) {
@@ -6044,7 +6074,7 @@ io.on('connection', (socket) => {
     if (W * H > 90000) { socket.emit('liquid-mirror-state', { err: 'rect too large (' + W + '×' + H + ') — zoom in' }); return; }
     const cells = [], T = LIQ_T;
     for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) {
-      const i = r * FCOLS + c, p = amt.rp(i), b = amt.o(i);
+      const i = c * FROWS + r, p = amt.rp(i), b = amt.o(i);
       let mask = 0; for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) mask |= (1 << rk);
       cells.push(i, tot.g(i) > 0 ? liqRepId(amt, i) : grid.g(i), 0, mask);
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) cells.push(p[b + rk]);
@@ -6056,8 +6086,8 @@ io.on('connection', (socket) => {
     // at the geometry (10 hand-built + 1320 randomised scenes never produced one), report every gate's value for each
     // standing pair. Mirrors the conditions on step (2) in fineLiquidTickRoom verbatim — keep the two in step.
     const FROW_FLOOR = Math.floor(FLOOR_TOP / TERRAIN_CELL) * SUB;
-    const isSolidF = (k) => { if (k < 0 || k >= FCOLS * FROWS) return true; const fr = (k / FCOLS) | 0, fc = k - fr * FCOLS;
-      const v = grid.g(((fr / SUB) | 0) * st.cols + ((fc / SUB) | 0)); return v !== 0 && !isFluidId(v); };
+    const isSolidF = (k) => { if (k < 0 || k >= FCOLS * FROWS) return true; const fc = (k / FROWS) | 0, fr = k - fc * FROWS;
+      const v = grid.g(((fc / SUB) | 0) * st.rows + ((fr / SUB) | 0)); return v !== 0 && !isFluidId(v); };
     const floorRk = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) return rk; return -1; };
     const ceilRk = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = T - 1; rk >= 0; rk--) if (p[b + rk] > 0) return rk; return -1; };
     const stk = (j) => { const p = amt.rp(j), b = amt.o(j), o = []; for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) o.push(rk + ':' + p[b + rk]); return '{' + o.join(' ') + '}'; };
@@ -6065,7 +6095,7 @@ io.on('connection', (socket) => {
       if (!la && !lb) return false; return (la && tot.g(B) - lvB > 0) || (lb && tot.g(A) - lvA > 0); };
     const stuck = []; let invTotal = 0;
     for (let r = r0; r < r1; r++) for (let c = c0; c <= c1; c++) {
-      const a = r * FCOLS + c, b = a + FCOLS;
+      const a = c * FROWS + r, b = a + 1;
       if (tot.g(a) <= 0 || tot.g(b) <= 0) continue;
       const f = floorRk(a); if (f < 0 || f >= ceilRk(b)) continue;
       invTotal++;
@@ -7023,7 +7053,7 @@ io.on('connection', (socket) => {
       const i = cells[k] | 0;
       let v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
       if (v && clear) {
-        const cc = (i % grid.geom.cols + 0.5) * TERRAIN_CELL, cr = (Math.floor(i / grid.geom.cols) + 0.5) * TERRAIN_CELL;
+        const cc = (Math.floor(i / grid.geom.rows) + 0.5) * TERRAIN_CELL, cr = (i % grid.geom.rows + 0.5) * TERRAIN_CELL;
         if (aabbHitsClear(clear, cc, cr, cc, cr)) { v = 0; cells[k + 1] = 0; }
       }
       if (i >= 0 && i < grid.length) { if (grid.g(i) !== v) { grid.s(i, v); changed = true; } hp.s(i, v ? matStrengthSrv(mats, v) : 0); }
@@ -7037,10 +7067,10 @@ io.on('connection', (socket) => {
       ensureFineArrays(currentAvatarRoom, 1); const changedFine = [];
       for (let k = 0; k + 1 < cells.length; k += 2) {
         const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
-        const SCOLS = grid.geom.cols, cc = i % SCOLS, cr = Math.floor(i / SCOLS);
+        const SROWS = grid.geom.rows, cc = Math.floor(i / SROWS), cr = i % SROWS;
         if (isFluidId(grid.g(i))) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[grid.g(i)]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, 1, cc, cr, ca)) changedFine.push(x); hp.s(i, 0); }   // the painted fluid id STAYS in the grid (re-coupled)
         else for (const x of fineClearBlock(currentAvatarRoom, 1, cc, cr)) changedFine.push(x);   // a solid/empty coarse cell clears its fine block
-        if (isPowderId(grid.g(i))) powderSet(currentAvatarRoom).add(i); const up = i - SCOLS; if (up >= 0 && isPowderId(grid.g(up))) powderSet(currentAvatarRoom).add(up);
+        if (isPowderId(grid.g(i))) powderSet(currentAvatarRoom).add(i); const up = i - 1; if (cr > 0 && isPowderId(grid.g(up))) powderSet(currentAvatarRoom).add(up);
         seedFineReactAround(currentAvatarRoom, i);   // explicit cell write (undo/paste/scene) can put a solid next to settled liquid
       }
       emitFineCells(currentAvatarRoom, changedFine);
