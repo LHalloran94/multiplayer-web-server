@@ -1814,12 +1814,11 @@ function ChunkRec() {
   this.evHash = 0;
   // ⭐ PHASE 6 INCREMENT 4c. A chunk of a GENERATED world that nobody has changed does not need storing at all —
   // it can be thrown away and produced again from the seed. `gen` marks an evicted chunk as "restore me by
-  // regenerating, not from a blob"; `genRev` is the revision each content field had at the moment the generator
-  // produced it, which is how "has anyone changed this?" is answered in O(1) rather than by re-generating the
-  // chunk and comparing 8KB. It works because only `wp()` bumps a revision, and a page produced by a READ
-  // (which is how on-demand production happens) goes through `_alloc` without one.
+  // regenerating, not from a blob". "Has anyone changed this?" is answered at eviction by generating the chunk
+  // and comparing — the same pass that computes the stored diff — rather than by any bookkeeping kept along the
+  // way. ⚠️ A revision-counting version of this shipped for a few hours and was subtly wrong; see evictChunk.
   this.gen = 0;
-  this.genRev = null;     // {terrain, terrainHp} revisions at production, or null if this chunk was never produced
+  this.restoring = 0;     // 4d: decoding right now — do NOT treat the page fault it causes as a first production
 }
 const NO_CHUNK_REC = Object.freeze(new ChunkRec());   // what `peek` answers for a chunk nothing has happened to
 function RoomChunks(nPages) {
@@ -1901,6 +1900,21 @@ function encodeChunk(s, p) {
   return out;
 }
 function decodeChunk(s, p, blob) {
+  // ⭐ 4d: a DIFF is applied ON TOP of the ground the generator just rebuilt, rather than replacing it. The
+  // base is always there by the time this runs — every path into here faults the page first, and faulting a
+  // page of a generated room runs the generator (see genSeedFn). ⚠️ Only the listed cells are written; the
+  // rest of the page is deliberately left exactly as the generator made it.
+  if (blob.d) {
+    if (blob.v !== WORLDGEN.WORLDGEN_VERSION) return;    // taken against different ground — see WORLDGEN_VERSION
+    const tp = s.terrain && s.terrain.wpPage(p), hpp = s.terrainHp && s.terrainHp.wpPage(p);
+    if (tp) for (let k = 0; k < blob.d.length; k++) { tp[blob.d[k]] = blob.m[k]; if (hpp) hpp[blob.d[k]] = blob.hp[k]; }
+    if (blob.a && blob.a.length && s.fineAmt && s.fineTotal) {
+      const amt = s.fineAmt.wpPage(p), tot = s.fineTotal.wpPage(p);
+      for (let q = 0; q < blob.a.length; q += (1 + LIQ_T)) { const c = blob.a[q], b = c * LIQ_T; let sum = 0;
+        for (let k = 0; k < LIQ_T; k++) { const v = blob.a[q + 1 + k]; amt[b + k] = v; sum += v; } tot[c] = sum > 255 ? 255 : sum; }
+    }
+    return;
+  }
   for (let fi = 0; fi < 2; fi++) {
     const runs = blob.r[fi], f = ['terrain', 'terrainHp'][fi];
     if (!runs || !s[f]) continue;
@@ -1919,14 +1933,50 @@ function decodeChunk(s, p, blob) {
 // three thousand lines above where the other two were declared. Every writer is inside a function body so
 // call-time evaluation was safe either way, but `PAGE_DIMS` and `rpOn` both taught this track that a `let`
 // below its reader is a trap not worth setting.
-let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0;
-// ⭐ INCREMENT 4c, AND THE SAME SEAM `wireFanout` AND `drainGenLiquid` USE, FOR THE SAME REASON.
-// `evictChunk` lives inside the block the probe rigs slice into a `new Function`, and deciding whether a chunk
-// is droppable needs `worldCfg` and `chunkIsPristine`, both defined three thousand lines away and OUTSIDE the
-// slice. Referencing them directly made every probe_chunking scenario die with a ReferenceError — the second
-// time this increment tripped over exactly this. Declared here as "never droppable", which is also the right
-// answer for the sliced sim: those rigs build their scenes by hand and have no generator.
-let chunkDroppable = () => false;
+let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0, genChunksDeltad = 0;
+// ⭐ INCREMENT 4c/4d, ON THE SAME SEAM `wireFanout` AND `drainGenLiquid` USE, FOR THE SAME REASON.
+// `evictChunk` lives inside the block the probe rigs slice into a `new Function`, and diffing a chunk against
+// the generator needs `worldCfg` and the generator registry, both defined three thousand lines away and
+// OUTSIDE the slice. Referencing them directly made every probe_chunking scenario die with a ReferenceError.
+// Declared here as "no generator, so no diff", which is also the right answer for the sliced rigs and for
+// every hand-built or published room: those store the chunk whole, exactly as they always did.
+// Same seam again (see above): evictChunk is inside the sliced block and the generator registry is not.
+// "No generator ⇒ no diff ⇒ store the whole chunk", which is exactly right for the sliced rigs and for every
+// hand-built room.
+let chunkDelta = () => null;
+// ⭐⭐ INCREMENT 4d — STORE ONLY THE CELLS THAT DIFFER FROM WHAT THE GENERATOR WOULD PRODUCE.
+// 4c throws away a chunk nobody has changed. This is the other half: a chunk somebody HAS changed no longer
+// stores all 4,096 cells, only the ones that differ. The rest is recomputed from the seed on the way back in.
+// MEASURED (scratchpad/probe_chunk_blob.js): a whole changed chunk costs 18.5KB; the cells a player actually
+// changes cost 4 bytes each, so a short tunnel is 0.47KB — **39x smaller** — and a dug-out room is 7.9x
+// smaller. Break-even is past 4,700 changed cells of 4,096, i.e. it cannot lose; the fallback below is belt
+// and braces rather than a real case.
+// ⇒ what the server keeps becomes proportional to what players have BUILT, and to nothing else: not to world
+// size, not to how far anyone has walked, not to how many chunks exist.
+const _dScratchT = new Uint8Array(CHUNK_CELLS), _dScratchH = new Uint8Array(CHUNK_CELLS);
+function encodeChunkDelta(s, p, gen, geom) {
+  const t = s.terrain && s.terrain.pageAt(p), hp = s.terrainHp && s.terrainHp.pageAt(p);
+  if (!t) return null;
+  _dScratchT.fill(0); _dScratchH.fill(0);
+  gen.fillPage(_dScratchT, _dScratchH, p, geom, 1);
+  // One pass to count, so the arrays are allocated at exactly the right size rather than grown.
+  let n = 0;
+  for (let k = 0; k < CHUNK_CELLS; k++) if (t[k] !== _dScratchT[k] || (hp ? hp[k] : 0) !== _dScratchH[k]) n++;
+  // ⚠️ Falls back to the whole-chunk encoding if the diff is somehow bigger. It cannot be at 4 bytes a cell
+  // against an 18.5KB blob, but "the encoding that is smaller wins" is one comparison and removes the question.
+  if (n * 4 >= CHUNK_CELLS * 2) return null;
+  const idx = new Uint16Array(n), mat = new Uint8Array(n), dmg = new Uint8Array(n);
+  let w = 0;
+  for (let k = 0; k < CHUNK_CELLS; k++) {
+    const hv = hp ? hp[k] : 0;
+    if (t[k] === _dScratchT[k] && hv === _dScratchH[k]) continue;
+    idx[w] = k; mat[w] = t[k]; dmg[w] = hv; w++;
+  }
+  // The generator version travels WITH the diff. A diff only means anything alongside the ground it was taken
+  // against, so when the content redesign changes the generator, a stale diff must be detectable rather than
+  // quietly applied to different rock. See WORLDGEN_VERSION in worldgen.js.
+  return { v: WORLDGEN.WORLDGEN_VERSION, d: idx, m: mat, hp: dmg, a: null };
+}
 function evictChunk(room, p) {
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
   const ch = chunksOf(room);
@@ -1944,8 +1994,19 @@ function evictChunk(room, p) {
   // it is the wrong encoding for noisy generated ground, and the content redesign will make it noisier.
   // ⚠️ `evHash` still matters, and is still taken BEFORE the drop: an evicted chunk answers hash queries from
   // it, so the delta-persistence signature stays stable and autosave keeps skipping an unchanged world.
-  rec.gen = chunkDroppable(room, p) ? 1 : 0;
-  rec.blob = rec.gen ? null : encodeChunk(s, p);
+  // ⭐⭐ ONE GENERATE-AND-DIFF DECIDES BOTH QUESTIONS, and that replaced a revision-counting scheme that was
+  // subtly and intermittently WRONG. The old test asked "has any page revision changed since the generator
+  // produced this?", recording the revisions at production. But a chunk restored FROM a diff has its base
+  // regenerated and the diff written on top — and the recording happened during that restore, AFTER the writes
+  // that brought it back. So a chunk that had just been restored from somebody's edit looked untouched, and
+  // the next eviction threw the edit away. It failed roughly one run in four, in both directions: the hole
+  // filling back in, and untouched ground coming back as air.
+  // The replacement has no bookkeeping to get wrong: generate the chunk, compare, and "nobody changed it" is
+  // simply "the comparison found nothing". It costs one generation (~0.35ms) per evicted chunk — which the
+  // diff was going to pay anyway — on a sweep that runs every five seconds.
+  const _d = chunkDelta(room, p);
+  rec.gen = (_d && _d.pristine) ? 1 : 0;
+  rec.blob = rec.gen ? null : (_d || encodeChunk(s, p));
   if (rec.gen) genChunksDropped++;
   ch.evicted[p] = 1;
   for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
@@ -2004,7 +2065,16 @@ function rehydrateChunk(room, p) {
   const ch = chunksOf(room), rec = ch.peek(p), blob = rec.blob;
   if (!blob) return false;                   // (a blob implies a record, so `rec` here is never the shared empty)
   rec.blob = null; ch.evicted[p] = 0;
-  decodeChunk(s, p, blob);
+  // 🟥 `restoring` EXISTS BECAUSE OF A REAL BUG, and the flag ordering above is what caused it. Decoding
+  // faults the page back in, and for a generated room faulting a page RUNS THE GENERATOR — which queues that
+  // chunk's generated lakes for liquid seeding. But `evicted[p]` has already been cleared two lines up (it has
+  // to be, or `_alloc` would recurse straight back into here), so the "is this a restore rather than a birth?"
+  // test in genSeedFn saw a birth. The stored liquid would then be overwritten on the next tick by whatever
+  // the generator says should be there — resurrecting a pool somebody had drained. Not reachable through
+  // `_alloc` (the page is installed before the flag is cleared), but very reachable through `restoreChunk`,
+  // which is what `sendChunkContent` calls.
+  rec.restoring = 1;
+  try { decodeChunk(s, p, blob); } finally { rec.restoring = 0; }
   // Liquid that comes back is WOKEN, not re-seeded: it resumes flowing from exactly the state it was put away in.
   const amt = s.fineAmt, tot = s.fineTotal;
   if (blob.a && blob.a.length && amt && tot) { const act = fineSet(room), geom = worldGeom(room);
@@ -4253,7 +4323,7 @@ function cfgWire() {
     // thing actually FIRED rather than inferring it from an outcome. The panel's sync loop skips any key it has
     // no control for, so these are invisible there. Same reasoning as liqRateSkips and liqK2Throttles: this
     // track has been bitten three times by a check that measured a result instead of a mechanism.
-    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, dropped: genChunksDropped },
+    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, dropped: genChunksDropped, deltad: genChunksDeltad },
   });
 }
 
@@ -5256,41 +5326,29 @@ function genSeedFn(field, room) {
     // then lets `rehydrateChunk` decode the blob over the top — and re-seeding liquid from the regenerated
     // terrain afterwards would resurrect a lake that had since drained, clobbering the restored state.
     // `evicted[p]` is precisely the "this is a restore, not a birth" flag.
-    if (!chunksOf(room).evicted[p]) _genPending.add(room + GEN_SEP + p);
-    noteGenRev(room, p);
+    const _ch = chunksOf(room);
+    if (!_ch.evicted[p] && !_ch.peek(p).restoring) _genPending.add(room + GEN_SEP + p);
   };
 }
-// Record what "untouched" looks like for this chunk, so eviction can tell later. Whichever of the two seeders
-// runs second overwrites the first's reading, which is what we want: the pair has to be read at one moment, or
-// a write landing between them would be invisible.
-function noteGenRev(room, p) {
-  const s = roomCells.get(room); if (!s || !s.terrain) return;
-  const rec = chunksOf(room).at(p);
-  rec.genRev = { t: s.terrain.revAt(p), h: s.terrainHp ? s.terrainHp.revAt(p) : 0 };
-}
-// ⭐⭐ INCREMENT 4c — IS THIS CHUNK STILL EXACTLY WHAT THE GENERATOR WOULD PRODUCE?
-// O(1), and that is the point: the alternative is regenerating the chunk and comparing 8KB on every eviction
-// candidate, which the residency sweep would pay for tens of chunks at a time. Only `wp()` bumps a page
-// revision, and on-demand production goes through `_alloc` from a READ, which does not — so "nobody has
-// written here since it was produced" is two number comparisons.
-// ⚠️ DELIBERATELY CONSERVATIVE: a write that happened to restore the original value still bumps a revision, so
-// the chunk is treated as edited and stored. Calling a chunk somebody has built in "pristine" would DELETE
-// THEIR WORK, so this test may only ever err towards keeping things.
-// ⚠️ LIQUID COUNTS AS AN EDIT. A generated lake that has since flowed, drained or reacted is not reproducible
-// from the seed, and regenerating it would resurrect water that is no longer there. Any live liquid page in the
-// chunk therefore disqualifies it — which still leaves the great majority of a world (dry ground) droppable.
-function chunkIsPristine(room, p) {
-  if (!_genRooms.has(room)) return false;
-  const s = roomCells.get(room); if (!s || !s.terrain) return false;
-  const gr = chunksOf(room).peek(p).genRev;
-  if (!gr) return false;                                   // never produced by the generator ⇒ not ours to drop
-  if (s.terrain.revAt(p) !== gr.t) return false;
-  if (s.terrainHp && s.terrainHp.revAt(p) !== gr.h) return false;
-  for (const f of ['fineAmt', 'fineTotal']) if (s[f] && s[f].pageAt(p)) return false;
-  return true;
-}
-// The hook evictChunk actually calls, wired up here where both halves are in scope.
-chunkDroppable = (room, p) => !!worldCfg.dropPristine && chunkIsPristine(room, p);
+// (`chunkIsPristine` and its revision bookkeeping lived here. Deleted 2026-08-04: see the note in evictChunk —
+// recording "what untouched looks like" during a RESTORE recorded the restored state, so an edited chunk could
+// be judged untouched and thrown away. "The diff is empty" needs no bookkeeping and cannot drift.)
+// A chunk is stored as a DIFF only if there is a generator to diff it against and to rebuild it from.
+chunkDelta = (room, p) => {
+  const gen = _genRooms.get(room); if (!gen || !worldCfg.dropPristine) return null;
+  const st = roomCells.get(room); if (!st || !st.terrain) return null;
+  const b = encodeChunkDelta(st, p, gen, worldGeom(room));
+  if (!b) return null;                                  // diff bigger than the chunk ⇒ store it whole
+  b.a = encodeChunk(st, p).a;                           // liquid keeps its existing SPARSE encoding
+  // ⚠️ LIQUID IS JUDGED BY WHETHER A PAGE EXISTS, NOT BY WHETHER IT HOLDS ANYTHING. A generated lake that has
+  // since drained leaves an ALLOCATED but empty liquid page and an unchanged terrain diff — so by content
+  // alone the chunk would look untouched, be thrown away, and come back with its lake restored. Conservative
+  // on purpose: any chunk that has ever held liquid is stored.
+  const wet = !!((st.fineAmt && st.fineAmt.pageAt(p)) || (st.fineTotal && st.fineTotal.pageAt(p)));
+  b.pristine = b.d.length === 0 && !wet;
+  if (!b.pristine) genChunksDeltad++;
+  return b;
+};
 // Attach (or remove) the seeders for a room. Idempotent, and safe to call after the fields already exist —
 // which matters because `ensureTerrain` may have run long before anybody decided this room was generated.
 function setRoomGenerator(room, gen) {

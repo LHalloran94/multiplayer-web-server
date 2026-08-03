@@ -304,4 +304,12 @@ function makeGen(cfg) {
   };
 }
 
-module.exports = { makeGen, mulberry32, h, SALT, MAT, SB, UB, REGION_FLUID, CHUNK_SIDE };
+// ⭐ BUMP THIS WHENEVER THE GENERATOR'S OUTPUT CHANGES.
+// Stored changes are kept as a DIFF against generated ground, so they are only meaningful alongside the
+// generator that made them: change a cave threshold and every stored tunnel is suddenly cut through different
+// rock. The version travels with each stored diff so a mismatch is DETECTABLE rather than silent — which is
+// cheap now and very unpleasant to retrofit once worlds outlive a server restart.
+// ⚠️ The content redesign WILL bump this, and that is the point.
+const WORLDGEN_VERSION = 1;
+
+module.exports = { makeGen, mulberry32, h, SALT, MAT, SB, UB, REGION_FLUID, CHUNK_SIDE, WORLDGEN_VERSION };
