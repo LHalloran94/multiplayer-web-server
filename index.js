@@ -1613,6 +1613,7 @@ const PAGE_GRP_SH = 8, PAGE_GRP = 1 << PAGE_GRP_SH, PAGE_GRP_M = PAGE_GRP - 1;
 // page on READ too, or an untouched cell would read 0 instead of its phase — hence the branch in `g()`.
 function PagedArray(geom, Ctor, stride, seedFn, room) {
   this.geom = geom; this.Ctor = Ctor; this.T = (stride | 0) || 1; this.seedFn = seedFn || null;
+  this.seedEmpty = null;                          // optional: (p) => true when the seeder is CERTAIN the page is all zeros
   // ⭐ EVICTION MUST BE TRANSPARENT TO ACCESS. An evicted chunk has no pages, so without this every read would hand
   // back the shared ZERO page and the chunk would look like EMPTY WORLD — which is exactly what it did: liquid at a
   // chunk seam saw air where solid ground was evicted and poured through it, one cell wide, and a write into an
@@ -1667,7 +1668,14 @@ PagedArray.prototype.rp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i
 // The cold half of rp, kept out of line so the hot path is just "load the page and return it".
 PagedArray.prototype._miss = function (p) {
   if (this.ev !== null && this.ev[p]) return this._alloc(p);       // evicted → fault it back, blob and all
-  return this.seedFn ? this._alloc(p) : this.zero;                 // genuinely empty → the shared zero page
+  // ⭐ PHASE 6 INCREMENT 4b. A seeded array must materialise on READ too, or an untouched cell would read 0
+  // instead of its seed — which for a GENERATED world means reading solid ground as air. But a world is mostly
+  // SKY, and faulting 4KB of zeros for every page of it would undo increment 2's sparse storage from the other
+  // side. `seedEmpty` lets the seeder answer "provably nothing here" without generating: sky costs nothing, and
+  // a WRITE into it still allocates through wp() as usual. Conservative by contract — a false "empty" is
+  // invisible terrain, which is the worst bug this subsystem can have.
+  if (this.seedFn) return (this.seedEmpty && this.seedEmpty(p)) ? this.zero : this._alloc(p);
+  return this.zero;                                               // genuinely empty → the shared zero page
 };
 PagedArray.prototype.wp = function (i) {
   const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cx + ((i >>> 6) & g.CXM)) : g.pageOf[i], gi = p >> PAGE_GRP_SH;
@@ -2087,6 +2095,13 @@ let wireFanout = (room, ev, payload) => io.to(room).emit(ev, payload);
 // Between these two calls the diffs are collected and delivered as ONE packet each. Same no-op-by-default trick as
 // wireFanout: the sliced sim batches nothing, so the probes still see the wire they have always seen.
 let beginWireBatch = () => {}, endWireBatch = () => {};
+// PHASE 6 INCREMENT 4b: same seam, same reason. `runLiquidTick` drains the queue of chunks produced on demand
+// since the last tick, but the real implementation lives outside this block (it needs the cell store, the fine
+// arrays and the chunk records). Declared as a no-op HERE so the sliced sim still runs — probe_budget slices
+// exactly this block into a `new Function`, and a bare `drainGenLiquid()` in the tick made it throw
+// ReferenceError on every scenario. Reassigned at load, next to the generator it belongs to.
+// ⚠️ The sliced sim therefore never produces chunks, which is correct: those probes build their scenes by hand.
+let drainGenLiquid = () => 0;
 // ---- SOURCE + SINK (test/scene tooling, but real world features) ------------------------------------------------
 // SINK = material id 17 ("Drain"): an ordinary SOLID block that DESTROYS liquid touching it, at liquidCfg.sinkRate
 // units per tick per touching cell. Put a row of them under a pool instead of clearing it by hand.
@@ -3453,6 +3468,10 @@ const runLiquidTick = () => {
   if (liquidCfg.paused) { if (liquidStepsPending <= 0) return; liquidStepsPending--; }
   const _t0 = liquidCfg.perfLog ? performance.now() : 0; let _active = 0;
   liquidTickCount++;
+  // ⭐ Phase 6 inc 4b. Chunks produced on demand since the last tick get their liquid HERE, before anything
+  // starts iterating an active-cell Set — a page fault can happen from deep inside the flow loop, and seeding
+  // writes into the very Set that loop is walking. No-op (one `.size` test) unless on-demand generation is on.
+  drainGenLiquid();
   beginWireBatch();   // ⇓ everything this tick broadcasts is collected and sent as one packet per client (see the hook)
   // ── PLAN THE ROSTER. Admit rooms in rotating order until their predicted cost fills the budget; the rest
   // are deferred whole. At least one room is ALWAYS admitted, so a single room bigger than the whole budget
@@ -3704,8 +3723,21 @@ function sendChunkContent(sock, room, chunks) {
   if (!chunks || !chunks.length) return;
   const s = peekCells(room); if (!s.terrain) return;
   const geom = worldGeom(room), tc = [], fine = [];
+  // ⭐ PHASE 6 INCREMENT 4b — TWO PASSES, AND THE SPLIT IS LOAD-BEARING.
+  // With on-demand production, reading a chunk's terrain is what PRODUCES it, and a freshly produced chunk's
+  // liquid is deliberately seeded on a deferred pass (see genSeedFn: seeding from inside a page fault would
+  // write into the active-cell Set the flow loop may be iterating). Done in one pass, this function would
+  // produce the ground and then read `fineTotal` back as zero on the very same cells — the client would be
+  // sent a lake bed with no lake in it, and nothing would ever correct it, because a SETTLED lake broadcasts
+  // no diffs. So: produce everything first, let the deferred pass run, then read it all out.
+  // ⚠️ `drainGenLiquid` is safe HERE and not everywhere: every caller of this function is a socket handler or
+  // the beacon path, never the liquid tick. Checked, not assumed.
   for (const p of chunks) {
     rehydrateChunk(room, p);   // a chunk we are about to READ OUT must not be sitting in a blob
+    if (_genRooms.size) s.terrain.g(((((p / geom.cx) | 0) * CHUNK_SIDE) * geom.cols) + (p % geom.cx) * CHUNK_SIDE);
+  }
+  drainGenLiquid();
+  for (const p of chunks) {
     const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
     for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
       for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
@@ -4155,7 +4187,7 @@ function cfgWire() {
   return Object.assign({}, liquidCfg, {
     relayOn: !!relayCfg.on, relayHz: relayCfg.hz, relayCap: relayCfg.cap,
     relayFarHz: relayCfg.farHz, relayFarCap: relayCfg.farCap,
-    worldChunked: !!worldCfg.chunked,
+    worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand,
   });
 }
 
@@ -5070,6 +5102,7 @@ function generateWorld(avatarRoom, seed, band) {
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 const worldCfg = {
   chunked: 0,          // 0 = generateWorld (shipping) · 1 = worldgen.js. Applies to worlds generated from now on.
+  onDemand: 0,         // 4b: with `chunked`, do not build the world at all — produce each chunk when it is first read.
 };
 const _roomGens = new Map();                          // avatarRoom → the generator for its seed+shape, built once
 // Everything worldgen.js needs to know about a room, gathered in one place so there is one definition of
@@ -5106,6 +5139,107 @@ function generateWorldChunked(avatarRoom, seed, band) {
   // places trees, sky platforms and cave props into `roomObjects`, which is one per-room Map broadcast whole to
   // every client. That does not survive an infinite world and needs an object-streaming design that does not
   // exist yet. A world made by this generator therefore has terrain but no props. Recorded, not forgotten.
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  INCREMENT 4b — ON-DEMAND GENERATION. The half that actually makes the Overworld possible: the world is never
+//  built. Each chunk is produced the first time something reads it, and a chunk nobody has read does not exist.
+//
+//  ⭐ THE HOOK IS `PagedArray.seedFn`, WHICH ALREADY EXISTED (for fineLevelAcc's per-cell phase), and the read
+//  path already did the right thing: a seeded array materialises on READ as well as write, because otherwise an
+//  untouched cell reads 0 — and Phase 3 recorded exactly what that costs ("any unloaded state must be invisible
+//  to READERS, or the sim silently treats unloaded as empty": liquid poured through evicted ground at chunk
+//  seams). Generated-but-not-yet-produced is the same hazard wearing a different hat, and it gets the same
+//  answer: reads see the ground.
+//
+//  ⭐ AND THE EXPOSURE IS BOUNDED BY CONSTRUCTION, which is the thing that made this safe to do at all.
+//  A seedFn means "every read of an unproduced page produces it", so the question is who reads far away:
+//    · the liquid sim reads only ACTIVE cells and their neighbours, which chunk residency already keeps near
+//      players;
+//    · `terrainRLE` (the join replay) and `chunkHash` read through `pageAt`, which does NOT fault — so they
+//      see only what exists, which is exactly right for a world too big to replay;
+//    · `scan`/`some`/`eachPage` walk the pages that EXIST;
+//    · `sendChunkContent` reads through `.g()` and therefore DOES produce — and it is driven by chunk
+//      subscriptions, i.e. by what a player can see. That is the eager path, and it needs no separate loop.
+//  So nothing has to police the bound; the only whole-world readers were already non-faulting.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+const _genRooms = new Map();                          // avatarRoom → generator, for rooms produced on demand
+// One page of scratch shared by the terrain and hp seeders. They are two separate PagedArrays with two separate
+// seed functions, but one call to `fillPage` produces both — so whichever faults first fills the pair and the
+// other reads it back, halving the cost instead of generating the same chunk twice.
+const _genMemo = { room: null, p: -1, gen: null, t: new Uint8Array(CHUNK_CELLS), h: new Uint8Array(CHUNK_CELLS) };
+const _genPending = new Set();                        // "room page" — produced, liquid not yet seeded (see below)
+// Mechanism counters — the guard asserts on THESE rather than on a wall clock, which is a lesson this track has
+// now learned twice (liqRateSkips, liqK2Throttles). ⚠️ Declared ABOVE every use: both writers sit inside
+// function bodies so call-time evaluation would be safe anyway, but `PAGE_DIMS` and `rpOn` both taught this
+// track that a `let` below its reader is a trap worth simply not setting.
+let genLiquidSeeded = 0, genPagesProduced = 0;
+function genSeedFn(field, room) {
+  return function (page, p, geom) {
+    const g = _genRooms.get(room); if (!g) return;
+    if (_genMemo.room !== room || _genMemo.p !== p || _genMemo.gen !== g) {
+      _genMemo.t.fill(0); _genMemo.h.fill(0);
+      g.fillPage(_genMemo.t, _genMemo.h, p, geom, 1);
+      _genMemo.room = room; _genMemo.p = p; _genMemo.gen = g;
+    }
+    page.set(field === 'terrain' ? _genMemo.t : _genMemo.h);
+    genPagesProduced++;
+    // ⚠️ ONLY A FIRST PRODUCTION QUEUES LIQUID. An EVICTION restore also runs this seedFn — `_alloc` seeds and
+    // then lets `rehydrateChunk` decode the blob over the top — and re-seeding liquid from the regenerated
+    // terrain afterwards would resurrect a lake that had since drained, clobbering the restored state.
+    // `evicted[p]` is precisely the "this is a restore, not a birth" flag.
+    if (!chunksOf(room).evicted[p]) _genPending.add(room + ' ' + p);
+  };
+}
+// Attach (or remove) the seeders for a room. Idempotent, and safe to call after the fields already exist —
+// which matters because `ensureTerrain` may have run long before anybody decided this room was generated.
+function setRoomGenerator(room, gen) {
+  if (gen) _genRooms.set(room, gen); else _genRooms.delete(room);
+  const s = roomCells.get(room); if (!s) return;
+  for (const f of ['terrain', 'terrainHp']) {
+    const pa = s[f]; if (!pa) continue;
+    pa.seedFn = gen ? genSeedFn(f, room) : null;
+    pa.seedEmpty = gen ? ((p) => gen.pageEmpty(p, pa.geom)) : null;
+  }
+}
+// ⭐ LIQUID IS SEEDED ON A DEFERRED PASS, AND THAT IS NOT TIDINESS. A page fault can happen from deep inside
+// `fineLiquidTickRoom`, which is iterating the room's active-cell Set; seeding writes into that same Set, and
+// this track has already recorded that room/cell iteration order is load-bearing. So production writes terrain
+// only, records the page, and the liquid half runs at a point where nothing is mid-iteration. The delay is at
+// most one tick (40ms) and it is why `drainGenLiquid` is called from the top of the liquid tick rather than
+// anywhere convenient.
+function seedGenChunkLiquid(room, p) {
+  const s = peekCells(room); if (!s.terrain || (s.fineSub || 1) !== 1) return;
+  const page = s.terrain.pageAt(p); if (!page) return;      // dropped again before we got here — nothing to seed
+  const geom = worldGeom(room);
+  ensureFineArrays(room, 1);
+  const amt = s.fineAmt, tot = s.fineTotal; if (!amt || !tot) return;
+  const act = fineSet(room);
+  const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
+  let n = 0;
+  for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
+    for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
+      const v = page[lr * CHUNK_SIDE + lc]; if (!isFluidId(v)) continue;
+      const i = (r0 + lr) * geom.cols + c0 + lc;
+      amt.wp(i)[amt.o(i) + LIQ_RANK[v]] = LIQUID_MAX; tot.s(i, LIQUID_MAX);
+      if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
+      n++;
+    }
+  if (!n && !act.size) dropFineActive(room);
+  return n;
+}
+drainGenLiquid = function () {
+  if (!_genPending.size) return 0;
+  const batch = Array.from(_genPending); _genPending.clear();
+  let n = 0;
+  for (const key of batch) {
+    const cut = key.lastIndexOf(' ');
+    const room = key.slice(0, cut), p = +key.slice(cut + 1);
+    if (!roomCells.has(room)) continue;
+    n += seedGenChunkLiquid(room, p) || 0;
+  }
+  genLiquidSeeded += n;
+  return n;
 }
 // True when a built-in terrain material id behaves as a fluid (Water/Quicksand/Lava/Acid/Brine/Oil).
 function TERRAIN_MATS_FLUID(v) { return v === 9 || v === 10 || v === 11 || v === 12 || v === 14 || v === 15; }
@@ -5148,6 +5282,17 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   worldGenerated.add(avatarRoom);
   // Phase 6 inc 4: which generator. `worldCfg.chunked` ships 0, so this is `generateWorld` unless switched.
   const _seed = worldSeedFor(roomId), _band = genColBand(roomId, levelIndex);
+  // ⭐ 4b — ON DEMAND: register the generator and build NOTHING. The world comes into existence a chunk at a
+  // time as it is read, which is the only way an Overworld can work. Everything below (the liquid seed, the
+  // pre-settle) is about a world that already exists, so it is skipped: a chunk seeds and settles its own
+  // liquid when it is produced. ⚠️ `ensureTerrain` is called FIRST so the fields exist for the seeders to be
+  // attached to — `setRoomGenerator` is idempotent and can attach to fields made earlier, but there is no
+  // reason to rely on that here.
+  if (worldCfg.chunked && worldCfg.onDemand) {
+    ensureTerrain(avatarRoom); ensureTerrainHp(avatarRoom);
+    setRoomGenerator(avatarRoom, genFor(avatarRoom, _seed, _band));
+    return;
+  }
   if (worldCfg.chunked) generateWorldChunked(avatarRoom, _seed, _band); else generateWorld(avatarRoom, _seed, _band);
   seedLiquidActivity(avatarRoom);                    // give generated liquid its fill levels, then…
   liquidQuiet = true;                                // …pre-settle it silently so joiners see it already at rest (no on-load sloshing / broadcast storm)
@@ -5895,6 +6040,10 @@ io.on('connection', (socket) => {
     // so flipping this only affects rooms generated from here on. That is on purpose — silently rebuilding
     // every live world would throw away whatever anyone had built in it.
     if ('worldChunked' in patch) worldCfg.chunked = patch.worldChunked ? 1 : 0;
+    // ⚠️ On-demand only means anything WITH the chunked generator — the shipping one has no way to produce a
+    // single chunk, which is the entire reason increment 4 exists. Ticking this alone must therefore not look
+    // like it did something, so it turns the generator on too.
+    if ('worldOnDemand' in patch) { worldCfg.onDemand = patch.worldOnDemand ? 1 : 0; if (worldCfg.onDemand) worldCfg.chunked = 1; }
     // ── and the button that makes the switch testable: rebuild THIS room's world with the current generator.
     // ⭐ Why a rebuild in place rather than "go and visit a different page": the seed is keyed on the URL, so a
     // different page is a different world, and comparing two different worlds tells you nothing. Rebuilt in
@@ -5908,6 +6057,7 @@ io.on('connection', (socket) => {
       if (hydratedAvRooms.has(_r)) socket.emit('liquid-cfg-note', { text: 'Regenerate refused: this is a published world.' });
       else {
         worldGenerated.delete(_r); _roomGens.delete(_r);
+        setRoomGenerator(_r, null);                         // detach the on-demand seeders before the fields are refilled
         materializeRoom(_r);                                // start from a fully resident world, not a half-evicted one
         ensureWorldGenerated(_r, currentAvRoomId, currentAvLevelIndex | 0);
         // Replay the new world to everyone standing in it — same events the join path sends.

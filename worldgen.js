@@ -273,10 +273,34 @@ function makeGen(cfg) {
     }
   }
 
+  // ⭐ "IS THIS PAGE PROVABLY EMPTY?" — asked BEFORE a page is allocated, so open sky costs nothing at all.
+  // Half a page world and much more of a tall Overworld is sky; without this, reading one cell of it would
+  // fault in 4KB of zeros and undo increment 2's sparse storage from the other direction.
+  // ⚠️ DELIBERATELY CONSERVATIVE — it may only ever answer "empty" when that is certain, because a false
+  // "empty" is invisible terrain. Three things can put content above the ground line, so all three are
+  // allowed for: surface lakes fill DOWN FROM `seaRow`, rock mounds stack up to `2*G` rows ABOVE the surface,
+  // and the world floor is at `bottomRow`. Costs 64 `surfAt` calls (~3 sines each) against a 4KB allocation
+  // plus a full page generation, so it pays for itself many times over.
+  function pageEmpty(p, geom) {
+    const c0 = (p % geom.cx) * CHUNK_SIDE, r0 = ((p / geom.cx) | 0) * CHUNK_SIDE;
+    const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
+    if (rN <= 0 || cN <= 0) return true;
+    if (r0 > bottomRow) return true;                       // below the bedrock floor — nothing is generated there
+    if (c0 > genC1 || c0 + cN - 1 < genC0) return true;    // outside the generated column band
+    let top = Infinity;
+    for (let lc = 0; lc < cN; lc++) {
+      const c = c0 + lc; if (c < genC0 || c > genC1) continue;
+      const s = surfAt(c);
+      const t = Math.min(s - 2 * G, s > seaRow ? seaRow : Infinity);   // mounds above the surface, lakes from seaRow
+      if (t < top) top = t;
+    }
+    return r0 + rN - 1 < top;                              // the whole page sits above anything that could exist
+  }
+
   return {
     cols, rows, cell: CELL, seed, G, bottomRow, baseRow, seaRow, CRUST, POOL_DEPTH, genC0, genC1,
     surfAt, sbAt, ugBiomeAt, baseAt, caveAt, poolCfgAt, moundAt, dirtBotAt, deepTopAt, strengthOf,
-    matAt, fillPage,
+    matAt, fillPage, pageEmpty,
   };
 }
 
