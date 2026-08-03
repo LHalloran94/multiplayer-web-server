@@ -15,6 +15,7 @@ const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
 const MWSim = require('./avatar-sim'); // shared authoritative avatar simulation
+const WORLDGEN = require('./worldgen'); // Phase 6 inc 4: chunk-on-demand world generation (the Overworld's generator)
 
 const app = express();
 const server = http.createServer(app);
@@ -4154,6 +4155,7 @@ function cfgWire() {
   return Object.assign({}, liquidCfg, {
     relayOn: !!relayCfg.on, relayHz: relayCfg.hz, relayCap: relayCfg.cap,
     relayFarHz: relayCfg.farHz, relayFarCap: relayCfg.farCap,
+    worldChunked: !!worldCfg.chunked,
   });
 }
 
@@ -5059,6 +5061,52 @@ function generateWorld(avatarRoom, seed, band) {
     }
   }
 }
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  PHASE 6 INCREMENT 4 — THE SECOND GENERATOR (chunk-on-demand). See server/worldgen.js for the design.
+//  `generateWorld` above is UNTOUCHED and still owns page rooms. This is the generator the Overworld needs,
+//  because the Overworld cannot be built up front: terrain there has to be a pure function of (seed, column,
+//  row) so any 64x64 chunk can be produced alone, thrown away, and produced again identically.
+//  ⚠️ SHIPS OFF (`worldCfg.chunked = 0`). While it is off, not one line of world generation changes.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+const worldCfg = {
+  chunked: 0,          // 0 = generateWorld (shipping) · 1 = worldgen.js. Applies to worlds generated from now on.
+};
+const _roomGens = new Map();                          // avatarRoom → the generator for its seed+shape, built once
+// Everything worldgen.js needs to know about a room, gathered in one place so there is one definition of
+// "what shape and seed is this world" rather than several that can drift.
+function genCfgFor(avatarRoom, seed, band) {
+  const d = roomDims(avatarRoom);
+  return { seed, cols: d.cols, rows: d.rows, cell: TERRAIN_CELL, floorTop: FLOOR_TOP,
+    spawnX: MWSim.C.WORLD_W / 2, spawnHalfW: SPAWN_CLEAR_HALF_W, band, strength: BUILTIN_STRENGTH };
+}
+function genFor(avatarRoom, seed, band) {
+  let g = _roomGens.get(avatarRoom);
+  if (!g) { g = WORLDGEN.makeGen(genCfgFor(avatarRoom, seed, band)); _roomGens.set(avatarRoom, g); }
+  return g;
+}
+// The whole world, built one page at a time through exactly the code path a single on-demand page fault will
+// take. That is deliberate: it means the eager path and the on-demand path cannot produce different worlds,
+// because they are the same function called in a different order — which is the property `probe_worldgen`
+// Part B asserts (page order changes nothing).
+function generateWorldChunked(avatarRoom, seed, band) {
+  const grid = ensureTerrain(avatarRoom), hp = ensureTerrainHp(avatarRoom);
+  grid.fill(0); hp.fill(0);
+  const geom = grid.geom, gen = genFor(avatarRoom, seed, band);
+  const page = new Uint8Array(CHUNK_CELLS), hpPage = new Uint8Array(CHUNK_CELLS);
+  for (let p = 0; p < geom.nPages; p++) {
+    page.fill(0); hpPage.fill(0);
+    gen.fillPage(page, hpPage, p, geom, 1);
+    // Only fault a page in if the generator actually put something there — sky is most of a world, and an
+    // all-air page must stay absent or increment 2's sparse storage is undone at generation time.
+    let any = 0; for (let k = 0; k < CHUNK_CELLS; k++) if (page[k]) { any = 1; break; }
+    if (!any) continue;
+    grid.wpPage(p).set(page); hp.wpPage(p).set(hpPage);
+  }
+  // ⚠️ OBJECTS ARE NOT GENERATED HERE, and that is a real gap rather than an oversight: `generateWorld` also
+  // places trees, sky platforms and cave props into `roomObjects`, which is one per-room Map broadcast whole to
+  // every client. That does not survive an infinite world and needs an object-streaming design that does not
+  // exist yet. A world made by this generator therefore has terrain but no props. Recorded, not forgotten.
+}
 // True when a built-in terrain material id behaves as a fluid (Water/Quicksand/Lava/Acid/Brine/Oil).
 function TERRAIN_MATS_FLUID(v) { return v === 9 || v === 10 || v === 11 || v === 12 || v === 14 || v === 15; }
 // Phase 6: generation column band for a Level's size preset (null = full world). Looks up the room's
@@ -5098,7 +5146,9 @@ function clampToBand(band, x, y) {
 function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   if (worldGenerated.has(avatarRoom)) return;
   worldGenerated.add(avatarRoom);
-  generateWorld(avatarRoom, worldSeedFor(roomId), genColBand(roomId, levelIndex));
+  // Phase 6 inc 4: which generator. `worldCfg.chunked` ships 0, so this is `generateWorld` unless switched.
+  const _seed = worldSeedFor(roomId), _band = genColBand(roomId, levelIndex);
+  if (worldCfg.chunked) generateWorldChunked(avatarRoom, _seed, _band); else generateWorld(avatarRoom, _seed, _band);
   seedLiquidActivity(avatarRoom);                    // give generated liquid its fill levels, then…
   liquidQuiet = true;                                // …pre-settle it silently so joiners see it already at rest (no on-load sloshing / broadcast storm)
   // ⭐⭐ THE PRE-SETTLE HAD SILENTLY STOPPED HAPPENING. This loop tested the COARSE active set, but `seedLiquidActivity`
@@ -5840,12 +5890,45 @@ io.on('connection', (socket) => {
     // Batching is behaviour-preserving (same events, same order, one envelope), so unlike the two above it needs
     // no repair when toggled — the next tick simply arrives unwrapped.
     if ('interestBatch' in patch) interestCfg.batch = !!patch.interestBatch;
+    // ── PHASE 6 INCREMENT 4: which world generator (see worldgen.js) ──────────────────────────────────────────
+    // ⚠️ The switch ALONE changes nothing you can see: a world is generated once per room per server lifetime,
+    // so flipping this only affects rooms generated from here on. That is on purpose — silently rebuilding
+    // every live world would throw away whatever anyone had built in it.
+    if ('worldChunked' in patch) worldCfg.chunked = patch.worldChunked ? 1 : 0;
+    // ── and the button that makes the switch testable: rebuild THIS room's world with the current generator.
+    // ⭐ Why a rebuild in place rather than "go and visit a different page": the seed is keyed on the URL, so a
+    // different page is a different world, and comparing two different worlds tells you nothing. Rebuilt in
+    // place, both generators draw the heightmap and biome constants as the first 11 draws off the same seed, so
+    // you get the SAME LANDSCAPE with different caves, veins, pools and mounds — which is the comparison worth
+    // looking at. (probe_worldgen D8/D9 assert exactly that pairing.)
+    // 🟥 IT DESTROYS WHATEVER IS IN THE ROOM. Refused outright for a PUBLISHED world, where the live state is
+    // snapshotted back to the database and a regenerate would be silent data loss, not a debug action.
+    if (patch.worldRegen && currentAvatarRoom) {
+      const _r = currentAvatarRoom;
+      if (hydratedAvRooms.has(_r)) socket.emit('liquid-cfg-note', { text: 'Regenerate refused: this is a published world.' });
+      else {
+        worldGenerated.delete(_r); _roomGens.delete(_r);
+        materializeRoom(_r);                                // start from a fully resident world, not a half-evicted one
+        ensureWorldGenerated(_r, currentAvRoomId, currentAvLevelIndex | 0);
+        // Replay the new world to everyone standing in it — same events the join path sends.
+        const _cs = cellsOf(_r), _tg = _cs.terrain;
+        if (_tg) {
+          io.to(_r).emit('terrain-init', { levelIndex: currentAvLevelIndex | 0, cell: TERRAIN_CELL, cols: _tg.geom.cols, rows: _tg.geom.rows,
+            ...terrainRLE(_tg), hpRuns: _cs.terrainHp ? terrainRLE(_cs.terrainHp).runs : undefined });
+          const _fi = buildFineInit(_r); if (_fi) io.to(_r).emit('liquid-fine-init', _fi);
+          io.to(_r).emit('avatar-objects-init', { levelIndex: currentAvLevelIndex | 0, objects: roomObjects[_r] ? [...roomObjects[_r].values()] : [] });
+        }
+      }
+    }
     io.emit('liquid-cfg', cfgWire());                       // broadcast (config is global) so every open menu stays in sync
   });
   let currentAvatarRoom = null;   // this socket's active avatar-world room key (URL + mode); set on avt-join
   let currentAvBuildRoomId = null; // Phase 3: real roomId for L2 build-perm checks (null = page/URL room → open build)
   let currentAvOwnerId = null;     // owner_id of that room (null for the page/URL room)
   let currentAvLevelIndex = 0;     // this socket's current Level index within the room's World (for per-Level locks)
+  let currentAvRoomId = null;      // Phase 6 inc 4: the roomId the avatar room was keyed on (= the URL for a page room).
+                                   // `currentAvBuildRoomId` is NOT this — it is null for a page room by design — and the
+                                   // world SEED is keyed on the roomId, so a regenerate needs the real one.
   let currentAvBand = null;        // Phase 6: this socket's playable band rect (world px) — server-clamps object placement; null = full world
   // May this socket mutate the current avatar World? Page/URL room → always. Owner → always. A locked
   // Level blocks everyone but the owner. Else the room's per-user override, falling back to the role
@@ -6340,6 +6423,7 @@ io.on('connection', (socket) => {
       }
     }
     currentAvLevelIndex = levelIndex;                              // Phase 3: per-Level build lock keys on this
+    currentAvRoomId = roomId;                                      // Phase 6 inc 4: the seed key, for a world regenerate
     currentAvBand = playBand(roomId, levelIndex);                  // Phase 6: clamp this socket's object placement to the Level's band
     // Leave any previous avatar room (Level switch without an explicit avt-leave).
     if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
