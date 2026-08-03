@@ -16,6 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const MWSim = require('./avatar-sim'); // shared authoritative avatar simulation
 const WORLDGEN = require('./worldgen'); // Phase 6 inc 4: chunk-on-demand world generation (the Overworld's generator)
+const DOMAINS = require('./domains');   // Phase 6 inc 6: which column of the Overworld a site spawns at
 
 const app = express();
 const server = http.createServer(app);
@@ -1531,18 +1532,28 @@ const PAGE_DIMS = Object.freeze({ cols: TERRAIN_COLS, rows: TERRAIN_ROWS });
 // DEPTH is the decided, permanent number: 4,096 rows = 32,768 px, ~364 player-heights, 0.44× Noita. It is a POWER
 // OF TWO on purpose — that is what puts every Overworld geometry on the shift-and-mask paging path, at any width.
 // WIDTH is NOT a decision and is deliberately not treated as one. Since increment 5 the stride is the depth, so
-// widening the world appends columns and renumbers nothing: this number can be raised later without touching a
-// single stored edit. 262,144 columns = 2,097,152 px is simply a generous starting extent (2^30 cells, which
-// keeps a flat index inside V8's unboxed-integer range — see chunkGeom's ceiling note).
+// widening the world appends columns and renumbers nothing: this number can be raised at any time without
+// touching a single stored edit.
+// ⚠️ 524,224 columns = 4,193,792 px is the WIDEST THE FLAT INDEX ALLOWS at this depth — 2,147,221,504 cells,
+// just under chunkGeom's 2^31 ceiling. At the default 30,720px domain separation that is ~136 sites; at 8,192px
+// it is ~512. Capacity is width ÷ separation and BOTH are dials, so neither number is a commitment.
+// ⭐ It was 262,144 for one increment because a flat index above 2^31 stops being a V8 unboxed integer, and
+// nobody had priced that. MEASURED (probe_domains C1): **1.01x** — the small-integer boundary is not a cost at
+// all, so there was no reason to leave half the legal width on the table.
+// 🟥 GOING FURTHER IS A REAL SWEEP, NOT A CONSTANT: past 2^31 cells the wire handlers' `cells[k] | 0` wraps
+// (ToInt32) and `fineFluxStack` is an Int32Array OF INDICES; past 2^32 the arithmetic paging's own `i >>> K6`
+// stops being exact. So the next lever is that sweep — now worth doing, since C1 says it buys real width for no
+// CPU — and beyond it, not sharing one flat index space across the whole world at all.
 // ⚠️ NOTHING USES THIS YET. Domain placement and turning the Overworld on are later increments; declaring the
 // shape here is what lets them be about placement rather than about arithmetic, and it is what
 // probe_overworld_scale checks against instead of a number copied out of a document.
-const OVERWORLD_DIMS = Object.freeze({ cols: 262144, rows: 4096 });
+const OVERWORLD_DIMS = Object.freeze({ cols: 524224, rows: 4096 });
 // Rooms that are part of the Overworld rather than a page world. EMPTY, and the Overworld cannot be entered yet —
 // so `roomDims` returns the page shape for every real room and behaviour is unchanged. A Set rather than a key
 // test so the eventual sector split (§7: N scheduling rooms over one cell store) has somewhere to register.
 const overworldRooms = new Set();
 function roomDims(room) { return overworldRooms.has(room) ? OVERWORLD_DIMS : PAGE_DIMS; }
+// (The domain registry itself lives just BELOW this block — see the note at ==CELL_STORE_BLOCK_END==.)
 // The terrain-resolution geometry (SUB=1) for a room, i.e. the one the fields that are not fine-grid ones use.
 const worldGeom = (room) => { const d = roomDims(room); return chunkGeom(d.cols, d.rows); };
 // ═══ CHUNKING (SHARED-WORLD.md §7, Phase 3) ═════════════════════════════════════════════════════════════════════
@@ -2192,6 +2203,22 @@ function cellView(field) {
   });
 }
 // ==CELL_STORE_BLOCK_END==
+// ⭐ WHERE A SITE LANDS (Phase 6 increment 6). One column per site; the row is wherever the ground is there.
+// See server/domains.js for the whole design — it is an ALLOCATION keyed on the page's permanent identity, not a
+// pure hash, because the design's rule is "identity is permanent, LOCATION IS REVOCABLE".
+// ⚠️ DELIBERATELY OUTSIDE THE CELL-STORE BLOCK ABOVE. The probe rigs slice that block into a bare `new Function`,
+// so a module-level `require` referenced from inside it is a ReferenceError there and nowhere else — the same
+// sliced-block boundary that has now bitten this track four times (F15). Nothing in the block needs the registry:
+// `roomDims` only needs the SHAPE, and the only reader is `spawnXOf`, which is out here too.
+// ⚠️ INERT TODAY: nothing places anything, because `overworldRooms` is empty and the Overworld cannot be entered.
+// The registry is in memory and does not survive a restart — deliberate, and fine while the Overworld does not
+// either. When it needs to persist it is one table (identity, col, sep) and `domains.all()` is the dump.
+// ⚠️ 30,720 px = one page-world of neighbourhood plus one of wilderness, which is §3's own sense of generous.
+// It is a DEFAULT, not a decision: `place()` takes a per-site separation and honours the larger of any pair.
+const domainCfg = { spacingPx: 30720 };
+const domains = DOMAINS.makeDomains({
+  cols: OVERWORLD_DIMS.cols, rows: OVERWORLD_DIMS.rows, cell: TERRAIN_CELL, spacingPx: domainCfg.spacingPx,
+});
 function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', worldGeom(room), room)); }
 function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', worldGeom(room), room)); }
 // Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
@@ -5537,8 +5564,26 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
 // Spawn point = world-centre column resting on the terrain SURFACE there (so a generated world
 // drops you on top of the ground, not buried in it). Falls back to the floor when that column is
 // empty (sandbox / un-generated). y is the feet position (top of the first solid cell).
+// ⚠️ THE SPAWN COLUMN IS PER-ROOM (Phase 6 increment 6). A page room spawns you at its middle, as it always has;
+// an Overworld room spawns you at the site's own column, from the domain registry. The COLUMN is the only thing
+// that differs — finding the ground at that column is the same code either way, which is the whole reason
+// placement is one-dimensional.
+// ⚠️ Returns the spawn X IN PIXELS, not a column — because a page room's spawn is exactly `WORLD_W / 2` and
+// always has been, and rounding it through a column would move it by half a cell. A 4px shift is invisible to
+// look at and would still be a behaviour change on a path that is meant to be untouched.
+function spawnXOf(avatarRoom) {
+  const d = overworldRooms.has(avatarRoom) ? domains.peek(overworldIdentity(avatarRoom)) : null;
+  return d ? (d.col + 0.5) * TERRAIN_CELL : (MWSim.C.WORLD_W / 2);
+}
+// The identity an Overworld room is placed BY. `avatarRoomKey` is 'av:<roomId>:<levelIndex>' and the roomId is the
+// page URL, so the identity is the middle field — normalised to a host by domains.normalizeIdentity.
+function overworldIdentity(avatarRoom) {
+  const s = String(avatarRoom);
+  const a = s.indexOf(':'), b = s.lastIndexOf(':');
+  return (a >= 0 && b > a) ? s.slice(a + 1, b) : s;
+}
 function worldSpawnFor(avatarRoom) {
-  const x = MWSim.C.WORLD_W / 2;
+  const x = spawnXOf(avatarRoom);
   const grid = peekCells(avatarRoom).terrain;
   if (!grid) return { x, y: FLOOR_TOP };
   const COLS = grid.geom.cols, ROWS = grid.geom.rows;
