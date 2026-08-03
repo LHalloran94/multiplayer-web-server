@@ -1650,7 +1650,7 @@ PagedArray.prototype._alloc = function (p) {
   (this.dir[p >> PAGE_GRP_SH] || this._grp(p))[p & PAGE_GRP_M] = a; this.live++;
   // ⚠️ Ordering: the page is installed BEFORE the restore, and rehydrateChunk clears the evicted flag and takes the
   // blob before decoding — so the decode's own writes re-enter here and see a normal, un-evicted chunk.
-  if (this.ev !== null && this.ev[p]) rehydrateChunk(this.room, p);
+  if (this.ev !== null && this.ev[p]) onChunkFault(this.room, p);
   return a;
 };
 // Fault in one GROUP of the directory (pages + revisions together, so the two can never disagree about existing).
@@ -1812,6 +1812,14 @@ function ChunkRec() {
   // chunk-verify would then "repair" every client to empty. The hash is therefore taken BEFORE the pages are
   // dropped and served from here until the chunk comes back.
   this.evHash = 0;
+  // ⭐ PHASE 6 INCREMENT 4c. A chunk of a GENERATED world that nobody has changed does not need storing at all —
+  // it can be thrown away and produced again from the seed. `gen` marks an evicted chunk as "restore me by
+  // regenerating, not from a blob"; `genRev` is the revision each content field had at the moment the generator
+  // produced it, which is how "has anyone changed this?" is answered in O(1) rather than by re-generating the
+  // chunk and comparing 8KB. It works because only `wp()` bumps a revision, and a page produced by a READ
+  // (which is how on-demand production happens) goes through `_alloc` without one.
+  this.gen = 0;
+  this.genRev = null;     // {terrain, terrainHp} revisions at production, or null if this chunk was never produced
 }
 const NO_CHUNK_REC = Object.freeze(new ChunkRec());   // what `peek` answers for a chunk nothing has happened to
 function RoomChunks(nPages) {
@@ -1905,6 +1913,20 @@ function decodeChunk(s, p, blob) {
       for (let k = 0; k < LIQ_T; k++) { const v = blob.a[q + 1 + k]; amt[b + k] = v; sum += v; } tot[c] = sum > 255 ? 255 : sum; }
   }
 }
+// Mechanism counters for on-demand production — the guards assert on THESE rather than on a wall clock, which
+// is a lesson this track has now learned three times (liqRateSkips, liqK2Throttles, and here).
+// ⚠️ Declared ABOVE every writer, and `genChunksDropped` is why they had to move: it is written by evictChunk,
+// three thousand lines above where the other two were declared. Every writer is inside a function body so
+// call-time evaluation was safe either way, but `PAGE_DIMS` and `rpOn` both taught this track that a `let`
+// below its reader is a trap not worth setting.
+let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0;
+// ⭐ INCREMENT 4c, AND THE SAME SEAM `wireFanout` AND `drainGenLiquid` USE, FOR THE SAME REASON.
+// `evictChunk` lives inside the block the probe rigs slice into a `new Function`, and deciding whether a chunk
+// is droppable needs `worldCfg` and `chunkIsPristine`, both defined three thousand lines away and OUTSIDE the
+// slice. Referencing them directly made every probe_chunking scenario die with a ReferenceError — the second
+// time this increment tripped over exactly this. Declared here as "never droppable", which is also the right
+// answer for the sliced sim: those rigs build their scenes by hand and have no generator.
+let chunkDroppable = () => false;
 function evictChunk(room, p) {
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
   const ch = chunksOf(room);
@@ -1912,7 +1934,19 @@ function evictChunk(room, p) {
   if (!anyLive) return false;                // nothing to put away; do not mark it evicted (it has no blob)
   const rec = ch.at(p);
   rec.evHash = chunkHash(room, p);           // ⚠️ BEFORE the pages go — see ChunkRec.evHash
-  rec.blob = encodeChunk(s, p);
+  // ⭐⭐ INCREMENT 4c. A chunk of a generated world that nobody has changed is not stored at all — it is thrown
+  // away and produced again from the seed if it is ever needed. That is what makes memory scale with what
+  // players have BUILT rather than with everywhere they have BEEN.
+  // 🟥 IT IS NOT AN OPTIMISATION, IT IS A FIX. Measured (scratchpad/probe_chunk_blob.js): on generated terrain
+  // the RLE blob is **1.93x the raw pages it replaces** — 16.3KB against 8.4KB — because only 5 chunks in 133
+  // are uniform enough to compress, and every run costs two JS numbers where a cell costs one byte. Evicting a
+  // generated chunk currently COSTS memory. RLE was chosen for hand-built worlds, which are mostly flat fills;
+  // it is the wrong encoding for noisy generated ground, and the content redesign will make it noisier.
+  // ⚠️ `evHash` still matters, and is still taken BEFORE the drop: an evicted chunk answers hash queries from
+  // it, so the delta-persistence signature stays stable and autosave keeps skipping an unchanged world.
+  rec.gen = chunkDroppable(room, p) ? 1 : 0;
+  rec.blob = rec.gen ? null : encodeChunk(s, p);
+  if (rec.gen) genChunksDropped++;
   ch.evicted[p] = 1;
   for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
   for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === worldGeom(room).nPages) s[f].dropPage(p);
@@ -1937,7 +1971,33 @@ function materializeRoom(room) {
   const s = roomCells.get(room); if (!s || !s.chunks) return;
   const ch = s.chunks;
   // Only chunks something has happened to have a record, so this is O(touched chunks), not O(world area).
-  for (const [p, r] of Array.from(ch.rec)) if (r.blob) rehydrateChunk(room, p);
+  // ⚠️ BOTH KINDS. Increment 4c added chunks that were dropped rather than encoded, and to a whole-world reader
+  // a dropped chunk is indistinguishable from empty world — which is exactly the failure Phase 3 recorded when
+  // eviction first shipped (terrain replayed empty, and autosave wrote the emptiness to the database).
+  // Still O(touched chunks), not O(world area): only chunks something has happened to have a record.
+  for (const [p, r] of Array.from(ch.rec)) if (r.blob || r.gen) restoreChunk(room, p);
+}
+// ⭐ INCREMENT 4c. What a page fault does about an evicted chunk, now that there are two kinds. A chunk put
+// away as a BLOB has to be decoded; a chunk that was simply dropped because it still matched the generator has
+// ALREADY been rebuilt by the seed function that ran a few lines earlier in `_alloc`, so all that is left is to
+// stop calling it evicted. Getting that wrong leaves `evicted[p]` set on a chunk whose pages are back, and
+// `chunkHash` then keeps answering from the stale `evHash` for ever.
+function onChunkFault(room, p) {
+  const rec = chunksOf(room).peek(p);
+  if (rec.blob) return rehydrateChunk(room, p);
+  if (rec.gen) { chunksOf(room).evicted[p] = 0; rec.gen = 0; return true; }
+  return false;
+}
+// "Make sure this chunk is really here", for callers that are about to read it out. Blob → decode; dropped as
+// pristine → touch one cell, which faults the page and runs the generator.
+function restoreChunk(room, p) {
+  const rec = chunksOf(room).peek(p);
+  if (rec.blob) return rehydrateChunk(room, p);
+  if (!rec.gen) return false;
+  const s = roomCells.get(room); if (!s || !s.terrain) return false;
+  const g = worldGeom(room);
+  s.terrain.g((((p / g.cx) | 0) * CHUNK_SIDE) * g.cols + (p % g.cx) * CHUNK_SIDE);
+  return true;
 }
 function rehydrateChunk(room, p) {
   const s = roomCells.get(room); if (!s) return false;
@@ -3733,7 +3793,7 @@ function sendChunkContent(sock, room, chunks) {
   // ⚠️ `drainGenLiquid` is safe HERE and not everywhere: every caller of this function is a socket handler or
   // the beacon path, never the liquid tick. Checked, not assumed.
   for (const p of chunks) {
-    rehydrateChunk(room, p);   // a chunk we are about to READ OUT must not be sitting in a blob
+    restoreChunk(room, p);     // a chunk we are about to READ OUT must not be in a blob NOR dropped-as-pristine
     if (_genRooms.size) s.terrain.g(((((p / geom.cx) | 0) * CHUNK_SIDE) * geom.cols) + (p % geom.cx) * CHUNK_SIDE);
   }
   drainGenLiquid();
@@ -4188,6 +4248,12 @@ function cfgWire() {
     relayOn: !!relayCfg.on, relayHz: relayCfg.hz, relayCap: relayCfg.cap,
     relayFarHz: relayCfg.farHz, relayFarCap: relayCfg.farCap,
     worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand,
+    worldDropPristine: !!worldCfg.dropPristine,
+    // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
+    // thing actually FIRED rather than inferring it from an outcome. The panel's sync loop skips any key it has
+    // no control for, so these are invisible there. Same reasoning as liqRateSkips and liqK2Throttles: this
+    // track has been bitten three times by a check that measured a result instead of a mechanism.
+    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, dropped: genChunksDropped },
   });
 }
 
@@ -5103,6 +5169,9 @@ function generateWorld(avatarRoom, seed, band) {
 const worldCfg = {
   chunked: 0,          // 0 = generateWorld (shipping) · 1 = worldgen.js. Applies to worlds generated from now on.
   onDemand: 0,         // 4b: with `chunked`, do not build the world at all — produce each chunk when it is first read.
+  dropPristine: 1,     // 4c: evict an UNCHANGED chunk to nothing at all rather than storing a blob of it.
+                       // ⚠️ Defaults ON because it only ever applies to rooms `onDemand` produced, which itself ships OFF —
+                       // and where it applies, NOT doing it is measurably worse than doing it (the blob is 1.93x the pages).
 };
 const _roomGens = new Map();                          // avatarRoom → the generator for its seed+shape, built once
 // Everything worldgen.js needs to know about a room, gathered in one place so there is one definition of
@@ -5168,12 +5237,11 @@ const _genRooms = new Map();                          // avatarRoom → generato
 // seed functions, but one call to `fillPage` produces both — so whichever faults first fills the pair and the
 // other reads it back, halving the cost instead of generating the same chunk twice.
 const _genMemo = { room: null, p: -1, gen: null, t: new Uint8Array(CHUNK_CELLS), h: new Uint8Array(CHUNK_CELLS) };
+// A room key is a URL, so the separator has to be something a URL cannot contain. Written as an ESCAPE, not
+// as a literal: a raw NUL byte in the source makes grep treat index.js as a binary file, which quietly breaks
+// every text search over the server.
+const GEN_SEP = '\u0000';
 const _genPending = new Set();                        // "room page" — produced, liquid not yet seeded (see below)
-// Mechanism counters — the guard asserts on THESE rather than on a wall clock, which is a lesson this track has
-// now learned twice (liqRateSkips, liqK2Throttles). ⚠️ Declared ABOVE every use: both writers sit inside
-// function bodies so call-time evaluation would be safe anyway, but `PAGE_DIMS` and `rpOn` both taught this
-// track that a `let` below its reader is a trap worth simply not setting.
-let genLiquidSeeded = 0, genPagesProduced = 0;
 function genSeedFn(field, room) {
   return function (page, p, geom) {
     const g = _genRooms.get(room); if (!g) return;
@@ -5188,9 +5256,41 @@ function genSeedFn(field, room) {
     // then lets `rehydrateChunk` decode the blob over the top — and re-seeding liquid from the regenerated
     // terrain afterwards would resurrect a lake that had since drained, clobbering the restored state.
     // `evicted[p]` is precisely the "this is a restore, not a birth" flag.
-    if (!chunksOf(room).evicted[p]) _genPending.add(room + ' ' + p);
+    if (!chunksOf(room).evicted[p]) _genPending.add(room + GEN_SEP + p);
+    noteGenRev(room, p);
   };
 }
+// Record what "untouched" looks like for this chunk, so eviction can tell later. Whichever of the two seeders
+// runs second overwrites the first's reading, which is what we want: the pair has to be read at one moment, or
+// a write landing between them would be invisible.
+function noteGenRev(room, p) {
+  const s = roomCells.get(room); if (!s || !s.terrain) return;
+  const rec = chunksOf(room).at(p);
+  rec.genRev = { t: s.terrain.revAt(p), h: s.terrainHp ? s.terrainHp.revAt(p) : 0 };
+}
+// ⭐⭐ INCREMENT 4c — IS THIS CHUNK STILL EXACTLY WHAT THE GENERATOR WOULD PRODUCE?
+// O(1), and that is the point: the alternative is regenerating the chunk and comparing 8KB on every eviction
+// candidate, which the residency sweep would pay for tens of chunks at a time. Only `wp()` bumps a page
+// revision, and on-demand production goes through `_alloc` from a READ, which does not — so "nobody has
+// written here since it was produced" is two number comparisons.
+// ⚠️ DELIBERATELY CONSERVATIVE: a write that happened to restore the original value still bumps a revision, so
+// the chunk is treated as edited and stored. Calling a chunk somebody has built in "pristine" would DELETE
+// THEIR WORK, so this test may only ever err towards keeping things.
+// ⚠️ LIQUID COUNTS AS AN EDIT. A generated lake that has since flowed, drained or reacted is not reproducible
+// from the seed, and regenerating it would resurrect water that is no longer there. Any live liquid page in the
+// chunk therefore disqualifies it — which still leaves the great majority of a world (dry ground) droppable.
+function chunkIsPristine(room, p) {
+  if (!_genRooms.has(room)) return false;
+  const s = roomCells.get(room); if (!s || !s.terrain) return false;
+  const gr = chunksOf(room).peek(p).genRev;
+  if (!gr) return false;                                   // never produced by the generator ⇒ not ours to drop
+  if (s.terrain.revAt(p) !== gr.t) return false;
+  if (s.terrainHp && s.terrainHp.revAt(p) !== gr.h) return false;
+  for (const f of ['fineAmt', 'fineTotal']) if (s[f] && s[f].pageAt(p)) return false;
+  return true;
+}
+// The hook evictChunk actually calls, wired up here where both halves are in scope.
+chunkDroppable = (room, p) => !!worldCfg.dropPristine && chunkIsPristine(room, p);
 // Attach (or remove) the seeders for a room. Idempotent, and safe to call after the fields already exist —
 // which matters because `ensureTerrain` may have run long before anybody decided this room was generated.
 function setRoomGenerator(room, gen) {
@@ -5233,7 +5333,7 @@ drainGenLiquid = function () {
   const batch = Array.from(_genPending); _genPending.clear();
   let n = 0;
   for (const key of batch) {
-    const cut = key.lastIndexOf(' ');
+    const cut = key.lastIndexOf(GEN_SEP);
     const room = key.slice(0, cut), p = +key.slice(cut + 1);
     if (!roomCells.has(room)) continue;
     n += seedGenChunkLiquid(room, p) || 0;
@@ -6044,6 +6144,7 @@ io.on('connection', (socket) => {
     // single chunk, which is the entire reason increment 4 exists. Ticking this alone must therefore not look
     // like it did something, so it turns the generator on too.
     if ('worldOnDemand' in patch) { worldCfg.onDemand = patch.worldOnDemand ? 1 : 0; if (worldCfg.onDemand) worldCfg.chunked = 1; }
+    if ('worldDropPristine' in patch) worldCfg.dropPristine = patch.worldDropPristine ? 1 : 0;
     // ── and the button that makes the switch testable: rebuild THIS room's world with the current generator.
     // ⭐ Why a rebuild in place rather than "go and visit a different page": the seed is keyed on the URL, so a
     // different page is a different world, and comparing two different worlds tells you nothing. Rebuilt in
