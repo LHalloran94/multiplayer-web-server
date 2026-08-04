@@ -5564,7 +5564,25 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   // attached to — `setRoomGenerator` is idempotent and can attach to fields made earlier, but there is no
   // reason to rely on that here.
   if (worldCfg.chunked && worldCfg.onDemand) {
-    ensureTerrain(avatarRoom); ensureTerrainHp(avatarRoom);
+    const _t = ensureTerrain(avatarRoom), _h = ensureTerrainHp(avatarRoom);
+    // 🟥 A REBUILD HAS TO EMPTY THE WORLD FIRST, AND THIS BRANCH DID NOT. On a FRESH room there is nothing to
+    // clear, so the omission was invisible — but the Rebuild button runs this same function on a room that
+    // already has a world in it, and on-demand production only fires for pages that DO NOT EXIST. Worse, the
+    // regen handler calls `materializeRoom` immediately before this to "start from a fully resident world",
+    // which guarantees every page exists. So rebuild left the old world byte for byte and produced new ground
+    // ONLY in the empty sky above it, where no page had ever been allocated — and since the two generators put
+    // the surface at different heights, that arrived as slabs of new terrain floating over the old world with
+    // chunk-boundary edges. Reported from play as "it doesn't actually rebuild, it just adds these new
+    // disconnected chunks above the surface, and the speckling all still exists".
+    // ⚠️ The LIQUID has to go too. Terrain is regenerated from the seed but liquid is not — leaving the fine
+    // arrays populated would float the old world's lakes in the new world's sky.
+    _t.fill(0); _h.fill(0);
+    const _st = cellsOf(avatarRoom);
+    if (_st.fineAmt) _st.fineAmt.fill(0);
+    if (_st.fineTotal) _st.fineTotal.fill(0);
+    if (_st.fineActive) _st.fineActive.clear();
+    if (_st.powderActive) _st.powderActive.clear();
+    clearLiquidSources(avatarRoom);
     setRoomGenerator(avatarRoom, genFor(avatarRoom, _seed, _band));
     return;
   }

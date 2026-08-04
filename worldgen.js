@@ -296,6 +296,10 @@ function makeGen(cfg) {
   const POOL_MAX = Math.round(4 * G * 2.6);                   // the deepest any biome fills — sets the column overlap
   const ICE_SHEET = Math.round(2.5 * G);                      // how thick the frozen lid on a polar sea is
   const HEAD = Math.round(2.5 * G);                           // ceiling clearance a cell needs before it floods
+  // Solid rows at the very bottom of the world — see the note in `solidAt`. Deep enough that a player digging
+  // into it still meets ground rather than the drawn floor band immediately.
+  const BEDROCK = Math.max(2, Math.round(1.5 * G));
+  const bedrockTop = Math.max(1, bottomRow - BEDROCK + 1);
   const strTab = cfg.strength || DEF_STRENGTH;
   const strengthOf = (v) => strTab[v] || 1;
 
@@ -823,6 +827,17 @@ function makeGen(cfg) {
   const solidAt = (c, rr, ci) => {
     const s = ci.s;
     if (rr < 0 || rr > bottomRow) return 0;
+    // ⭐⭐ THE WORLD'S FLOOR IS REAL GROUND NOW, and this is a fix rather than decoration.
+    // "Bedrock" in this codebase was never a material: it is a RULE (`LIQUID_FLOOR_ROW` — liquid may not descend
+    // past it) plus a band the client DRAWS from `FLOOR_TOP` downward. The generator's deepest row sits one row
+    // above that band, so the bottom of the world was open ground held up by a rule — and the pool rule treats
+    // "past the bottom of the world" as solid, so it filled that row wherever the biome was wet.
+    // 🟥 MEASURED on seed 42: 626 of 1920 columns had LAVA in the very bottom row. That is a world-spanning
+    // sheet at slightly different heights, and this sim is recorded as taking >100s to level a HALF-SCREEN
+    // spill — so it never settles, stays permanently active, and everything else queues behind it.
+    // ⚠️ Returned BEFORE anything can carve or flood it: caves, the volcano conduit, deep halls and the pool
+    // rule all run below this line, and any one of them punching through the floor puts the hole back.
+    if (rr >= bedrockTop) return MAT.STONE;
     // A floating island is the one thing that exists ABOVE the ground line, so it is tested before the sky
     // early-out — and before the sea fill, so an island in a low-lying stretch stands proud of the water
     // rather than being submerged by it.
