@@ -214,11 +214,15 @@ const BIOMES = [
     caves: { w: 0.048, w2: 0.036, t: 0.78 }, climateBias: -0.1 },
   { key: 'shale',    name: 'Oil Shale',      at: [0.72, 0.62, 0.74], mat: MAT.STONE, patch: { mat: MAT.EARTH, freq: 0.045, t: 0.68 }, fluid: MAT.OIL, wet: 0.85, poolMul: 2.2,
     caves: { w: 0.056, w2: 0.044, t: 0.7 }, climateBias: -0.25 },
-  { key: 'acid',     name: 'Acid Wastes',    at: [0.64, 0.56, 0.88], mat: MAT.STONE, patch: { mat: MAT.GLASS, freq: 0.042, t: 0.70 }, fluid: MAT.ACID, wet: 0.80, poolMul: 1.8,
+  { key: 'acid',     name: 'Acid Wastes',    at: [0.64, 0.56, 0.88], mat: MAT.STONE, patch: null, fluid: MAT.ACID, wet: 0.80, poolMul: 1.8,
     caves: { w: 0.056, w2: 0.044, t: 0.72 }, climateBias: -0.3 },
   { key: 'deepice',  name: 'Deep Ice',       at: [0.76, 0.06, 0.40], mat: MAT.ICE, patch: { mat: MAT.STONE, freq: 0.032, t: 0.58 }, fluid: MAT.BRINE, wet: 0.20,
     caves: { w: 0.05, w2: 0.038, t: 0.76 }, climateBias: 0.8 },
-  { key: 'glass',    name: 'Glassfields',    at: [0.80, 0.82, 0.24], mat: MAT.STONE, patch: { mat: MAT.GLASS, freq: 0.036, t: 0.62 }, fluid: MAT.LAVA, wet: 0.30, poolMul: 1.6,
+  // ⭐ GLASS IS NOT GENERATED — IT IS EARNED. Glassfields used to BE a glass patch; now it is the raw ingredients,
+  // sand shot through with stone, sitting on lava. Lava fusing sand into glass is an existing reaction, so the
+  // biome still becomes glassfields — but at runtime, in the shape the lava actually took, rather than in a shape
+  // a noise field decided in advance. (Same reasoning that took generated MUD out: mud is a reaction product.)
+  { key: 'glass',    name: 'Glassfields',    at: [0.80, 0.82, 0.24], mat: MAT.SAND, patch: { mat: MAT.STONE, freq: 0.036, t: 0.62 }, fluid: MAT.LAVA, wet: 0.30, poolMul: 1.6,
     caves: { w: 0.056, w2: 0.044, t: 0.68 }, climateBias: -0.7 },
   // ---- the floor ----------------------------------------------------------------------------------------------
   { key: 'molten',   name: 'Molten Depths',  at: [0.99, 0.99, 0.55], mat: MAT.STONE, patch: null, fluid: MAT.LAVA, wet: 0.85, poolMul: 2.6, floor: true,
@@ -1031,7 +1035,9 @@ function makeGen(cfg) {
 // ⚠️ 1 -> 2: THE CONTENT REDESIGN (2026-08-04). Nothing about this world is the previous one — different
 // surface, different caves, different regions, different materials. Every diff stored against version 1 is now
 // correctly refused.
-const WORLDGEN_VERSION = 2;
+// ⚠️ 2 -> 3: GLASS STOPPED BEING GENERATED (2026-08-05). Two biomes' patch material changed and Glassfields'
+// matrix went stone -> sand, so the ground under any stored diff in those biomes is different rock.
+const WORLDGEN_VERSION = 3;
 
 module.exports = { makeGen, recipeFor, mulberry32, h, vn1, vn2, fbm1, fbm2, wave1, wave2, ridge1, isFluid,
   SALT, MAT, SB, BIOMES, SURFACE, MOLTEN, CHUNK_SIDE, WORLDGEN_VERSION };
