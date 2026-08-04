@@ -876,6 +876,17 @@ function makeGen(cfg) {
     const s = ci.s, lake = s > seaRow;
     for (let lr = 0; lr < rN; lr++) {
       const rr = r0 + lr, j = HEAD + lr;
+      // 🟥🟥 NOTHING EXISTS BELOW THE WORLD'S LAST ROW, ASSERTED HERE RATHER THAN TRUSTED.
+      // `solidAt` already returns 0 past `bottomRow`, but the POOL rule does not go through it: it ends with
+      // `rr + k > bottomRow || at(j + k)` — "past the bottom of the world counts as solid" — which for a cell
+      // that is ITSELF below the bottom is true on the first probe. So every dead row under the world flooded,
+      // except where the headroom test happened to see solid ground within HEAD rows above.
+      // MEASURED: exactly 1,920 liquid cells at row 404 of a 405-row world — one per column, every column —
+      // sitting 8 rows BELOW the floor band the client draws, which is the reported "lava beneath the bedrock",
+      // and a full-width row of permanently active lava, which is the reported lag at the bottom of the screen.
+      // ⚠️ Fixed at the OUTPUT rather than in the pool rule, deliberately: this is the one place every rule's
+      // result passes through, so any future rule that leaks past the floor is caught here too.
+      if (rr > bottomRow) { out[lr] = 0; continue; }
       let v = scratch[j];
       if (!v) {
         // ⭐ ARCTIC ICE SHEET: in cold country the sea has a lid on it rather than an open surface, so you can
@@ -901,6 +912,7 @@ function makeGen(cfg) {
   // path with no slow twin to check it against is a fast path nobody can prove.
   function matAt(c, rr) {
     if (c < genC0 || c > genC1 || c < 0 || c >= cols || rr < 0 || rr >= rows) return 0;
+    if (rr > bottomRow) return 0;                          // see the note in fillColumn — the pool rule leaks past it
     const ci = colInfo(c), s = ci.s;
     const v = solidAt(c, rr, ci); if (v) return v;
     if (s > seaRow && rr >= seaRow && rr < s) return (ci.sB === SB.SNOW && rr < seaRow + ICE_SHEET) ? MAT.ICE : MAT.WATER;
