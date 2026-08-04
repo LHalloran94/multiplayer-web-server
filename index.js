@@ -1981,7 +1981,7 @@ function decodeChunk(s, p, blob) {
 // three thousand lines above where the other two were declared. Every writer is inside a function body so
 // call-time evaluation was safe either way, but `PAGE_DIMS` and `rpOn` both taught this track that a `let`
 // below its reader is a trap not worth setting.
-let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0, genChunksDeltad = 0;
+let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0, genChunksDeltad = 0, genPowderSeeded = 0;
 // ⭐ INCREMENT 4c/4d, ON THE SAME SEAM `wireFanout` AND `drainGenLiquid` USE, FOR THE SAME REASON.
 // `evictChunk` lives inside the block the probe rigs slice into a `new Function`, and diffing a chunk against
 // the generator needs `worldCfg` and the generator registry, both defined three thousand lines away and
@@ -2795,6 +2795,28 @@ function seedLiquidActivity(room) {
   });
   grid.scan((i, _o, page) => { if (page[_o] === 9) seedSoilAround(room, grid, i); });   // pre-generated lakes absorb just like poured water (no special-casing)
   if (!act.size) dropFineActive(room);
+}
+// ⭐ AND THE SAME FOR POWDER (user, 2026-08-05): *"powders should not be static upon generation and should
+// rather fall and settle as they would once disturbed"*. Generated sand and snow used to sit exactly where the
+// noise put it — including in mid-air and on slopes far past the 45° angle of repose — until a player happened
+// to dig near it, at which point a hillside would collapse for no visible reason. Seeding them here means the
+// world arrives at rest, and the pre-settle loop below does the settling silently before anyone can see it.
+// ⚠️ ONLY GRAINS THAT COULD ACTUALLY MOVE. `powderTickRoom` drops a grain from the active set the moment it
+// finds it supported, so seeding everything is CORRECT but makes the first tick walk every grain in the world —
+// and a desert world is nothing but grains. A grain with something solid directly beneath it is already at rest;
+// the ones worth waking are those over air or over liquid (which they sink through).
+function seedPowderActivity(room) {
+  const s = cellsOf(room), grid = s.terrain; if (!grid) return;
+  const ROWS = grid.geom.rows;
+  const set = powderSet(room);
+  grid.scan((i, _o, page) => {
+    if (!isPowderId(page[_o])) return;
+    if ((i % ROWS) + 1 >= ROWS) return;                 // resting on the bottom row of the world
+    const below = grid.g(i + 1);                        // column-major: +1 is the cell BELOW
+    if (!below || isFluidId(below)) set.add(i);
+  });
+  genPowderSeeded += set.size;
+  if (!set.size) dropPowderSet(room);
 }
 // Join replay: the full multi-liquid state as a flat list (same mask encoding as the live liquid-cells wire, side 0) for
 // every cell that holds liquid. (Per-cell, not RLE — fine for the ~2k fluid cells a generated world has.)
@@ -4400,7 +4422,7 @@ function cfgWire() {
     // thing actually FIRED rather than inferring it from an outcome. The panel's sync loop skips any key it has
     // no control for, so these are invisible there. Same reasoning as liqRateSkips and liqK2Throttles: this
     // track has been bitten three times by a check that measured a result instead of a mechanism.
-    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, dropped: genChunksDropped, deltad: genChunksDeltad },
+    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, powderSeeded: genPowderSeeded, dropped: genChunksDropped, deltad: genChunksDeltad },
   });
 }
 
@@ -5458,8 +5480,22 @@ function seedGenChunkLiquid(room, p) {
   let n = 0;
   for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
     for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
-      const v = page[lr * CHUNK_SIDE + lc]; if (!isFluidId(v)) continue;
+      const v = page[lr * CHUNK_SIDE + lc];
       const i = (c0 + lc) * geom.rows + r0 + lr;
+      // ⭐ POWDER RIDES THE SAME DEFERRED PASS, and for the same reason rather than for convenience: the powder
+      // active set is a Set that `powderTickRoom` iterates, so writing to it from inside a page fault is the
+      // identical re-entrancy hazard that put liquid seeding here (probe_worldgen F7).
+      // ⚠️ `grid.g(i + 1)` may fault the chunk BELOW this one. That is bounded and intended — a grain at the
+      // bottom edge of a chunk genuinely needs to know whether there is ground under it, and producing one
+      // neighbour is what the pool rule's column overlap already costs on the generator side.
+      if (isPowderId(v)) {
+        if ((i % geom.rows) + 1 < geom.rows) {
+          const below = s.terrain.g(i + 1);
+          if (!below || isFluidId(below)) powderSet(room).add(i);
+        }
+        continue;
+      }
+      if (!isFluidId(v)) continue;
       amt.wp(i)[amt.o(i) + LIQ_RANK[v]] = LIQUID_MAX; tot.s(i, LIQUID_MAX);
       if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
       n++;
@@ -5534,6 +5570,7 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   }
   if (worldCfg.chunked) generateWorldChunked(avatarRoom, _seed, _band); else generateWorld(avatarRoom, _seed, _band);
   seedLiquidActivity(avatarRoom);                    // give generated liquid its fill levels, then…
+  seedPowderActivity(avatarRoom);                    // …and wake the sand and snow that is not resting on anything
   liquidQuiet = true;                                // …pre-settle it silently so joiners see it already at rest (no on-load sloshing / broadcast storm)
   // ⭐⭐ THE PRE-SETTLE HAD SILENTLY STOPPED HAPPENING. This loop tested the COARSE active set, but `seedLiquidActivity`
   // ends by calling `upscaleRoomToFine`, which hands the generated lakes to the fine grid and CLEARS
@@ -5558,12 +5595,19 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
     const _st = cellsOf(avatarRoom);
     const fact = _st.fineActive;
     const seeded = _st.fineReact, burning = _st.fineFire;
-    if (!(fact && fact.size) && !(seeded && seeded.size) && !(burning && burning.size)) break;
+    // ⚠️ POWDER IS PART OF THE REST CONDITION NOW, not just part of the work. Without `pact` in this test the
+    // loop breaks as soon as the LIQUID settles and leaves the sand mid-collapse — which is worse than never
+    // having woken it, because the collapse then happens in front of the first player to arrive.
+    const pact = _st.powderActive;
+    if (!(fact && fact.size) && !(seeded && seeded.size) && !(burning && burning.size) && !(pact && pact.size)) break;
     liquidTickCount++;
     const SUB = _st.fineSub || 1;
     if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
     fineLiquidTickRoom(avatarRoom, SUB);
     if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
+    // Powder runs in lockstep with liquid in the live tick (same gravity), so it does here too — otherwise a
+    // grain sinking through water settles at a different rate before a joiner sees it than after.
+    if (pact && pact.size) { powderTickCount++; powderTickRoom(avatarRoom); }
   }
   // (There used to be a pass here putting still-airborne DROPLETS back into the grid, so the cap could not leave water
   // falling on the first joiner. It went with the droplet cascade — nothing is ever in flight outside the grid now.)
