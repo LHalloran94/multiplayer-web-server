@@ -2213,9 +2213,16 @@ function cellView(field) {
 // ⚠️ INERT TODAY: nothing places anything, because `overworldRooms` is empty and the Overworld cannot be entered.
 // The registry is in memory and does not survive a restart — deliberate, and fine while the Overworld does not
 // either. When it needs to persist it is one table (identity, col, sep) and `domains.all()` is the dump.
-// ⚠️ 30,720 px = one page-world of neighbourhood plus one of wilderness, which is §3's own sense of generous.
-// It is a DEFAULT, not a decision: `place()` takes a per-site separation and honours the larger of any pair.
-const domainCfg = { spacingPx: 30720 };
+// ⚠️ THE BASE SEPARATION CAME DOWN FROM 30,720 px TO 10,240 px, AND IT WAS A MEASUREMENT THAT MOVED IT.
+// 30,720 (one page-world of neighbourhood plus one of wilderness) is what §3 called generous, but the curated
+// head of the internet is ~89 sites averaging weight 1.6, and at 30,720 each that demands ~4.4M px against a
+// world 4.19M px wide. The categories overflowed into one another and the layout came out shuffled — social
+// between reference and news — which is how it was found.
+// ⭐ It is a BASE, not a flat rule: a site's radius is `spacing × weight`, so the giants still get 30,720 px
+// (weight 3) while an ordinary site starts at 10,240. That is the user's own model — a high-traffic site starts
+// with a bigger radius, meaning more room to scatter its arrivals, NOT a bigger claim on land. Territory is
+// still never granted; it grows from activity.
+const domainCfg = { spacingPx: 10240 };
 const domains = DOMAINS.makeDomains({
   cols: OVERWORLD_DIMS.cols, rows: OVERWORLD_DIMS.rows, cell: TERRAIN_CELL, spacingPx: domainCfg.spacingPx,
 });
