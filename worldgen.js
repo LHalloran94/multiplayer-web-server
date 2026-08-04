@@ -589,11 +589,14 @@ function makeGen(cfg) {
   //  ⭐ CONNECTIVITY IS A PERCOLATION TRANSITION, NOT A DIAL (measured, `worldgen_passability.js`): below a
   //  width threshold the underground is isolated pockets, above it one system, and crossing it costs roughly a
   //  DOUBLING of carved volume (24% -> 40% air, which looks like swiss cheese). We sit deliberately below it.
-  //  ⚠️ The principled fix is LATTICE-ANCHORED SHAFTS — a guaranteed passage every N columns — not hollowing.
-  //  The anisotropic SHAFT field below was the unprincipled version: at usable widths it draws a curtain of
-  //  near-vertical slots across the whole world. It ships OFF with the code left in place.
+  //  🟥 AND WE DO NOT TRY TO CROSS IT. Two attempts at a dedicated vertical passage have now been rejected — an
+  //  anisotropic noise field (a curtain of near-vertical slots across the whole world) and a lattice-anchored
+  //  shaft (unnatural, and a second mechanism papering over a fault in the first: the caves were already
+  //  running up to the ground and an entrance fade was pinching them shut, see CAVE MOUTHS). Both are deleted
+  //  rather than left switched off, because dead code that describes itself as the right idea is a trap.
+  //  ⭐ The answer the user gave instead: **terrain is destructible, so "unreachable" means "you have to mine",
+  //  and not everything should be reachable.** The way in is a real cave mouth, and beyond that a pickaxe.
   const SPF = 0.028 / G, SP2F = 0.015 / G, CHF = 0.030 / G;
-  const SHF_X = 0.034 / G, SHF_Y = 0.013 / G, SHAFT_W = 0;
   const caveAt = (c, rr, top, s, fade, bi) => {
     const B = BIOMES[bi === undefined ? regionPick(c, rr, s) : bi];
     const cv = B.caves, boost = B.caveBoost || 1;
@@ -603,7 +606,9 @@ function makeGen(cfg) {
       y += (fbm2(seed, SALT.WARPY, c * 0.010 / G, rr * 0.010 / G, 2) - 0.5) * WARP * G;
     }
     const depth = (rr - top) / Math.max(1, bottomRow - top);
-    const f = fade == null ? 1 : fade;                        // < 1 near the surface: only strong tunnels break out
+    // ⚠️ `fade` is now always 1 from `solidAt` — the entrance fade is gone (see CAVE MOUTHS). The parameter is
+    // kept because the sweep harnesses drive it, and because a future "this biome's tunnels taper" would use it.
+    const f = fade == null ? 1 : fade;
     // ⭐ WIDTH IS MODULATED, not uniform. A single width makes every tunnel the same size, and raising it to get
     // the occasional big cavern makes EVERY cavern big. The field is a slow 2D one cubed, so it sits low almost
     // everywhere and only rarely swings high: most of the world is tight passages, and the wide galleries are
@@ -612,7 +617,6 @@ function makeGen(cfg) {
     const g = boost * f * CMUL * wm * (1 + depth * 0.35);
     if (Math.abs(2 * fbm2(seed, SALT.SPAG, x * SPF, y * SPF, 2) - 1) < cv.w * g) return true;
     if (Math.abs(2 * fbm2(seed, SALT.SPAG2, x * SP2F, y * SP2F, 2) - 1) < cv.w2 * g) return true;
-    if (SHAFT_W && Math.abs(2 * fbm2(seed, SALT.SHAFT, x * SHF_X, y * SHF_Y, 2) - 1) < SHAFT_W * f) return true;
     // ⚠️ `boost` moves the chamber threshold ADDITIVELY. Dividing by it (the first version) took t from 0.70 to
     // 0.50 for a 1.4x boost, which is 25% of cells rather than 8% — a lever four times stronger than intended.
     return fbm2(seed, SALT.CHEESE, x * CHF, y * CHF, 3) > cv.t + 0.04 - (wm - 1) * 0.10 - (boost - 1) * 0.06 - depth * 0.05 + (1 - f) * 0.12;
@@ -745,54 +749,19 @@ function makeGen(cfg) {
     }
     return out;
   }
-  // ---- LATTICE-ANCHORED SHAFTS: a guaranteed way DOWN, and the principled fix for connectivity.
-  // ⭐⭐ CONNECTIVITY IS A PERCOLATION TRANSITION, NOT A DIAL (measured, `worldgen_passability.js`). Below a cave
-  // width the underground is isolated pockets; above it, one system. Buying the transition by WIDENING every
-  // tunnel costs a doubling of carved volume for very little: measured here, cave width x1.25 carves 2.8x the
-  // air and takes reachable-from-the-surface from 2% to 8.9% in an Overworld domain, while making the world
-  // look like swiss cheese. It is the wrong trade.
-  // ⭐ So add the thing that is actually MISSING — a route DOWN — instead of hollowing everything. One shaft
-  // hangs off every second deep-hall anchor, so a player is never more than ~5 screens from a way underground,
-  // and each shaft ENDS IN A HALL, which is what makes the underground depth band reachable rather than merely
-  // present. Measured: page seed 19 went from 0.0% reachable to 44.8% for 2% more carved air.
-  // ⚠️ An earlier attempt did this with an ANISOTROPIC NOISE FIELD (creases running mostly vertically) and it
-  // was rejected: at usable widths it draws a curtain of near-vertical slots across the entire world. The
-  // difference is that a lattice places a BOUNDED number of them in known places; a field puts one everywhere.
-  const SHAFT_HW = Math.max(3, Math.round(1.1 * G));          // half-width — 7 cells across, player is 5
-  const SHAFT_WANDER = Math.round(18 * G);                    // how far it drifts sideways over its length
-  // A 1D noise with the ANCHOR in the hash's y slot, so every shaft wanders differently without needing its own
-  // salt range. Two hash reads, and only for columns near a shaft — measured at under 1% of generation cost.
-  const shaftNoise = (a, x) => {
-    const xi = Math.floor(x), xf = x - xi, u = xf * xf * (3 - 2 * xf);
-    const p = h(seed, SALT.SHAFT, xi, a), q = h(seed, SALT.SHAFT, xi + 1, a);
-    return p + (q - p) * u;
-  };
-  const shaftOn = (a) => h(seed, SALT.SHAFT + 1, a, 0) < 0.55;
-  function shaftSpanAt(c) {
-    const near = Math.round(c / HALL_STEP), reach = Math.ceil((SHAFT_WANDER + SHAFT_HW) / HALL_STEP) + 1;
-    let out = null;
-    for (let k = -reach; k <= reach; k++) {
-      const a = (near + k) * HALL_STEP;
-      if (Math.abs(c - a) > SHAFT_WANDER + SHAFT_HW + 1) continue;
-      if (!shaftOn(a)) continue;
-      const H = hallAnchorAt(a); if (!H) continue;             // a shaft with nothing at the bottom is a hole
-      (out || (out = [])).push({ a, r0: surfAt(a) - 2, r1: H.cy });
-    }
-    return out;
-  }
-  // ⚠️ `sTop` is THIS column's surface, and the shaft opens at whichever is higher — the anchor's surface or
-  // this column's. Without it a shaft whose anchor sits in a valley would start below the ground on a
-  // neighbouring rise and leave a lid of rock over its own entrance.
-  const inShaft = (sh, c, rr, sTop) => {
-    if (!sh) return false;
-    for (let i = 0; i < sh.length; i++) {
-      const S = sh[i];
-      if (rr > S.r1 || rr < Math.min(S.r0, sTop)) continue;
-      const cx = S.a + (shaftNoise(S.a, rr * 0.010 / G) * 2 - 1) * SHAFT_WANDER;
-      if (Math.abs(c - cx) <= SHAFT_HW) return true;
-    }
-    return false;
-  };
+  // 🟥 LATTICE-ANCHORED SHAFTS WERE BUILT HERE AND REMOVED (user, 2026-08-05): *"the wandering vertical shafts
+  // are not really good, in that they seem unnatural, and moreover, I think that the reason that the underground
+  // seemed unreachable might be because in general basically all of the tunnels seem to stop before breaking
+  // through to the surface, so it probably makes more sense to fix that than to add specific tunnels."*
+  // They were right, and the diagnosis is the important part: a shaft is a SECOND mechanism papering over a
+  // fault in the FIRST one. The caves already ran up to the ground — they were being pinched shut by an
+  // entrance fade a few rows before they got there, so the world had a lid on it and the fix was to take the
+  // lid off, not to drill through it. See `carveTop` / `CAVE_MOUTHS` below.
+  // ⭐ The two things worth keeping from the attempt are written down rather than in code:
+  //   · connectivity cannot be bought by WIDENING — cave width x1.25 carves 2.8x the air to move an Overworld
+  //     domain from 2% to 8.9% reachable, i.e. swiss cheese that still fails;
+  //   · and it does not have to be bought at all. **Terrain is destructible, so "unreachable" means "you have
+  //     to mine", and not everything should be reachable** (user, same message).
 
   const inSpan = (spans, rr) => { if (!spans) return false; for (let i = 0; i < spans.length; i++) if (rr >= spans[i].r0 && rr <= spans[i].r1) return true; return false; };
   const isleMatAt = (spans, rr) => {
@@ -803,17 +772,50 @@ function makeGen(cfg) {
   };
 
   // ---- the per-column pieces the fill loops share -------------------------------------------------------------
-  // ⭐ CAVE ENTRANCES. Caves used to start strictly BELOW the crust, so every tunnel running up to the surface was
-  // sealed under a lid of earth and the world had no way in. They now carve from the surface down, with the
-  // threshold FADED so only a strong tunnel actually breaks out — otherwise the ground is full of holes.
-  // ⚠️ Not below sea level: an entrance under the sea would want the ocean to pour into it, and whether it does
-  // is a GLOBAL question (which cave connects to which) that a chunk cannot answer alone.
+  // ⭐⭐ CAVE MOUTHS — THE THING THAT MAKES THE UNDERGROUND REACHABLE, AND IT IS A DELETION.
+  //
+  // History, because the shape of the mistake matters. First the caves started strictly BELOW the crust, so
+  // every tunnel that ran up to the ground was sealed under a lid of earth and there was no way in at all
+  // (this is still what the legacy `generateWorld` does, and is exactly what the user described seeing).
+  // Then they were allowed to carve from the surface down, but with the threshold FADED to 0.70 over the top
+  // ~66 rows so that "only a strong tunnel actually breaks out". A ridged tunnel's width is proportional to
+  // its threshold, so a fade does not select strong tunnels — **it narrows every tunnel to nothing exactly
+  // where it would have opened.** The lid was still there, drawn differently. I then built lattice shafts to
+  // drill through the lid I had left in place.
+  //
+  // ⇒ THE FADE IS GONE. On land that is safely above sea level a tunnel keeps its full width right up to the
+  // surface and opens where it opens.
+  //
+  // ⚠️ THE ONE RULE THAT STAYS, AND WHY IT IS AN ELEVATION MARGIN RATHER THAN "NOT UNDERWATER": an opening
+  // below or near the waterline would let the sea pour in and drain, and whether a given cave drains is a
+  // GLOBAL question (which cave connects to which) that a chunk cannot answer alone. So the whole question is
+  // avoided rather than answered — a column only gets mouths if its ground stands SHORE rows clear of sea
+  // level, which also keeps mouths off beaches, where a storm surge of a lake would find them.
+  // Below that, carving still starts under the crust, so coastlines and seabeds keep their lid.
+  //
+  // 🟥 AND DELETING THE FADE WAS NOT ENOUGH — MEASURED, WHICH IS THE ONLY REASON I FOUND OUT. With the fade
+  // gone, a page world still had **one 2-column mouth** in it (seed 19), because the width profile narrows
+  // toward the surface for two independent reasons that had nothing to do with the fade:
+  //   · `g` carries `(1 + depth * 0.35)`, so a tunnel at the surface is 26% narrower than the same tunnel at
+  //     the floor — caves are *designed* to open out with depth;
+  //   · the width-modulation field is a cube, so it sits near its floor (~0.52) almost everywhere.
+  // A tunnel two cells wide is not a mouth: the player is five cells.
+  // ⭐ So the entrance band gets a FLARE — the exact opposite of the fade, and the physically right one, since
+  // weathering widens a cave mouth rather than pinching it. Full strength at the ground line, tapering to
+  // nothing by `entr` rows down, so it makes doorways without hollowing the crust.
+  const MOUTH_GAIN = 2.2;
+  const SHORE = Math.round(4 * G);
   const colInfo = (c) => {
     const s = surfAt(c), sB = sbAt(c), crust = crustDepthAt(c, s);
     const drySurface = s <= seaRow;
-    return { s, sB, crust, top: s + crust + 1, vent: volcVentAt(c), drySurface,
-      carveTop: drySurface ? s + 1 : s + crust + 1, entr: crust + Math.round(18 * G),
-      isle: isleSpanAt(c), hall: hallSpanAt(c), shaft: shaftSpanAt(c) };
+    const openable = s <= seaRow - SHORE;
+    // 🟥 `s + crust + 1` IS NOT "BELOW THE CRUST", and C10 caught it. In the overhang band the ground starts at
+    // `s + surfDisp`, which can be OVH rows LOWER than `s` — so the crust sits lower too, and carving from
+    // `s + crust + 1` cuts straight through it. On a seabed that is a hole in the ocean floor. The seal has to
+    // clear the deepest the displaced crust can reach, which is `s + OVH + crust`.
+    return { s, sB, crust, top: s + crust + 1, vent: volcVentAt(c), drySurface, openable,
+      carveTop: openable ? s + 1 : s + OVH + crust + 1, entr: crust + Math.round(10 * G),
+      isle: isleSpanAt(c), hall: hallSpanAt(c) };
   };
   // The solid (post-carve) material at one cell of a column whose per-column values are already in hand.
   // ⚠️ The region is looked up ONCE here and handed to both `baseAt` and `caveAt`. They used to look it up
@@ -828,12 +830,12 @@ function makeGen(cfg) {
     if (rr < s - OVH) return 0;                              // sky — nothing below can reach up here
     const bi = (rr >= s + ci.crust) ? regionPick(c, rr, s) : undefined;
     let v = baseAt(c, rr, s, ci.sB, ci.crust, bi);
+    // The entrance FLARE — see CAVE MOUTHS above. > 1 near the ground line on land that may open, 1 elsewhere.
     const d = rr - s;
-    const fade = (!ci.drySurface || d >= ci.entr) ? 1 : 0.70 + 0.30 * Math.max(0, d) / ci.entr;
-    if (v && rr >= ci.carveTop && caveAt(c, rr, ci.top, s, fade, bi)) v = 0;
+    const flare = (!ci.openable || d >= ci.entr) ? 1 : 1 + (MOUTH_GAIN - 1) * (1 - Math.max(0, d) / ci.entr);
+    if (v && rr >= ci.carveTop && caveAt(c, rr, ci.top, s, flare, bi)) v = 0;
     if (ci.vent && rr >= s + 2) v = MAT.LAVA;                // the volcano conduit, straight through everything
     if (v && ci.hall && rr > ci.top && inSpan(ci.hall, rr)) v = 0;   // a deep hall is carved out of everything
-    if (v && ci.shaft && inShaft(ci.shaft, c, rr, s)) v = 0;         // ...and so is the shaft that reaches it
     return v;
   };
 
@@ -990,11 +992,7 @@ function makeGen(cfg) {
     POOL_DEPTH, POOL_MAX, HEAD, ICE_SHEET, snowLine, iceLine, BIOMES, SURFACE,
     surfAt, sbAt, sbRawAt, crustDepthAt, baseAt, caveAt, moundAt, poolCfgAt, volcVentAt,
     regionAt, regionPick, climAt, colInfo, solidAt, strengthOf,
-    isleSpanAt, hallSpanAt, shaftSpanAt, bandGroundAt,
-    // The centre column of the shaft hanging off anchor `a` at row `rr` — exposed so a guard can walk a shaft
-    // top to bottom and assert it is actually open, which is the entire reason shafts exist.
-    shaftCentreAt: (a, rr) => a + (shaftNoise(a, rr * 0.010 / G) * 2 - 1) * SHAFT_WANDER,
-    HALL_STEP, SHAFT_HW,
+    isleSpanAt, hallSpanAt, bandGroundAt, HALL_STEP, SHORE, OVH, OVH_BAND, MOUTH_GAIN,
     fillColumn, matAt, fillPage, pageEmpty,
   };
 }
