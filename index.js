@@ -1981,7 +1981,13 @@ function decodeChunk(s, p, blob) {
 // three thousand lines above where the other two were declared. Every writer is inside a function body so
 // call-time evaluation was safe either way, but `PAGE_DIMS` and `rpOn` both taught this track that a `let`
 // below its reader is a trap not worth setting.
-let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0, genChunksDeltad = 0, genPowderSeeded = 0;
+let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0, genChunksDeltad = 0, genPowderSeeded = 0, genPowderRewoken = 0;
+// Same seam as chunkDelta / drainGenLiquid / wireFanout, for the fifth time on this track: `onChunkFault` and
+// `rehydrateChunk` are inside the block the probe rigs slice into a `new Function`, and the pending set this
+// queues into lives with the generator three thousand lines below, outside the slice. A bare call would give a
+// ReferenceError in the rigs and nowhere else. No generator ⇒ no eviction-restore to re-wake ⇒ a no-op is the
+// right answer for the sliced rigs and for every hand-built room.
+let queuePowderReseed = () => {};
 // ⭐ INCREMENT 4c/4d, ON THE SAME SEAM `wireFanout` AND `drainGenLiquid` USE, FOR THE SAME REASON.
 // `evictChunk` lives inside the block the probe rigs slice into a `new Function`, and diffing a chunk against
 // the generator needs `worldCfg` and the generator registry, both defined three thousand lines away and
@@ -2094,7 +2100,7 @@ function materializeRoom(room) {
 function onChunkFault(room, p) {
   const rec = chunksOf(room).peek(p);
   if (rec.blob) return rehydrateChunk(room, p);
-  if (rec.gen) { chunksOf(room).evicted[p] = 0; rec.gen = 0; return true; }
+  if (rec.gen) { chunksOf(room).evicted[p] = 0; rec.gen = 0; queuePowderReseed(room, p); return true; }
   return false;
 }
 // "Make sure this chunk is really here", for callers that are about to read it out. Blob → decode; dropped as
@@ -2130,6 +2136,8 @@ function rehydrateChunk(room, p) {
       const lr = (c / CHUNK_SIDE) | 0, lc = c % CHUNK_SIDE;
       const gr = (p % geom.cy) * CHUNK_SIDE + lr, gc = ((p / geom.cy) | 0) * CHUNK_SIDE + lc;
       if (gr < geom.rows && gc < geom.cols) act.add(gc * geom.rows + gr); } }
+  // ...and so is POWDER, for the same reason and by a different route. See queuePowderReseed.
+  queuePowderReseed(room, p);
   return true;
 }
 // ── HARNESS SEAM ── the probe rigs build scenes by assigning whole arrays per room (`roomTerrain[R] = new
@@ -4422,7 +4430,7 @@ function cfgWire() {
     // thing actually FIRED rather than inferring it from an outcome. The panel's sync loop skips any key it has
     // no control for, so these are invisible there. Same reasoning as liqRateSkips and liqK2Throttles: this
     // track has been bitten three times by a check that measured a result instead of a mechanism.
-    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, powderSeeded: genPowderSeeded, dropped: genChunksDropped, deltad: genChunksDeltad },
+    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, powderSeeded: genPowderSeeded, powderRewoken: genPowderRewoken, dropped: genChunksDropped, deltad: genChunksDeltad },
   });
 }
 
@@ -5503,17 +5511,65 @@ function seedGenChunkLiquid(room, p) {
   if (!n && !act.size) dropFineActive(room);
   return n;
 }
-drainGenLiquid = function () {
-  if (!_genPending.size) return 0;
-  const batch = Array.from(_genPending); _genPending.clear();
+// 🟥 SAND HANGING IN MID-AIR OFF A FLOATING ISLAND. `evictChunk` PRUNES the room's work sets — it deletes every
+// cell of the evicted chunk from `fineActive`, `powderActive` and the rest, which is right: a chunk with no pages
+// must not be simulated, and leaving its cells in the set would fault it straight back in every tick and defeat
+// eviction entirely. The other half of that bargain is that anything still MOVING has to be woken when the chunk
+// comes back — and liquid was (`rehydrateChunk` re-adds every cell in the stored blob's liquid list) while powder
+// was not. So a grain mid-fall in a chunk that left residency was deleted from the active set and never re-added:
+// it froze exactly where it was, in a column, and stayed frozen when you walked back into view. Which is why the
+// report was "it happens off-screen, or on approach" — off-screen is where eviction happens.
+// ⚠️ THE FIX IS NOT "STOP PRUNING". Powder is re-DERIVED instead, because the rule for "this grain can move" is
+// local and cheap — powder rests on whatever is under it, so a scan of the chunk answers it exactly. Liquid is
+// not re-derivable that way, which is why IT is stored and woken rather than recomputed.
+// ⚠️ And it must NOT go through the liquid path: `seedGenChunkLiquid` seeds liquid from what the GENERATOR says
+// should be there, and running that on a restore resurrects a lake somebody drained (the reason `_genPending` is
+// only added on a first production). Powder is safe to re-derive from restored terrain; liquid is not.
+const _powderPending = new Set();
+queuePowderReseed = (room, p) => { _powderPending.add(room + GEN_SEP + p); };
+// The powder half of the deferred pass. Deferred for the SAME re-entrancy reason as liquid, not for tidiness:
+// this writes into the Set `powderTickRoom` iterates, and a page fault can arrive from inside that iteration.
+function reseedChunkPowder(room, p) {
+  const s = peekCells(room); if (!s.terrain) return 0;
+  const page = s.terrain.pageAt(p); if (!page) return 0;    // evicted again before we got here — nothing to wake
+  const geom = worldGeom(room);
+  const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
   let n = 0;
-  for (const key of batch) {
-    const cut = key.lastIndexOf(GEN_SEP);
-    const room = key.slice(0, cut), p = +key.slice(cut + 1);
-    if (!roomCells.has(room)) continue;
-    n += seedGenChunkLiquid(room, p) || 0;
+  for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
+    for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
+      if (!isPowderId(page[lr * CHUNK_SIDE + lc])) continue;
+      const i = (c0 + lc) * geom.rows + r0 + lr;
+      if ((i % geom.rows) + 1 >= geom.rows) continue;        // resting on the bottom row of the world
+      // ⚠️ Same rule as seedPowderActivity: only grains that could ACTUALLY move. A grain with something solid
+      // beneath it is already at rest, and waking every grain in a desert chunk would make the next powder tick
+      // walk all of them. `g(i + 1)` on the bottom row faults the chunk BELOW — bounded, and the same cost the
+      // first-production path already pays.
+      const below = s.terrain.g(i + 1);
+      if (!below || isFluidId(below)) { powderSet(room).add(i); n++; }
+    }
+  return n;
+}
+drainGenLiquid = function () {
+  let n = 0;
+  if (_genPending.size) {
+    const batch = Array.from(_genPending); _genPending.clear();
+    for (const key of batch) {
+      const cut = key.lastIndexOf(GEN_SEP);
+      const room = key.slice(0, cut), p = +key.slice(cut + 1);
+      if (!roomCells.has(room)) continue;
+      n += seedGenChunkLiquid(room, p) || 0;
+    }
+    genLiquidSeeded += n;
   }
-  genLiquidSeeded += n;
+  if (_powderPending.size) {
+    const batch = Array.from(_powderPending); _powderPending.clear();
+    for (const key of batch) {
+      const cut = key.lastIndexOf(GEN_SEP);
+      const room = key.slice(0, cut), p = +key.slice(cut + 1);
+      if (!roomCells.has(room)) continue;
+      genPowderRewoken += reseedChunkPowder(room, p);
+    }
+  }
   return n;
 }
 // True when a built-in terrain material id behaves as a fluid (Water/Quicksand/Lava/Acid/Brine/Oil).
