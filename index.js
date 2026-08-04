@@ -5325,7 +5325,11 @@ const _roomGens = new Map();                          // avatarRoom → the gene
 // "what shape and seed is this world" rather than several that can drift.
 function genCfgFor(avatarRoom, seed, band) {
   const d = roomDims(avatarRoom);
+  // ⭐ `overworld` decides two things and only two: the whole biome catalogue rather than a seeded selection of
+  // two to four of it, and continent-sized horizontal features rather than a page-sized landscape. It is read
+  // from the same `overworldRooms` set `roomDims` uses, so a room's shape and its content agree by construction.
   return { seed, cols: d.cols, rows: d.rows, cell: TERRAIN_CELL, floorTop: FLOOR_TOP,
+    overworld: overworldRooms.has(avatarRoom),
     spawnX: MWSim.C.WORLD_W / 2, spawnHalfW: SPAWN_CLEAR_HALF_W, band, strength: BUILTIN_STRENGTH };
 }
 function genFor(avatarRoom, seed, band) {
