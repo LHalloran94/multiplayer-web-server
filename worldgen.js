@@ -108,30 +108,50 @@ const CHUNK_SIDE = 64;
 //  i.e. a tunnel. That is the whole cave algorithm, and it is the same SHAPE as the sine test it replaced. The
 //  sines were the problem: sum three periodic things and the caves repeat on a schedule, visibly.
 // ==============================================================================================================
-function vn2(seed, salt, x, y) {
+// ⭐⭐ PERIODIC IN X. Every one of these takes a trailing `per` — the number of lattice cells after which the
+// x axis wraps — so the field is sampled on a CIRCLE rather than a line and repeats seamlessly at that period.
+// The world is narrower than one period (see PERIOD_COLS), so nothing reaches the join today; the point is that
+// a horizontal world-wrap can be turned on LATER as a movement rule instead of a regeneration. Player edits are
+// stored as diffs against generated ground, so changing the ground invalidates every one of them — which is
+// what WORLDGEN_VERSION exists to detect, and what doing this now avoids.
+// ⚠️ `per === 0` means "do not wrap" and is the escape hatch for the y axis and for tools, not a default.
+// 🟥 THE WRAP GOES ON THE LATTICE CORNERS, NOT ON THE COLUMN. Folding the column (`c % P`) repeats perfectly and
+// still leaves a HARD SEAM at the join, because the corner before the join and the corner after it are different
+// hashes. Measured (probe_periodic_cost): step across the join 4.6e-1 folded vs 2.4e-4 wrapped, against an
+// ordinary step of 1.1e-2. Wrapping the corners makes the join indistinguishable from anywhere else.
+// ⚠️ The in-range test is a BRANCH, not a mask. A power-of-two period would let it be `& (per-1)` and measured
+// ~3% cheaper, but a power-of-two period forces the FREQUENCY to a power of two over PERIOD_COLS, which moves
+// the generator's tuned frequencies by up to 30%. The branch's frequencies move by at most 0.05%. The rig's
+// run-to-run spread was wider than the gap between the two, so this is chosen on the drift, not on speed.
+const wrapL = (i, per) => (i >= 0 && i < per) ? i : ((i % per) + per) % per;
+function vn2(seed, salt, x, y, per) {
   const xi = Math.floor(x), yi = Math.floor(y);
   const xf = x - xi, yf = y - yi;
   const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
-  const a = h(seed, salt, xi, yi), b = h(seed, salt, xi + 1, yi);
-  const c = h(seed, salt, xi, yi + 1), d = h(seed, salt, xi + 1, yi + 1);
+  const x0 = per ? wrapL(xi, per) : xi, x1 = per ? (x0 + 1 === per ? 0 : x0 + 1) : xi + 1;
+  const a = h(seed, salt, x0, yi), b = h(seed, salt, x1, yi);
+  const c = h(seed, salt, x0, yi + 1), d = h(seed, salt, x1, yi + 1);
   const top = a + (b - a) * u, bot = c + (d - c) * u;
   return top + (bot - top) * v;
 }
-function vn1(seed, salt, x) {
+function vn1(seed, salt, x, per) {
   const xi = Math.floor(x), xf = x - xi;
   const u = xf * xf * (3 - 2 * xf);
-  const a = h(seed, salt, xi, 0), b = h(seed, salt, xi + 1, 0);
+  const x0 = per ? wrapL(xi, per) : xi, x1 = per ? (x0 + 1 === per ? 0 : x0 + 1) : xi + 1;
+  const a = h(seed, salt, x0, 0), b = h(seed, salt, x1, 0);
   return a + (b - a) * u;
 }
 // fBm — octaves at halving amplitude, doubling frequency. Big shapes with fine detail on them.
-function fbm2(seed, salt, x, y, oct) {
+// ⚠️ Octave i samples at x*2^i, so ITS lattice period is per*2^i. Getting that wrong would make the low octave
+// periodic and the high ones not, i.e. a field that is periodic in its shape and not in its detail.
+function fbm2(seed, salt, x, y, oct, per) {
   let f = 1, amp = 1, sum = 0, norm = 0;
-  for (let i = 0; i < oct; i++) { sum += amp * vn2(seed, salt + i * 7, x * f, y * f); norm += amp; f *= 2; amp *= 0.5; }
+  for (let i = 0; i < oct; i++) { sum += amp * vn2(seed, salt + i * 7, x * f, y * f, per * f); norm += amp; f *= 2; amp *= 0.5; }
   return sum / norm;
 }
-function fbm1(seed, salt, x, oct) {
+function fbm1(seed, salt, x, oct, per) {
   let f = 1, amp = 1, sum = 0, norm = 0;
-  for (let i = 0; i < oct; i++) { sum += amp * vn1(seed, salt + i * 7, x * f); norm += amp; f *= 2; amp *= 0.5; }
+  for (let i = 0; i < oct; i++) { sum += amp * vn1(seed, salt + i * 7, x * f, per * f); norm += amp; f *= 2; amp *= 0.5; }
   return sum / norm;
 }
 // 🟥 A BIG SMOOTH SWING IS NOT WHAT fBm GIVES YOU, AND THIS COST FIVE SEPARATE ROUNDS ON THIS TRACK. Averaging
@@ -140,22 +160,54 @@ function fbm1(seed, salt, x, oct) {
 // region field and made overhangs invisible. `wave1` keeps ONE DOMINANT OCTAVE (which spans the full range on
 // its own) and adds a small second one for detail, so +-1 means +-1. Signed, -1..1.
 // ⚠️ Its cousin, hit twice: a frequency so low that a whole small world sits inside ONE lattice cell.
-function wave1(seed, salt, x) {
-  return (vn1(seed, salt, x) * 2 - 1) * 0.78 + (vn1(seed, salt + 7, x * 2.3) * 2 - 1) * 0.22;
+// 🟥 THE DETAIL OCTAVES ARE AT 2.3x AND 2.7x, WHICH ARE NOT INTEGERS, AND THIS BROKE PERIODICITY IN EXACTLY THE
+// WAY THE PROBE WARNS ABOUT ONE LEVEL UP. Rounding the octave's PERIOD to `round(per * 2.3)` while still scaling
+// x by 2.3 means a step of one world period moves x by `per * 2.3` lattice cells — a fractional number — so the
+// detail octave does not land back on the same corner and the field does not repeat. `probe_worldgen` B7 caught
+// it as 204 of 1,920 cells differing a period along; nothing else would have.
+// ⇒ The MULTIPLIER is derived back from the rounded period, exactly as the frequency is derived back from the
+// rounded lattice period in `nfreq`. Same mistake, same fix, one level down. The multiplier moves by <1e-6.
+// ⚠️ `per === 0` means "not wrapped" (tools, y-only callers), and then the literal multipliers stand.
+function wave1(seed, salt, x, per) {
+  const p2 = per ? Math.round(per * 2.3) : 0, m2 = per ? p2 / per : 2.3;
+  return (vn1(seed, salt, x, per) * 2 - 1) * 0.78 + (vn1(seed, salt + 7, x * m2, p2) * 2 - 1) * 0.22;
 }
-function wave2(seed, salt, x, y) {
-  return (vn2(seed, salt, x, y) * 2 - 1) * 0.72 + (vn2(seed, salt + 7, x * 2.7, y * 2.7) * 2 - 1) * 0.28;
+function wave2(seed, salt, x, y, per) {
+  const p2 = per ? Math.round(per * 2.7) : 0, m2 = per ? p2 / per : 2.7;
+  return (vn2(seed, salt, x, y, per) * 2 - 1) * 0.72 + (vn2(seed, salt + 7, x * m2, y * 2.7, p2) * 2 - 1) * 0.28;
 }
 // ⭐ RIDGED fBm — several octaves of `1 - |noise|`, each squared to sharpen the crease. One octave of this is a
 // TENT (and cubing a tent gives the sharp triangular peaks the user rejected); several octaves give a ridgeline
 // with shoulders and spurs. Returns 0..1, near 1 along a ridge.
-function ridge1(seed, salt, x, oct) {
+function ridge1(seed, salt, x, oct, per) {
   let f = 1, amp = 1, sum = 0, norm = 0;
   for (let i = 0; i < oct; i++) {
-    const v = 1 - Math.abs(vn1(seed, salt + i * 7, x * f) * 2 - 1);
+    const v = 1 - Math.abs(vn1(seed, salt + i * 7, x * f, per * f) * 2 - 1);
     sum += amp * v * v; norm += amp; f *= 2.0; amp *= 0.40;   // ⚠️ gain 0.52 put ~50-row teeth every 22 columns
   }
   return sum / norm;
+}
+// ==============================================================================================================
+//  THE PERIOD.  524,288 columns = 4,194,304 px.
+//  ⭐ THIS IS NOT A CHOICE, IT IS THE CEILING. Increment 6 measured the widest world the flat cell index allows
+//  at 4,096 rows and declared it: 524,224 columns. 2^19 is the next power of two up, so the terrain's repeat sits
+//  just past the widest world that can currently exist — unreachable, and therefore invisible, until the index is
+//  widened past 2^31 (which is on the agenda). A field periodic at P is automatically periodic at 2P, 4P, 8P, so
+//  widening later opens a menu of wrap circumferences rather than closing one off.
+//
+//  ⭐ THE FREQUENCY IS WHAT GETS QUANTISED, NOT THE PERIOD, and getting that backwards is a silent failure.
+//  For a field to repeat at P the lattice period `q * P` must be a whole number of lattice cells. Rounding the
+//  PERIOD and keeping the frequency gives a field periodic at `round(q*P)/q` — a different number — and the
+//  probe measured |f(c) - f(c+P)| = 0.49 on a 0..1 field, i.e. no periodicity whatsoever, from code that looked
+//  right. So: round the period, then DERIVE the frequency back from it, and sample at that.
+//  Worst drift over every frequency in this generator: 0.05%, at the very lowest one. Nothing else exceeds 0.02%.
+// ==============================================================================================================
+const PERIOD_COLS = 1 << 19;
+// `want` is a per-COLUMN frequency. Returns the lattice period and the frequency to actually sample at.
+// ⚠️ Callers must use `.q` and never the literal they asked for — that is the entire mechanism.
+function nfreq(want) {
+  const p = Math.max(1, Math.round(Math.abs(want) * PERIOD_COLS));
+  return { p, q: (want < 0 ? -p : p) / PERIOD_COLS };
 }
 
 // ==============================================================================================================
@@ -355,6 +407,35 @@ function makeGen(cfg) {
   // world (1,920 columns) inside ONE lattice cell — a single smooth swell with no coast and no range. Small
   // worlds compress the horizontal scale so a page gets a whole landscape.
   const HS = cfg.overworld ? 1 : 6;
+  // ══ PERIODICITY ═══════════════════════════════════════════════════════════════════════════════════════════
+  // Every horizontal frequency in the generator, quantised so its field repeats EXACTLY at PERIOD_COLS. Named
+  // and hoisted here rather than written inline, because the frequency and its lattice period have to agree and
+  // a literal repeated at the call site is how they stop agreeing. Sample at `.q`, wrap at `.p` — never the
+  // literal. (It also hoists ~20 divisions by G out of the per-cell loops, which is free.)
+  // ⚠️ Y IS NOT WRAPPED and must not be. Rows are the world's DEPTH, which is fixed and has two ends (bedrock
+  // below, vacuum above); only the x axis can ever be a circle. vn2 takes one period and applies it to x alone.
+  const NQ = {
+    SURFBIO: nfreq(0.0075 / G), ERO: nfreq(0.0016 * HS / G), CONT: nfreq(0.0011 * HS / G),
+    MTN: nfreq(0.0075 * Math.sqrt(HS) / G), DET: nfreq(0.030 / G),
+    HEAT: nfreq(0.0055 / G), WETF: nfreq(0.0070 / G), WET: nfreq(0.004 / G),
+    VOLC: nfreq(0.0075 / G), CAVEW: nfreq(0.0045 / G), OVH: nfreq(0.024 / G), WARP: nfreq(0.010 / G),
+    SPAG: nfreq(0.028 / G), SPAG2: nfreq(0.015 / G), CHEESE: nfreq(0.030 / G),
+    ISLE_T: nfreq(0.085 / G), ISLE_B: nfreq(0.055 / G), HALL_T: nfreq(0.075 / G), HALL_B: nfreq(0.065 / G),
+  };
+  // Per-biome patch frequency — one per entry in BIOMES, memoised because it is read in the per-cell loop.
+  const NQ_PATCH = BIOMES.map(B => B.patch ? nfreq(B.patch.freq / G) : null);
+  // ⭐ THE ANCHOR LATTICES HAVE TO TILE THE PERIOD TOO, and this is the half that is easy to forget. Volcanoes,
+  // islands, halls and rock mounds sit on lattices of "one candidate every N columns". A field can be perfectly
+  // periodic and still show a half-volcano at the join if N does not divide the period. PERIOD_COLS is a power
+  // of two, so N has to be one — which moves each spacing by up to ~30%. That is a content change and it is
+  // fine: these are "how far apart should these be" numbers, not values tuned against a symptom.
+  // ⚠️ Anchors are at `k * STEP` (or `moundLo + k * STEP`), so only the STEP has to divide the period — the
+  // offset cancels. That is why moundLo can stay where it is.
+  const pow2 = (n) => 1 << Math.max(0, Math.round(Math.log2(Math.max(1, n))));
+  // ...and so do the hashes taken on a COLUMN directly, rather than through a noise field: whether an anchor is
+  // real, how tall a mound is, which side of a region boundary a cell falls on. Every noise field in the world
+  // can repeat perfectly and the world still not repeat, because these decide where the features ARE.
+  const hc = (salt, c, y) => h(seed, salt, wrapL(c, PERIOD_COLS), y);
   // 🟥 THIS SPLINE IS WHY THE SURFACE NO LONGER STEPS IN VERTICAL SLICES. `SURFACE[biome].flat` is a STEP
   // function — the moment the thresholded biome index changed, flatness jumped by up to 0.7, erosion jumped, the
   // mountain term jumped, and the ground moved tens of rows in ONE COLUMN. Flatness is now splined along the
@@ -365,18 +446,18 @@ function makeGen(cfg) {
   // Surface biome from one noise field, shifted by the world's `climate` so different pages have different
   // dominant weather. The raw field is exposed as well as the thresholded biome, because the landform has to
   // vary continuously through a biome edge even though the material does not.
-  const sbRawAt = (c) => wave1(seed, SALT.SURFBIO, c * 0.0075 / G + sOff) * 1.15 + recipe.climate * 0.72;
+  const sbRawAt = (c) => wave1(seed, SALT.SURFBIO, c * NQ.SURFBIO.q + sOff, NQ.SURFBIO.p) * 1.15 + recipe.climate * 0.72;
   const eroAt = (c) => {
-    const base = (wave1(seed, SALT.HEIGHT + 40, c * 0.0016 * HS / G + hOff) + 1) * 0.5;
+    const base = (wave1(seed, SALT.HEIGHT + 40, c * NQ.ERO.q + hOff, NQ.ERO.p) + 1) * 0.5;
     return Math.max(0, Math.min(1, base + spline(sbRawAt(c), FLAT_KNOTS)));
   };
 
   // ---- volcanoes: the lattice pattern doing something worth looking at ---------------------------------------
   // One candidate every VOLC_STEP columns, ~9% of them real. A cone with a crater bitten out of the top and a
   // lava conduit under it. Bounded size => a chunk asks "does any anchor within VOLC_HW of me reach me?" alone.
-  const VOLC_STEP = Math.round(420 * G), VOLC_HW = Math.round(300 * G);
+  const VOLC_STEP = pow2(Math.round(420 * G)), VOLC_HW = Math.round(300 * G);
   const VOLC_H = Math.round(baseRow * 0.42), VOLC_CRATER = Math.round(26 * G);
-  const volcOn = (a) => h(seed, SALT.VOLC, a, 0) < 0.09 && a > VOLC_HW && a < cols - VOLC_HW;
+  const volcOn = (a) => hc(SALT.VOLC, a, 0) < 0.09 && a > VOLC_HW && a < cols - VOLC_HW;
   // 🟥 THIS USED TO LOOK AT ONE ANCHOR — the nearest — so halfway between two the answer switched, and since the
   // cone is half-width 900 against a 1,260 spacing it had NOT decayed to zero by then: the surface dropped ~29
   // rows in a single column. Every candidate whose cone can reach `c` is considered and the tallest wins, which
@@ -407,16 +488,16 @@ function makeGen(cfg) {
   };
 
   const heightAt = (c) => {
-    const cont = wave1(seed, SALT.HEIGHT, c * 0.0011 * HS / G + hOff) + 0.24;   // biased toward land: sea is a feature
+    const cont = wave1(seed, SALT.HEIGHT, c * NQ.CONT.q + hOff, NQ.CONT.p) + 0.24;   // biased toward land: sea is a feature
     const ero = eroAt(c);
     const land = spline(cont, CONT_SPLINE);                   // elevation above sea, as a fraction of baseRow
     // ⭐ MOUNTAINS FROM MULTI-OCTAVE RIDGED NOISE, not from one tent cubed. `1 - |noise|` is a TENT: cube it and
     // you get a single sharp spike, which is exactly the triangular peaks the user rejected. Several octaves
     // give a ridgeline with shoulders, spurs and foothills — a range rather than a traffic cone.
-    const mtn = ridge1(seed, SALT.HEIGHT + 20, c * 0.0075 * Math.sqrt(HS) / G, 3);   // already squared per octave
+    const mtn = ridge1(seed, SALT.HEIGHT + 20, c * NQ.MTN.q, 3, NQ.MTN.p);   // already squared per octave
     const above = Math.max(0, Math.min(1, (land + 0.02) / 0.10));   // no mountains rising out of deep water
     const hh = (land + mtn * (1 - ero) * above * 0.46) * baseRow
-      + (fbm1(seed, SALT.HEIGHT + 60, c * 0.030 / G, 3) - 0.5) * 2 * DETAIL_A;
+      + (fbm1(seed, SALT.HEIGHT + 60, c * NQ.DET.q, 3, NQ.DET.p) - 0.5) * 2 * DETAIL_A;
     const s = Math.round(baseRow - hh) - volcanoLift(c);       // volcanoes sit on top of whatever is there
     return s < 4 * G ? 4 * G : (s > bottomRow - 10 * G ? bottomRow - 10 * G : s);
   };
@@ -447,7 +528,7 @@ function makeGen(cfg) {
       const dd = v - SB_EDGES[e];
       if (Math.abs(dd) < SB_SOFT) {
         const p = 0.5 * (1 - Math.abs(dd) / SB_SOFT);
-        if (h(seed, SALT.CRUST + 3, c, rr) < p) k = dd < 0 ? e + 1 : e;
+        if (hc(SALT.CRUST + 3, c, rr) < p) k = dd < 0 ? e + 1 : e;
         break;
       }
     }
@@ -458,7 +539,7 @@ function makeGen(cfg) {
   // thresholded index is a step, and a step in crust depth is another seam.
   const crustDepthAt = (c, s) => {
     const base = (s < snowLine ? 10.0 : spline(sbRawAt(c), CRUST_KNOTS)) * G;
-    return Math.round(base) + ((h(seed, SALT.CRUST, c, 0) * 4 * G) | 0);
+    return Math.round(base) + ((hc(SALT.CRUST, c, 0) * 4 * G) | 0);
   };
 
   // ============================================================================================================
@@ -480,8 +561,8 @@ function makeGen(cfg) {
     const d = Math.max(0, Math.min(1, (rr - s) / span));
     // ⭐ Heat rises with depth BY DEFAULT, so the molten floor is a consequence rather than a rule — but the
     // noise term means cold pockets exist deep down and hot ground exists near the surface.
-    const heat = Math.max(0, Math.min(1, d * 0.72 + wave2(seed, SALT.HEAT, c * 0.0055 / G, rr * 0.011 / G) * 0.44 + 0.14));
-    const wet = Math.max(0, Math.min(1, 0.5 + wave2(seed, SALT.WETF, c * 0.0070 / G + wOff, rr * 0.013 / G) * 0.62));
+    const heat = Math.max(0, Math.min(1, d * 0.72 + wave2(seed, SALT.HEAT, c * NQ.HEAT.q, rr * 0.011 / G, NQ.HEAT.p) * 0.44 + 0.14));
+    const wet = Math.max(0, Math.min(1, 0.5 + wave2(seed, SALT.WETF, c * NQ.WETF.q + wOff, rr * 0.013 / G, NQ.WETF.p) * 0.62));
     return { d, heat, wet };
   }
   // Returns { a, b, p } — best biome, runner-up, and the probability a cell defects to the runner-up.
@@ -516,7 +597,7 @@ function makeGen(cfg) {
     const span = Math.max(1, bottomRow - s);
     if (rr - s < span * 0.88) return false;
     const d = (rr - s) / span;
-    return d > 0.935 + wave2(seed, SALT.VOLC + 5, c * 0.0075 / G, rr * 0.013 / G) * 0.055;
+    return d > 0.935 + wave2(seed, SALT.VOLC + 5, c * NQ.VOLC.q, rr * 0.013 / G, NQ.VOLC.p) * 0.055;
   };
   let _rcq = -1, _rcache = null, _wmcache = null;
   const _bump = (cq) => { _rcq = cq; _rcache = []; _wmcache = []; };
@@ -526,7 +607,7 @@ function makeGen(cfg) {
     if (cq !== _rcq) _bump(cq);
     let ri = _rcache[k];
     if (ri === undefined) ri = _rcache[k] = regionInfo(cq, rq);
-    return (ri.p > 0 && h(seed, SALT.RGN, c, rr) < ri.p) ? ri.b : ri.a;
+    return (ri.p > 0 && hc(SALT.RGN, c, rr) < ri.p) ? ri.b : ri.a;
   }
   // ⭐ CAVE-WIDTH MODULATION, on the SAME 4x4 grid as the climate and for the same reason. `wm` is a slow field —
   // its lattice cells are ~660 columns by ~375 rows — and sampling it per cell was measured at 19% of every hash
@@ -537,7 +618,7 @@ function makeGen(cfg) {
     if (cq !== _rcq) _bump(cq);
     let w = _wmcache[k];
     if (w === undefined) {
-      const t = Math.max(0, Math.min(1, wave2(seed, SALT.CAVEW, cq * 0.0045 / G, rq * 0.008 / G) * 0.5 + 0.5));
+      const t = Math.max(0, Math.min(1, wave2(seed, SALT.CAVEW, cq * NQ.CAVEW.q, rq * 0.008 / G, NQ.CAVEW.p) * 0.5 + 0.5));
       w = _wmcache[k] = 0.52 + 1.45 * t * t * t;
     }
     return w;
@@ -557,7 +638,7 @@ function makeGen(cfg) {
   const surfDisp = (c, rr, s) => {
     const t = (rr - s) / OVH_BAND;
     const fade = t <= 0 ? 1 : t >= 1 ? 0 : (1 - t) * (1 - t);
-    return Math.round(wave2(seed, SALT.OVH, c * 0.024 / G, rr * 0.017 / G) * OVH * fade);
+    return Math.round(wave2(seed, SALT.OVH, c * NQ.OVH.q, rr * 0.017 / G, NQ.OVH.p) * OVH * fade);
   };
   // `bi` is the biome index if the caller already has it — `solidAt` looks it up once and hands it to both
   // `baseAt` and `caveAt`, which halves the region lookups (each one costs the molten density test plus a
@@ -579,7 +660,7 @@ function makeGen(cfg) {
     // ⚠️ Keyed on the biome INDEX, not on `at[0] * 97`. That expression was FRACTIONAL, and a fractional salt is
     // silently truncated inside `h` (`a ^ salt` coerces to int32) — so the spacing between two biomes' patch
     // fields was neither what it looked like nor under anyone's control.
-    if (B.patch && fbm2(seed, SALT.PATCH + k * SALT.PATCH_STEP, c * B.patch.freq / G, rr * B.patch.freq / G, 2) > B.patch.t) return B.patch.mat;
+    if (B.patch && fbm2(seed, SALT.PATCH + k * SALT.PATCH_STEP, c * NQ_PATCH[k].q, rr * NQ_PATCH[k].q, 2, NQ_PATCH[k].p) > B.patch.t) return B.patch.mat;
     return B.mat;
   };
 
@@ -604,14 +685,14 @@ function makeGen(cfg) {
   //  rather than left switched off, because dead code that describes itself as the right idea is a trap.
   //  ⭐ The answer the user gave instead: **terrain is destructible, so "unreachable" means "you have to mine",
   //  and not everything should be reachable.** The way in is a real cave mouth, and beyond that a pickaxe.
-  const SPF = 0.028 / G, SP2F = 0.015 / G, CHF = 0.030 / G;
+  const SPF = NQ.SPAG.q, SP2F = NQ.SPAG2.q, CHF = NQ.CHEESE.q;
   const caveAt = (c, rr, top, s, fade, bi) => {
     const B = BIOMES[bi === undefined ? regionPick(c, rr, s) : bi];
     const cv = B.caves, boost = B.caveBoost || 1;
     let x = c, y = rr;
     if (WARP) {                                               // domain warping: look the noise up somewhere else
-      x += (fbm2(seed, SALT.WARPX, c * 0.010 / G, rr * 0.010 / G, 2) - 0.5) * WARP * G;
-      y += (fbm2(seed, SALT.WARPY, c * 0.010 / G, rr * 0.010 / G, 2) - 0.5) * WARP * G;
+      x += (fbm2(seed, SALT.WARPX, c * NQ.WARP.q, rr * NQ.WARP.q, 2, NQ.WARP.p) - 0.5) * WARP * G;
+      y += (fbm2(seed, SALT.WARPY, c * NQ.WARP.q, rr * NQ.WARP.q, 2, NQ.WARP.p) - 0.5) * WARP * G;
     }
     const depth = (rr - top) / Math.max(1, bottomRow - top);
     // ⚠️ `fade` is now always 1 from `solidAt` — the entrance fade is gone (see CAVE MOUTHS). The parameter is
@@ -623,11 +704,11 @@ function makeGen(cfg) {
     // the exception they should be.
     const wm = wmAt(c, rr);
     const g = boost * f * CMUL * wm * (1 + depth * 0.35);
-    if (Math.abs(2 * fbm2(seed, SALT.SPAG, x * SPF, y * SPF, 2) - 1) < cv.w * g) return true;
-    if (Math.abs(2 * fbm2(seed, SALT.SPAG2, x * SP2F, y * SP2F, 2) - 1) < cv.w2 * g) return true;
+    if (Math.abs(2 * fbm2(seed, SALT.SPAG, x * SPF, y * SPF, 2, NQ.SPAG.p) - 1) < cv.w * g) return true;
+    if (Math.abs(2 * fbm2(seed, SALT.SPAG2, x * SP2F, y * SP2F, 2, NQ.SPAG2.p) - 1) < cv.w2 * g) return true;
     // ⚠️ `boost` moves the chamber threshold ADDITIVELY. Dividing by it (the first version) took t from 0.70 to
     // 0.50 for a 1.4x boost, which is 25% of cells rather than 8% — a lever four times stronger than intended.
-    return fbm2(seed, SALT.CHEESE, x * CHF, y * CHF, 3) > cv.t + 0.04 - (wm - 1) * 0.10 - (boost - 1) * 0.06 - depth * 0.05 + (1 - f) * 0.12;
+    return fbm2(seed, SALT.CHEESE, x * CHF, y * CHF, 3, NQ.CHEESE.p) > cv.t + 0.04 - (wm - 1) * 0.10 - (boost - 1) * 0.06 - depth * 0.05 + (1 - f) * 0.12;
   };
 
   // ---- pools: a purely LOCAL rule, which is what makes them chunk-independent ---------------------------------
@@ -643,7 +724,7 @@ function makeGen(cfg) {
   const poolCfgAt = (c, rr, s) => {
     const B = BIOMES[regionPick(c, rr, s)];
     if (!B.wet) return null;
-    const w = (wave1(seed, SALT.WET, c * 0.004 / G + wOff) + 1) * 0.5;
+    const w = (wave1(seed, SALT.WET, c * NQ.WET.q + wOff, NQ.WET.p) + 1) * 0.5;
     if (w >= B.wet) return null;
     return { fluid: B.fluid, depth: Math.round(POOL_DEPTH * (B.poolMul || 1)) };
   };
@@ -651,16 +732,16 @@ function makeGen(cfg) {
   // ---- surface rock mounds: the lattice template, kept ---------------------------------------------------------
   // Small, but it matters out of proportion to its size: it is the TEMPLATE for everything the world will later
   // scatter, and the only rule that writes into a column it does not own.
-  const moundStep = Math.max(1, Math.round(6 * G));
+  const moundStep = Math.max(1, pow2(Math.round(6 * G)));
   const moundLo = Math.max(8, genC0), moundHi = Math.min(cols - 8, genC1);
   const isAnchor = (a) => a >= moundLo && a < moundHi && (a - moundLo) % moundStep === 0;
-  const moundOn = (a) => h(seed, SALT.MOUND_ON, a, 0) <= 0.10 && surfAt(a) <= seaRow;
-  const moundHgt = (a) => (1 + ((h(seed, SALT.MOUND_H, a, 0) * 2) | 0)) * G;
+  const moundOn = (a) => hc(SALT.MOUND_ON, a, 0) <= 0.10 && surfAt(a) <= seaRow;
+  const moundHgt = (a) => (1 + ((hc(SALT.MOUND_H, a, 0) * 2) | 0)) * G;
   const moundAt = (c, rr, s) => {
     const k = s - 1 - rr; if (k < 0) return false;
     if (isAnchor(c) && k < moundHgt(c) && moundOn(c)) return true;
     const a = c - 1;
-    return isAnchor(a) && k < moundHgt(a) && h(seed, SALT.MOUND_N, a, k) > 0.5 && moundOn(a);
+    return isAnchor(a) && k < moundHgt(a) && hc(SALT.MOUND_N, a, k) > 0.5 && moundOn(a);
   };
 
   // ============================================================================================================
@@ -682,21 +763,21 @@ function makeGen(cfg) {
   //  a player) has to walk to find its band's ground. Variety comes from SIZE and POSITION, both hashed.
   // ============================================================================================================
   // ---- SKY: floating islands. Also the answer to "there is a lot of empty sky", which is ~a third of the world.
-  const ISLE_STEP = Math.max(8, Math.round(160 * G));         // one island per ~480 columns (3,840 px, ~2.5 screens)
+  const ISLE_STEP = Math.max(8, pow2(Math.round(160 * G)));         // one island per ~480 columns (3,840 px, ~2.5 screens)
   const ISLE_HW = Math.round(40 * G);                         // biggest half-width
   const SKY_LO = Math.round(rows * 0.06);
   const isleAnchorAt = (a) => {
     if (a < ISLE_HW || a > cols - 1 - ISLE_HW) return null;   // needs room for its own width
-    const u = h(seed, SALT.ISLE_SHAPE, a, 1);
+    const u = hc(SALT.ISLE_SHAPE, a, 1);
     const hw = Math.max(6, Math.round((0.35 + 0.65 * u) * ISLE_HW));
-    const top = Math.round((3 + 5 * h(seed, SALT.ISLE_SHAPE, a, 2)) * G);
+    const top = Math.round((3 + 5 * hc(SALT.ISLE_SHAPE, a, 2)) * G);
     const bot = Math.round(top * 2.2);
     // Below the top of the world, and clear of whatever ground is under it. A tall mountain squeezes the
     // available sky, so a candidate that cannot fit simply does not exist here — but with SKY_LO at 6% of the
     // world and the surface at ~47%, that is rare rather than routine.
     const hi = Math.min(Math.round(rows * 0.30), surfAt(a) - bot - Math.round(10 * G));
     if (hi <= SKY_LO + top) return null;
-    const cy = SKY_LO + top + Math.round(h(seed, SALT.ISLE_ON, a, 3) * (hi - SKY_LO - top));
+    const cy = SKY_LO + top + Math.round(hc(SALT.ISLE_ON, a, 3) * (hi - SKY_LO - top));
     // The anchor's OWN surface biome decides the skin, so an island is one place rather than a stripe of three.
     const sb = surfBiomeAt(a);
     return { a, hw, top, bot, cy, skin: Math.round(3 * G), mat: SURFACE[sb].mat };
@@ -716,8 +797,8 @@ function makeGen(cfg) {
       const I = isleAnchorAt((near + k) * ISLE_STEP); if (!I) continue;
       const dx = Math.abs(c - I.a); if (dx >= I.hw) continue;
       const q = 1 - (dx / I.hw) * (dx / I.hw), kk = Math.sqrt(q);
-      const nT = 1 + wave1(seed, SALT.ISLE_SHAPE + 4, (c + I.a) * 0.085 / G) * ISLE_ROUGH;
-      const nB = 1 + wave1(seed, SALT.ISLE_MAT, (c - I.a * 3) * 0.055 / G) * ISLE_ROUGH;
+      const nT = 1 + wave1(seed, SALT.ISLE_SHAPE + 4, (c + I.a) * NQ.ISLE_T.q, NQ.ISLE_T.p) * ISLE_ROUGH;
+      const nB = 1 + wave1(seed, SALT.ISLE_MAT, (c - I.a * 3) * NQ.ISLE_B.q, NQ.ISLE_B.p) * ISLE_ROUGH;
       const r0 = I.cy - Math.round(I.top * kk * nT), r1 = I.cy + Math.round(I.bot * q * nB);
       if (r1 < r0) continue;
       (out || (out = [])).push({ r0, r1, skin: I.skin, mat: I.mat });
@@ -728,18 +809,18 @@ function makeGen(cfg) {
   // ⚠️ DELIBERATELY DRY — the pool rule is suppressed inside one. Ordinary cheese chambers still flood, and that
   // is most of them; these are the placed, habitable ones, and a site whose spawn lands in a lava lake is not a
   // site. It also gives the band its own identity: the big halls are the ones that are not full of something.
-  const HALL_STEP = Math.max(8, Math.round(120 * G));         // one hall per ~360 columns (2,880 px)
+  const HALL_STEP = Math.max(8, pow2(Math.round(120 * G)));         // one hall per ~360 columns (2,880 px)
   const HALL_HW = Math.round(30 * G), HALL_HH = Math.round(10 * G);
   const UG_LO = Math.round(rows * 0.67), UG_HI = Math.round(rows * 0.97);
   const hallAnchorAt = (a) => {
     if (a < HALL_HW || a > cols - 1 - HALL_HW) return null;
-    const hw = Math.max(6, Math.round((0.5 + 0.5 * h(seed, SALT.HALL_SHAPE, a, 1)) * HALL_HW));
-    const hh = Math.max(4, Math.round((0.5 + 0.5 * h(seed, SALT.HALL_SHAPE, a, 2)) * HALL_HH));
+    const hw = Math.max(6, Math.round((0.5 + 0.5 * hc(SALT.HALL_SHAPE, a, 1)) * HALL_HW));
+    const hh = Math.max(4, Math.round((0.5 + 0.5 * hc(SALT.HALL_SHAPE, a, 2)) * HALL_HH));
     // Inside the deep band, and never through the bedrock floor or up into the crust.
     const lo = Math.max(UG_LO, surfAt(a) + Math.round(30 * G)) + hh;
     const hi = Math.min(UG_HI, bottomRow - Math.round(3 * G)) - hh;
     if (hi <= lo) return null;
-    return { a, hw, hh, cy: lo + Math.round(h(seed, SALT.HALL_ON, a, 3) * (hi - lo)) };
+    return { a, hw, hh, cy: lo + Math.round(hc(SALT.HALL_ON, a, 3) * (hi - lo)) };
   };
   function hallSpanAt(c) {
     const near = Math.round(c / HALL_STEP), reach = Math.ceil(HALL_HW / HALL_STEP) + 1;
@@ -750,8 +831,8 @@ function makeGen(cfg) {
       // Roughened for the same reason the islands are: a clean ellipse in the middle of a noise-carved cave
       // system reads as a bubble somebody stamped there. Top and bottom are perturbed independently.
       const b = H.hh * Math.sqrt(1 - (dx / H.hw) * (dx / H.hw));
-      const eT = Math.round(b * (1 + wave1(seed, SALT.HALL_SHAPE + 4, (c + H.a) * 0.075 / G) * 0.40));
-      const eB = Math.round(b * (1 + wave1(seed, SALT.HALL_SHAPE + 5, (c - H.a * 3) * 0.065 / G) * 0.40));
+      const eT = Math.round(b * (1 + wave1(seed, SALT.HALL_SHAPE + 4, (c + H.a) * NQ.HALL_T.q, NQ.HALL_T.p) * 0.40));
+      const eB = Math.round(b * (1 + wave1(seed, SALT.HALL_SHAPE + 5, (c - H.a * 3) * NQ.HALL_B.q, NQ.HALL_B.p) * 0.40));
       if (eT + eB < 2) continue;
       (out || (out = [])).push({ r0: H.cy - eT, r1: H.cy + eB });
     }
@@ -1037,7 +1118,11 @@ function makeGen(cfg) {
 // correctly refused.
 // ⚠️ 2 -> 3: GLASS STOPPED BEING GENERATED (2026-08-05). Two biomes' patch material changed and Glassfields'
 // matrix went stone -> sand, so the ground under any stored diff in those biomes is different rock.
-const WORLDGEN_VERSION = 3;
+// ⚠️ 3 -> 4: PERIODIC NOISE (2026-08-05). Every horizontal frequency is quantised so its field repeats exactly
+// at PERIOD_COLS, and the volcano/island/hall/mound lattices moved to power-of-two spacings so they tile it.
+// Frequencies moved by at most 0.05%; the anchor spacings by up to 30%. This is the LAST cheap moment to do it
+// — the whole point is that it must not have to happen once generated worlds persist.
+const WORLDGEN_VERSION = 4;
 
 module.exports = { makeGen, recipeFor, mulberry32, h, vn1, vn2, fbm1, fbm2, wave1, wave2, ridge1, isFluid,
-  SALT, MAT, SB, BIOMES, SURFACE, MOLTEN, CHUNK_SIDE, WORLDGEN_VERSION };
+  SALT, MAT, SB, BIOMES, SURFACE, MOLTEN, CHUNK_SIDE, WORLDGEN_VERSION, PERIOD_COLS, nfreq };
