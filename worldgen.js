@@ -691,6 +691,12 @@ function makeGen(cfg) {
   };
   // The rows an island occupies IN THIS COLUMN. A lens: a shallow dome on top and a longer keel below, which is
   // what makes it read as a floating island rather than as a floating pill.
+  // 🟥 AND THEN ROUGHENED, BECAUSE THE FIRST RENDER LOOKED LIKE FLYING SAUCERS. A lens is an analytic shape, and
+  // an analytic shape drawn at full size reads as maths — the same objection that killed the terracing, the
+  // triangular peaks, the dune ripple and the wavy-line molten boundary on this track. Each edge is scaled by
+  // its own 1D noise along the column, salted per anchor, so the silhouette is ragged and the two edges are
+  // ragged independently. Two noise reads per column of island, not per cell.
+  const ISLE_ROUGH = 0.42;
   function isleSpanAt(c) {
     const near = Math.round(c / ISLE_STEP), reach = Math.ceil(ISLE_HW / ISLE_STEP) + 1;
     let out = null;
@@ -698,7 +704,9 @@ function makeGen(cfg) {
       const I = isleAnchorAt((near + k) * ISLE_STEP); if (!I) continue;
       const dx = Math.abs(c - I.a); if (dx >= I.hw) continue;
       const q = 1 - (dx / I.hw) * (dx / I.hw), kk = Math.sqrt(q);
-      const r0 = I.cy - Math.round(I.top * kk), r1 = I.cy + Math.round(I.bot * q);
+      const nT = 1 + wave1(seed, SALT.ISLE_SHAPE + 4, (c + I.a) * 0.085 / G) * ISLE_ROUGH;
+      const nB = 1 + wave1(seed, SALT.ISLE_MAT, (c - I.a * 3) * 0.055 / G) * ISLE_ROUGH;
+      const r0 = I.cy - Math.round(I.top * kk * nT), r1 = I.cy + Math.round(I.bot * q * nB);
       if (r1 < r0) continue;
       (out || (out = [])).push({ r0, r1, skin: I.skin, mat: I.mat });
     }
@@ -727,12 +735,65 @@ function makeGen(cfg) {
     for (let k = -reach; k <= reach; k++) {
       const H = hallAnchorAt((near + k) * HALL_STEP); if (!H) continue;
       const dx = Math.abs(c - H.a); if (dx >= H.hw) continue;
-      const e = Math.round(H.hh * Math.sqrt(1 - (dx / H.hw) * (dx / H.hw)));
-      if (e < 1) continue;
-      (out || (out = [])).push({ r0: H.cy - e, r1: H.cy + e });
+      // Roughened for the same reason the islands are: a clean ellipse in the middle of a noise-carved cave
+      // system reads as a bubble somebody stamped there. Top and bottom are perturbed independently.
+      const b = H.hh * Math.sqrt(1 - (dx / H.hw) * (dx / H.hw));
+      const eT = Math.round(b * (1 + wave1(seed, SALT.HALL_SHAPE + 4, (c + H.a) * 0.075 / G) * 0.40));
+      const eB = Math.round(b * (1 + wave1(seed, SALT.HALL_SHAPE + 5, (c - H.a * 3) * 0.065 / G) * 0.40));
+      if (eT + eB < 2) continue;
+      (out || (out = [])).push({ r0: H.cy - eT, r1: H.cy + eB });
     }
     return out;
   }
+  // ---- LATTICE-ANCHORED SHAFTS: a guaranteed way DOWN, and the principled fix for connectivity.
+  // ⭐⭐ CONNECTIVITY IS A PERCOLATION TRANSITION, NOT A DIAL (measured, `worldgen_passability.js`). Below a cave
+  // width the underground is isolated pockets; above it, one system. Buying the transition by WIDENING every
+  // tunnel costs a doubling of carved volume for very little: measured here, cave width x1.25 carves 2.8x the
+  // air and takes reachable-from-the-surface from 2% to 8.9% in an Overworld domain, while making the world
+  // look like swiss cheese. It is the wrong trade.
+  // ⭐ So add the thing that is actually MISSING — a route DOWN — instead of hollowing everything. One shaft
+  // hangs off every second deep-hall anchor, so a player is never more than ~5 screens from a way underground,
+  // and each shaft ENDS IN A HALL, which is what makes the underground depth band reachable rather than merely
+  // present. Measured: page seed 19 went from 0.0% reachable to 44.8% for 2% more carved air.
+  // ⚠️ An earlier attempt did this with an ANISOTROPIC NOISE FIELD (creases running mostly vertically) and it
+  // was rejected: at usable widths it draws a curtain of near-vertical slots across the entire world. The
+  // difference is that a lattice places a BOUNDED number of them in known places; a field puts one everywhere.
+  const SHAFT_HW = Math.max(3, Math.round(1.1 * G));          // half-width — 7 cells across, player is 5
+  const SHAFT_WANDER = Math.round(18 * G);                    // how far it drifts sideways over its length
+  // A 1D noise with the ANCHOR in the hash's y slot, so every shaft wanders differently without needing its own
+  // salt range. Two hash reads, and only for columns near a shaft — measured at under 1% of generation cost.
+  const shaftNoise = (a, x) => {
+    const xi = Math.floor(x), xf = x - xi, u = xf * xf * (3 - 2 * xf);
+    const p = h(seed, SALT.SHAFT, xi, a), q = h(seed, SALT.SHAFT, xi + 1, a);
+    return p + (q - p) * u;
+  };
+  const shaftOn = (a) => h(seed, SALT.SHAFT + 1, a, 0) < 0.55;
+  function shaftSpanAt(c) {
+    const near = Math.round(c / HALL_STEP), reach = Math.ceil((SHAFT_WANDER + SHAFT_HW) / HALL_STEP) + 1;
+    let out = null;
+    for (let k = -reach; k <= reach; k++) {
+      const a = (near + k) * HALL_STEP;
+      if (Math.abs(c - a) > SHAFT_WANDER + SHAFT_HW + 1) continue;
+      if (!shaftOn(a)) continue;
+      const H = hallAnchorAt(a); if (!H) continue;             // a shaft with nothing at the bottom is a hole
+      (out || (out = [])).push({ a, r0: surfAt(a) - 2, r1: H.cy });
+    }
+    return out;
+  }
+  // ⚠️ `sTop` is THIS column's surface, and the shaft opens at whichever is higher — the anchor's surface or
+  // this column's. Without it a shaft whose anchor sits in a valley would start below the ground on a
+  // neighbouring rise and leave a lid of rock over its own entrance.
+  const inShaft = (sh, c, rr, sTop) => {
+    if (!sh) return false;
+    for (let i = 0; i < sh.length; i++) {
+      const S = sh[i];
+      if (rr > S.r1 || rr < Math.min(S.r0, sTop)) continue;
+      const cx = S.a + (shaftNoise(S.a, rr * 0.010 / G) * 2 - 1) * SHAFT_WANDER;
+      if (Math.abs(c - cx) <= SHAFT_HW) return true;
+    }
+    return false;
+  };
+
   const inSpan = (spans, rr) => { if (!spans) return false; for (let i = 0; i < spans.length; i++) if (rr >= spans[i].r0 && rr <= spans[i].r1) return true; return false; };
   const isleMatAt = (spans, rr) => {
     if (!spans) return 0;
@@ -752,7 +813,7 @@ function makeGen(cfg) {
     const drySurface = s <= seaRow;
     return { s, sB, crust, top: s + crust + 1, vent: volcVentAt(c), drySurface,
       carveTop: drySurface ? s + 1 : s + crust + 1, entr: crust + Math.round(18 * G),
-      isle: isleSpanAt(c), hall: hallSpanAt(c) };
+      isle: isleSpanAt(c), hall: hallSpanAt(c), shaft: shaftSpanAt(c) };
   };
   // The solid (post-carve) material at one cell of a column whose per-column values are already in hand.
   // ⚠️ The region is looked up ONCE here and handed to both `baseAt` and `caveAt`. They used to look it up
@@ -772,6 +833,7 @@ function makeGen(cfg) {
     if (v && rr >= ci.carveTop && caveAt(c, rr, ci.top, s, fade, bi)) v = 0;
     if (ci.vent && rr >= s + 2) v = MAT.LAVA;                // the volcano conduit, straight through everything
     if (v && ci.hall && rr > ci.top && inSpan(ci.hall, rr)) v = 0;   // a deep hall is carved out of everything
+    if (v && ci.shaft && inShaft(ci.shaft, c, rr, s)) v = 0;         // ...and so is the shaft that reaches it
     return v;
   };
 
@@ -928,7 +990,11 @@ function makeGen(cfg) {
     POOL_DEPTH, POOL_MAX, HEAD, ICE_SHEET, snowLine, iceLine, BIOMES, SURFACE,
     surfAt, sbAt, sbRawAt, crustDepthAt, baseAt, caveAt, moundAt, poolCfgAt, volcVentAt,
     regionAt, regionPick, climAt, colInfo, solidAt, strengthOf,
-    isleSpanAt, hallSpanAt, bandGroundAt,
+    isleSpanAt, hallSpanAt, shaftSpanAt, bandGroundAt,
+    // The centre column of the shaft hanging off anchor `a` at row `rr` — exposed so a guard can walk a shaft
+    // top to bottom and assert it is actually open, which is the entire reason shafts exist.
+    shaftCentreAt: (a, rr) => a + (shaftNoise(a, rr * 0.010 / G) * 2 - 1) * SHAFT_WANDER,
+    HALL_STEP, SHAFT_HW,
     fillColumn, matAt, fillPage, pageEmpty,
   };
 }
