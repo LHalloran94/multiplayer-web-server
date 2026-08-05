@@ -2166,10 +2166,27 @@ function evictChunk(room, p) {
   for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === worldGeom(room).nPages) s[f].dropPage(p);
   // Drop this chunk's cells from the work sets, and release a set that empties (same contract as dropFineActive).
   const geom = worldGeom(room);
-  const prune = (set, drop) => { if (!set) return; for (const i of Array.from(set)) if (geomPage(geom, i) === p) set.delete(i); if (!set.size) drop(room); };
+  // 🟥 THIS WAS 19.6% OF ALL SERVER CPU — measured, not reasoned about (GET /debug/cpu-profile while panning
+  // across the Overworld). It used to be `for (const i of Array.from(set)) if (geomPage(geom, i) === p) ...`:
+  // a walk of the ENTIRE work set to find the handful of cells belonging to ONE chunk, five sets deep, once per
+  // evicted chunk — plus an `Array.from` copy of a 200,000-element Set each time. Moving is what evicts chunks,
+  // so it fired in bursts exactly when the player moved, which is when the freeze was worst.
+  // ⚠️ IT GOT WORSE THE MORE THERE WAS TO DO, which is the property that turns a slow world into a stuck one:
+  // cost was O(evicted chunks × |fineActive|), and `fineActive` grows to six figures in the Overworld.
+  // ⭐ A CHUNK HAS EXACTLY 4,096 CELLS AND WE KNOW WHICH. So ask the SET about the chunk's cells rather than
+  // asking every cell in the set about the chunk: 4,096 O(1) deletes, independent of how big the set is. The
+  // set-walk is kept for the case where the set is genuinely smaller than a chunk, which is the common one in a
+  // page room — this must not become a pessimisation there.
+  const cy = geom.cy, pc0 = ((p / cy) | 0) * CHUNK_SIDE, pr0 = (p % cy) * CHUNK_SIDE;
+  const pcN = Math.min(CHUNK_SIDE, geom.cols - pc0), prN = Math.min(CHUNK_SIDE, geom.rows - pr0);
+  const pruneKeys = (del, size) => {
+    if (size < CHUNK_CELLS) { for (const i of Array.from(del.keys ? del.keys() : del)) if (geomPage(geom, i) === p) del.delete(i); return; }
+    for (let lc = 0; lc < pcN; lc++) { const base = (pc0 + lc) * geom.rows + pr0; for (let lr = 0; lr < prN; lr++) del.delete(base + lr); }
+  };
+  const prune = (set, drop) => { if (!set) return; pruneKeys(set, set.size); if (!set.size) drop(room); };
   prune(s.fineActive, dropFineActive); prune(s.fineReact, dropFineReact); prune(s.fineFire, dropFineFire);
   prune(s.powderActive, dropPowderSet); prune(s.soilActive, dropSoilSet);
-  if (s.src) { for (const i of Array.from(s.src.keys())) if (geomPage(geom, i) === p) s.src.delete(i); if (!s.src.size) dropSrcMap(room); }
+  if (s.src) { pruneKeys(s.src, s.src.size); if (!s.src.size) dropSrcMap(room); }
   return true;
 }
 // ⚠️⚠️ ANYTHING THAT READS THE WHOLE WORLD MUST CALL THIS FIRST. An evicted chunk has no pages, so it reads as
