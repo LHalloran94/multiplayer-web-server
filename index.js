@@ -1548,10 +1548,31 @@ const PAGE_DIMS = Object.freeze({ cols: TERRAIN_COLS, rows: TERRAIN_ROWS });
 // shape here is what lets them be about placement rather than about arithmetic, and it is what
 // probe_overworld_scale checks against instead of a number copied out of a document.
 const OVERWORLD_DIMS = Object.freeze({ cols: 524224, rows: 4096 });
-// Rooms that are part of the Overworld rather than a page world. EMPTY, and the Overworld cannot be entered yet —
-// so `roomDims` returns the page shape for every real room and behaviour is unchanged. A Set rather than a key
-// test so the eventual sector split (§7: N scheduling rooms over one cell store) has somewhere to register.
+// Rooms that are part of the Overworld rather than a page world. Populated only when `worldCfg.overworld` is on
+// (increment 7), so with it off `roomDims` returns the page shape for every real room and behaviour is unchanged.
+// A Set rather than a key test because the sector split (§7: N scheduling rooms over one cell store) registers
+// each sector here too — one shape, many scheduling keys.
 const overworldRooms = new Set();
+// ⭐ ONE ROOM FOR EVERYONE. The Overworld is a single continuous world, so every page that enters it enters the
+// SAME room key — which is what makes it shared at all. The page you came from decides only your spawn COLUMN.
+// ⚠️ Deliberately not a valid `avatarRoomKey` output: those are 'av:<url>:<level>' and a URL cannot be '@over'.
+// Nothing can collide with it by accident, and it is greppable.
+const OVERWORLD_ROOM = 'av:@over:1';
+// The Overworld's terrain seed. FIXED, unlike a page world's (which is keyed on its URL so every page differs):
+// there is only one Overworld, and it has to look the same to everyone who walks into it.
+const OVERWORLD_SEED = 20260805;
+// 🟥 THE WORLD FLOOR IS PER ROOM, AND MISSING THAT SQUASHED THE OVERWORLD INTO THE TOP 10% OF ITSELF.
+// `FLOOR_TOP` is the page world's floor — 3,168px, from the stage layout — and it was being handed to the
+// Overworld's generator as well. So a 4,096-row world was generated with its bedrock at row 395: the terrain
+// occupied the top tenth and the other 3,700 rows were nothing at all. It was not visible in the spawn e2e
+// because "you are standing on ground" was true; the ground was just in the wrong place, ~1,700 rows above
+// where `bandGroundAt` says the surface band is. Caught by comparing the spawn the server gave against what
+// the generator says for the same column — one number against another, not by reading.
+// ⚠️ Declared in the cell-store block, next to `overworldRooms`, because the sim tick functions that need it
+// are inside the block the probe rigs slice — and those rigs define `FLOOR_TOP` in their preamble, so this
+// resolves in them too and answers the page floor for every room they build. Fifth time on this boundary.
+const OVERWORLD_FLOOR_TOP = OVERWORLD_DIMS.rows * TERRAIN_CELL - 72;
+const roomFloorTop = (room) => overworldRooms.has(room) ? OVERWORLD_FLOOR_TOP : FLOOR_TOP;
 function roomDims(room) { return overworldRooms.has(room) ? OVERWORLD_DIMS : PAGE_DIMS; }
 // (The domain registry itself lives just BELOW this block — see the note at ==CELL_STORE_BLOCK_END==.)
 // The terrain-resolution geometry (SUB=1) for a room, i.e. the one the fields that are not fine-grid ones use.
@@ -2848,7 +2869,7 @@ function powderTickRoom(room) {
   const st = cellsOf(room), grid = st.terrain, hp = st.terrainHp, active = st.powderActive;
   if (!grid || !hp || !active || !active.size) { if (active && !active.size) dropPowderSet(room); return; }
   const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, ROWS = st.rows, tick = powderTickCount, nn = grid.length;
-  const FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // grains may not enter the bedrock floor row (same as liquid)
+  const FLOOR_ROW = Math.floor(roomFloorTop(room) / TERRAIN_CELL);   // grains may not enter the bedrock floor row (same as liquid)
   // FINE mode: liquid lives in the roomFine* arrays and the terrain grid holds SOLIDS ONLY, so `isFluidId(grid[j])`
   // never matches and a grain read a liquid cell as plain AIR — it fell straight through the pool and, worse, the
   // grid[dst]===0 branch left the fine liquid sitting INSIDE the new solid cell. Same sink-and-swap logic, fine arrays.
@@ -2978,7 +2999,7 @@ function fineLiquidTickRoom(room, SUB) {
   const lvlAcc = st.fineLevelAcc;
   const tick = liquidTickCount, cap = LIQUID_MAX, T = LIQ_T;
   const COLS = st.cols * SUB, FROWS = st.rows * SUB, NCELL = COLS * FROWS;   // Phase 6: this room's shape (FROWS = the STRIDE — increment 5)
-  const LIQUID_FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL) * SUB;   // liquid may not descend into/below the bedrock row (scaled to fine rows)
+  const LIQUID_FLOOR_ROW = Math.floor(roomFloorTop(room) / TERRAIN_CELL) * SUB;   // liquid may not descend into/below the bedrock row (scaled to fine rows)
   const SCAN = LIQUID_LEVEL_SCAN * SUB;                                  // levelling scan reach in CELLS → scaled so PHYSICAL reach is unchanged
   const TROWS = st.rows;
   const coarseOf = (k) => { const fc = (k / FROWS) | 0, fr = k - fc * FROWS; return ((fc / SUB) | 0) * TROWS + ((fr / SUB) | 0); };
@@ -3451,7 +3472,7 @@ function fineReactTickRoom(room, SUB) {
   const active = st.fineActive, seeded = st.fineReact, burning = st.fineFire;
   if ((!active || !active.size) && (!seeded || !seeded.size) && (!burning || !burning.size)) { if (seeded) dropFineReact(room); return; }
   const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, ROWS = st.rows, N = grid.length;
-  const tick = liquidTickCount, FLOOR_ROW = Math.floor(FLOOR_TOP / TERRAIN_CELL);   // acid may not eat the bedrock row
+  const tick = liquidTickCount, FLOOR_ROW = Math.floor(roomFloorTop(room) / TERRAIN_CELL);   // acid may not eat the bedrock row
   const act = fineSet(room), liqChanged = new Set(), terrCells = [], fx = [];
   // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
   // && gid === 2` ⇒ steam, etc). In fine mode liquid is not a grid id at all, so no transition can ever match and every
@@ -4445,7 +4466,7 @@ function cfgWire() {
   return Object.assign({}, liquidCfg, {
     relayOn: !!relayCfg.on, relayHz: relayCfg.hz, relayCap: relayCfg.cap,
     relayFarHz: relayCfg.farHz, relayFarCap: relayCfg.farCap,
-    worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand,
+    worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand, worldOverworld: !!worldCfg.overworld,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
     // thing actually FIRED rather than inferring it from an outcome. The panel's sync loop skips any key it has
@@ -5370,6 +5391,14 @@ const worldCfg = {
   dropPristine: 1,     // 4c: evict an UNCHANGED chunk to nothing at all rather than storing a blob of it.
                        // ⚠️ Defaults ON because it only ever applies to rooms `onDemand` produced, which itself ships OFF —
                        // and where it applies, NOT doing it is measurably worse than doing it (the blob is 1.93x the pages).
+  // ⭐⭐ INCREMENT 7 — THE OVERWORLD ITSELF. With this on, a 'world' join goes to ONE shared world instead of a
+  // per-page one, and the page you came from decides only WHERE IN IT YOU ARRIVE. That is the whole Stage 7
+  // model: identity (which page you are) is separate from location (which column you spawn at).
+  // ⚠️ Ships OFF. It changes what "join a world" means, so it is a switch, not a migration.
+  // ⚠️ It IMPLIES chunked + onDemand for the Overworld room regardless of those flags: a 524,224 x 4,096 world
+  // cannot be built eagerly, and `ensureWorldGenerated` reads `overworldRooms` rather than the flags for that
+  // reason. Turning this on without them is not a broken combination, it is simply not a combination.
+  overworld: 0,
 };
 const _roomGens = new Map();                          // avatarRoom → the generator for its seed+shape, built once
 // Everything worldgen.js needs to know about a room, gathered in one place so there is one definition of
@@ -5379,7 +5408,7 @@ function genCfgFor(avatarRoom, seed, band) {
   // ⭐ `overworld` decides two things and only two: the whole biome catalogue rather than a seeded selection of
   // two to four of it, and continent-sized horizontal features rather than a page-sized landscape. It is read
   // from the same `overworldRooms` set `roomDims` uses, so a room's shape and its content agree by construction.
-  return { seed, cols: d.cols, rows: d.rows, cell: TERRAIN_CELL, floorTop: FLOOR_TOP,
+  return { seed, cols: d.cols, rows: d.rows, cell: TERRAIN_CELL, floorTop: roomFloorTop(avatarRoom),
     overworld: overworldRooms.has(avatarRoom),
     spawnX: MWSim.C.WORLD_W / 2, spawnHalfW: SPAWN_CLEAR_HALF_W, band, strength: BUILTIN_STRENGTH };
 }
@@ -5633,14 +5662,22 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
   if (worldGenerated.has(avatarRoom)) return;
   worldGenerated.add(avatarRoom);
   // Phase 6 inc 4: which generator. `worldCfg.chunked` ships 0, so this is `generateWorld` unless switched.
-  const _seed = worldSeedFor(roomId), _band = genColBand(roomId, levelIndex);
+  // ⭐ INCREMENT 7. The Overworld's seed is FIXED rather than keyed on a URL — there is one Overworld and it has
+  // to look the same to everyone — and it has no column band, because a Level's size preset is a page-world idea
+  // and the whole width is the point here.
+  const _over = overworldRooms.has(avatarRoom);
+  const _seed = _over ? OVERWORLD_SEED : worldSeedFor(roomId), _band = _over ? null : genColBand(roomId, levelIndex);
   // ⭐ 4b — ON DEMAND: register the generator and build NOTHING. The world comes into existence a chunk at a
   // time as it is read, which is the only way an Overworld can work. Everything below (the liquid seed, the
   // pre-settle) is about a world that already exists, so it is skipped: a chunk seeds and settles its own
   // liquid when it is produced. ⚠️ `ensureTerrain` is called FIRST so the fields exist for the seeders to be
   // attached to — `setRoomGenerator` is idempotent and can attach to fields made earlier, but there is no
   // reason to rely on that here.
-  if (worldCfg.chunked && worldCfg.onDemand) {
+  // ⚠️ THE OVERWORLD TAKES THIS BRANCH WHATEVER THE FLAGS SAY. A 524,224 x 4,096 world is 2.1 billion cells;
+  // there is no eager path for it, and falling through to `generateWorld` would try to allocate one. Reading
+  // `overworldRooms` rather than the two flags means "Overworld ⇒ produced on demand" is a property of the room
+  // and not of whether somebody remembered to tick two other boxes.
+  if (_over || (worldCfg.chunked && worldCfg.onDemand)) {
     const _t = ensureTerrain(avatarRoom), _h = ensureTerrainHp(avatarRoom);
     // 🟥 A REBUILD HAS TO EMPTY THE WORLD FIRST, AND THIS BRANCH DID NOT. On a FRESH room there is nothing to
     // clear, so the omission was invisible — but the Rebuild button runs this same function on a room that
@@ -5721,8 +5758,12 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
 // ⚠️ Returns the spawn X IN PIXELS, not a column — because a page room's spawn is exactly `WORLD_W / 2` and
 // always has been, and rounding it through a column would move it by half a cell. A 4px shift is invisible to
 // look at and would still be a behaviour change on a path that is meant to be untouched.
-function spawnXOf(avatarRoom) {
-  const d = overworldRooms.has(avatarRoom) ? domains.peek(overworldIdentity(avatarRoom)) : null;
+// ⚠️ `rec` IS THE SOCKET'S OWN DOMAIN RECORD and it has to be passed in. Everywhere else in the server a spawn
+// is a property of the ROOM; in the Overworld every player has their own, because the room is shared and the
+// page they came from is what decides where they arrive. There is nothing about the room key to look it up
+// from — `OVERWORLD_ROOM` is the same string for everybody — so it is resolved at the join and handed down.
+function spawnXOf(avatarRoom, rec) {
+  const d = rec || null;
   return d ? (d.col + 0.5) * TERRAIN_CELL : (MWSim.C.WORLD_W / 2);
 }
 // The identity an Overworld room is placed BY. `avatarRoomKey` is 'av:<roomId>:<levelIndex>' and the roomId is the
@@ -5732,18 +5773,44 @@ function overworldIdentity(avatarRoom) {
   const a = s.indexOf(':'), b = s.lastIndexOf(':');
   return (a >= 0 && b > a) ? s.slice(a + 1, b) : s;
 }
-function worldSpawnFor(avatarRoom) {
-  const x = spawnXOf(avatarRoom);
+function worldSpawnFor(avatarRoom, rec) {
+  const x = spawnXOf(avatarRoom, rec);
+  const col0 = Math.floor(x / TERRAIN_CELL);
+  // ⭐ THE OVERWORLD ASKS THE GENERATOR, NOT THE GRID. Its world is mostly not produced, so scanning the stored
+  // grid would either read air (and drop you through the floor) or fault in the whole column to find out — and
+  // for a 4,096-row world that is 64 chunks produced to answer one question. `bandGroundAt` walks the column
+  // arithmetically, produces nothing, and knows about liquid, so it will not stand you on a lava lake's bed.
+  // It also honours the site's DEPTH BAND: a sky site lands on its floating island, an underground one in its
+  // hall, which is the interface increment 6 built placement against.
+  if (rec && overworldRooms.has(avatarRoom)) {
+    const gen = _roomGens.get(avatarRoom), b = domains.bandRows(rec.band);
+    if (gen && b) {
+      const r = gen.bandGroundAt(col0, b.r0, b.r1, 5);
+      if (r >= 0) return { x, y: r * TERRAIN_CELL };
+      // ⚠️ NO GROUND IN THE BAND IS A REAL OUTCOME, not an error — the generator guarantees ground in every band
+      // at SOME column, not at every column. Falling back to the surface band is better than falling to the
+      // world floor, which for a sky site would be 32,000px of freefall.
+      const s = domains.bandRows('surface');
+      const sr = gen.bandGroundAt(col0, s.r0, s.r1, 5);
+      if (sr >= 0) return { x, y: sr * TERRAIN_CELL };
+    }
+  }
   const grid = peekCells(avatarRoom).terrain;
   if (!grid) return { x, y: FLOOR_TOP };
   const COLS = grid.geom.cols, ROWS = grid.geom.rows;
-  const col = Math.max(0, Math.min(COLS - 1, Math.floor(x / TERRAIN_CELL)));
+  const col = Math.max(0, Math.min(COLS - 1, col0));
   for (let r = 0; r < ROWS; r++) if (grid.g(col * ROWS + r)) return { x, y: r * TERRAIN_CELL };
   return { x, y: FLOOR_TOP };
 }
 // Keep-clear no-build box above the spawn surface — world mode only (sandbox has no protection).
 function spawnClearRect(avatarRoom) {
   if (!worldGenerated.has(avatarRoom)) return null;
+  // ⏭️ THE OVERWORLD HAS NO SINGLE SPAWN, so there is no single box to keep clear — it has one spawn per placed
+  // site, and protecting them means asking the domain registry for every site near the edit, not asking the room
+  // for its spawn. Deliberately unprotected for now rather than protecting the WRONG place: without this, the
+  // call below would resolve to a page room's centre (`WORLD_W / 2`, column 120) and fence off an arbitrary
+  // patch of the shared world that is nobody's spawn. Open item on increment 7.
+  if (overworldRooms.has(avatarRoom)) return null;
   const sp = worldSpawnFor(avatarRoom);
   return { x0: sp.x - SPAWN_CLEAR_HALF_W, x1: sp.x + SPAWN_CLEAR_HALF_W, y0: sp.y - SPAWN_CLEAR_H, y1: sp.y };
 }
@@ -6295,7 +6362,7 @@ io.on('connection', (socket) => {
     // fires. So the swap is not firing, and the sim knows exactly which of its gates is stopping it. Rather than guess
     // at the geometry (10 hand-built + 1320 randomised scenes never produced one), report every gate's value for each
     // standing pair. Mirrors the conditions on step (2) in fineLiquidTickRoom verbatim — keep the two in step.
-    const FROW_FLOOR = Math.floor(FLOOR_TOP / TERRAIN_CELL) * SUB;
+    const FROW_FLOOR = Math.floor(roomFloorTop(room) / TERRAIN_CELL) * SUB;   // per room — this mirrors the sim, so it has to move with it
     const isSolidF = (k) => { if (k < 0 || k >= FCOLS * FROWS) return true; const fc = (k / FROWS) | 0, fr = k - fc * FROWS;
       const v = grid.g(((fc / SUB) | 0) * st.rows + ((fr / SUB) | 0)); return v !== 0 && !isFluidId(v); };
     const floorRk = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) return rk; return -1; };
@@ -6443,6 +6510,11 @@ io.on('connection', (socket) => {
     // single chunk, which is the entire reason increment 4 exists. Ticking this alone must therefore not look
     // like it did something, so it turns the generator on too.
     if ('worldOnDemand' in patch) { worldCfg.onDemand = patch.worldOnDemand ? 1 : 0; if (worldCfg.onDemand) worldCfg.chunked = 1; }
+    // ⭐ Turning the Overworld on turns the other two on with it, for the same reason `worldOnDemand` turns
+    // `worldChunked` on: they are not independent choices, and a half-set combination is not a configuration
+    // anybody wants. `ensureWorldGenerated` does not RELY on this (it reads `overworldRooms`), so the flags
+    // agreeing is for the panel's benefit rather than the server's.
+    if ('worldOverworld' in patch) { worldCfg.overworld = patch.worldOverworld ? 1 : 0; if (worldCfg.overworld) { worldCfg.chunked = 1; worldCfg.onDemand = 1; } }
     if ('worldDropPristine' in patch) worldCfg.dropPristine = patch.worldDropPristine ? 1 : 0;
     // ── and the button that makes the switch testable: rebuild THIS room's world with the current generator.
     // ⭐ Why a rebuild in place rather than "go and visit a different page": the seed is keyed on the URL, so a
@@ -6957,7 +7029,21 @@ io.on('connection', (socket) => {
     currentAvOwnerId = rinfo ? rinfo.owner_id : null;
     // levelIndex selects the Level within the room's World; default the per-URL room's [sandbox=0, life=1].
     const levelIndex = (data && Number.isInteger(data.levelIndex) && data.levelIndex >= 0) ? data.levelIndex : (type === 'world' ? 1 : 0);
-    const avRoom = avatarRoomKey(roomId, levelIndex);
+    // ⭐⭐ INCREMENT 7 — THE OVERWORLD. A 'world' join goes to ONE shared room instead of a per-page one. The page
+    // is still what you ARE (it decides where you arrive, below); it is no longer where you GO.
+    // ⚠️ SANDBOX LEVELS ARE NOT AFFECTED and must not be: a sandbox is a private scratch world per page, which is
+    // a different thing from the shared world and stays exactly as it is.
+    // ⚠️ `overworldRooms.add` happens HERE, before anything asks for the room's shape. `roomDims`, `worldGeom`
+    // and `genCfgFor` all read this Set, so registering late would create page-shaped fields for an
+    // Overworld-shaped world — and the fields are allocated by the first thing that touches them.
+    const _isOver = !!worldCfg.overworld && type === 'world';
+    const avRoom = _isOver ? OVERWORLD_ROOM : avatarRoomKey(roomId, levelIndex);
+    if (_isOver) overworldRooms.add(avRoom);
+    // Where in the Overworld THIS socket arrives: an allocation against the page's permanent identity, which is
+    // the whole of `server/domains.js`. `place` (not `peek`) because arriving is what claims a column.
+    // ⚠️ PER SOCKET, NOT PER ROOM. Everywhere else `spawn` is a property of the room; in a shared world every
+    // player has their own, so it cannot be read back from the room later — it is resolved once, here.
+    const _overCol = _isOver ? domains.place(overworldIdentity(roomId)) : null;
     // Duplicate-instance guard: if THIS identity is already live in this avatar World from another tab/window,
     // don't silently spawn a second blob. Ask the joiner to confirm a takeover (avt-dup); they re-send with
     // force:true, and we evict the other instance(s) here. (No-op at the common single-instance case.)
@@ -6974,7 +7060,9 @@ io.on('connection', (socket) => {
     }
     currentAvLevelIndex = levelIndex;                              // Phase 3: per-Level build lock keys on this
     currentAvRoomId = roomId;                                      // Phase 6 inc 4: the seed key, for a world regenerate
-    currentAvBand = playBand(roomId, levelIndex);                  // Phase 6: clamp this socket's object placement to the Level's band
+    // Phase 6: clamp this socket's object placement to the Level's band. The Overworld has no band — a Level
+    // size preset is a page-world idea, and the whole width is the point.
+    currentAvBand = _isOver ? null : playBand(roomId, levelIndex);
     // Leave any previous avatar room (Level switch without an explicit avt-leave).
     if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
       socket.leave(currentAvatarRoom);
@@ -6985,7 +7073,10 @@ io.on('connection', (socket) => {
     socketToAvatarRoom[socket.id] = avRoom;
     socket.join(avRoom);
     if (type === 'world') ensureWorldGenerated(avRoom, roomId, levelIndex);   // seed keyed by roomId (=URL for the default room → identical worlds), once per server lifetime; band from the Level's size preset
-    maybeHydratePublished(avRoom, roomId, levelIndex);   // Phase 7b: server-load a published World's content (no host needed); runs before the replay below
+    // ⚠️ NOT INTO THE OVERWORLD. Hydration server-loads a PUBLISHED page world's stored content into a room;
+    // doing that to the shared world would paste somebody's published page over whatever part of the Overworld
+    // happened to share its coordinates, once per joiner.
+    if (!_isOver) maybeHydratePublished(avRoom, roomId, levelIndex);   // Phase 7b: server-load a published World's content (no host needed); runs before the replay below
     if (!roomAvt[avRoom]) roomAvt[avRoom] = new Set();
     roomAvt[avRoom].add(socket.id);
     // Phase 4 visibility cap: who this joiner offers to. With peerCfg.cap = 0 this is every existing peer, i.e.
@@ -7006,7 +7097,7 @@ io.on('connection', (socket) => {
     // constant, so a second world shape was not expressible at all; it now reshapes to whatever this says.
     // `roomDims` returns the page shape for every room today, so this is the value the client already had.
     const _rd = roomDims(avRoom);
-    socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: (type === 'world') ? worldSpawnFor(avRoom) : null,
+    socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: (type === 'world') ? worldSpawnFor(avRoom, _overCol) : null,
       dims: { w: _rd.cols * TERRAIN_CELL, h: _rd.rows * TERRAIN_CELL, cell: TERRAIN_CELL } });
     // Identity, once, rather than on every position packet — see roomProfile. Both directions: the joiner
     // needs everyone already here, and everyone here needs the joiner. Harmless when the relay is off (an

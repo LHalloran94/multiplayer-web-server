@@ -298,7 +298,13 @@ function makeDomains(cfg) {
     spawnXOf(raw) { const r = this.peek(raw); return r ? (r.col + 0.5) * CELL : null; },
     bandRowsOf(raw) {
       const r = this.peek(raw); if (!r) return null;
-      const b = BANDS.find(x => x.name === r.band) || BANDS[0];
+      return this.bandRows(r.band);
+    },
+    // The same answer for a band NAME, for callers that already hold a placed record and would otherwise have to
+    // peek it back up by identity to get here. ⚠️ It exists so there is ONE definition of where the bands are:
+    // the spawn seam briefly had its own copy of these fractions, which is two things that can drift apart.
+    bandRows(name) {
+      const b = BANDS.find(x => x.name === name) || BANDS[0];
       return { r0: b.r0, r1: b.r1 };
     },
   };
