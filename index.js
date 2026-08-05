@@ -3660,6 +3660,13 @@ let liqReactCand = 0, liqReactSeen = 0;
 // If `woken` dominates, the sim is re-examining a huge halo around every moving cell every tick, and the fix is
 // the wake rule — not the flow, not the budget, and not anything measured so far.
 let liqQProcessed = 0, liqQMoved = 0, liqQWoken = 0, liqQCapped = 0;
+// 🟥 CHUNKS GENERATED FROM INSIDE THE LIQUID TICK. A profile of aggressive panning put worldgen.js at 33.4% of
+// all server CPU — more than the entire liquid sim — and the sim is one of the things that triggers it: any read
+// into a chunk that has never been produced runs the generator (`rp` → `_miss` → `_alloc`), synchronously, at
+// ~0.9ms a chunk. So liquid flowing to the edge of produced world generates that world MID-TICK, which is how a
+// single tick reaches the 940ms the in-game readout reports. This counter separates "the sim is slow" from
+// "the sim is generating the world while you watch", which are different problems with different fixes.
+let liqTickGenPages = 0;
 const liqReactFired = {};     // reaction FX code → how many times it has fired
 // A reaction can only START when something changes, and anything that moved is already in roomFineActive — which the tick
 // uses as its candidate list. What that misses is a change to a SETTLED pair (painting water beside a settled lava pool,
@@ -4009,6 +4016,7 @@ const runLiquidTick = () => {
   // lifted or a step is requested, so what you are looking at is exactly what the sim last produced.
   if (liquidCfg.paused) { if (liquidStepsPending <= 0) return; liquidStepsPending--; }
   const _t0 = liquidCfg.perfLog ? performance.now() : 0; let _active = 0;
+  const _genAtTickStart = genPagesProduced;      // see liqTickGenPages: how much WORLD this tick built
   liquidTickCount++;
   // ⭐ Phase 6 inc 4b. Chunks produced on demand since the last tick get their liquid HERE, before anything
   // starts iterating an active-cell Set — a page fault can happen from deep inside the flow loop, and seeding
@@ -4185,6 +4193,7 @@ const runLiquidTick = () => {
   powderTickCount++; for (const room of Array.from(cellRooms.powder)) { if (!cellRooms.powder.has(room)) continue; if (_deferred && _deferred.has(room)) continue; powderTickRoom(room); }   // powder runs in lockstep with liquid → consistent gravity
   if ((liquidTickCount & 3) === 0) for (const room of Array.from(cellRooms.soil)) { if (!cellRooms.soil.has(room)) continue; if (_deferred && _deferred.has(room)) continue; soilTickRoom(room); }
   if (liquidCfg.perfLog && _deferred) liqPerf.deferred += _deferred.size;
+  liqTickGenPages += genPagesProduced - _genAtTickStart;
   if (liquidCfg.perfLog) {
     const _dt = performance.now() - _t0; liqPerf.simMs += _dt; if (_dt > liqPerf.simMsMax) liqPerf.simMsMax = _dt;
     if (_active > liqPerf.active) liqPerf.active = _active; liqPerf.ticks++;
@@ -4206,6 +4215,7 @@ const runLiquidTick = () => {
         reactCand: liqReactCand, reactSeen: liqReactSeen, reactAnchors: liqReactAnchors, reactFired: liqReactFired,
         // the work-queue funnel: examined → actually did something → put back by a neighbour → put back by the cap
         qProcessed: liqQProcessed, qMoved: liqQMoved, qWoken: liqQWoken, qCapped: liqQCapped,
+        tickGenPages: liqTickGenPages, genPages: genPagesProduced,
         // WHERE the active liquid is. `actChunks` against the ~150 chunks one player's viewport subscribes to
         // is the whole diagnosis: similar ⇒ the sim is working on what you can see and the COST is the problem;
         // far larger ⇒ containment is the problem and tuning the cost cannot fix it.
