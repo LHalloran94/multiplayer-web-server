@@ -3157,10 +3157,10 @@ function fineLiquidTickRoom(room, SUB) {
   // QUIESCENCE scratch (only when enabled): per-fine-cell counter of consecutive ticks the cell did NOT move. Reallocated if NCELL changed (sub switch).
   const quiesce = liquidCfg.fineQuiesce ? ((st.fineStill && st.fineStill.length === NCELL) ? st.fineStill : (st.fineStill = newPagedField('fineStill', chunkGeom(COLS, FROWS), room))) : null;
   let stepMoves = 0;   // cell-changes in the current sub-step (adaptive-K activity proxy)
-  const wake = (j) => { if (j >= 0 && j < NCELL && !isSolid(j) && tot.g(j) > 0) active.add(j); };
+  const wake = (j) => { if (j >= 0 && j < NCELL && !isSolid(j) && tot.g(j) > 0) { if (!active.has(j)) liqQWoken++; active.add(j); } };
   const wakeN = (j) => { const y = j % FROWS; wake(j - FROWS); wake(j + FROWS); if (y > 0) wake(j - 1); if (y < FROWS - 1) wake(j + 1); };
   const wakeD = (j) => { wakeN(j); const y = j % FROWS; if (y > 0) { wake(j - FROWS - 1); wake(j + FROWS - 1); } if (y < FROWS - 1) { wake(j - FROWS + 1); wake(j + FROWS + 1); } };
-  const mark = (j) => { changedSet.add(j); active.add(j); stepMoves++; };
+  const mark = (j) => { changedSet.add(j); active.add(j); stepMoves++; liqQMoved++; };
   // ⚠️ PAGED ACCESS: the page + offset base are hoisted ONCE per cell and the rank loop then indexes the page flat,
   // so a rank loop costs what it always did plus one table lookup. `rp` reads through an unallocated page as zeros;
   // `wp` faults one in. When A and B share a page these are the same typed array, which is exactly as before.
@@ -3311,11 +3311,11 @@ function fineLiquidTickRoom(room, SUB) {
     };
     let processed = 0;
   for (const i of list) {
-    if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); continue; }
+    if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); liqQCapped++; continue; }
     if (isSolid(i)) continue;
     const c = (i / FROWS) | 0, r = i - c * FROWS, canDown = r + 1 < LIQUID_FLOOR_ROW;
     let L = tot.g(i); if (L <= 0) continue;
-    processed++;
+    processed++; liqQProcessed++;
     // ---- SINK (drain block id 17): a fine cell touching a coarse drain block loses liquid, heaviest first (ledgered).
     if (sinkRate > 0 && ((r < FROWS - 1 && isSinkF(i + 1)) || (r > 0 && isSinkF(i - 1)) || (c > 0 && isSinkF(i - FROWS)) || (c < COLS - 1 && isSinkF(i + FROWS)))) {
       let need = sinkRate < L ? sinkRate : L; const sp = amt.wp(i), sb = amt.o(i);
@@ -3649,6 +3649,17 @@ let liqReactAnchors = 0;      // anchors the reaction pass has built, ever — t
 // If `seen` dwarfs `anchor`, the cost is the candidate expansion and no amount of tuning individual reactions
 // touches it. If they are close, the chemistry itself is the cost and naming the reaction becomes worthwhile.
 let liqReactCand = 0, liqReactSeen = 0;
+// ⭐⭐ WHY IS THE WORK QUEUE NOT DRAINING? Flagged directly: *"if the share of the queue moving each tick is 3.1%,
+// surely that should be screaming to us that there is an enormous performance issue."* It should, and it is.
+// 29,167 cells queued while 893 move means ~97% of the queue is cells the sim looks at and does nothing with.
+// The question is HOW THEY GOT IN, and there are only three doors:
+//   liqQProcessed  cells the flow loop actually examined
+//   liqQMoved      of those, cells that changed something
+//   liqQWoken      cells added by wake/wakeN/wakeD because a NEIGHBOUR moved (most of these have nothing to do)
+//   liqQCapped     cells put back untouched because the per-sub-step cap was reached
+// If `woken` dominates, the sim is re-examining a huge halo around every moving cell every tick, and the fix is
+// the wake rule — not the flow, not the budget, and not anything measured so far.
+let liqQProcessed = 0, liqQMoved = 0, liqQWoken = 0, liqQCapped = 0;
 const liqReactFired = {};     // reaction FX code → how many times it has fired
 // A reaction can only START when something changes, and anything that moved is already in roomFineActive — which the tick
 // uses as its candidate list. What that misses is a change to a SETTLED pair (painting water beside a settled lava pool,
@@ -4193,6 +4204,8 @@ const runLiquidTick = () => {
         reactSkips: liqReactSkips,
         // the funnel: candidates → deduped neighbourhood → cells that can actually react → what fired
         reactCand: liqReactCand, reactSeen: liqReactSeen, reactAnchors: liqReactAnchors, reactFired: liqReactFired,
+        // the work-queue funnel: examined → actually did something → put back by a neighbour → put back by the cap
+        qProcessed: liqQProcessed, qMoved: liqQMoved, qWoken: liqQWoken, qCapped: liqQCapped,
         // WHERE the active liquid is. `actChunks` against the ~150 chunks one player's viewport subscribes to
         // is the whole diagnosis: similar ⇒ the sim is working on what you can see and the COST is the problem;
         // far larger ⇒ containment is the problem and tuning the cost cannot fix it.
