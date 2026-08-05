@@ -3936,8 +3936,17 @@ function noteWhere(avRoom, sid, v) {
   if (!isFinite(x) || !isFinite(y)) return;
   // Clamp the claimed viewport to the world. It is client-asserted and decides how much memory we hold, so a
   // client cannot ask us to make the entire world resident by claiming an enormous screen.
-  const w = Math.max(0, Math.min(MWSim.C.WORLD_W, +v.w || 0));
-  const h = Math.max(0, Math.min(MWSim.C.WORLD_H, +v.h || 0));
+  // 🟥 THIS CLAMPED AGAINST THE PAGE WORLD'S SIZE ON EVERY ROOM. `MWSim.C.WORLD_W/H` are the stage constants
+  // (15,360 x 3,240) — but a windowed client in the Overworld reports its WINDOW, which is 8,192 x 4,096, so the
+  // height was silently cut to 3,240 and the bottom ~107 rows of the window were held and drawn but never
+  // subscribed to: correct when they arrived and stale ever after. Same bug family as SIZE_PRESETS and FLOOR_TOP
+  // (a page constant on the Overworld path); the room's own shape is the only right answer.
+  // ⚠️ `worldGeom`, NOT `roomDims`. This block is SLICED OUT by probe_chunking (H/I), whose rig injects
+  // `worldGeom` and does not know `roomDims` — the sliced-block boundary that has now bitten this track five
+  // times. Same answer, and it is already a dependency of the block.
+  const _g = worldGeom(avRoom);
+  const w = Math.max(0, Math.min(_g.cols * TERRAIN_CELL, +v.w || 0));
+  const h = Math.max(0, Math.min(_g.rows * TERRAIN_CELL, +v.h || 0));
   const m = roomWhere[avRoom] || (roomWhere[avRoom] = new Map());
   const rect = {
     cx0: Math.floor(x / span), cy0: Math.floor(y / span),
