@@ -1882,6 +1882,21 @@ PagedArray.prototype.pageOfCell = function (i) { const g = this.geom; return g.K
 // first (it is all zeros) but must NOT skip the second, or evicted content silently reads as empty — Phase 3's
 // worst bug, and the reason this is a named test rather than `pageAt(p) === null`.
 PagedArray.prototype.pageVacant = function (p) { return this.pageAt(p) === null && (this.ev === null || !this.ev[p]); };
+// Is the page holding cell `i` provably SKY — absent, and the generator can say so WITHOUT generating it?
+// ⭐ This is what makes "never build world from inside the sim" safe. Refusing to produce is fail-safe only if
+// the refusal reads as SOLID, and reading open sky as solid would stop falling liquid dead in mid-air — which is
+// the exact symptom this whole track started from. Sky is the one absent page whose contents are known for free,
+// so it must be answered honestly (air) while everything else answers "unbuilt".
+// ⚠️ Shares `_miss`'s one-slot memo deliberately: same question, same answer, and every hot reader walks a page
+// at a time, so one slot is enough. Without it this re-evaluates the generator's surface on every single cell.
+PagedArray.prototype.skyAt = function (i) {
+  if (!this.seedEmpty) return false;
+  const p = this.pageOfCell(i);
+  if (p === this._emptyP) return this._emptyV;
+  const e = !!this.seedEmpty(p);
+  this._emptyP = p; this._emptyV = e;
+  return e;
+};
 // A NON-FAULTING read: the cell's value, or -1 when nobody has produced that page yet. `.g()` would produce it,
 // and there are readers for which producing is exactly the wrong answer — see the powder seeders, where a read
 // of "the cell below" cascaded a chunk at a time down 64 chunks of Overworld and stalled the server.
@@ -3022,11 +3037,22 @@ function powderTickRoom(room) {
   // ⭐ THE MACHINERY WAS ALREADY THERE. `swapMove` below is written to carry a displaced pool UP into the cell
   // the grain vacates (`carried = ftot.g(dst)`, and it re-wakes the liquid around it). Powder sinking through
   // liquid was the designed behaviour all along; only this predicate refused it.
-  const canDisplace = (j) => { const v = grid.g(j); return v === 0 || isFluidId(v); };
+  // 🟥 THE TICK MUST NOT BUILD WORLD EITHER, AND THIS IS THE EXACT CASCADE ALREADY ON THE RECORD. The note on
+  // the powder SEEDER reads: "a grain at a chunk's bottom edge produced the chunk beneath it, whose seeding
+  // produced the one beneath that, to bedrock — 64 chunks deep, 8,191 wide, and the server stopped answering."
+  // The seeder was changed to peek. THE TICK WAS NOT, and it is the hotter path: `canDisplace` asks "what is
+  // below this grain?" of every falling grain, every tick. MEASURED at 840 chunks generated from inside the
+  // powder pass over 35s, second only to reactions.
+  // ⭐ UNBUILT ⇒ NOT DISPLACEABLE: a grain resting on the edge of the produced world stays put instead of
+  // generating the world beneath itself to fall into. Sky is still honestly air (`skyAt`), so a grain genuinely
+  // falling through open sky keeps falling.
+  const genRoom = !!grid.seedFn;
+  const peekG = genRoom ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
+  const canDisplace = (j) => { const v = peekG(j); return v === 0 || isFluidId(v); };   // -1 (unbuilt) is neither
   const list = Array.from(active); active.clear();
   list.sort((a, b) => (b % ROWS) - (a % ROWS));   // bottom-up so a falling column cascades in a single pass
   const changedSet = new Set(), fineChanged = new Set();
-  const wakeAround = (i) => { const r = i % ROWS; if (r <= 0) return; for (const j of [i - 1, i - ROWS - 1, i + ROWS - 1]) if (j >= 0 && j < nn && isPowderId(grid.g(j))) active.add(j); };   // wake grains above the vacated cell → column keeps falling
+  const wakeAround = (i) => { const r = i % ROWS; if (r <= 0) return; for (const j of [i - 1, i - ROWS - 1, i + ROWS - 1]) if (j >= 0 && j < nn && isPowderId(peekG(j))) active.add(j); };   // wake grains above the vacated cell → column keeps falling
   const swapMove = (src, dst) => {
     const P = grid.g(src), hpP = hp.g(src);
     {
@@ -3150,8 +3176,30 @@ function fineLiquidTickRoom(room, SUB) {
   const SCAN = LIQUID_LEVEL_SCAN * SUB;                                  // levelling scan reach in CELLS → scaled so PHYSICAL reach is unchanged
   const TROWS = st.rows;
   const coarseOf = (k) => { const fc = (k / FROWS) | 0, fr = k - fc * FROWS; return ((fc / SUB) | 0) * TROWS + ((fr / SUB) | 0); };
-  const isSolid = (k) => { if (k < 0 || k >= NCELL) return true; const v = grid.g(coarseOf(k)); return v !== 0 && !isFluidId(v); };   // fine solid = the coarse terrain cell it sits in
-  const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; return isSinkId(grid.g(coarseOf(k))); };   // a fine cell whose coarse cell is a DRAIN block
+  // 🟥🟥 THE SIM MUST NEVER BUILD WORLD. `.g()` PRODUCES the page it lands on, so `isSolid` — the single most
+  // called function in the tick — generated a chunk (~0.9ms, synchronously) every time liquid looked at a cell
+  // just outside the produced world. MEASURED: 2,239 of 3,395 chunks, 66% of ALL world generation, came from
+  // inside `runLiquidTick`, ~2.0s of tick time over a 40s run, and worldgen was 33.4% of all server CPU — more
+  // than the entire liquid sim. That is what a 940ms tick is.
+  // ⚠️ THIS EXACT CASCADE HAS ALREADY TAKEN THE SERVER DOWN ONCE. See the note on the powder seeder: "a grain at
+  // a chunk's bottom edge produced the chunk beneath it, whose seeding produced the one beneath that, to
+  // bedrock — 64 chunks deep, 8,191 wide, and the server stopped answering." The SEEDERS were fixed to peek. The
+  // SIM was not, and it is the hotter path by far.
+  // ⭐ UNBUILT ⇒ SOLID, which is the fail-safe direction: liquid stops at the edge of the produced world instead
+  // of pouring through it. That edge is always outside everyone's view (production follows visibility plus a
+  // margin), and when a player goes there `sendChunkContent` produces it properly and the liquid resumes.
+  // ⚠️ SKY IS THE EXCEPTION AND IT IS NOT OPTIONAL: an absent page the generator can prove is sky must read as
+  // AIR, or falling liquid stops dead in mid-air over unproduced ground — the exact symptom this track began
+  // with. `skyAt` answers that for free.
+  // ⚠️ A room with NO generator is untouched, byte for byte: absent there really does mean empty, and `.g()` is
+  // the right read. That is what keeps `probe_fine_identity` bit-identical and every page room unchanged.
+  const genRoom = !!grid.seedFn;
+  const isSolid = genRoom
+    ? (k) => { if (k < 0 || k >= NCELL) return true; const ci = coarseOf(k); const v = peekCellAt(grid, ci);
+               if (v >= 0) return v !== 0 && !isFluidId(v);
+               return !grid.skyAt(ci); }                                                    // unbuilt ⇒ solid; sky ⇒ air
+    : (k) => { if (k < 0 || k >= NCELL) return true; const v = grid.g(coarseOf(k)); return v !== 0 && !isFluidId(v); };
+  const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; const v = genRoom ? peekCellAt(grid, coarseOf(k)) : grid.g(coarseOf(k)); return v >= 0 && isSinkId(v); };   // a fine cell whose coarse cell is a DRAIN block
   const sinkRate = Math.max(0, Math.min(cap, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
   const changedSet = new Set(), airborneWire = new Set();   // accumulate across the physics sub-steps below; broadcast once
   // QUIESCENCE scratch (only when enabled): per-fine-cell counter of consecutive ticks the cell did NOT move. Reallocated if NCELL changed (sub switch).
@@ -3667,6 +3715,14 @@ let liqQProcessed = 0, liqQMoved = 0, liqQWoken = 0, liqQCapped = 0;
 // single tick reaches the 940ms the in-game readout reports. This counter separates "the sim is slow" from
 // "the sim is generating the world while you watch", which are different problems with different fixes.
 let liqTickGenPages = 0;
+// ⚠️ AND WHICH PASS. Bracketing the whole tick said 66% of world generation happened inside it; fixing the
+// liquid flow's solidity test moved the number the WRONG WAY, which means the flow was never the source. A total
+// cannot say who spent it, so each pass is bracketed separately. (`drain` is `drainGenLiquid`, which runs at the
+// top of the tick precisely because production defers liquid seeding to it.)
+const liqGenBy = { drain: 0, src: 0, react: 0, flow: 0, powder: 0, soil: 0 };
+let _genMark = 0;
+const genMark = () => { _genMark = genPagesProduced; };
+const genSince = (k) => { liqGenBy[k] += genPagesProduced - _genMark; _genMark = genPagesProduced; };
 const liqReactFired = {};     // reaction FX code → how many times it has fired
 // A reaction can only START when something changes, and anything that moved is already in roomFineActive — which the tick
 // uses as its candidate list. What that misses is a change to a SETTLED pair (painting water beside a settled lava pool,
@@ -3722,7 +3778,14 @@ function fineReactTickRoom(room, SUB) {
   // && gid === 2` ⇒ steam, etc). In fine mode liquid is not a grid id at all, so no transition can ever match and every
   // one of those effects is unreachable. The server knows exactly which reaction fired, so it says so: [cell, code].
   const addFx = (i, code) => { liqReactFired[code] = (liqReactFired[code] || 0) + 1; if (fx.length < 4096) fx.push(i, code); };
-  const wake = (j) => { if (j >= 0 && j < N && tot.g(j) > 0) { const v = grid.g(j); if (v === 0 || isFluidId(v)) act.add(j); } };
+  // 🟥 SAME RULE AS THE FLOW AND POWDER PASSES: never build world from inside the tick. MEASURED at 927 chunks
+  // generated from inside the reaction pass over 35s -- the largest single source. `.g()` produces the page it
+  // lands on, and these read NEIGHBOURS, so they reach one cell past the produced world by construction.
+  // ⭐ -1 (unbuilt) is neither air nor a fluid nor a reagent, so every test below falls through to 'no reaction',
+  // which is the fail-safe answer: chemistry waits until that ground actually exists.
+  const genRoom = !!grid.seedFn;
+  const gPeek = genRoom ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
+  const wake = (j) => { if (j >= 0 && j < N && tot.g(j) > 0) { const v = gPeek(j); if (v === 0 || isFluidId(v)) act.add(j); } };
   const wakeN = (j) => { const r = j % ROWS; wake(j - ROWS); wake(j + ROWS); if (r > 0) wake(j - 1); if (r < ROWS - 1) wake(j + 1); };
   const recomp = (j) => { const p = amt.rp(j), b = amt.o(j); let s = 0; for (let k = 0; k < T; k++) s += p[b + k]; tot.s(j, s); };
   const clearFine = (j) => { const p = amt.wp(j), b = amt.o(j); for (let k = 0; k < T; k++) p[b + k] = 0; tot.s(j, 0); act.delete(j); liqChanged.add(j); };
@@ -3815,7 +3878,7 @@ function fineReactTickRoom(room, SUB) {
       // ── (A) SOLID terrain the lava is touching. Each conversion costs lava, so a pool eats a bounded distance in.
       for (const j of NB) {
         if (lavaAt() <= 0 || j < 0 || j >= N) continue;
-        const g = grid.g(j);
+        const g = gPeek(j);
         if (g === 8 || g === 4) { setLiquid(j, 4, capFrac(FREACT_MELT_AMT_F)); spendLava(i, capFrac(FREACT_MELT_COST_F)); addFx(j, 1); }   // snow/ice melt → water
         else if (g === 5) { setSolid(j, 1); spendLava(i, capFrac(FREACT_BAKE_COST_F)); addFx(j, 4); }                          // mud baked dry → earth
         else if (g === 3) { convertSolid(j, 16, 3); spendLava(i, capFrac(FREACT_FUSE_COST_F)); }                                                       // sand fused → glass, BOTH consumed
@@ -3892,7 +3955,7 @@ function fineReactTickRoom(room, SUB) {
     } else {                                                // nothing to neutralise with → eat an adjacent solid
       let solidJ = -1;
       for (const j of NB) { if (j < 0 || j >= N) continue; if ((j % ROWS) >= FLOOR_ROW) continue;
-        const g = grid.g(j); if (g !== 0 && !isFluidId(g) && hp.g(j) > 0 && g !== 16) { solidJ = j; break; } }   // never bedrock, never glass (acid-immune)
+        const g = gPeek(j); if (g > 0 && !isFluidId(g) && hp.g(j) > 0 && g !== 16) { solidJ = j; break; } }   // never bedrock, never glass (acid-immune)
       if (solidJ >= 0) {
         fineReactSet(room).add(i);                          // gradual: keep the contact alive between bites
         if ((tick % ACID_BITE_TICKS) === 0) {
@@ -4016,7 +4079,7 @@ const runLiquidTick = () => {
   // lifted or a step is requested, so what you are looking at is exactly what the sim last produced.
   if (liquidCfg.paused) { if (liquidStepsPending <= 0) return; liquidStepsPending--; }
   const _t0 = liquidCfg.perfLog ? performance.now() : 0; let _active = 0;
-  const _genAtTickStart = genPagesProduced;      // see liqTickGenPages: how much WORLD this tick built
+  const _genAtTickStart = genPagesProduced; genMark();      // see liqTickGenPages: how much WORLD this tick built
   liquidTickCount++;
   // ⭐ Phase 6 inc 4b. Chunks produced on demand since the last tick get their liquid HERE, before anything
   // starts iterating an active-cell Set — a page fault can happen from deep inside the flow loop, and seeding
@@ -4089,7 +4152,9 @@ const runLiquidTick = () => {
   // same membership in the same first-touch order (see the registries in the cell-store block). Where the body can
   // drop the room it is iterating, the registry is SNAPSHOTTED and re-checked per room, which is exactly what
   // `for…in` did: V8 enumerates a cached key list but re-tests existence before yielding each key.
-  for (const room of Array.from(cellRooms.src)) { if (!cellRooms.src.has(room)) continue; if (_deferred && _deferred.has(room)) continue; sourceTickRoom(room); }   // sources top up first, so their liquid is ordinary pooled liquid to everything below
+  genSince('drain');
+  for (const room of Array.from(cellRooms.src)) { if (!cellRooms.src.has(room)) continue; if (_deferred && _deferred.has(room)) continue; sourceTickRoom(room); }
+  genSince('src');   // sources top up first, so their liquid is ordinary pooled liquid to everything below
   // FINE-CELL liquid (experimental) — a parallel sim in its own arrays, ticked only when liquidCfg.fine.
   // Timed SEPARATELY from the coarse sim so the Perf tab can isolate the fine cost at various fineLevelSteps (K).
   const _fine0 = liquidCfg.perfLog ? performance.now() : 0; let _fineActive = 0;
@@ -4104,7 +4169,7 @@ const runLiquidTick = () => {
   // it looked like an idle room. Two numbers say in one glance what took a whole session to isolate by hand.
   const _react = () => {
     const _rt0 = liquidCfg.perfLog ? performance.now() : 0;
-    _reactInner();
+    const _gm = genPagesProduced; _reactInner(); liqGenBy.react += genPagesProduced - _gm; _genMark = genPagesProduced;
     if (liquidCfg.perfLog) { const _rd = performance.now() - _rt0; liqPerf.reactMs += _rd; if (_rd > liqPerf.reactMsMax) liqPerf.reactMsMax = _rd; }
   };
   const _reactInner = () => {
@@ -4190,9 +4255,12 @@ const runLiquidTick = () => {
     liqPerf.actCols = _cols.size;      // DISTINCT columns holding active liquid — an area, comparable to a viewport
     liqPerf.pending = _pend;
   }
+  genSince('flow');
   powderTickCount++; for (const room of Array.from(cellRooms.powder)) { if (!cellRooms.powder.has(room)) continue; if (_deferred && _deferred.has(room)) continue; powderTickRoom(room); }   // powder runs in lockstep with liquid → consistent gravity
+  genSince('powder');
   if ((liquidTickCount & 3) === 0) for (const room of Array.from(cellRooms.soil)) { if (!cellRooms.soil.has(room)) continue; if (_deferred && _deferred.has(room)) continue; soilTickRoom(room); }
   if (liquidCfg.perfLog && _deferred) liqPerf.deferred += _deferred.size;
+  genSince('soil');
   liqTickGenPages += genPagesProduced - _genAtTickStart;
   if (liquidCfg.perfLog) {
     const _dt = performance.now() - _t0; liqPerf.simMs += _dt; if (_dt > liqPerf.simMsMax) liqPerf.simMsMax = _dt;
@@ -4215,7 +4283,7 @@ const runLiquidTick = () => {
         reactCand: liqReactCand, reactSeen: liqReactSeen, reactAnchors: liqReactAnchors, reactFired: liqReactFired,
         // the work-queue funnel: examined → actually did something → put back by a neighbour → put back by the cap
         qProcessed: liqQProcessed, qMoved: liqQMoved, qWoken: liqQWoken, qCapped: liqQCapped,
-        tickGenPages: liqTickGenPages, genPages: genPagesProduced,
+        tickGenPages: liqTickGenPages, genPages: genPagesProduced, genBy: liqGenBy,
         // WHERE the active liquid is. `actChunks` against the ~150 chunks one player's viewport subscribes to
         // is the whole diagnosis: similar ⇒ the sim is working on what you can see and the COST is the problem;
         // far larger ⇒ containment is the problem and tuning the cost cannot fix it.
