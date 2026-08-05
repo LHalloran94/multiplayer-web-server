@@ -66,13 +66,37 @@
     return h % STAGE_LAYOUTS.length;
   }
   function platformsFor(url) { return STAGE_LAYOUTS[layoutIndex(url)]; }
-  function floorY(P) { return P[0].y; }
+  // ⚠️ THE OVERWORLD HAS NO PLATFORMS AT ALL — its ground is entirely generated terrain, so `PLATFORMS` is an
+  // empty array there and `P[0].y` is a TypeError. The fallback is the world floor, which is the same thing the
+  // page layout's entry [0] is.
+  function floorY(P, fallback) { return (P && P.length) ? P[0].y : (fallback != null ? fallback : C.WORLD_H); }
+
+  // ══ THE WORLD'S BOUNDS ARE PER-AVATAR, NOT A MODULE CONSTANT ═══════════════════════════════════════════════
+  // 🟥 THIS IS WHAT MADE THE OVERWORLD INVISIBLE, and it is the same bug family as SIZE_PRESETS / FLOOR_TOP /
+  // PLATFORMS: a PAGE-world constant on the Overworld path. `C.WORLD_W/H` are the page stage's 15,360 x 3,240.
+  // The server spawned the avatar correctly at (1271548, 17112) — measured, the join line agreed — and then the
+  // very first sim step clamped it to (15340, 3240), i.e. `WORLD_W - AV_W/2` and `WORLD_H` exactly. That single
+  // clamp produced ALL FOUR reported symptoms at once:
+  //   · `y > WORLD_H ⇒ y = WORLD_H, onGround = true`  → "all movement is along a flat ground" (an invisible floor)
+  //   · `x + AV_W/2 > WORLD_W ⇒ x = WORLD_W - AV_W/2` → "an invisible wall on the right, but I can move left"
+  //   · and it parks you at row 405 of a 4,096-row world, ~1,700 rows above any generated ground → nothing to see.
+  // The terrain window was tracking correctly the whole time; it was faithfully following a body that had been
+  // teleported into the corner of a world that is not the one it is in.
+  // ⚠️ DETERMINISM IS PRESERVED: the bounds live on the STATE, which both ends already agree on, and they default
+  // to `C.WORLD_W/H` when unset — so every page room, and every existing caller, behaves exactly as before.
+  function boundsW(s) { return (s && s.worldW > 0) ? s.worldW : C.WORLD_W; }
+  function boundsH(s) { return (s && s.worldH > 0) ? s.worldH : C.WORLD_H; }
+  // The one seam callers use to tell an avatar which world it is standing in. Both ends must pass the SAME pair,
+  // which is why it comes off the room shape the server sends on `avt-joined {dims}` and not off a local guess.
+  function setBounds(s, w, h) { if (!s) return s; if (w > 0) s.worldW = w; if (h > 0) s.worldH = h; return s; }
 
   // ---- State ----
-  function createState(id, P) {
+  function createState(id, P, worldW, worldH) {
+    const ww = worldW > 0 ? worldW : C.WORLD_W, wh = worldH > 0 ? worldH : C.WORLD_H;
     return {
       id,
-      x: C.WORLD_W / 2, y: floorY(P),
+      worldW: ww, worldH: wh,
+      x: ww / 2, y: floorY(P, wh),
       vx: 0, vy: 0,
       facingLeft: false, onGround: false, wasOnGround: false,
       hasDoubleJump: true, wallSlideDir: 0,
@@ -101,16 +125,17 @@
     }
   }
   function resolveStageBounds(s) {
+    const WW = boundsW(s), WH = boundsH(s);
     if (s.x - C.AV_W / 2 < 0) {
       s.x = C.AV_W / 2; s.vx = 0;
       if (!s.onGround && s.vy > 0) s.wallSlideDir = -1;
     }
-    if (s.x + C.AV_W / 2 > C.WORLD_W) {
-      s.x = C.WORLD_W - C.AV_W / 2; s.vx = 0;
+    if (s.x + C.AV_W / 2 > WW) {
+      s.x = WW - C.AV_W / 2; s.vx = 0;
       if (!s.onGround && s.vy > 0) s.wallSlideDir = 1;
     }
     if (s.y - C.AV_H < 0) { s.y = C.AV_H; if (s.vy < 0) s.vy = 0; }
-    if (s.y > C.WORLD_H) { s.y = C.WORLD_H; s.vy = 0; s.onGround = true; }
+    if (s.y > WH) { s.y = WH; s.vy = 0; s.onGround = true; }
   }
 
   // ---- One fixed-timestep movement step for a single avatar ----
@@ -125,8 +150,8 @@
     // Respawn (edge) — to the active checkpoint if one is set, else world spawn.
     // respawnX/Y are set out-of-sim (server: avatar-checkpoint handler; client: checkpoint touch).
     if (input.respawn && !s.prevRespawn) {
-      s.x = (typeof s.respawnX === 'number') ? s.respawnX : C.WORLD_W / 2;
-      s.y = (typeof s.respawnY === 'number') ? s.respawnY : floorY(P);
+      s.x = (typeof s.respawnX === 'number') ? s.respawnX : boundsW(s) / 2;
+      s.y = (typeof s.respawnY === 'number') ? s.respawnY : floorY(P, boundsH(s));
       s.vx = 0; s.vy = 0;
       s.hasDoubleJump = true; s.fallThroughIdx = -1; s.wallSlideDir = 0;
     }
@@ -139,7 +164,7 @@
       if (s.onGround || s.vy < 0) {
         s.wallSlideDir = 0;
       } else {
-        s.x = s.wallSlideDir === -1 ? C.AV_W / 2 : C.WORLD_W - C.AV_W / 2;
+        s.x = s.wallSlideDir === -1 ? C.AV_W / 2 : boundsW(s) - C.AV_W / 2;
         s.vx = 0; s.vy = Math.min(s.vy, wantsDown ? C.WALL_SLIDE_VY_FAST : C.WALL_SLIDE_VY);
       }
     }
@@ -156,7 +181,7 @@
           if (Math.abs(s.y - p.y) <= 3 && s.x + C.AV_W / 2 > p.x && s.x - C.AV_W / 2 < p.x + p.w) { onIdx = i; break; }
         }
         // index 0 is the canonical ground floor (floorY = P[0].y) — always solid, never droppable.
-        if (onIdx > 0 && P[onIdx].y + P[onIdx].h < C.WORLD_H) { s.fallThroughIdx = onIdx; s.vy = 5; }
+        if (onIdx > 0 && P[onIdx].y + P[onIdx].h < boundsH(s)) { s.fallThroughIdx = onIdx; s.vy = 5; }
         s.jumpBuffer = 0; s.coyote = 0;
       } else if (canWallJump) {
         s.vy = C.JUMP_VY; s.vx = -s.wallSlideDir * C.MAX_VX * 1.4;
@@ -355,7 +380,7 @@
   }
 
   return {
-    C, STAGE_LAYOUTS, layoutIndex, platformsFor, floorY,
+    C, STAGE_LAYOUTS, layoutIndex, platformsFor, floorY, setBounds, boundsW, boundsH,
     createState, stepMovement, resolveGrabThrow, resolveCollisions, resolveOwnCollision, snapshot, applySnapshot
   };
 });
