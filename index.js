@@ -374,6 +374,47 @@ app.post('/auth/discord', async (req, res) => {
   }
 });
 
+// ---- CPU PROFILE ON DEMAND (debug) ----------------------------------------------------------------------
+// ⭐ "Isn't there some way you can look at the actual computational behaviour and see what exactly is holding
+// everything up?" — yes, and this is it. `GET /debug/cpu-profile?ms=20000` samples the server for that long and
+// writes a V8 .cpuprofile into server/prof/; `scratchpad/read_cpuprofile.js` ranks it by SELF time.
+//
+// ⚠️ WHY NOT `node --cpu-prof`. That only writes the file when the process EXITS CLEANLY, and restart-server.ps1
+// stops the server with `Stop-Process -Force`, which does not give it the chance. The profile came out empty
+// every time and looked like a profiler problem rather than a shutdown one. Doing it in-process removes the
+// question: the file is written while the server is still running.
+//
+// ⚠️ LOCALHOST ONLY, and deliberately not behind the JWT: a profiler is arbitrary-ish introspection, and the
+// server is reachable over a public Funnel URL. Costs nothing when not profiling — the inspector session is
+// created on demand and disconnected afterwards.
+let _cpuProf = null;
+app.get('/debug/cpu-profile', (req, res) => {
+  const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  if (ip !== '127.0.0.1' && ip !== '::1') return res.status(403).json({ error: 'localhost only' });
+  if (_cpuProf) return res.status(409).json({ error: 'a profile is already running' });
+  const ms = Math.max(1000, Math.min(120000, +req.query.ms || 20000));
+  let inspector, fs2, path2;
+  try { inspector = require('node:inspector'); fs2 = require('node:fs'); path2 = require('node:path'); }
+  catch (e) { return res.status(500).json({ error: String(e) }); }
+  const session = new inspector.Session();
+  try { session.connect(); } catch (e) { return res.status(500).json({ error: 'connect: ' + e.message }); }
+  _cpuProf = session;
+  session.post('Profiler.enable', () => session.post('Profiler.start', () => {
+    setTimeout(() => session.post('Profiler.stop', (err, out) => {
+      _cpuProf = null;
+      try {
+        const dir = path2.join(__dirname, 'prof');
+        if (!fs2.existsSync(dir)) fs2.mkdirSync(dir, { recursive: true });
+        const f = path2.join(dir, 'server-' + Date.now() + '.cpuprofile');
+        if (!err) fs2.writeFileSync(f, JSON.stringify(out.profile));
+        console.log('[prof] wrote ' + f);
+      } catch (e) { console.log('[prof] write failed: ' + e.message); }
+      try { session.disconnect(); } catch (e) {}
+    }), ms);
+  }));
+  res.json({ profiling: true, ms, dir: 'server/prof' });
+});
+
 // ---- Friends endpoints ----
 app.get('/friends', (req, res) => {
   const user = verifyToken(req);
@@ -1831,6 +1872,16 @@ PagedArray.prototype.bytes = function () { return this.live * CHUNK_CELLS * this
 // this seam). The hot paths — rp/wp/g/s/o above — deliberately stay inlined and are the only sites that know.
 // `wpPage` is "wp, but you already have the page number": the get-or-fault-and-bump that chunk decoding does.
 PagedArray.prototype.pageAt = function (p) { const d = this.dir[p >> PAGE_GRP_SH]; return (d !== null && d[p & PAGE_GRP_M]) || null; };
+// Which page holds cell `i`, without touching it. The page NUMBER only — no allocation, no generator call, no
+// eviction restore. Kept here rather than recomputed at call sites so the two addressing modes (arithmetic and
+// table) stay the class's business, exactly as `eachPage` keeps the directory's layout its business.
+// ⚠️ Its whole purpose is to let a scan ask "is there anything here?" WITHOUT the asking creating it — `rp` on an
+// absent page of a generated world calls `_alloc`, which PRODUCES that chunk of the world.
+PagedArray.prototype.pageOfCell = function (i) { const g = this.geom; return g.K >= 0 ? ((i >>> g.K6) * g.cy + ((i >>> 6) & g.PGM)) : g.pageOf[i]; };
+// Is this page absent because nothing was ever stored there, as opposed to evicted-to-a-blob? A scan may skip the
+// first (it is all zeros) but must NOT skip the second, or evicted content silently reads as empty — Phase 3's
+// worst bug, and the reason this is a named test rather than `pageAt(p) === null`.
+PagedArray.prototype.pageVacant = function (p) { return this.pageAt(p) === null && (this.ev === null || !this.ev[p]); };
 // A NON-FAULTING read: the cell's value, or -1 when nobody has produced that page yet. `.g()` would produce it,
 // and there are readers for which producing is exactly the wrong answer — see the powder seeders, where a read
 // of "the cell below" cascaded a chunk at a time down 64 chunks of Overworld and stalled the server.
@@ -3182,14 +3233,40 @@ function fineLiquidTickRoom(room, SUB) {
     // Whether a column still holds a vertical density inversion — computed once per column per sub-step, since every
     // cell in it asks the same question (see sortingHere below).
     const colSorting = new Map();
+    // 🟥 THIS WAS 46.5% OF ALL SERVER CPU IN THE OVERWORLD — measured, `server/prof` via GET /debug/cpu-profile.
+    // It used to walk `for (r2 = 0; r2 + 1 < FROWS; r2++)`: the WORLD'S FULL DEPTH, once per column, once per
+    // sub-step. In a page room FROWS is 405 and that is merely wasteful; in the Overworld it is 4,096, ×9
+    // sub-steps ×every column holding active liquid. Cost therefore scaled with the WORLD'S HEIGHT and not with
+    // the amount of water, which is why the profile was flat at ~26ms whether 130 or 380 cells were active, and
+    // why the same lake that settles fine in a page room crawls here.
+    // ⚠️ AND IT WAS DOING IT WITH FAULTING READS, against the rule written at the top of the paging section,
+    // which names this function: *"whole-grid SCANS are reads, and must stay reads, or a single scan would fault
+    // the entire world back in"*. `tot.g()` → `rp()` → `_miss()` → `_alloc()`, and on a generated world `_alloc`
+    // PRODUCES that chunk. So every column with a drop of moving water was generating the world all the way down
+    // beneath itself, nine times a tick — the exact opposite of what increment 4b is for.
+    // ⭐ THE FIX IS A BOUND, NOT A CACHE. An inversion needs two adjacent cells that BOTH hold liquid, so only
+    // pages of `fineTotal` that exist can contain one; a vacant page is all zeros and `tot.g(a2) <= 0` would
+    // `continue` on every row of it anyway. Skipping it is exact rather than approximate. An EVICTED page is not
+    // vacant and is still visited (see pageVacant) — skipping that one would be Phase 3's unloaded-reads-as-empty
+    // bug again. Typical column: 1–2 live pages = 64–128 rows instead of 4,096.
+    const CY = tot.geom.cy;
     const colStillSorting = (cc) => {
       let v = colSorting.get(cc);
       if (v !== undefined) return v;
       v = false;
-      for (let r2 = 0; r2 + 1 < FROWS; r2++) {
-        const a2 = cc * FROWS + r2, b2 = a2 + 1;
-        if (tot.g(a2) <= 0 || tot.g(b2) <= 0 || isSolid(a2) || isSolid(b2)) continue;
-        const f = floorRank(a2); if (f >= 0 && f < ceilRank(b2)) { v = true; break; }
+      const colBase = cc * FROWS;
+      outer:
+      for (let cr = 0; cr < CY; cr++) {
+        const r0 = cr << 6;
+        if (r0 >= FROWS) break;
+        if (tot.pageVacant(tot.pageOfCell(colBase + r0))) continue;   // nothing was ever stored here
+        const rN = Math.min(r0 + 64, FROWS);
+        for (let r2 = r0; r2 < rN; r2++) {
+          if (r2 + 1 >= FROWS) break outer;
+          const a2 = colBase + r2, b2 = a2 + 1;
+          if (tot.g(a2) <= 0 || tot.g(b2) <= 0 || isSolid(a2) || isSolid(b2)) continue;
+          const f = floorRank(a2); if (f >= 0 && f < ceilRank(b2)) { v = true; break outer; }
+        }
       }
       colSorting.set(cc, v); return v;
     };
