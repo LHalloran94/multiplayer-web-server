@@ -7773,7 +7773,16 @@ io.on('connection', (socket) => {
         const bc0 = Math.max(0, Math.floor((cx - rr) / TERRAIN_CELL)), bc1 = Math.min(ECOLS - 1, Math.floor((cx + rr) / TERRAIN_CELL));
         const br0 = Math.max(0, Math.floor((cy - rr) / TERRAIN_CELL)), br1 = Math.min(grid.geom.rows - 1, Math.floor((cy + rr) / TERRAIN_CELL));
         const changedFine = [];
-        for (let r = br0; r <= br1; r++) for (let c = bc0; c <= bc1; c++) { const i = r * ECOLS + c;
+        // 🟥 THIS READ `r * ECOLS + c` — ROW-MAJOR — AND INCREMENT 5 MADE THE FLAT INDEX COLUMN-MAJOR.
+        // It is the one site in the server the sweep missed, and it is the reason painted liquid stopped working
+        // in page worlds and the sandbox. The index landed on an unrelated cell, so `grid.g(i) === m` was false,
+        // so the fine block was never seeded and `grid.s(i, 0)` never ran: the paint was left sitting in the
+        // TERRAIN GRID as a water-coloured BLOCK. It looks like water and can never move, because the liquid sim
+        // does not own it — which is exactly "I place liquid and it doesn't move at all".
+        // ⚠️ Nothing caught it because it fails SILENTLY and only for PAINTED liquid: generated and pre-existing
+        // liquid is seeded elsewhere and was fine, so every world loaded correctly and only new paint was dead.
+        const EROWS = grid.geom.rows;
+        for (let r = br0; r <= br1; r++) for (let c = bc0; c <= bc1; c++) { const i = c * EROWS + r;
           if (op === 'paint' && isFluidId(m) && grid.g(i) === m) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[m]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, 1, c, r, ca)) changedFine.push(x); grid.s(i, 0); hp.s(i, 0); }
           else if (op === 'carve' || (op === 'paint' && isSolidCell(grid.g(i)))) for (const x of fineClearBlock(currentAvatarRoom, 1, c, r)) changedFine.push(x);
         }
