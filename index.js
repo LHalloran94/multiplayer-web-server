@@ -5386,8 +5386,17 @@ function generateWorld(avatarRoom, seed, band) {
 //  ⚠️ SHIPS OFF (`worldCfg.chunked = 0`). While it is off, not one line of world generation changes.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 const worldCfg = {
-  chunked: 0,          // 0 = generateWorld (shipping) · 1 = worldgen.js. Applies to worlds generated from now on.
-  onDemand: 0,         // 4b: with `chunked`, do not build the world at all — produce each chunk when it is first read.
+  // ⭐⭐ THE REDESIGNED GENERATOR IS THE DEFAULT NOW (user, 2026-08-05: *"why do we even still have the old
+  // generator? Why don't page worlds just load into the new generator version by default"*). They are right:
+  // it was eyeballed and confirmed on page worlds, on-demand production was verified in-browser, and keeping
+  // the old one as the default meant every page world was built by code we no longer intend to keep — while
+  // the new one only ever ran when somebody remembered to tick two boxes. Two things to maintain, one of them
+  // untested in normal use, which is exactly the complaint.
+  // ⚠️ `generateWorld` (the legacy one) is NOT deleted, and that is deliberate rather than hedging:
+  // `probe_worldgen` Part D is an A/B against it — same seed, both generators — and it is how the redesign's
+  // structural stats are kept honest. It is now reachable only by explicitly unticking this.
+  chunked: 1,          // 0 = generateWorld (legacy, A/B only) · 1 = worldgen.js. Applies to worlds generated from now on.
+  onDemand: 1,         // 4b: with `chunked`, do not build the world at all — produce each chunk when it is first read.
   dropPristine: 1,     // 4c: evict an UNCHANGED chunk to nothing at all rather than storing a blob of it.
                        // ⚠️ Defaults ON because it only ever applies to rooms `onDemand` produced, which itself ships OFF —
                        // and where it applies, NOT doing it is measurably worse than doing it (the blob is 1.93x the pages).
@@ -6514,7 +6523,17 @@ io.on('connection', (socket) => {
     // `worldChunked` on: they are not independent choices, and a half-set combination is not a configuration
     // anybody wants. `ensureWorldGenerated` does not RELY on this (it reads `overworldRooms`), so the flags
     // agreeing is for the panel's benefit rather than the server's.
-    if ('worldOverworld' in patch) { worldCfg.overworld = patch.worldOverworld ? 1 : 0; if (worldCfg.overworld) { worldCfg.chunked = 1; worldCfg.onDemand = 1; } }
+    // ⭐ ONE SWITCH, AND IT TAKES EFFECT BY ITSELF. Reported from play: *"I have to click it on in the debug,
+    // along with all the other world checks, and then I have to manually close layer 2 and reopen it"* — and
+    // the natural thing to click instead, Rebuild, stalled the server. Which room you are in is decided at
+    // `avt-join`, so a flag flipped mid-session changes nothing until you re-join; every client is now ASKED to
+    // re-join, on the same `avt-retransport` seam the relay switch already uses for the same reason.
+    if ('worldOverworld' in patch) {
+      const _was = worldCfg.overworld;
+      worldCfg.overworld = patch.worldOverworld ? 1 : 0;
+      if (worldCfg.overworld) { worldCfg.chunked = 1; worldCfg.onDemand = 1; }
+      if (_was !== worldCfg.overworld) io.emit('avt-retransport', { relay: relayCfg.on });   // re-join → land in (or leave) the Overworld
+    }
     if ('worldDropPristine' in patch) worldCfg.dropPristine = patch.worldDropPristine ? 1 : 0;
     // ── and the button that makes the switch testable: rebuild THIS room's world with the current generator.
     // ⭐ Why a rebuild in place rather than "go and visit a different page": the seed is keyed on the URL, so a
@@ -6526,7 +6545,16 @@ io.on('connection', (socket) => {
     // snapshotted back to the database and a regenerate would be silent data loss, not a debug action.
     if (patch.worldRegen && currentAvatarRoom) {
       const _r = currentAvatarRoom;
-      if (hydratedAvRooms.has(_r)) socket.emit('liquid-cfg-note', { text: 'Regenerate refused: this is a published world.' });
+      // 🟥 REFUSED FOR THE OVERWORLD, AND THIS IS WHAT STALLED THE SERVER IN PLAY. Everything below is
+      // whole-world: `materializeRoom` restores every evicted chunk, `terrainRLE` walks the entire index space
+      // (524,224 x 4,096 = 2.15 BILLION cells) and `buildFineInit` scans it again for liquid. That is fine for a
+      // page room and fatal here — the server stops answering, with an empty error log, which is what "it
+      // crashed" looked like from the outside. Worse, the World tab's own help text tells you to press Rebuild
+      // after ticking the other switches, so it was the natural next click.
+      // ⚠️ There is also nothing to rebuild INTO. A regenerate exists to A/B two generators on one seed; the
+      // Overworld has one generator and one seed, and is produced on demand, so "rebuild it" has no meaning.
+      if (overworldRooms.has(_r)) socket.emit('liquid-cfg-note', { text: 'Rebuild refused: the Overworld is produced on demand — there is nothing to rebuild, and doing it would read all 2.15 billion cells.' });
+      else if (hydratedAvRooms.has(_r)) socket.emit('liquid-cfg-note', { text: 'Regenerate refused: this is a published world.' });
       else {
         worldGenerated.delete(_r); _roomGens.delete(_r);
         setRoomGenerator(_r, null);                         // detach the on-demand seeders before the fields are refilled
