@@ -7116,11 +7116,26 @@ io.on('connection', (socket) => {
     // drop a replay that arrives AFTER it has switched Levels again (rapid switching → stale cross-Level bleed).
     socket.emit('avatar-objects-init', { levelIndex, objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
     // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
-    materializeRoom(avRoom);   // join replay reads the whole world — an evicted chunk would arrive empty
+    // 🟥 THE WHOLE-WORLD JOIN REPLAY IS FATAL IN THE OVERWORLD AND IS WHAT HUNG THE SERVER.
+    // `terrainRLE` walks the entire index space — 524,224 x 4,096 = 2.15 BILLION cells, 33.5 million page
+    // lookups — on EVERY join, and it gets worse as more of the world gets produced: measured 1 RLE run on a
+    // fresh world and 32,621 after three clients had walked around in it. `materializeRoom` is worse still,
+    // because it restores every evicted chunk in the room. The server stopped responding with an EMPTY error
+    // log, which is what a stall looks like from outside and is exactly the "seemed to crash" from play.
+    // ⭐ It is also simply unnecessary here. Phase 4's whole point was that a client is told about the chunks it
+    // can SEE, and increment 4b produces those chunks on demand; `sendChunkContent` delivers terrain AND liquid
+    // over the same wires the replay would have used. Measured against the live server: standing still in the
+    // Overworld for three seconds delivers 122,880 cells, 111,038 of them solid, 28,874 within 96 cells of the
+    // spawn. The replay was adding nothing except the stall.
+    // ⚠️ `terrainHasAny` on the client is set by the incoming `terrain-set` cells (16a ~1088), NOT by
+    // `terrain-init`, so skipping the replay does not leave the renderer switched off. Checked, not assumed.
     const _cs = cellsOf(avRoom), tg = _cs.terrain;
-    if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: tg.geom.cols, rows: tg.geom.rows, ...terrainRLE(tg), hpRuns: _cs.terrainHp ? terrainRLE(_cs.terrainHp).runs : undefined });
-    // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
-    if (tg) { const fi = buildFineInit(avRoom); if (fi && fi.cells.length) socket.emit('liquid-fine-init', fi); }
+    if (!_isOver) {
+      materializeRoom(avRoom);   // join replay reads the whole world — an evicted chunk would arrive empty
+      if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: tg.geom.cols, rows: tg.geom.rows, ...terrainRLE(tg), hpRuns: _cs.terrainHp ? terrainRLE(_cs.terrainHp).runs : undefined });
+      // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
+      if (tg) { const fi = buildFineInit(avRoom); if (fi && fi.cells.length) socket.emit('liquid-fine-init', fi); }
+    }
     if (_cs.src && _cs.src.size) socket.emit('liquid-src', { cells: Array.from(_cs.src.keys()), on: true, init: true });   // join replay: which cells are sources (marker only; the sim owns the behaviour)
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
     const mm = roomMats[avRoom];
