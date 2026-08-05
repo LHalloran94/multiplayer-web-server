@@ -2535,6 +2535,29 @@ const liquidCfg = {
   // room AT K=1 is estimated as its full-K EMA divided by this, not by K. Using K would under-estimate by
   // ~1.4× and fire tier 3 later than it should.
   budgetKGain: 6.5,
+  // ══ THE REACTION PASS'S OWN LIMITS ═══════════════════════════════════════════════════════════════════════
+  // 🟥 MEASURED 2026-08-05 ON THE LIVE OVERWORLD (`scratchpad/probe_overworld_settle.js`): the flow loop ran in
+  // **0% of perf windows** and turning the whole-room rate limiter OFF changed nothing — but turning REACTIONS
+  // off made it run in **100%**. Reactions go BEFORE the flow, walk the same active set, and had no limit of any
+  // kind, so with one room they ate the entire budget and the flow loop's own hard stop then deferred every room
+  // every tick, forever. That is not slow liquid, it is liquid that NEVER MOVES, and it is exactly what the
+  // Overworld looked like. CLAUDE.md had already recorded "reactions are not throttled at all" from the
+  // resolution re-decide; this is that bill arriving.
+  // ⚠️ The perf line HID it: `fineActive` is only accumulated for a room the FLOW loop reaches, so a starved
+  // room reports `active=0` while burning 187ms. A zero beside a large millisecond figure is an artefact.
+  //
+  // TWO limits, and they fix different things:
+  //   `reactAnchorFilter` — the COST. `anchors` was every candidate plus its 4 neighbours, deduped through a
+  //     Set, and at 360,000 active cells that is a ~1.8M-entry Set built every tick — to find the handful of
+  //     cells that can actually react. All three phases open by requiring lava (rank 0), acid (rank 3) or water
+  //     (rank 4); anything else is skipped immediately. So the filter is the union of the phases' own entry
+  //     tests, applied before the Set instead of after it.
+  //   `reactMaxCand` — the GUARANTEE. The filter makes the pass cheap in every world we know of, but "cheap in
+  //     the worlds we measured" is not a bound. This one is: at most N candidates per room per tick, taken from
+  //     a ROTATING cursor so nothing is ever permanently skipped. Without it, a world that is genuinely all
+  //     lava and water would starve the flow again and we would be back here.
+  reactAnchorFilter: 1,  // 0 = old behaviour (anchor every candidate + neighbours, decide inside the phases)
+  reactMaxCand: 20000,   // 0 = unlimited (old behaviour). Per room per tick, from a rotating cursor.
   // ⭐ Admit the CHEAPEST rooms first (see the note at the sort in runLiquidTick). Ships ON: it is strictly
   // fairer than pure rotation wherever more than one room is busy, the rotation is kept on top of it so nothing
   // starves, and `probe_budget`'s liveness checks are what watch that. Live toggle `budgetCheapFirst`.
@@ -2654,7 +2677,7 @@ const liquidCfg = {
 // DEBUG perf accounting (only touched when liquidCfg.perfLog): runLiquidTick tallies sim time + active cells and
 // prints a rolling ~1s summary to the console. (emitLiquidCells, which centralised the coarse `liquid-cells` emit so
 // its wire payload could be sized, went with that wire.)
-let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0 };
+let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0 };
 // Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
 // the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
 // ⭐ 0 = OFF, and that is the shipping value. Tried at 200 and the user reported prolonged lag on joining: the cost is
@@ -3451,6 +3474,18 @@ function fineLiquidTickRoom(room, SUB) {
 // `terrain-set` + `liquid-fine-cells` wires — both already handled client-side, so this is a server-only change.
 // (`fineReact` on the cell store: Set<fine cell> explicitly seeded for a reaction test — see seedFineReactAround.)
 function fineReactSet(room) { const s = cellsOf(room); if (!s.fineReact) { s.fineReact = new Set(); cellRooms.react.add(room); } return s.fineReact; }
+// ⚠️ DECLARED HERE, INSIDE ==LIQUID_SIM_BLOCK==, and not next to `liqRateSkips` where they would read more
+// naturally. `liqRateSkips` sits BELOW ==LIQUID_SIM_BLOCK_END== because only `runLiquidTick` uses it; these two
+// are used by `fineReactTickRoom`, which is inside. Putting them outside would be a ReferenceError in every rig
+// that slices the sim and nowhere else — the SEVENTH time this exact boundary has caught something on this track.
+const roomReactCursor = {};   // room → where the capped reaction pass resumes, so no cell is permanently skipped
+let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCand (⇒ it is biting; see the Perf tab)
+// ⚠️ A COUNT, NOT A CLOCK. `probe_react_budget` D2 first asserted "the flow moved liquid on most ticks", which
+// gave 18/30 and then 6/30 for identical code — the budget scheduler is `performance.now()`-driven, so any
+// threshold on its outcome is a coin flip on machine load. This track has been here before (probe_budget's
+// cold-start check, fixed the same way: assert the MECHANISM, not a timing outcome). Anchors built is
+// deterministic, so filtered-vs-unfiltered can be compared inside one process with no timing in it at all.
+let liqReactAnchors = 0;      // anchors the reaction pass has built, ever — the thing reactAnchorFilter reduces
 // A reaction can only START when something changes, and anything that moved is already in roomFineActive — which the tick
 // uses as its candidate list. What that misses is a change to a SETTLED pair (painting water beside a settled lava pool,
 // digging the wall between them), so terrain edits seed the cell + its 4 neighbours explicitly.
@@ -3541,18 +3576,49 @@ function fineReactTickRoom(room, SUB) {
   // Candidates: every cell that moved this tick, plus anything seeded by a terrain edit. The reaction is anchored on the
   // LAVA cell, which may be a candidate itself OR a settled neighbour of one (a still lava pool a stream just reached),
   // so each candidate also offers up its 4 neighbours — `done` keeps a shared lava cell from being evaluated twice.
+  // ⚠️ BOUNDED, AND THE BOUND IS WHY THE OVERWORLD'S LIQUID MOVES AT ALL. See the reactAnchorFilter /
+  // reactMaxCand note in liquidCfg for the measurement — unbounded, this pass starved the flow loop outright.
+  // The cursor is per ROOM and advances by however many candidates were taken, so over successive ticks the
+  // whole active set is covered; a capped tick is a DELAY for the cells past the cap, never a skip.
+  // ⚠️ `seeded` is drained WHOLE regardless of the cap. It holds cells a terrain edit explicitly flagged for a
+  // reaction test — a handful, and each one is a thing a player just did. Rationing those would make building
+  // feel broken in a way rationing settled liquid does not.
   const cand = [];
-  if (active) for (const i of active) cand.push(i);
+  if (active && active.size) {
+    const capN = Math.max(0, liquidCfg.reactMaxCand | 0);
+    if (!capN || active.size <= capN) { for (const i of active) cand.push(i); roomReactCursor[room] = 0; }
+    else {
+      let start = (roomReactCursor[room] | 0) % active.size, n = 0;
+      for (const i of active) { if (n++ < start) continue; cand.push(i); if (cand.length >= capN) break; }
+      // Wrap: a cursor near the end takes fewer than the cap, so top up from the front rather than waste the tick.
+      if (cand.length < capN) for (const i of active) { cand.push(i); if (cand.length >= capN) break; }
+      roomReactCursor[room] = (start + capN) % active.size;
+      liqReactSkips++;
+    }
+  }
   if (seeded) { for (const i of seeded) cand.push(i); seeded.clear(); }
+  // ⭐ ONLY CELLS THAT CAN REACT BECOME ANCHORS. All three phases below open by requiring lava (rank 0), acid
+  // (rank 3) or water (rank 4) and `continue` otherwise, so this is their own entry test hoisted ahead of the
+  // dedupe Set instead of applied after it — which is the difference between a Set of every liquid cell's
+  // neighbourhood and a Set of the cells that have work.
+  // ⚠️ NOT byte-identical, and here is the one case: a cell that ACQUIRES lava/acid/water from a reaction fired
+  // earlier in this same pass was an anchor before and is not one now, so its own follow-on reaction happens on
+  // the NEXT tick instead. It cannot be lost — every producer (`setLiquid`, `setSolid`, `spendLava`, `combine`)
+  // calls `act.add`/`wakeN`, so the cell is a candidate again immediately. One tick of latency on a secondary
+  // chain, against a pass that otherwise does not run at all.
+  const filt = !!liquidCfg.reactAnchorFilter;
+  const reactive = (i) => { const p = amt.rp(i), b = amt.o(i); return p[b] > 0 || p[b + 3] > 0 || p[b + 4] > 0; };
   const seen = new Set(), anchors = [];
   for (const ci of cand) {
     if (ci < 0 || ci >= N) continue;
     const cr = ci % ROWS;
     for (const i of [ci, ci - ROWS, ci + ROWS, cr > 0 ? ci - 1 : -1, cr < ROWS - 1 ? ci + 1 : -1]) {
       if (i < 0 || i >= N || seen.has(i)) continue;
-      seen.add(i); anchors.push(i);
+      seen.add(i); if (filt && !reactive(i)) continue;
+      anchors.push(i);
     }
   }
+  liqReactAnchors += anchors.length;
   // ⭐ TWO PHASES, so the result cannot depend on Set iteration order. EVERY lava contact is resolved first, then the
   // water-freezing is evaluated against the state that leaves. Measured before the split: the same lava-on-snow setup
   // gave STONE in one geometry and ICE in another, purely on which cell the pass happened to reach first.
@@ -3829,7 +3895,16 @@ const runLiquidTick = () => {
   // the set by the time the tick returns — running after would miss every static contact, which is most of them. Run
   // first and the set still holds everything that moved last tick, i.e. exactly the cells whose contacts are new.
   // Rooms with no active liquid still get a pass when a terrain edit seeded them.
+  // ⭐ TIMED SEPARATELY FROM THE FLOW, and that separation is the whole lesson of 2026-08-05. The Perf tab
+  // reported ONE "liquid/tick" figure spanning pre-reactions + flow + post-reactions, so a reaction pass eating
+  // 187ms and starving the flow completely was indistinguishable from a flow costing 187ms. `active=0` next to
+  // it looked like an idle room. Two numbers say in one glance what took a whole session to isolate by hand.
   const _react = () => {
+    const _rt0 = liquidCfg.perfLog ? performance.now() : 0;
+    _reactInner();
+    if (liquidCfg.perfLog) { const _rd = performance.now() - _rt0; liqPerf.reactMs += _rd; if (_rd > liqPerf.reactMsMax) liqPerf.reactMsMax = _rd; }
+  };
+  const _reactInner = () => {
     const seenRooms = new Set();
     for (const reg of [cellRooms.fine, cellRooms.react, cellRooms.fire])   // a room may be quiet but still have a seeded contact or a burning slick
       for (const room of Array.from(reg)) { if (!reg.has(room) || seenRooms.has(room) || (_deferred && _deferred.has(room))) continue; seenRooms.add(room); fineReactTickRoom(room, cellsOf(room).fineSub || 1); }
@@ -3881,14 +3956,20 @@ const runLiquidTick = () => {
         steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
         // BUDGET: mean rooms deferred per tick. Non-zero = the budget is biting and liquid is resolving slower
         // than real time somewhere. Zero at rest is the expected state.
-        deferred: +(liqPerf.deferred / liqPerf.ticks).toFixed(2), simBudgetPct: liquidCfg.simBudgetPct };
+        deferred: +(liqPerf.deferred / liqPerf.ticks).toFixed(2), simBudgetPct: liquidCfg.simBudgetPct,
+        // ⭐ REACTIONS, BROKEN OUT. Part of `fineAvgMs` above, not additional to it — the point is to see how
+        // much of the "liquid" figure is chemistry rather than flow. Reactions running long is the shape that
+        // starves the flow loop's hard stop; `reactSkips` says the per-tick candidate cap is biting.
+        reactAvgMs: +(liqPerf.reactMs / liqPerf.ticks).toFixed(2), reactMaxMs: +liqPerf.reactMsMax.toFixed(2),
+        reactSkips: liqReactSkips };
       console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
         (`  |  LIQUID K=${_stat.steps} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
+        (`  |  REACT avg=${_stat.reactAvgMs}ms max=${_stat.reactMaxMs}ms capped=${_stat.reactSkips}`) +
         (_stat.simBudgetPct ? `  |  BUDGET ${_stat.simBudgetPct}% deferred-rooms/tick=${_stat.deferred}` +
           (liquidCfg.budgetRate ? ` tier3-skips=${liqRateSkips}` : '') + (liquidCfg.budgetSeed ? ' seed=on' : '') : '') +
         ` (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
       io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
-      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0 };
+      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0 };
     }
   }
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
@@ -6497,6 +6578,11 @@ io.on('connection', (socket) => {
     if ('cellCostUs' in patch) liquidCfg.cellCostUs = Math.max(1, Math.min(500, +patch.cellCostUs || 23));
     if ('budgetRateMax' in patch) liquidCfg.budgetRateMax = Math.max(2, Math.min(64, patch.budgetRateMax | 0));
     if ('budgetCheapFirst' in patch) liquidCfg.budgetCheapFirst = patch.budgetCheapFirst ? 1 : 0;
+    // The two reaction-pass limits ride the same wire and for the same reason: "is the liquid frozen because of
+    // the flow or because reactions ate the tick ahead of it" is otherwise unanswerable from inside the game,
+    // and that is precisely the question that cost this track a session.
+    if ('reactAnchorFilter' in patch) liquidCfg.reactAnchorFilter = patch.reactAnchorFilter ? 1 : 0;
+    if ('reactMaxCand' in patch) liquidCfg.reactMaxCand = Math.max(0, Math.min(2000000, patch.reactMaxCand | 0));
     if ('avSlow' in patch) liquidCfg.avSlow = Math.max(1, Math.min(16, patch.avSlow | 0));   // universal avatar slow-motion (debug)
     // CHUNK RESIDENCY (Phase 3) rides the same patch wire so eviction can be A/B'd live from the console without a
     // restart — which is the whole point while it is being eyeballed. Turning it OFF materialises every room, so a
