@@ -2563,6 +2563,10 @@ const liquidCfg = {
   // "liquid works" and "liquid is frozen" in the Overworld is exactly this. Left as a live toggle because if
   // liquid ever appears to hang where it should flow, this is the first thing to flip.
   genWakeAll: 0,
+  // ⭐ THE ACTIVE-CELL HEAT WIRE. Off by default and costs literally nothing when off (one boolean on a path that
+  // already runs once every 32 ticks). Turned on by the Inspect tab's "Active-cell heat" checkbox, which is the
+  // only thing that reads it — a diagnostic nobody has switched on should not be on the wire.
+  heat: 0,
   // ⭐ Admit the CHEAPEST rooms first (see the note at the sort in runLiquidTick). Ships ON: it is strictly
   // fairer than pure rotation wherever more than one room is busy, the rotation is kept on top of it so nothing
   // starves, and `probe_budget`'s liveness checks are what watch that. Live toggle `budgetCheapFirst`.
@@ -3964,19 +3968,35 @@ const runLiquidTick = () => {
   // quiet exactly then. The first version of this spread counter sat inside the flow loop too, and measuring a
   // panning player produced "no samples" for the same reason.
   // Once per ~32 ticks so a pass over the active set is not on the hot path, and only when perfLog is on.
-  if (liquidCfg.perfLog && (liquidTickCount & 31) === 0) {
-    const _ch = new Set(); let _c0 = Infinity, _c1 = -Infinity, _pend = 0;
+  if ((liquidCfg.perfLog || liquidCfg.heat) && (liquidTickCount & 31) === 0) {
+    let _c0 = Infinity, _c1 = -Infinity, _pend = 0, _nch = 0;
     for (const room of cellRooms.fine) {
       const _st = peekCells(room); if (!_st.fineActive) continue;
       const _g = worldGeom(room);
       _pend += _st.fineActive.size;
+      // ⭐ COUNT PER CHUNK, not just distinct chunks. "How much work is there and where" is one question, and a
+      // per-chunk tally answers it in a payload small enough to send to the client every second — which is what
+      // the ACTIVE-CELL HEAT overlay draws. Asked for directly: *"perhaps consider giving me some tools to help
+      // diagnose it, like using tools in the inspect portion of the debug menu to see which cells are active."*
+      // ⚠️ Counting CHUNKS rather than cells is the whole reason this is affordable. The active set can hold
+      // hundreds of thousands of cells; there are only ever a few hundred chunks holding them, so the payload is
+      // bounded by the map you can see rather than by how busy it is.
+      const _cnt = new Map();
       for (const i of _st.fineActive) {
         const c = (i / _g.rows) | 0;
         if (c < _c0) _c0 = c; if (c > _c1) _c1 = c;
-        _ch.add(geomPage(_g, i));
+        const p = geomPage(_g, i); _cnt.set(p, (_cnt.get(p) || 0) + 1);
+      }
+      _nch += _cnt.size;
+      if (liquidCfg.heat) {
+        // Flat [chunk, count, chunk, count, …], busiest first, capped — a client only draws what is on screen
+        // and an unbounded list would be the one thing this tool must not become: a cost of its own.
+        const _top = [..._cnt.entries()].sort((a, b) => b[1] - a[1]).slice(0, 1500);
+        const _flat = []; for (const [p, n] of _top) _flat.push(p, n);
+        io.to(room).emit('liquid-heat', { chunks: _flat, side: CHUNK_SIDE, cy: _g.cy, total: _st.fineActive.size });
       }
     }
-    liqPerf.actChunks = _ch.size;
+    liqPerf.actChunks = _nch;
     liqPerf.actSpan = _c1 >= _c0 ? (_c1 - _c0 + 1) : 0;
     liqPerf.pending = _pend;
   }
@@ -6654,6 +6674,7 @@ io.on('connection', (socket) => {
     if ('reactAnchorFilter' in patch) liquidCfg.reactAnchorFilter = patch.reactAnchorFilter ? 1 : 0;
     if ('reactMaxCand' in patch) liquidCfg.reactMaxCand = Math.max(0, Math.min(2000000, patch.reactMaxCand | 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
+    if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('avSlow' in patch) liquidCfg.avSlow = Math.max(1, Math.min(16, patch.avSlow | 0));   // universal avatar slow-motion (debug)
     // CHUNK RESIDENCY (Phase 3) rides the same patch wire so eviction can be A/B'd live from the console without a
     // restart — which is the whole point while it is being eyeballed. Turning it OFF materialises every room, so a
