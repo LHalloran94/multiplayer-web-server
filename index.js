@@ -7098,7 +7098,13 @@ io.on('connection', (socket) => {
     // `roomDims` returns the page shape for every room today, so this is the value the client already had.
     const _rd = roomDims(avRoom);
     socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: (type === 'world') ? worldSpawnFor(avRoom, _overCol) : null,
-      dims: { w: _rd.cols * TERRAIN_CELL, h: _rd.rows * TERRAIN_CELL, cell: TERRAIN_CELL } });
+      dims: { w: _rd.cols * TERRAIN_CELL, h: _rd.rows * TERRAIN_CELL, cell: TERRAIN_CELL },
+      // ⚠️ SAID EXPLICITLY, not inferred from `dims` being large. The client has to ignore its Level's SIZE
+      // PRESET in the Overworld — a preset belongs to a page's Level, and the Overworld is entered THROUGH a
+      // page, so it would otherwise fence the shared world down to whatever that page's Level 1 was set to.
+      // "Is this the Overworld" is a fact the server knows; making the client guess it from a pixel count is
+      // how the two ends drift apart.
+      overworld: _isOver ? 1 : 0 });
     // Identity, once, rather than on every position packet — see roomProfile. Both directions: the joiner
     // needs everyone already here, and everyone here needs the joiner. Harmless when the relay is off (an
     // un-relayed client simply has no handler for these, and gets names off the mesh as it always has).
