@@ -2558,6 +2558,11 @@ const liquidCfg = {
   //     lava and water would starve the flow again and we would be back here.
   reactAnchorFilter: 1,  // 0 = old behaviour (anchor every candidate + neighbours, decide inside the phases)
   reactMaxCand: 20000,   // 0 = unlimited (old behaviour). Per room per tick, from a rotating cursor.
+  // ⭐ 1 = the OLD behaviour: every generated liquid cell is woken on production, all ~58,000 per window, of
+  // which measurement says 0.5% can move. Ships 0 (wake only what is loose) because the difference between
+  // "liquid works" and "liquid is frozen" in the Overworld is exactly this. Left as a live toggle because if
+  // liquid ever appears to hang where it should flow, this is the first thing to flip.
+  genWakeAll: 0,
   // ⭐ Admit the CHEAPEST rooms first (see the note at the sort in runLiquidTick). Ships ON: it is strictly
   // fairer than pure rotation wherever more than one room is busy, the rotation is kept on top of it so nothing
   // starves, and `probe_budget`'s liveness checks are what watch that. Live toggle `budgetCheapFirst`.
@@ -2925,7 +2930,17 @@ function powderTickRoom(room) {
   // grid[dst]===0 branch left the fine liquid sitting INSIDE the new solid cell. Same sink-and-swap logic, fine arrays.
   ensureFineArrays(room, 1);   // the fine arrays ARE the liquid; there is no coarse fallback to degrade to
   const famt = st.fineAmt, ftot = st.fineTotal;
-  const canDisplace = (j) => grid.g(j) === 0;   // liquid is not a grid id, so an empty grid cell covers a pool too
+  // 🟥 SAND LANDING ON WATER AND STOPPING DEAD — reported from play 2026-08-05, and doubly bad as reported:
+  // "if the liquid is moving the liquid flows out from underneath it and the sand floats in mid-air."
+  // This read `grid.g(j) === 0`, and the comment on it said "liquid is not a grid id, so an empty grid cell
+  // covers a pool too". THAT STOPPED BEING TRUE when liquid was re-coupled to the grid: `fineSyncGrid` writes
+  // the fluid's id INTO the terrain grid (`grid.s(i, liqRepId(...))`), so a water cell reads 9, not 0, and a
+  // grain treated an open pool as solid ground. The comment was load-bearing and stale — the code did exactly
+  // what it said, and what it said had stopped being the case.
+  // ⭐ THE MACHINERY WAS ALREADY THERE. `swapMove` below is written to carry a displaced pool UP into the cell
+  // the grain vacates (`carried = ftot.g(dst)`, and it re-wakes the liquid around it). Powder sinking through
+  // liquid was the designed behaviour all along; only this predicate refused it.
+  const canDisplace = (j) => { const v = grid.g(j); return v === 0 || isFluidId(v); };
   const list = Array.from(active); active.clear();
   list.sort((a, b) => (b % ROWS) - (a % ROWS));   // bottom-up so a falling column cascades in a single pass
   const changedSet = new Set(), fineChanged = new Set();
@@ -5695,6 +5710,20 @@ function setRoomGenerator(room, gen) {
 // only, records the page, and the liquid half runs at a point where nothing is mid-iteration. The delay is at
 // most one tick (40ms) and it is why `drainGenLiquid` is called from the top of the liquid tick rather than
 // anywhere convenient.
+// Can this freshly generated liquid cell move at all? Falls if there is air or another fluid under it; spills if
+// there is air beside it. Anything else is a cell inside a body of liquid that is already at its resting level.
+// 🟥 EVERY READ IS A PEEK, NEVER `.g()`. `.g()` PRODUCES the page it lands on, and the powder seeder ten lines
+// below carries the scar: a grain at a chunk's bottom edge produced the chunk beneath it, whose seeding produced
+// the one beneath that, all the way to bedrock — 64 chunks deep and 8,191 wide, and the server stopped
+// answering. -1 means "nobody has produced that yet", and the right answer for a cell resting on it is to leave
+// it asleep; whatever produces that chunk later runs this same pass over its own cells.
+function genLiquidLoose(terr, i, geom) {
+  const rows = geom.rows, c = (i / rows) | 0, r = i - c * rows;
+  if (r + 1 < rows) { const b = peekCellAt(terr, i + 1); if (b >= 0 && (!b || isFluidId(b))) return true; }
+  if (c > 0 && peekCellAt(terr, i - rows) === 0) return true;
+  if (c + 1 < geom.cols && peekCellAt(terr, i + rows) === 0) return true;
+  return false;
+}
 function seedGenChunkLiquid(room, p) {
   const s = peekCells(room); if (!s.terrain || (s.fineSub || 1) !== 1) return;
   const page = s.terrain.pageAt(p); if (!page) return;      // dropped again before we got here — nothing to seed
@@ -5733,7 +5762,20 @@ function seedGenChunkLiquid(room, p) {
       }
       if (!isFluidId(v)) continue;
       amt.wp(i)[amt.o(i) + LIQ_RANK[v]] = LIQUID_MAX; tot.s(i, LIQUID_MAX);
-      if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
+      // ⭐⭐ WAKE ONLY LIQUID THAT CAN ACTUALLY MOVE. This line used to be an unconditional `act.add(i)`, and it
+      // is the whole reason the Overworld's liquid looked frozen.
+      // MEASURED (`scratchpad/probe_gen_atrest.js`, 3 seeds x 40 surface chunks): the generator emits ~58,000
+      // liquid cells per terrain window and **99.5% of them are already at rest** — 11.2% of the world is
+      // liquid, and only 0.5% of it has anywhere to go. Every one of them was being handed to the sim as work
+      // anyway, which is where the live "47,900 cells waiting to move" came from. The flow loop then spent its
+      // entire budget re-discovering that a lake is a lake.
+      // ⚠️ The user asked the right question — "how would you be sure it generated settled without checking?"
+      // You would not. So this checks. A check is one read per cell, ONCE; simulating is one pass per cell PER
+      // TICK until it stops. That asymmetry is the entire argument.
+      // ⚠️ CONSERVATIVE ON PURPOSE — it wakes a superset of what must move. Under-waking would leave liquid
+      // visibly hanging until something disturbed it, which is a much worse failure than doing a little extra
+      // work, so a lateral air neighbour counts as well as a fall.
+      if (act.size < LIQUID_MAX_ACTIVE && (liquidCfg.genWakeAll || genLiquidLoose(s.terrain, i, geom))) act.add(i);
       n++;
     }
   if (!n && !act.size) dropFineActive(room);
@@ -6611,6 +6653,7 @@ io.on('connection', (socket) => {
     // and that is precisely the question that cost this track a session.
     if ('reactAnchorFilter' in patch) liquidCfg.reactAnchorFilter = patch.reactAnchorFilter ? 1 : 0;
     if ('reactMaxCand' in patch) liquidCfg.reactMaxCand = Math.max(0, Math.min(2000000, patch.reactMaxCand | 0));
+    if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('avSlow' in patch) liquidCfg.avSlow = Math.max(1, Math.min(16, patch.avSlow | 0));   // universal avatar slow-motion (debug)
     // CHUNK RESIDENCY (Phase 3) rides the same patch wire so eviction can be A/B'd live from the console without a
     // restart — which is the whole point while it is being eyeballed. Turning it OFF materialises every room, so a
