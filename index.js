@@ -2759,7 +2759,7 @@ const liquidCfg = {
 // DEBUG perf accounting (only touched when liquidCfg.perfLog): runLiquidTick tallies sim time + active cells and
 // prints a rolling ~1s summary to the console. (emitLiquidCells, which centralised the coarse `liquid-cells` emit so
 // its wire payload could be sized, went with that wire.)
-let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actSpan: 0, pending: 0 };
+let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actCols: 0, pending: 0 };
 // Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
 // the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
 // ⭐ 0 = OFF, and that is the shipping value. Tried at 200 and the user reported prolonged lag on joining: the cost is
@@ -3955,6 +3955,16 @@ let liqRoomCursor = 0;
 // against — "did the mechanism fire?" is a fact, where "did the tick count change?" turned out to be wall-clock
 // luck (the budget's hard stop is timed, so a loaded machine changes the tick count on its own).
 let liqRateSkips = 0;
+let liqIdleSkips = 0;         // ticks skipped because nobody was in the room at all
+// ⭐ "IS ANYBODY ACTUALLY IN THIS WORLD?" — the seam, not the answer.
+// Measured (`e2e_containment` A2): ~45s after the last player left the Overworld, the server was still spending
+// ~5ms of every tick simulating it, and the room was still flickering on and off the roster. Chunk eviction does
+// eventually drain it, but only after a 30s grace, and "eventually" is not the same as "never started".
+// ⚠️ A NO-OP THAT IS REASSIGNED BELOW, deliberately — the `wireFanout` idiom (F15). The real test needs
+// `roomWhere` and `io`, both declared FURTHER DOWN the file, and every probe rig that slices the tick out would
+// get a ReferenceError and nothing else would. Defaulting to "yes, occupied" means a sliced rig behaves exactly
+// as it always did, so no existing guard changes meaning.
+let roomOccupied = () => true;
 // ...and the same thing for TIER 2, for the same reason, added 2026-08-02. `probe_budget`'s cold-start check
 // asserted "WITH the seed, tick 0 is CHEAPER" by comparing two wall-clock readings — but the effect it is
 // testing is ~1ms against several ms of run-to-run spread, so it failed about one run in five REGARDLESS of
@@ -3990,10 +4000,20 @@ const runLiquidTick = () => {
   // still makes progress (slowly) rather than deadlocking.
   const _budgetMs = liquidCfg.simBudgetPct > 0 ? liquidCfg.tickMs * liquidCfg.simBudgetPct / 100 : 0;
   const _tickT0 = _budgetMs ? performance.now() : 0;
-  const _deferred = _budgetMs ? new Set() : null;
+  // ⭐ ALWAYS A SET NOW, not only when the budget is on: an UNATTENDED room is deferred whatever the budget is
+  // doing, and every downstream loop already tests `_deferred`, so this reaches sources, reactions, flow, powder
+  // and soil in one place rather than five.
+  const _deferred = new Set();
+  // ⭐⭐ NOBODY IS IN THERE. A world with no players in it must cost NOTHING — the whole point of chunking and the
+  // player window. Eviction does drain it, but only after a 30s grace, so until now a world you had left carried
+  // on being fully simulated for over half a minute. Deferring it here is immediate and costs one Map lookup.
+  // ⚠️ Its liquid is not lost or reset: a deferred room's active set is never read and never cleared, so it
+  // resumes exactly where it stopped when somebody walks back in. That is the same contract tiers 1–3 rely on.
+  for (const r of cellRooms.fine) if (!roomOccupied(r)) { _deferred.add(r); liqIdleSkips++; }
   if (_budgetMs) {
     const _keys = [];
     for (const r of cellRooms.fine) {
+      if (_deferred.has(r)) continue;
       const _a = cellsOf(r).fineActive; if (!_a || !_a.size) continue;
       // TIER 3 — rate-limit a room that cannot fit even at K=1 (see liquidCfg.budgetRate). Deferring it HERE,
       // in the roster, is what keeps sources, reactions, flow, powder and soil all skipping it together: every
@@ -4105,7 +4125,7 @@ const runLiquidTick = () => {
   // panning player produced "no samples" for the same reason.
   // Once per ~32 ticks so a pass over the active set is not on the hot path, and only when perfLog is on.
   if ((liquidCfg.perfLog || liquidCfg.heat) && (liquidTickCount & 31) === 0) {
-    let _c0 = Infinity, _c1 = -Infinity, _pend = 0, _nch = 0;
+    let _pend = 0, _nch = 0; const _cols = new Set();
     for (const room of cellRooms.fine) {
       const _st = peekCells(room); if (!_st.fineActive) continue;
       const _g = worldGeom(room);
@@ -4117,10 +4137,16 @@ const runLiquidTick = () => {
       // ⚠️ Counting CHUNKS rather than cells is the whole reason this is affordable. The active set can hold
       // hundreds of thousands of cells; there are only ever a few hundred chunks holding them, so the payload is
       // bounded by the map you can see rather than by how busy it is.
+      // 🟥 COUNT COLUMNS, DO NOT MEASURE A RANGE. This used to track min and max column and report the difference
+      // as "spanning M columns". That is a RANGE, not an area: two isolated cells at opposite ends of the world
+      // span the whole world and occupy nothing. Measured on the live server, the old figure read
+      // "24 chunks busy spanning 164,797 columns" — and it is why both the user and I believed the sim was
+      // working across the entire Overworld when containment was in fact doing its job (24 busy against ~72
+      // resident). A readout that reads catastrophically worse than reality sends every investigation the wrong
+      // way, which is exactly what it did.
       const _cnt = new Map();
       for (const i of _st.fineActive) {
-        const c = (i / _g.rows) | 0;
-        if (c < _c0) _c0 = c; if (c > _c1) _c1 = c;
+        _cols.add((i / _g.rows) | 0);
         const p = geomPage(_g, i); _cnt.set(p, (_cnt.get(p) || 0) + 1);
       }
       _nch += _cnt.size;
@@ -4133,7 +4159,7 @@ const runLiquidTick = () => {
       }
     }
     liqPerf.actChunks = _nch;
-    liqPerf.actSpan = _c1 >= _c0 ? (_c1 - _c0 + 1) : 0;
+    liqPerf.actCols = _cols.size;      // DISTINCT columns holding active liquid — an area, comparable to a viewport
     liqPerf.pending = _pend;
   }
   powderTickCount++; for (const room of Array.from(cellRooms.powder)) { if (!cellRooms.powder.has(room)) continue; if (_deferred && _deferred.has(room)) continue; powderTickRoom(room); }   // powder runs in lockstep with liquid → consistent gravity
@@ -4159,16 +4185,16 @@ const runLiquidTick = () => {
         // WHERE the active liquid is. `actChunks` against the ~150 chunks one player's viewport subscribes to
         // is the whole diagnosis: similar ⇒ the sim is working on what you can see and the COST is the problem;
         // far larger ⇒ containment is the problem and tuning the cost cannot fix it.
-        actChunks: liqPerf.actChunks, actSpan: liqPerf.actSpan, pending: liqPerf.pending };
+        actChunks: liqPerf.actChunks, actCols: liqPerf.actCols, pending: liqPerf.pending };
       console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
         (`  |  LIQUID K=${_stat.steps} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
         (`  |  REACT avg=${_stat.reactAvgMs}ms max=${_stat.reactMaxMs}ms capped=${_stat.reactSkips}`) +
-        (`  |  SPREAD pending=${_stat.pending} chunks=${_stat.actChunks} colspan=${_stat.actSpan}`) +
+        (`  |  SPREAD pending=${_stat.pending} chunks=${_stat.actChunks} cols=${_stat.actCols}`) +
         (_stat.simBudgetPct ? `  |  BUDGET ${_stat.simBudgetPct}% deferred-rooms/tick=${_stat.deferred}` +
           (liquidCfg.budgetRate ? ` tier3-skips=${liqRateSkips}` : '') + (liquidCfg.budgetSeed ? ' seed=on' : '') : '') +
         ` (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
       io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
-      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actSpan: 0, pending: 0 };
+      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actCols: 0, pending: 0 };
     }
   }
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
@@ -4209,6 +4235,16 @@ const chunkCfg = {
 // ⚠️ KEYED ON THE VIEWPORT, NOT THE AVATAR — cursor mode has no body and free-pans the camera, and zooming out
 // shows more world per screen. See the beacon comment in extension/src/16e_avatars_net.js.
 const roomWhere = {};
+// ⭐ THE REAL ANSWER for the no-op declared next to `liqRateSkips`. Socket.io room membership is the authority —
+// somebody who has joined but not yet sent a viewport beacon is still THERE, and keying only on `roomWhere`
+// would leave their world frozen until their first beacon arrived. `roomWhere` is the fallback for anything that
+// tracks presence without joining.
+roomOccupied = (room) => {
+  const r = io.sockets.adapter.rooms.get(room);
+  if (r && r.size) return true;
+  const m = roomWhere[room];
+  return !!(m && m.size);
+};
 function noteWhere(avRoom, sid, v) {
   if (!avRoom || !v) return;
   const span = CHUNK_SIDE * TERRAIN_CELL;
