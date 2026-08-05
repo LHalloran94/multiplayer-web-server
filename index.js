@@ -2487,6 +2487,12 @@ const liquidCfg = {
   // room AT K=1 is estimated as its full-K EMA divided by this, not by K. Using K would under-estimate by
   // ~1.4× and fire tier 3 later than it should.
   budgetKGain: 6.5,
+  // ⭐ Admit the CHEAPEST rooms first (see the note at the sort in runLiquidTick). Ships ON: it is strictly
+  // fairer than pure rotation wherever more than one room is busy, the rotation is kept on top of it so nothing
+  // starves, and `probe_budget`'s liveness checks are what watch that. Live toggle `budgetCheapFirst`.
+  // ⚠️ It does nothing at all in a single-room world — that is the point of probe_sectors D2, and it is why
+  // this is only HALF the answer to the Overworld's one-shared-room problem.
+  budgetCheapFirst: 1,
   // DEBUG slow motion for AVATARS, mirrored to every client so it is a UNIVERSAL time scale rather than one
   // player's local lens. Clients run their avatar sim every Nth frame while still rendering every frame. 1 = off.
   // It rides this wire for the same reason `tickMs` does: it has to be the same for everyone or what you are
@@ -3735,6 +3741,21 @@ const runLiquidTick = () => {
       _keys.push(r);
     }
     if (_keys.length) {
+      // ⭐ CHEAPEST FIRST, and it is half of the answer to the Overworld's sector problem (measured in
+      // `scratchpad/probe_sectors.js`, written up in `scratchpad/phase6_liquid_sectors.md`).
+      // Admitting in pure rotation means a room too big for the budget is admitted, consumes ALL of it, and
+      // defers everyone behind it — the rotation then hands a cheap room only every other tick. Sorting by
+      // predicted cost means a room costing ~nothing is always admitted and the expensive one takes what is
+      // left, where tier 3 rate-limits it properly instead of it crowding everyone out.
+      // MEASURED: a small puddle sharing the budget with a big spill settles 3.01× slow today. With the world
+      // split into sectors but admitted in rotation it is still 2.38× — sectors alone barely help, which was
+      // the surprise. Sectors PLUS this is 1.10×.
+      // ⚠️ This does NOT help a single room, because one room cannot be sorted (probe_sectors D2). It is
+      // useful on its own only where there are already several rooms — which is every page world today.
+      // ⚠️ The ROTATION IS KEPT on top of the sort. Sorting alone would starve the expensive tail whenever the
+      // cheap head refills the budget; the cursor still advances past whoever was admitted, so the tail keeps
+      // its turn. That is what `probe_budget`'s liveness checks (part C) are watching.
+      if (liquidCfg.budgetCheapFirst) _keys.sort((x, y) => estRoomCost(x) - estRoomCost(y));
       const _start = liqRoomCursor % _keys.length;
       let _acc = 0, _admitted = 0;
       for (let n = 0; n < _keys.length; n++) {
@@ -6338,6 +6359,7 @@ io.on('connection', (socket) => {
     if ('budgetRate' in patch) liquidCfg.budgetRate = patch.budgetRate ? 1 : 0;
     if ('cellCostUs' in patch) liquidCfg.cellCostUs = Math.max(1, Math.min(500, +patch.cellCostUs || 23));
     if ('budgetRateMax' in patch) liquidCfg.budgetRateMax = Math.max(2, Math.min(64, patch.budgetRateMax | 0));
+    if ('budgetCheapFirst' in patch) liquidCfg.budgetCheapFirst = patch.budgetCheapFirst ? 1 : 0;
     if ('avSlow' in patch) liquidCfg.avSlow = Math.max(1, Math.min(16, patch.avSlow | 0));   // universal avatar slow-motion (debug)
     // CHUNK RESIDENCY (Phase 3) rides the same patch wire so eviction can be A/B'd live from the console without a
     // restart — which is the whole point while it is being eyeballed. Turning it OFF materialises every room, so a
