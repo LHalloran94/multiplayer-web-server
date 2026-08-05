@@ -3641,6 +3641,15 @@ let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCa
 // cold-start check, fixed the same way: assert the MECHANISM, not a timing outcome). Anchors built is
 // deterministic, so filtered-vs-unfiltered can be compared inside one process with no timing in it at all.
 let liqReactAnchors = 0;      // anchors the reaction pass has built, ever — the thing reactAnchorFilter reduces
+// ⭐ WHERE THE REACTION PASS'S TIME ACTUALLY GOES — asked directly: *"is it a specific reaction or reactions which
+// are making up most of the cost?"* These three answer it as a funnel rather than by naming a reaction:
+//   cand   cells taken off the active set (up to reactMaxCand)
+//   seen   those PLUS their four neighbours, deduped — up to 5x cand, and every one is a Set insertion
+//   anchor the survivors that actually hold lava/acid/water and can react at all
+// If `seen` dwarfs `anchor`, the cost is the candidate expansion and no amount of tuning individual reactions
+// touches it. If they are close, the chemistry itself is the cost and naming the reaction becomes worthwhile.
+let liqReactCand = 0, liqReactSeen = 0;
+const liqReactFired = {};     // reaction FX code → how many times it has fired
 // A reaction can only START when something changes, and anything that moved is already in roomFineActive — which the tick
 // uses as its candidate list. What that misses is a change to a SETTLED pair (painting water beside a settled lava pool,
 // digging the wall between them), so terrain edits seed the cell + its 4 neighbours explicitly.
@@ -3694,7 +3703,7 @@ function fineReactTickRoom(room, SUB) {
   // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
   // && gid === 2` ⇒ steam, etc). In fine mode liquid is not a grid id at all, so no transition can ever match and every
   // one of those effects is unreachable. The server knows exactly which reaction fired, so it says so: [cell, code].
-  const addFx = (i, code) => { if (fx.length < 4096) fx.push(i, code); };
+  const addFx = (i, code) => { liqReactFired[code] = (liqReactFired[code] || 0) + 1; if (fx.length < 4096) fx.push(i, code); };
   const wake = (j) => { if (j >= 0 && j < N && tot.g(j) > 0) { const v = grid.g(j); if (v === 0 || isFluidId(v)) act.add(j); } };
   const wakeN = (j) => { const r = j % ROWS; wake(j - ROWS); wake(j + ROWS); if (r > 0) wake(j - 1); if (r < ROWS - 1) wake(j + 1); };
   const recomp = (j) => { const p = amt.rp(j), b = amt.o(j); let s = 0; for (let k = 0; k < T; k++) s += p[b + k]; tot.s(j, s); };
@@ -3773,7 +3782,7 @@ function fineReactTickRoom(room, SUB) {
       anchors.push(i);
     }
   }
-  liqReactAnchors += anchors.length;
+  liqReactCand += cand.length; liqReactSeen += seen.size; liqReactAnchors += anchors.length;
   // ⭐ TWO PHASES, so the result cannot depend on Set iteration order. EVERY lava contact is resolved first, then the
   // water-freezing is evaluated against the state that leaves. Measured before the split: the same lava-on-snow setup
   // gave STONE in one geometry and ICE in another, purely on which cell the pass happened to reach first.
@@ -4182,6 +4191,8 @@ const runLiquidTick = () => {
         // starves the flow loop's hard stop; `reactSkips` says the per-tick candidate cap is biting.
         reactAvgMs: +(liqPerf.reactMs / liqPerf.ticks).toFixed(2), reactMaxMs: +liqPerf.reactMsMax.toFixed(2),
         reactSkips: liqReactSkips,
+        // the funnel: candidates → deduped neighbourhood → cells that can actually react → what fired
+        reactCand: liqReactCand, reactSeen: liqReactSeen, reactAnchors: liqReactAnchors, reactFired: liqReactFired,
         // WHERE the active liquid is. `actChunks` against the ~150 chunks one player's viewport subscribes to
         // is the whole diagnosis: similar ⇒ the sim is working on what you can see and the COST is the problem;
         // far larger ⇒ containment is the problem and tuning the cost cannot fix it.
