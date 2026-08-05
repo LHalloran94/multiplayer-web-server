@@ -2677,7 +2677,7 @@ const liquidCfg = {
 // DEBUG perf accounting (only touched when liquidCfg.perfLog): runLiquidTick tallies sim time + active cells and
 // prints a rolling ~1s summary to the console. (emitLiquidCells, which centralised the coarse `liquid-cells` emit so
 // its wire payload could be sized, went with that wire.)
-let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0 };
+let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actSpan: 0, pending: 0 };
 // Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
 // the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
 // ⭐ 0 = OFF, and that is the shipping value. Tried at 200 and the user reported prolonged lag on joining: the cost is
@@ -3942,6 +3942,29 @@ const runLiquidTick = () => {
   // for a tick before crusting. The pass is O(active) and does nothing unless lava is actually touching something.
   if (liquidCfg.reactions) _react();
   if (liquidCfg.perfLog) { const _fdt = performance.now() - _fine0; liqPerf.fineMs += _fdt; if (_fdt > liqPerf.fineMsMax) liqPerf.fineMsMax = _fdt; if (_fineActive > liqPerf.fineActive) liqPerf.fineActive = _fineActive; }
+  // ⭐ HOW MUCH LIQUID IS PENDING, AND WHERE — COUNTED FOR EVERY ROOM, DEFERRED OR NOT.
+  // 🟥 Both of the readout's blind spots were the same mistake, made twice: the tallies above only run for a
+  // room the flow loop REACHED, so a room that is deferred every tick reports `active=0` and no spread at all.
+  // That is precisely the state worth looking at — it is what "the liquid is frozen" IS — and the readout went
+  // quiet exactly then. The first version of this spread counter sat inside the flow loop too, and measuring a
+  // panning player produced "no samples" for the same reason.
+  // Once per ~32 ticks so a pass over the active set is not on the hot path, and only when perfLog is on.
+  if (liquidCfg.perfLog && (liquidTickCount & 31) === 0) {
+    const _ch = new Set(); let _c0 = Infinity, _c1 = -Infinity, _pend = 0;
+    for (const room of cellRooms.fine) {
+      const _st = peekCells(room); if (!_st.fineActive) continue;
+      const _g = worldGeom(room);
+      _pend += _st.fineActive.size;
+      for (const i of _st.fineActive) {
+        const c = (i / _g.rows) | 0;
+        if (c < _c0) _c0 = c; if (c > _c1) _c1 = c;
+        _ch.add(geomPage(_g, i));
+      }
+    }
+    liqPerf.actChunks = _ch.size;
+    liqPerf.actSpan = _c1 >= _c0 ? (_c1 - _c0 + 1) : 0;
+    liqPerf.pending = _pend;
+  }
   powderTickCount++; for (const room of Array.from(cellRooms.powder)) { if (!cellRooms.powder.has(room)) continue; if (_deferred && _deferred.has(room)) continue; powderTickRoom(room); }   // powder runs in lockstep with liquid → consistent gravity
   if ((liquidTickCount & 3) === 0) for (const room of Array.from(cellRooms.soil)) { if (!cellRooms.soil.has(room)) continue; if (_deferred && _deferred.has(room)) continue; soilTickRoom(room); }
   if (liquidCfg.perfLog && _deferred) liqPerf.deferred += _deferred.size;
@@ -3961,15 +3984,20 @@ const runLiquidTick = () => {
         // much of the "liquid" figure is chemistry rather than flow. Reactions running long is the shape that
         // starves the flow loop's hard stop; `reactSkips` says the per-tick candidate cap is biting.
         reactAvgMs: +(liqPerf.reactMs / liqPerf.ticks).toFixed(2), reactMaxMs: +liqPerf.reactMsMax.toFixed(2),
-        reactSkips: liqReactSkips };
+        reactSkips: liqReactSkips,
+        // WHERE the active liquid is. `actChunks` against the ~150 chunks one player's viewport subscribes to
+        // is the whole diagnosis: similar ⇒ the sim is working on what you can see and the COST is the problem;
+        // far larger ⇒ containment is the problem and tuning the cost cannot fix it.
+        actChunks: liqPerf.actChunks, actSpan: liqPerf.actSpan, pending: liqPerf.pending };
       console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
         (`  |  LIQUID K=${_stat.steps} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
         (`  |  REACT avg=${_stat.reactAvgMs}ms max=${_stat.reactMaxMs}ms capped=${_stat.reactSkips}`) +
+        (`  |  SPREAD pending=${_stat.pending} chunks=${_stat.actChunks} colspan=${_stat.actSpan}`) +
         (_stat.simBudgetPct ? `  |  BUDGET ${_stat.simBudgetPct}% deferred-rooms/tick=${_stat.deferred}` +
           (liquidCfg.budgetRate ? ` tier3-skips=${liqRateSkips}` : '') + (liquidCfg.budgetSeed ? ' seed=on' : '') : '') +
         ` (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
       io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
-      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0 };
+      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actSpan: 0, pending: 0 };
     }
   }
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
