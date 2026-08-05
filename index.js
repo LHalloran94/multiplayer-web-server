@@ -1680,6 +1680,7 @@ const PAGE_GRP_SH = 8, PAGE_GRP = 1 << PAGE_GRP_SH, PAGE_GRP_M = PAGE_GRP - 1;
 function PagedArray(geom, Ctor, stride, seedFn, room) {
   this.geom = geom; this.Ctor = Ctor; this.T = (stride | 0) || 1; this.seedFn = seedFn || null;
   this.seedEmpty = null;                          // optional: (p) => true when the seeder is CERTAIN the page is all zeros
+  this._emptyP = -1; this._emptyV = false;        // one-slot memo of the last seedEmpty answer — see _miss
   // ⭐ EVICTION MUST BE TRANSPARENT TO ACCESS. An evicted chunk has no pages, so without this every read would hand
   // back the shared ZERO page and the chunk would look like EMPTY WORLD — which is exactly what it did: liquid at a
   // chunk seam saw air where solid ground was evicted and poured through it, one cell wide, and a write into an
@@ -1734,13 +1735,29 @@ PagedArray.prototype.rp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i
 // The cold half of rp, kept out of line so the hot path is just "load the page and return it".
 PagedArray.prototype._miss = function (p) {
   if (this.ev !== null && this.ev[p]) return this._alloc(p);       // evicted → fault it back, blob and all
+  // 🟥 THE `seedEmpty` ANSWER IS MEMOISED FOR ONE PAGE, AND WITHOUT THIS THE OVERWORLD IS UNPLAYABLE.
+  // `seedEmpty` asks the generator "is this whole page provably sky?" — it is not free, it evaluates the
+  // surface over the page's columns. Reads of an ABSENT page come here EVERY TIME (there is no page to find in
+  // the directory), so a loop reading 4,096 cells of one sky page asked the same question 4,096 times.
+  // MEASURED on the live server: `sendChunkContent` reading 16 chunks took 8,632ms while producing NOTHING —
+  // 132µs per cell, all of it re-deciding emptiness. That is the whole "the world is invisible" report: chunk
+  // content took ~9 seconds a batch, so almost none of it arrived; it is the `connection error: timeout` in the
+  // console; and repeated beacons queued more 9-second blocks until the server looked dead.
+  // ⚠️ ONE SLOT IS ENOUGH because every hot reader walks a page at a time (the chunk readout, the RLE walk, the
+  // sim's row scans). A page that later gets ALLOCATED never reaches here — `rp` finds it in the directory — so
+  // a stale "empty" cannot outlive the emptiness it describes.
+  if (this.seedFn) {
+    if (p === this._emptyP) return this._emptyV ? this.zero : this._alloc(p);
+    const empty = !!(this.seedEmpty && this.seedEmpty(p));
+    this._emptyP = p; this._emptyV = empty;
+    return empty ? this.zero : this._alloc(p);
+  }
   // ⭐ PHASE 6 INCREMENT 4b. A seeded array must materialise on READ too, or an untouched cell would read 0
   // instead of its seed — which for a GENERATED world means reading solid ground as air. But a world is mostly
   // SKY, and faulting 4KB of zeros for every page of it would undo increment 2's sparse storage from the other
   // side. `seedEmpty` lets the seeder answer "provably nothing here" without generating: sky costs nothing, and
   // a WRITE into it still allocates through wp() as usual. Conservative by contract — a false "empty" is
-  // invisible terrain, which is the worst bug this subsystem can have.
-  if (this.seedFn) return (this.seedEmpty && this.seedEmpty(p)) ? this.zero : this._alloc(p);
+  // invisible terrain, which is the worst bug this subsystem can have. (The decision itself is memoised above.)
   return this.zero;                                               // genuinely empty → the shared zero page
 };
 PagedArray.prototype.wp = function (i) {
@@ -1814,6 +1831,16 @@ PagedArray.prototype.bytes = function () { return this.live * CHUNK_CELLS * this
 // this seam). The hot paths — rp/wp/g/s/o above — deliberately stay inlined and are the only sites that know.
 // `wpPage` is "wp, but you already have the page number": the get-or-fault-and-bump that chunk decoding does.
 PagedArray.prototype.pageAt = function (p) { const d = this.dir[p >> PAGE_GRP_SH]; return (d !== null && d[p & PAGE_GRP_M]) || null; };
+// A NON-FAULTING read: the cell's value, or -1 when nobody has produced that page yet. `.g()` would produce it,
+// and there are readers for which producing is exactly the wrong answer — see the powder seeders, where a read
+// of "the cell below" cascaded a chunk at a time down 64 chunks of Overworld and stalled the server.
+// ⚠️ -1 means UNKNOWN and is not the same as 0 (air). A caller that treats it as air will wake or move things it
+// should have left alone; every caller here tests `>= 0` first.
+function peekCellAt(pa, i) {
+  const g = pa.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cy + ((i >>> 6) & g.PGM)) : g.pageOf[i];
+  const page = pa.pageAt(p);
+  return page ? page[(g.K >= 0 ? (((i & 63) << 6) | ((i >>> g.K) & 63)) : g.offOf[i]) * pa.T] : -1;
+}
 PagedArray.prototype.revAt = function (p) { const r = this.rdir[p >> PAGE_GRP_SH]; return (r !== null ? r[p & PAGE_GRP_M] : 0) + this.epoch; };
 PagedArray.prototype.wpPage = function (p) {
   const gi = p >> PAGE_GRP_SH; if (this.dir[gi] === null) this._grp(p);
@@ -3998,8 +4025,16 @@ setInterval(chunkResidencySweep, Math.max(1000, chunkCfg.sweepMs | 0));
 // `chunk-verify` (a resync could not undo a disappearance), and it only went unnoticed because chunk-verify runs
 // once after a reconnect; re-subscribing runs it constantly. Sending every cell instead would be ~49KB per chunk,
 // so the wire says "zero these chunks first" in one number each and then names the survivors.
+// ⭐ CHUNK-STREAM TRACING, off unless MW_TRACE_SUBS is set in the environment.
+// ⚠️ IT EARNED ITS PLACE. The Overworld's "the world is invisible" bug took most of a session to find by
+// reading, and thirty seconds once these four lines existed: they showed the beacon arriving with a correct
+// rect, sixteen chunks produced in 20ms, and then EIGHT AND A HALF SECONDS in the readout that follows,
+// generating nothing. No amount of staring at the code says that; one timestamp does.
+// Hoisted to a const so the hot paths read a boolean rather than doing a property lookup on process.env.
+const TRACE_SUBS = !!process.env.MW_TRACE_SUBS;
 function sendChunkContent(sock, room, chunks) {
   if (!chunks || !chunks.length) return;
+  const _T0 = TRACE_SUBS ? Date.now() : 0;
   const s = peekCells(room); if (!s.terrain) return;
   const geom = worldGeom(room), tc = [], fine = [];
   // ⭐ PHASE 6 INCREMENT 4b — TWO PASSES, AND THE SPLIT IS LOAD-BEARING.
@@ -4015,7 +4050,9 @@ function sendChunkContent(sock, room, chunks) {
     restoreChunk(room, p);     // a chunk we are about to READ OUT must not be in a blob NOR dropped-as-pristine
     if (_genRooms.size) s.terrain.g(((((p / geom.cy) | 0) * CHUNK_SIDE) * geom.rows) + (p % geom.cy) * CHUNK_SIDE);
   }
+  if (TRACE_SUBS) console.log('[subs] produced ' + chunks.length + ' chunks in ' + (Date.now() - _T0) + 'ms');
   drainGenLiquid();
+  if (TRACE_SUBS) console.log('[subs] drained liquid at ' + (Date.now() - _T0) + 'ms, pagesProduced=' + genPagesProduced);
   for (const p of chunks) {
     const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
     for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
@@ -4025,9 +4062,11 @@ function sendChunkContent(sock, room, chunks) {
         if (s.fineTotal && s.fineTotal.g(i) > 0) fine.push(i);
       }
   }
+  if (TRACE_SUBS) console.log('[subs] readout done ' + chunks.length + ' chunks, ' + (tc.length / 2) + ' cells, ' + (Date.now() - _T0) + 'ms, pagesProduced=' + genPagesProduced);
   if (tc.length) sock.emit('terrain-set', { cells: tc });
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
   sock.emit('liquid-fine-cells', { sub: 1, cols: geom.cols, cells, clear: chunks.slice() });
+  if (TRACE_SUBS) console.log('[subs] ...emitted in ' + (Date.now() - _T0) + 'ms total');
 }
 // ==INTEREST_BLOCK_START== (probe_subscriptions slices this out — stub io/chunkHash/worldGeom/geomPage when you do)
 const interestCfg = {
@@ -4059,6 +4098,7 @@ function dropSubs(room, sid) { const m = roomSubs[room]; if (m) { m.delete(sid);
 // replicated is what a player can SEE. Cursor mode has no body at all, so an avatar-keyed version would send an
 // entire mode's worth of players nothing.
 function updateSubs(room, sid, v) {
+  if (TRACE_SUBS) console.log('[subs] updateSubs room=' + room + ' chunks=' + interestCfg.chunks + ' rect=' + JSON.stringify(v));
   if (!interestCfg.chunks) return;
   const geom = worldGeom(room), M = Math.max(0, interestCfg.margin | 0);
   const fresh = !roomSubs[room] || !roomSubs[room].has(sid);
@@ -4093,6 +4133,7 @@ function updateSubs(room, sid, v) {
   if (e.pending.size) flushPending(room, sid, e);
 }
 function flushPending(room, sid, e) {
+  if (TRACE_SUBS) console.log('[subs] flush room=' + room + ' sid=' + sid + ' pending=' + e.pending.size);
   const sock = io.sockets.sockets.get(sid); if (!sock) return;
   const take = [];
   for (const p of e.pending) { take.push(p); if (take.length >= Math.max(1, interestCfg.pushPerBeacon | 0)) break; }
@@ -5557,8 +5598,18 @@ function seedGenChunkLiquid(room, p) {
       // neighbour is what the pool rule's column overlap already costs on the generator side.
       if (isPowderId(v)) {
         if ((i % geom.rows) + 1 < geom.rows) {
-          const below = s.terrain.g(i + 1);
-          if (!below || isFluidId(below)) powderSet(room).add(i);
+          // 🟥 THIS READ MUST NOT FAULT, AND WHEN IT DID IT RAN AWAY DOWN THE WORLD. `.g()` produces the page it
+          // lands on, so a grain at a chunk's BOTTOM EDGE produced the chunk beneath it — whose own powder
+          // seeding then produced the one beneath THAT, and so on to bedrock. In a page room that bottoms out
+          // after 7 chunks and the note here used to call it "bounded and intended". The Overworld is 64 chunks
+          // deep and 8,191 wide: looking at one screen produced a column of chunks all the way down, for every
+          // column on screen, and the server stopped answering. Reported from play as a crash; the error log was
+          // empty, because it was a stall.
+          // ⇒ Peek instead. An absent page means "nobody has produced this yet", and the right answer for a
+          // grain sitting on it is to leave it asleep: whatever produces that chunk later runs the same seeding
+          // over it, and `queuePowderReseed` wakes grains on every fault-in besides.
+          const below = peekCellAt(s.terrain, i + 1);
+          if (below >= 0 && (!below || isFluidId(below))) powderSet(room).add(i);
         }
         continue;
       }
@@ -5601,10 +5652,11 @@ function reseedChunkPowder(room, p) {
       if ((i % geom.rows) + 1 >= geom.rows) continue;        // resting on the bottom row of the world
       // ⚠️ Same rule as seedPowderActivity: only grains that could ACTUALLY move. A grain with something solid
       // beneath it is already at rest, and waking every grain in a desert chunk would make the next powder tick
-      // walk all of them. `g(i + 1)` on the bottom row faults the chunk BELOW — bounded, and the same cost the
-      // first-production path already pays.
-      const below = s.terrain.g(i + 1);
-      if (!below || isFluidId(below)) { powderSet(room).add(i); n++; }
+      // walk all of them.
+      // 🟥 AND THE READ MUST NOT FAULT — see the note in seedGenChunkLiquid. `.g()` here produced the chunk
+      // below, whose seeding produced the next one down, all the way to bedrock; 64 deep in the Overworld.
+      const below = peekCellAt(s.terrain, i + 1);
+      if (below >= 0 && (!below || isFluidId(below))) { powderSet(room).add(i); n++; }
     }
   return n;
 }
