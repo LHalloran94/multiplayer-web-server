@@ -2882,10 +2882,15 @@ function seedLiquidActivity(room) {
   const amt = s.fineAmt, tot = s.fineTotal, act = fineSet(room);
   amt.fill(0); tot.fill(0); act.clear();
   // Only pages that exist can hold a fluid id — an unallocated terrain page is all zeros (see PagedArray.scan).
+  // ⚠️ THE SAME "wake only what can move" RULE AS THE ON-DEMAND SEEDER, and it has to be the same rule or the
+  // two world generators disagree about what a freshly built world costs. This is the build-it-all-up-front
+  // path, so it is a page world today — where the saving is small because a page world's lakes are small — but
+  // leaving one path unconditional is how the two drift.
+  const _geomW = worldGeom(room);
   grid.scan((i, _o, page) => {
     const v = page[_o]; if (!isFluidId(v)) return;
     amt.wp(i)[amt.o(i) + LIQ_RANK[v]] = LIQUID_MAX; tot.s(i, LIQUID_MAX);
-    if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
+    if (act.size < LIQUID_MAX_ACTIVE && (liquidCfg.genWakeAll || genLiquidLoose(grid, i, _geomW, v))) act.add(i);
   });
   grid.scan((i, _o, page) => { if (page[_o] === 9) seedSoilAround(room, grid, i); });   // pre-generated lakes absorb just like poured water (no special-casing)
   if (!act.size) dropFineActive(room);
@@ -5737,10 +5742,31 @@ function setRoomGenerator(room, gen) {
 // the one beneath that, all the way to bedrock — 64 chunks deep and 8,191 wide, and the server stopped
 // answering. -1 means "nobody has produced that yet", and the right answer for a cell resting on it is to leave
 // it asleep; whatever produces that chunk later runs this same pass over its own cells.
-function genLiquidLoose(terr, i, geom) {
+// 🟥🟥 "FLUID BELOW" IS NOT A REASON FOR *LIQUID* TO MOVE, AND GETTING THAT WRONG COST THE WHOLE FIX.
+// The first version of this said `if (!b || isFluidId(b)) return true` — copied from the POWDER seeder ten lines
+// below, where it IS right, because a grain sinks through liquid. For liquid it is nonsense: water resting on
+// water is water at the bottom of a lake, which is the most at-rest thing in the world. So every cell of every
+// submerged chunk woke, which is exactly what the heat overlay showed — chunks reading a flat **4,096**, every
+// cell queued, in water. It is why the "wake only what can move" change delivered 10% instead of the ~40x the
+// cell counts implied: in a lake it woke everything anyway.
+// A liquid cell can actually move only if:
+//   · there is AIR below it            — it falls;
+//   · there is a LIGHTER fluid below   — it sinks past (density sorting). Same density ⇒ nothing to do;
+//   · there is AIR beside it           — it spills sideways.
+// ⚠️ EVERY READ IS A PEEK, NEVER `.g()`. `.g()` PRODUCES the page it lands on, and the powder seeder below
+// carries the scar: a grain at a chunk's bottom edge produced the chunk beneath it, whose seeding produced the
+// one beneath that, to bedrock — 64 chunks deep, 8,191 wide, and the server stopped answering. -1 means "not
+// produced yet", and the right answer for a cell resting on it is to stay asleep; whatever produces that chunk
+// later runs this same pass over its own cells.
+function genLiquidLoose(terr, i, geom, v) {
   const rows = geom.rows, c = (i / rows) | 0, r = i - c * rows;
-  if (r + 1 < rows) { const b = peekCellAt(terr, i + 1); if (b >= 0 && (!b || isFluidId(b))) return true; }
-  if (c > 0 && peekCellAt(terr, i - rows) === 0) return true;
+  if (r + 1 < rows) {
+    const b = peekCellAt(terr, i + 1);
+    if (b === 0) return true;                                     // air below ⇒ falls
+    // LIQ_RANK is 0 = heaviest, so this cell sinks past the one below only when its rank is SMALLER.
+    if (b > 0 && isFluidId(b) && LIQ_RANK[v] < LIQ_RANK[b]) return true;
+  }
+  if (c > 0 && peekCellAt(terr, i - rows) === 0) return true;     // air to the left ⇒ spills
   if (c + 1 < geom.cols && peekCellAt(terr, i + rows) === 0) return true;
   return false;
 }
@@ -5795,7 +5821,7 @@ function seedGenChunkLiquid(room, p) {
       // ⚠️ CONSERVATIVE ON PURPOSE — it wakes a superset of what must move. Under-waking would leave liquid
       // visibly hanging until something disturbed it, which is a much worse failure than doing a little extra
       // work, so a lateral air neighbour counts as well as a fall.
-      if (act.size < LIQUID_MAX_ACTIVE && (liquidCfg.genWakeAll || genLiquidLoose(s.terrain, i, geom))) act.add(i);
+      if (act.size < LIQUID_MAX_ACTIVE && (liquidCfg.genWakeAll || genLiquidLoose(s.terrain, i, geom, v))) act.add(i);
       n++;
     }
   if (!n && !act.size) dropFineActive(room);
