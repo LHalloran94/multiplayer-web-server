@@ -2130,6 +2130,10 @@ function encodeChunkDelta(s, p, gen, geom) {
   // quietly applied to different rock. See WORLDGEN_VERSION in worldgen.js.
   return { v: WORLDGEN.WORLDGEN_VERSION, d: idx, m: mat, hp: dmg, a: null };
 }
+// ⭐ SCALE COUNTER (see liqScanRows in the sim block for the reasoning). Key-deletes done pruning the work sets
+// when a chunk is evicted. It MUST stay independent of |fineActive|: the version that walked the whole set made
+// eviction more expensive the more there was to do, which is what turns a slow world into a stuck one.
+let evictPruneOps = 0;
 function evictChunk(room, p) {
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
   const ch = chunksOf(room);
@@ -2180,7 +2184,8 @@ function evictChunk(room, p) {
   const cy = geom.cy, pc0 = ((p / cy) | 0) * CHUNK_SIDE, pr0 = (p % cy) * CHUNK_SIDE;
   const pcN = Math.min(CHUNK_SIDE, geom.cols - pc0), prN = Math.min(CHUNK_SIDE, geom.rows - pr0);
   const pruneKeys = (del, size) => {
-    if (size < CHUNK_CELLS) { for (const i of Array.from(del.keys ? del.keys() : del)) if (geomPage(geom, i) === p) del.delete(i); return; }
+    if (size < CHUNK_CELLS) { evictPruneOps += size; for (const i of Array.from(del.keys ? del.keys() : del)) if (geomPage(geom, i) === p) del.delete(i); return; }
+    evictPruneOps += pcN * prN;
     for (let lc = 0; lc < pcN; lc++) { const base = (pc0 + lc) * geom.rows + pr0; for (let lr = 0; lr < prN; lr++) del.delete(base + lr); }
   };
   const prune = (set, drop) => { if (!set) return; pruneKeys(set, set.size); if (!set.size) drop(room); };
@@ -3266,7 +3271,16 @@ function fineLiquidTickRoom(room, SUB) {
     // `continue` on every row of it anyway. Skipping it is exact rather than approximate. An EVICTED page is not
     // vacant and is still visited (see pageVacant) — skipping that one would be Phase 3's unloaded-reads-as-empty
     // bug again. Typical column: 1–2 live pages = 64–128 rows instead of 4,096.
-    const CY = tot.geom.cy;
+    // ⚠️ "PAGES THAT EXIST" WAS THE WRONG BOUND, and the user caught it from the description alone: *"surely you
+    // wouldn't look at cells that have ever held liquid, but which are currently holding liquid?"* Exactly right.
+    // A page is allocated the first time liquid touches it and stays allocated after the water has drained away,
+    // so the bound decayed as the world was played — MEASURED at 46× (probe_scale_invariants B1) once water had
+    // run down a column and gone.
+    // ⭐ SO: remember, per (column, page), that the segment held NO liquid — keyed on the page's REVISION, which
+    // `wp()` bumps on every write. A drained segment nobody writes to again is one Map lookup forever; the moment
+    // anything writes into that page the revision moves and it is rescanned. Exact, not heuristic: the cache can
+    // only ever be consulted for a page whose contents have not changed since it was read.
+    const CY = tot.geom.cy, emptySeg = fineEmptySegs(room);
     const colStillSorting = (cc) => {
       let v = colSorting.get(cc);
       if (v !== undefined) return v;
@@ -3276,14 +3290,22 @@ function fineLiquidTickRoom(room, SUB) {
       for (let cr = 0; cr < CY; cr++) {
         const r0 = cr << 6;
         if (r0 >= FROWS) break;
-        if (tot.pageVacant(tot.pageOfCell(colBase + r0))) continue;   // nothing was ever stored here
+        const seg = colBase + r0, pg = tot.pageOfCell(seg);
+        if (tot.pageVacant(pg)) continue;                    // nothing was ever stored here
+        const rev = tot.revAt(pg);
+        if (emptySeg.get(seg) === rev) continue;              // known empty, and unchanged since we looked
         const rN = Math.min(r0 + 64, FROWS);
+        liqScanRows += rN - r0;
+        let anyLiquid = false;
         for (let r2 = r0; r2 < rN; r2++) {
-          if (r2 + 1 >= FROWS) break outer;
-          const a2 = colBase + r2, b2 = a2 + 1;
+          const a2 = colBase + r2;
+          if (tot.g(a2) > 0) anyLiquid = true;
+          if (r2 + 1 >= FROWS) { if (!anyLiquid) emptySeg.set(seg, rev); break outer; }
+          const b2 = a2 + 1;
           if (tot.g(a2) <= 0 || tot.g(b2) <= 0 || isSolid(a2) || isSolid(b2)) continue;
           const f = floorRank(a2); if (f >= 0 && f < ceilRank(b2)) { v = true; break outer; }
         }
+        if (!anyLiquid) emptySeg.set(seg, rev);
       }
       colSorting.set(cc, v); return v;
     };
@@ -3596,6 +3618,21 @@ function fineReactSet(room) { const s = cellsOf(room); if (!s.fineReact) { s.fin
 // naturally. `liqRateSkips` sits BELOW ==LIQUID_SIM_BLOCK_END== because only `runLiquidTick` uses it; these two
 // are used by `fineReactTickRoom`, which is inside. Putting them outside would be a ReferenceError in every rig
 // that slices the sim and nowhere else — the SEVENTH time this exact boundary has caught something on this track.
+// ⭐⭐ SCALE COUNTERS — the whole Overworld rests on "cost follows the WORK, not the WORLD", and until now nothing
+// checked it. Two bugs of exactly that class shipped in one day: `colStillSorting` scanned the world's full DEPTH
+// (cost ∝ world height) and `evictChunk`'s prune walked the whole work set (cost ∝ |fineActive|). Both were
+// invisible to every guard, because every guard uses a page-sized world with a small disturbance — the one shape
+// where "∝ world" and "∝ work" are the same number.
+// ⚠️ COUNTS, NOT CLOCKS. Wall-clock thresholds on this track have twice been coin flips (probe_budget's cold
+// start, probe_react_budget D2). A count is deterministic, so `probe_scale_invariants` can assert the same
+// disturbance costs the same in a page-sized world and an Overworld-sized one, inside one process.
+let liqScanRows = 0;          // rows visited by colStillSorting — must not grow with world height OR with use
+// (column, page) segments known to hold NO liquid, keyed on the page revision they were read at. Lives on the
+// cell store so it survives ticks — which is the whole point, a drained column stays drained — and is released
+// with the room's other scratch when the room goes quiet.
+function fineEmptySegs(room) { const s = cellsOf(room); return s.fineEmptySeg || (s.fineEmptySeg = new Map()); }
+// (`evictPruneOps`, the same idea for eviction, is declared next to `evictChunk` — it is in a DIFFERENT sliced
+//  block, and a counter on the wrong side of a marker is a ReferenceError in the rigs and nowhere else.)
 const roomReactCursor = {};   // room → where the capped reaction pass resumes, so no cell is permanently skipped
 let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCand (⇒ it is biting; see the Perf tab)
 // ⚠️ A COUNT, NOT A CLOCK. `probe_react_budget` D2 first asserted "the flow moved liquid on most ticks", which
