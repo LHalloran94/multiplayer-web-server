@@ -2833,7 +2833,7 @@ const liquidCfg = {
 // DEBUG perf accounting (only touched when liquidCfg.perfLog): runLiquidTick tallies sim time + active cells and
 // prints a rolling ~1s summary to the console. (emitLiquidCells, which centralised the coarse `liquid-cells` emit so
 // its wire payload could be sized, went with that wire.)
-let liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actCols: 0, pending: 0 };
+let liqPerf = { simMs: 0, simMsMax: 0, pendAt: 0, idleRooms: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actCols: 0, pending: 0 };
 // Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
 // the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
 // ⭐ 0 = OFF, and that is the shipping value. Tried at 200 and the user reported prolonged lag on joining: the cost is
@@ -4164,7 +4164,7 @@ const runLiquidTick = () => {
   // FROZEN. Nothing advances — not the grid, not droplets in flight, not powder or soil — until either the pause is
   // lifted or a step is requested, so what you are looking at is exactly what the sim last produced.
   if (liquidCfg.paused) { if (liquidStepsPending <= 0) return; liquidStepsPending--; }
-  const _t0 = liquidCfg.perfLog ? performance.now() : 0; let _active = 0;
+  const _t0 = liquidCfg.perfLog ? performance.now() : 0;
   const _genAtTickStart = genPagesProduced; genMark();      // see liqTickGenPages: how much WORLD this tick built
   liquidTickCount++;
   // ⭐ Phase 6 inc 4b. Chunks produced on demand since the last tick get their liquid HERE, before anything
@@ -4188,7 +4188,13 @@ const runLiquidTick = () => {
   // on being fully simulated for over half a minute. Deferring it here is immediate and costs one Map lookup.
   // ⚠️ Its liquid is not lost or reset: a deferred room's active set is never read and never cleared, so it
   // resumes exactly where it stopped when somebody walks back in. That is the same contract tiers 1–3 rely on.
-  for (const r of cellRooms.fine) if (!roomOccupied(r)) { _deferred.add(r); liqIdleSkips++; }
+  // ⚠️ COUNTED SEPARATELY FROM THE BUDGET'S DEFERRALS, because they mean OPPOSITE things and the readout showed
+  // one number for both. "Deferred" from tier 1/3 means the sim cannot keep up — a cost problem. "Deferred"
+  // because nobody is in the room means everything is working. A worried-looking `deferred/tick=1` in a test was
+  // entirely this, and it sent an investigation after a starvation bug that was not there.
+  let _idle = 0;
+  for (const r of cellRooms.fine) if (!roomOccupied(r)) { _deferred.add(r); liqIdleSkips++; _idle++; }
+  if (liquidCfg.perfLog && _idle > liqPerf.idleRooms) liqPerf.idleRooms = _idle;
   if (_budgetMs) {
     const _keys = [];
     for (const r of cellRooms.fine) {
@@ -4268,12 +4274,17 @@ const runLiquidTick = () => {
   if (liquidCfg.reactions) _react();
   for (const room of Array.from(cellRooms.fine)) {
     if (!cellRooms.fine.has(room)) continue;
+    // ⚠️ TALLIED BEFORE THE TWO `continue`s BELOW, NOT AFTER — the readout's second lie. This line sat under
+    // them, so a room the budget DEFERRED contributed 0 to the "active" figure: the number went quiet exactly
+    // when a room was being starved, which is the one state it exists to show. Same mistake as the `pending`
+    // block above, in the same tick, fixed there and not here.
+    // `peekCells`, not `cellsOf`: a measurement must never create a store for a room that has none.
+    if (liquidCfg.perfLog) { const _fa = peekCells(room).fineActive; if (_fa) _fineActive += _fa.size; }
     if (_deferred && _deferred.has(room)) continue;
     // HARD STOP — the guarantee. A room cut here has already had its sources and pre-reactions run but gets
     // no flow this tick; harmless and rare (only when the EMA badly under-predicted), and adding it to
     // _deferred keeps powder in lockstep by skipping it too.
     if (_budgetMs && performance.now() - _tickT0 > _budgetMs) { _deferred.add(room); continue; }
-    if (liquidCfg.perfLog) _fineActive += cellsOf(room).fineActive.size;
     const _r0 = _budgetMs ? performance.now() : 0;
     // TIER 2 — a room bigger than the WHOLE budget cannot be fixed by deferring other rooms, and skipping
     // it forever would freeze it. Instead cut its sub-steps (K) in proportion: cost is ~linear in K
@@ -4304,8 +4315,16 @@ const runLiquidTick = () => {
   // That is precisely the state worth looking at — it is what "the liquid is frozen" IS — and the readout went
   // quiet exactly then. The first version of this spread counter sat inside the flow loop too, and measuring a
   // panning player produced "no samples" for the same reason.
-  // Once per ~32 ticks so a pass over the active set is not on the hot path, and only when perfLog is on.
-  if ((liquidCfg.perfLog || liquidCfg.heat) && (liquidTickCount & 31) === 0) {
+  // Once per report window so a pass over the active set is not on the hot path, and only when perfLog is on.
+  // 🟥 THE THIRD LIE, AND THE ONE THE USER HAS BEEN READING ALL ALONG: *"waiting to move jumps between 0 and
+  // thousands."* The scan below measures a LEVEL — how much is queued RIGHT NOW — and it was sampled every 32
+  // ticks while the report window is `round(1000 / tickMs)` = 25 ticks at the shipping 40ms, which then reset the
+  // level to zero. 25 and 32 beat against each other, so about one second in five printed `pending=0` with
+  // nothing whatsoever wrong. A zero here reads as "the liquid is done"; it meant "no sample landed in this
+  // window", and the two are opposites.
+  // ⇒ the sample period IS the report window, so every printed line carries exactly one fresh sample…
+  const _perfWin = Math.max(1, Math.round(1000 / Math.max(1, liquidCfg.tickMs | 0)));
+  if ((liquidCfg.perfLog || liquidCfg.heat) && (liquidTickCount % _perfWin) === 0) {
     let _pend = 0, _nch = 0; const _cols = new Set();
     for (const room of cellRooms.fine) {
       const _st = peekCells(room); if (!_st.fineActive) continue;
@@ -4342,6 +4361,7 @@ const runLiquidTick = () => {
     liqPerf.actChunks = _nch;
     liqPerf.actCols = _cols.size;      // DISTINCT columns holding active liquid — an area, comparable to a viewport
     liqPerf.pending = _pend;
+    liqPerf.pendAt = liquidTickCount;  // …and the reading is STAMPED, so a stale one can say so instead of reading 0
   }
   genSince('flow');
   powderTickCount++; for (const room of Array.from(cellRooms.powder)) { if (!cellRooms.powder.has(room)) continue; if (_deferred && _deferred.has(room)) continue; powderTickRoom(room); }   // powder runs in lockstep with liquid → consistent gravity
@@ -4352,16 +4372,25 @@ const runLiquidTick = () => {
   liqTickGenPages += genPagesProduced - _genAtTickStart;
   if (liquidCfg.perfLog) {
     const _dt = performance.now() - _t0; liqPerf.simMs += _dt; if (_dt > liqPerf.simMsMax) liqPerf.simMsMax = _dt;
-    if (_active > liqPerf.active) liqPerf.active = _active; liqPerf.ticks++;
+    liqPerf.ticks++;
     if (liqPerf.ticks >= Math.max(1, Math.round(1000 / liquidCfg.tickMs))) {   // ~once per real second
       const _hz = 1000 / liquidCfg.tickMs, _rooms = cellRooms.fine.size;
-      const _stat = { rooms: _rooms, active: liqPerf.active, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs,
+      // 🟥 `active` USED TO BE A DEAD COUNTER — `_active` was declared at the top of the tick and INCREMENTED
+      // NOWHERE, a leftover of the deleted coarse sim, so `active(peak)` printed 0 in every state the server
+      // could be in. It is not a number that was sometimes wrong; it was never right. It already cost a
+      // diagnosis: the note beside the reaction breakout reads *"the `active(peak) 0` beside it read as an idle
+      // room rather than as 'the flow never ran'"* — neither was true, the field was simply dead.
+      // It now carries the honest whole-world total (the `pending` gauge below), under its old name because
+      // e2e_room_starvation, e2e_containment and probe_liquid_bottleneck all read `.active` off this wire.
+      const _stat = { rooms: _rooms, active: liqPerf.pending, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs,
         // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
         // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
         steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
         // BUDGET: mean rooms deferred per tick. Non-zero = the budget is biting and liquid is resolving slower
         // than real time somewhere. Zero at rest is the expected state.
         deferred: +(liqPerf.deferred / liqPerf.ticks).toFixed(2), simBudgetPct: liquidCfg.simBudgetPct,
+        // …of which THIS many were rooms with nobody in them, which is not the budget biting at all.
+        idleRooms: liqPerf.idleRooms,
         // ⭐ REACTIONS, BROKEN OUT. Part of `fineAvgMs` above, not additional to it — the point is to see how
         // much of the "liquid" figure is chemistry rather than flow. Reactions running long is the shape that
         // starves the flow loop's hard stop; `reactSkips` says the per-tick candidate cap is biting.
@@ -4375,16 +4404,24 @@ const runLiquidTick = () => {
         // WHERE the active liquid is. `actChunks` against the ~150 chunks one player's viewport subscribes to
         // is the whole diagnosis: similar ⇒ the sim is working on what you can see and the COST is the problem;
         // far larger ⇒ containment is the problem and tuning the cost cannot fix it.
-        actChunks: liqPerf.actChunks, actCols: liqPerf.actCols, pending: liqPerf.pending };
-      console.log(`[liq-perf] rooms=${_stat.rooms} active(peak)=${_stat.active} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
+        actChunks: liqPerf.actChunks, actCols: liqPerf.actCols, pending: liqPerf.pending,
+        // How old the reading above is, in ms. Zero every window in normal operation; non-zero means the scan
+        // did not run (perfLog toggled mid-window), and the panel says "Ns old" rather than printing a zero.
+        pendAgeMs: Math.max(0, (liquidTickCount - (liqPerf.pendAt || 0)) * Math.max(1, liquidCfg.tickMs | 0)) };
+      console.log(`[liq-perf] rooms=${_stat.rooms} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
         (`  |  LIQUID K=${_stat.steps} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
         (`  |  REACT avg=${_stat.reactAvgMs}ms max=${_stat.reactMaxMs}ms capped=${_stat.reactSkips}`) +
         (`  |  SPREAD pending=${_stat.pending} chunks=${_stat.actChunks} cols=${_stat.actCols}`) +
         (_stat.simBudgetPct ? `  |  BUDGET ${_stat.simBudgetPct}% deferred-rooms/tick=${_stat.deferred}` +
+          (_stat.idleRooms ? ` (${_stat.idleRooms} unoccupied)` : '') +
           (liquidCfg.budgetRate ? ` tier3-skips=${liqRateSkips}` : '') + (liquidCfg.budgetSeed ? ' seed=on' : '') : '') +
         ` (×clients-in-room = server upload; budget/tick=${_stat.budgetMs}ms)`);
       io.emit('liquid-perf', _stat);                       // mirrored to the Liquid Debug panel so it's visible while testing
-      liqPerf = { simMs: 0, simMsMax: 0, active: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actCols: 0, pending: 0 };
+      // ⭐ COUNTERS RESET, GAUGES DO NOT. Everything here is a sum or a peak over the window just printed, so it
+      // starts again at zero — except `pending`/`actChunks`/`actCols`, which are a snapshot of how much work is
+      // queued right now. Zeroing those made "I have no reading" indistinguishable from "there is no work".
+      liqPerf = { simMs: 0, simMsMax: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, idleRooms: 0, reactMs: 0, reactMsMax: 0,
+        actChunks: liqPerf.actChunks, actCols: liqPerf.actCols, pending: liqPerf.pending, pendAt: liqPerf.pendAt };
     }
   }
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
