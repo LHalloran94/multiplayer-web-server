@@ -7613,8 +7613,10 @@ io.on('connection', (socket) => {
     const rs = roomSim[currentRoom];
     const s = rs && rs.avatars[socket.id];
     if (!s || !isFinite(x) || !isFinite(y)) return;
-    s.respawnX = Math.max(0, Math.min(MWSim.C.WORLD_W, x));
-    s.respawnY = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
+    // ⚠️ SAME CLASS as the terrain-edit clamp above: the room's own size, not the page stage's.
+    const _rd = roomDims(currentAvatarRoom);
+    s.respawnX = Math.max(0, Math.min(_rd.cols * TERRAIN_CELL, x));
+    s.respawnY = Math.max(0, Math.min(_rd.rows * TERRAIN_CELL, y));
   });
 
   // ---- Avatar P2P transport signaling (Stage 6 pivot) ----
@@ -7937,7 +7939,19 @@ io.on('connection', (socket) => {
     if (!currentAvatarRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!canBuild()) return;                                // Phase 3: L2 build permission
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
-    const cx = Math.max(0, Math.min(MWSim.C.WORLD_W, x)), cy = Math.max(0, Math.min(MWSim.C.WORLD_H, y));
+    // 🟥🟥 THIS CLAMPED EVERY EDIT TO THE *PAGE* WORLD'S SIZE, IN EVERY ROOM. `MWSim.C.WORLD_W/H` are the
+    // page stage's constants (15,360 x 3,240). In the Overworld a player stands at x ~ 2,080,000, so every
+    // paint and carve was clamped to the page world's corner -- two million pixels from where they clicked.
+    // The CLIENT applies the edit optimistically where you actually clicked, so it renders there and looks
+    // placed; the server put it somewhere else entirely, so nothing ever moves it and no diff ever corrects
+    // it. That is the whole 'I go up into the sky, place liquid, and it is frozen' report, and it is exactly
+    // the 'is anything still using page-world values?' class. `sendChunkContent`'s residency clamp had the
+    // same bug and was fixed; this one was missed.
+    // ⚠️ `roomDims` returns { cols, rows } — CELLS, not pixels. The first version of this fix read `.w`/`.h`,
+    // got undefined, and clamped every edit to NaN: paint stopped working in page worlds entirely. Caught by
+    // e2e_place_liquid going 6/6 → 2/6 immediately after.
+    const _ed = roomDims(currentAvatarRoom);
+    const cx = Math.max(0, Math.min(_ed.cols * TERRAIN_CELL, x)), cy = Math.max(0, Math.min(_ed.rows * TERRAIN_CELL, y));
     const rr = Math.max(TERRAIN_CELL / 2, Math.min(160, r));   // floor = one fine tile's half-extent so the client's smallest (1-cell) brush isn't inflated server-side
     const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
     const sq = shape === 'square';
