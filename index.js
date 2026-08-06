@@ -1999,6 +1999,10 @@ function ChunkRec() {
   // way. ⚠️ A revision-counting version of this shipped for a few hours and was subtly wrong; see evictChunk.
   this.gen = 0;
   this.restoring = 0;     // 4d: decoding right now — do NOT treat the page fault it causes as a first production
+  // ⭐ 2026-08-06: RESIDENT BUT NOT SIMULATED. Its cells have been pruned from the work sets because nobody can
+  // see it, while the chunk itself stays in memory for the whole eviction grace. Cleared by `rewakeChunk` when
+  // it comes back into view. Declared here rather than assigned ad hoc so every record keeps one hidden shape.
+  this.quiet = 0;
 }
 const NO_CHUNK_REC = Object.freeze(new ChunkRec());   // what `peek` answers for a chunk nothing has happened to
 function RoomChunks(nPages) {
@@ -2207,6 +2211,68 @@ function evictChunk(room, p) {
   for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
   for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === worldGeom(room).nPages) s[f].dropPage(p);
   // Drop this chunk's cells from the work sets, and release a set that empties (same contract as dropFineActive).
+  pruneChunkWork(room, p);
+  return true;
+}
+// ⭐⭐ STOP SIMULATING A CHUNK WITHOUT PUTTING IT AWAY (2026-08-06). Eviction conflates two different things —
+// "nobody can see this, stop spending CPU on it" and "nobody can see this, release its memory" — and only the
+// second one needs to wait out a grace period. MEASURED (scratchpad/probe_evict_grace.js), walking a stretch of
+// Overworld and then standing 20 chunks away:
+//      grace 30s   queue drains at 26s   14.8 ms/tick while away   4,741KB to come back
+//      grace  0s   queue drains at  4s    0.8 ms/tick while away   4,527KB to come back
+// 🟥 The grace costs EIGHTEEN TIMES the CPU — 14.8ms of a 40ms tick spent on ground nobody is looking at, for
+// half a minute after they leave — and buys nothing on the wire: the 4.7% between those byte figures is smaller
+// than the ±3% spread within each setting. That is not a rig artefact, it is BY CONSTRUCTION since increment 3d,
+// which made re-entry always re-send ("a windowed client FORGETS a chunk the moment it leaves, so 'the chunk did
+// not change' now says nothing about whether the client has it"). The grace's entire purpose was to make turning
+// around free; 3d removed the mechanism that made that true, and nothing re-examined the grace afterwards.
+// ⇒ so split them. The work set is pruned at the FIRST sweep after a chunk leaves everyone's view; the chunk
+// itself stays resident for the full grace, so coming back still needs no restore, no decode and no generation.
+// ⚠️ The rewake is the whole risk, and it is the same risk `rehydrateChunk` already carries: under-waking leaves
+// liquid visibly hanging until something disturbs it. So the wake is deliberately a SUPERSET (everything that
+// could move) and uses the identical rule, `liquidCanMove` + `queuePowderReseed`, rather than a second one.
+// ⚠️ Behaviour: liquid in an unwatched chunk stops flowing. That is not new — eviction has always done exactly
+// this, 30 seconds later — and it is the same contract as the unoccupied-room deferral: a world nobody is in
+// costs nothing. Flow ARRIVING from a watched neighbour still wakes these cells normally, via wakeAround.
+let chunkQuietCount = 0, chunkRewakeCount = 0;   // diagnostics: how much ground has been put to sleep, and re-woken
+function quiesceChunk(room, p) {
+  const s = roomCells.get(room); if (!s || !s.terrain) return false;
+  const ch = chunksOf(room), rec = ch.at(p);
+  if (rec.quiet) return false;
+  rec.quiet = 1; chunkQuietCount++;
+  pruneChunkWork(room, p);
+  return true;
+}
+// …and the other half: this chunk is in view again, so put back what can move. Nothing was lost — the cells are
+// exactly as they were — so this is a WAKE, never a restore.
+function rewakeChunk(room, p) {
+  const ch = chunksOf(room), rec = ch.peek(p);
+  if (!rec.quiet) return false;
+  ch.at(p).quiet = 0; chunkRewakeCount++;
+  const s = roomCells.get(room); if (!s || !s.fineTotal) return true;
+  // ⚠️ `pageAt`, NOT `.g()`. A measurement or a housekeeping pass must never FAULT a page — on a generated room
+  // that produces the chunk, which is the cascade that cost 31.8 seconds of tick time in empty sky. An absent
+  // page means there is no liquid here to wake, which is the correct answer and a free one.
+  const tp = s.fineTotal.pageAt(p), ap = s.fineAmt && s.fineAmt.pageAt(p);
+  if (!tp) { queuePowderReseed(room, p); return true; }
+  const geom = worldGeom(room), act = fineSet(room);
+  const pc0 = ((p / geom.cy) | 0) * CHUNK_SIDE, pr0 = (p % geom.cy) * CHUNK_SIDE;
+  const pcN = Math.min(CHUNK_SIDE, geom.cols - pc0), prN = Math.min(CHUNK_SIDE, geom.rows - pr0);
+  for (let lr = 0; lr < prN; lr++) for (let lc = 0; lc < pcN; lc++) {
+    const off = lr * CHUNK_SIDE + lc;
+    if (!tp[off]) continue;                                  // no liquid in this cell
+    const i = (pc0 + lc) * geom.rows + (pr0 + lr);
+    let rid = 0;
+    if (ap) for (let rk = 0; rk < LIQ_T; rk++) if (ap[off * LIQ_T + rk] > 0) { rid = LIQ_ID[rk]; break; }
+    if (liquidCfg.genWakeAll || !rid || liquidCanMove(s.terrain, i, geom, rid)) act.add(i);
+  }
+  queuePowderReseed(room, p);
+  return true;
+}
+// The prune itself, shared by eviction and quiescing — one implementation, so the two cannot drift about which
+// work sets exist. (Split out 2026-08-06; the body and every comment below are unchanged.)
+function pruneChunkWork(room, p) {
+  const s = roomCells.get(room); if (!s) return;
   const geom = worldGeom(room);
   // 🟥 THIS WAS 19.6% OF ALL SERVER CPU — measured, not reasoned about (GET /debug/cpu-profile while panning
   // across the Overworld). It used to be `for (const i of Array.from(set)) if (geomPage(geom, i) === p) ...`:
@@ -2230,7 +2296,6 @@ function evictChunk(room, p) {
   prune(s.fineActive, dropFineActive); prune(s.fineReact, dropFineReact); prune(s.fineFire, dropFineFire);
   prune(s.powderActive, dropPowderSet); prune(s.soilActive, dropSoilSet);
   if (s.src) { pruneKeys(s.src, s.src.size); if (!s.src.size) dropSrcMap(room); }
-  return true;
 }
 // ⚠️⚠️ ANYTHING THAT READS THE WHOLE WORLD MUST CALL THIS FIRST. An evicted chunk has no pages, so it reads as
 // ZEROS — which would serve a joining client empty terrain and, through autosave, WRITE EMPTINESS TO THE DB for a
@@ -4453,11 +4518,23 @@ restartLiquidLoop();
 // `avt-where` beacon below: a coarse, low-rate position, which is all residency needs and is cheap enough that it
 // costs nothing when eviction is off.
 // ==CHUNK_RESIDENCY_BLOCK_START== (probe_chunking slices this out — stub MWSim/io when you do)
+// ⚠️ THE NO-OP-AND-REASSIGN SEAM (F15), and this is the SEVENTH time this boundary has bitten. `quiesceChunk`
+// and `rewakeChunk` live with `evictChunk` in the CELL STORE block, which the rigs that slice RESIDENCY do not
+// contain — a direct call is a ReferenceError in probe_chunking and nowhere else, which is exactly how it
+// presented. Declared as no-ops here and reassigned just past the end marker, so a sliced rig behaves precisely
+// as it did before quiescing existed and no existing check changes meaning.
+let quiesceChunkH = () => false, rewakeChunkH = () => false;
 const chunkCfg = {
   evict: true,         // master switch (see above); `chunkEvict` on the liquid-cfg wire toggles it live
   margin: 2,           // chunks kept resident BEYOND the edge of what a player can see (2 ⇒ 1024px of headroom)
   graceMs: 30000,      // how long a chunk stays resident after the last player stopped looking near it
   sweepMs: 5000,       // how often residency is recomputed
+  // ⭐ SIMULATION IS RELEASED LONG BEFORE MEMORY IS (see quiesceChunk for the measurement that motivated it).
+  // 0 = as soon as a sweep finds the chunk out of everyone's view, so within `sweepMs`. `chunkQuiesce` /
+  // `chunkQuiesceMs` on the liquid-cfg wire; turning it off restores the old "resident ⇒ simulated" behaviour
+  // exactly, which is what makes it A/B-able against the 14.8ms-vs-0.8ms figure.
+  quiesce: true,
+  quiesceMs: 0,
 };
 // avRoom → Map(socketId → the chunk rect that socket can see, plus its avatar chunk if it has a body).
 // ⚠️ KEYED ON THE VIEWPORT, NOT THE AVATAR — cursor mode has no body and free-pans the camera, and zooming out
@@ -4516,6 +4593,7 @@ function chunkResidencySweep() {
         for (let gx = Math.max(0, x0); gx <= Math.min(geom.cx - 1, x1); gx++) {
           const p = gx * geom.cy + gy; ch.at(p).lastNear = now;
           rehydrateChunk(room, p);           // no-op unless this chunk was put away (it checks its own blob)
+          rewakeChunkH(room, p);             // …and no-op unless it was QUIESCED (still resident, but not ticking)
         }
     };
     if (here) for (const v of here.values()) {
@@ -4531,12 +4609,17 @@ function chunkResidencySweep() {
     const cand = new Set();
     for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) pa.eachPage((p) => { cand.add(p); return false; }); }
     for (const p of Array.from(cand).sort((a, b) => a - b)) {
-      if (now - ch.peek(p).lastNear <= chunkCfg.graceMs) continue;
-      evictChunk(room, p);
+      const age = now - ch.peek(p).lastNear;
+      if (age > chunkCfg.graceMs) { evictChunk(room, p); continue; }
+      // ⭐ NOT YET OLD ENOUGH TO PUT AWAY, BUT ALREADY TOO OLD TO SIMULATE. See quiesceChunk: the memory and the
+      // CPU are two different questions and only the memory one wants a long grace. At quiesceMs = 0 this fires
+      // on the first sweep after a chunk leaves everyone's view, i.e. within `sweepMs`.
+      if (chunkCfg.quiesce && age > chunkCfg.quiesceMs) quiesceChunkH(room, p);
     }
   }
 }
 // ==CHUNK_RESIDENCY_BLOCK_END==
+quiesceChunkH = quiesceChunk; rewakeChunkH = rewakeChunk;   // see the seam note at the block start
 setInterval(chunkResidencySweep, Math.max(1000, chunkCfg.sweepMs | 0));
 
 // ═══ INTEREST-LIMITED REPLICATION (SHARED-WORLD.md §7, Phase 4) ═════════════════════════════════════════════════
@@ -7108,6 +7191,8 @@ io.on('connection', (socket) => {
     }
     if ('chunkMargin' in patch) chunkCfg.margin = Math.max(0, Math.min(64, patch.chunkMargin | 0));
     if ('chunkGraceMs' in patch) chunkCfg.graceMs = Math.max(0, Math.min(600000, patch.chunkGraceMs | 0));
+    if ('chunkQuiesce' in patch) chunkCfg.quiesce = !!patch.chunkQuiesce;
+    if ('chunkQuiesceMs' in patch) chunkCfg.quiesceMs = Math.max(0, Math.min(600000, patch.chunkQuiesceMs | 0));
     // INTEREST-LIMITED REPLICATION (Phase 4) — same reasoning as chunkEvict: it has to be A/B-able live, because
     // "is that a bug or is that just a chunk I am not subscribed to?" is otherwise unanswerable from inside the game.
     // ⚠️ TURNING IT OFF MUST REPAIR, not merely resume broadcasting. Every client with a subscription set has chunks
