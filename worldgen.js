@@ -480,13 +480,35 @@ function makeGen(cfg) {
   // ⭐ THE CONDUIT RUNS ALL THE WAY DOWN TO THE MAGMA (user, 2026-08-04). It used to stop at an arbitrary depth,
   // leaving a volcano plumbed into nothing; it now reaches the world floor, so every volcano is physically
   // connected to the molten layer that feeds it — and is a route down for a player brave enough.
-  const volcVentAt = (c) => {
+  const volcVentAt = (c) => (volcVentAnchorAt(c) >= 0 ? 1 : 0);
+  // WHICH volcano this column's conduit belongs to, or -1. Needed because the conduit's top must be decided for
+  // the BAND, not per column — see `ventTopFor`.
+  const volcVentAnchorAt = (c) => {
     const near = Math.round(c / VOLC_STEP), reach = Math.ceil(VOLC_HW / VOLC_STEP) + 1;
     for (let k = -reach; k <= reach; k++) {
       const a = (near + k) * VOLC_STEP;
-      if (volcOn(a) && Math.abs(c - a) < VOLC_CRATER * 0.55) return 1;
+      if (volcOn(a) && Math.abs(c - a) < VOLC_CRATER * 0.55) return a;
     }
-    return 0;
+    return -1;
+  };
+  // 🟥 THE CONDUIT'S TOP HAS TO BE FLAT ACROSS THE WHOLE BAND. Deciding it per column as `max(own surface,
+  // neighbours')` left it a STAIRCASE — each step put one column's lava a row above its neighbour's, with the
+  // neighbour's open sky beside it, and that was every wake left after the ordering fix (23 of them, all at
+  // row ≈ the surface, all `side-air`, all with a vent column as the exposed neighbour).
+  // ⇒ one line for the band, taken as the LOWEST ground anywhere across it plus its shoulders, so no column's
+  // lava can stand above the rock beside it. Memoised per volcano: the band is ~28 columns and this is asked
+  // once per column generated.
+  const _vtMemo = new Map();
+  const ventTopFor = (a) => {
+    let v = _vtMemo.get(a);
+    if (v !== undefined) return v;
+    const CR = Math.ceil(VOLC_CRATER * 0.55) + 1;
+    let lowest = -Infinity;
+    for (let c = a - CR; c <= a + CR; c++) { const s = surfAt(c); if (s > lowest) lowest = s; }
+    v = lowest + 2;
+    if (_vtMemo.size > 64) _vtMemo.clear();
+    _vtMemo.set(a, v);
+    return v;
   };
 
   const heightAt = (c) => {
@@ -972,7 +994,11 @@ function makeGen(cfg) {
       // cave field having left a hollow. The rest of the bowl is left to the terrain and merely flooded if it is
       // open — which is what keeps the outline irregular and the rock intrusions natural.
       const coreBot = bot >= P.line ? P.line + Math.round((bot - P.line) * 0.75) : P.line - 1;
-      (out || (out = [])).push({ line: P.line, bot, coreBot, collarTo, fluid: P.fluid });
+      // The chamber above the waterline — roughened independently of the bowl below it, so the two halves do not
+      // read as one mirrored lens. Cheap: one extra noise read, and only for a column a basin actually covers.
+      const nT = 1 + wave1(seed, SALT.POOL_SHAPE + 5, (c - P.a * 3) * NQ.POOL_B.q, NQ.POOL_B.p) * 0.45;
+      const air = bot >= P.line ? Math.max(2, Math.round((bot - P.line + 3) * 1.15 * nT)) : 0;
+      (out || (out = [])).push({ line: P.line, top: P.line - air, bot, coreBot, collarTo, fluid: P.fluid });
     }
     return out;
   }
@@ -1051,9 +1077,20 @@ function makeGen(cfg) {
     // one column further inland are untouched.
     const sL = surfAt(c - 1), sR = surfAt(c + 1);
     const seaDeep = Math.max(s > seaRow ? s : 0, sL > seaRow ? sL : 0, sR > seaRow ? sR : 0);
+    // 🟥 THE VOLCANO CONDUIT WAS NOT SEALED ON ITS SIDES, reported from play as "a massive pillar of lava trying
+    // to move". The vent replaces a band of columns with LAVA from just under the surface all the way to bedrock
+    // — and any cave carved into the column BESIDE it puts air next to lava, at which point the entire pillar,
+    // thousands of rows of it, is awake and trying to pour sideways. It rested on bedrock and was covered above,
+    // so this was the one face nobody had closed. Pre-existing, and by far the largest remaining wake source.
     return { s, sB, crust, top: s + crust + 1, vent: volcVentAt(c), drySurface, openable,
       carveTop: openable ? s + 1 : s + OVH + crust + 1, entr: crust + Math.round(10 * G),
       seaSealTo: seaDeep ? seaDeep + crust + OVH + 2 : -1,
+      // …and the conduit itself does not start until it is below its NEIGHBOURS' ground as well as its own. A
+      // volcano is a raised cone, so the vent column's surface is high and the ground beside it is lower — which
+      // left the top of the conduit standing in open SKY with nothing at its side at all. Plugging it with the
+      // cone's own rock is what makes a volcano a volcano rather than a column of lava in the air.
+      ventFrom: (() => { const a = volcVentAnchorAt(c); return a >= 0 ? ventTopFor(a) : -1; })(),
+      ventN: (volcVentAt(c - 1) | volcVentAt(c + 1)),
       isle: isleSpanAt(c), hall: hallSpanAt(c), pool: poolSpanAt(c) };
   };
   // The solid (post-carve) material at one cell of a column whose per-column values are already in hand.
@@ -1087,17 +1124,52 @@ function makeGen(cfg) {
     // ⚠️ `seaSealTo`: no cave may open into the sea's body or beside it. See colInfo.
     const seaSealed = rr >= seaRow - 1 && rr <= ci.seaSealTo;
     if (v && !seaSealed && rr >= ci.carveTop && caveAt(c, rr, ci.top, s, flare, bi)) v = 0;
-    if (ci.vent && rr >= s + 2) v = MAT.LAVA;                // the volcano conduit, straight through everything
     if (v && ci.hall && rr > ci.top && inSpan(ci.hall, rr)) v = 0;   // a deep hall is carved out of everything
-    // ⭐ ANCHORED BASINS, LAST, so the seal wins over anything that would breach it. Two effects, and only two:
-    // carve the core (so a basin always holds water instead of depending on the cave field having left a hollow)
-    // and restore the cell's own base material in the collar (so nothing below the waterline can be open).
-    if (ci.pool) for (let i = 0; i < ci.pool.length; i++) {
-      const P = ci.pool[i];
-      if (rr < P.line || rr > P.collarTo) continue;
-      if (rr <= P.coreBot) { v = 0; continue; }
-      if (rr > P.bot) v = v || base || MAT.STONE;
+    // ⭐ ANCHORED BASINS, LAST, so the seal wins over anything that would breach it. THREE PASSES, and the order
+    // is the whole correctness argument once basins are allowed to overlap.
+    if (ci.pool) {
+      const PL = ci.pool;
+      // 1 — CARVE. The chamber ABOVE the waterline is new: reported from play, "the shapes are almost always
+      // completely covered on top, rather than being open pools at all". They were there — a basin's water was
+      // simply sealed under rock unless the cave field happened to open it, so most of them could only be found
+      // by digging. Carving headroom makes a basin a chamber with water in the bottom of it, which is what an
+      // underground pool is. ⚠️ Never above the crust: `ci.top` is this column's own floor for carving.
+      for (let i = 0; i < PL.length; i++) {
+        const P = PL[i];
+        if (rr > ci.top && rr >= P.top && rr < P.line) { v = 0; continue; }
+        if (rr >= P.line && rr <= P.coreBot) v = 0;
+      }
+      // 2 — SEAL, AFTER every carve. 🟥 With basins overlapping, one basin's air chamber can be carved straight
+      // through a neighbour's collar, which would put open air beside settled water and wake it. Sealing in a
+      // second pass means the collar cannot be undone by anything in the first, whatever order the spans arrive.
+      for (let i = 0; i < PL.length; i++) {
+        const P = PL[i];
+        if (rr > P.bot && rr <= P.collarTo) v = v || base || MAT.STONE;
+      }
+      // 3 — 🟥 NO POWDER IN OR AROUND A BASIN. Reported from play: "other liquids pooled with sand as the
+      // surrounding cells to keep it in, but the sand of course just fell down." That is this fix's own doing —
+      // the collar restores the cell's OWN material so a basin is walled in native rock, and in a sand region
+      // the native rock is SAND, which is a powder and falls the moment there is liquid under it. A wall that
+      // falls into the water is not a wall. Applies two rows ABOVE the line as well, or a sand rim sinks in.
+      for (let i = 0; i < PL.length; i++) {
+        const P = PL[i];
+        if (rr >= P.top - 2 && rr <= P.collarTo && (v === MAT.SAND || v === MAT.SNOW)) { v = MAT.STONE; break; }
+      }
     }
+    // ⭐⭐ THE VOLCANO CONDUIT IS APPLIED LAST, AND THE ORDER IS THE ENTIRE BUG. It used to be set immediately
+    // after the cave carve — before deep halls and (now) before basins — so both of those carved straight
+    // THROUGH it, leaving air gaps inside a column of lava thousands of rows tall. Diagnosed by printing the
+    // waking cells rather than by reasoning about them, after two wrong guesses: they were `below-air`, INSIDE
+    // the vent band, at rows 2,615 and 3,595 — the deep-hall band and a basin chamber. Nothing was wrong with
+    // the seal; the conduit simply had holes punched in it afterwards.
+    // ⚠️ A conduit that survives to here is continuous by construction: solid from `ventFrom` to the bedrock it
+    // stands on, with lava either side of every interior cell.
+    if (ci.vent && rr >= ci.ventFrom) v = MAT.LAVA;
+    // …and its NEIGHBOURS are closed for its whole depth, after every carve for the same reason. The conduit's
+    // top is `max(s, sL, sR) + 2` and this column is one of those three, so sealing from `s + 2` downward always
+    // covers it. ⚠️ Never with a POWDER: a sand wall beside a lava column falls into it on the first tick.
+    if (!v && ci.ventN && !ci.vent && rr >= s + 2)
+      v = (base && base !== MAT.SAND && base !== MAT.SNOW) ? base : MAT.STONE;
     return v;
   };
 
