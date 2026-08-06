@@ -3380,8 +3380,19 @@ function fineLiquidTickRoom(room, SUB) {
       }
       colSorting.set(cc, v); return v;
     };
+    // ⭐ START WHERE THE LAST CAPPED TICK STOPPED. Without this the deterministic sort above means the same
+    // 9,000 cells win every tick and everything past the cap is starved for ever (see roomFlowCursor). The
+    // slice is still walked in sorted order, so a falling column still cascades within it; the cursor only
+    // moves which WINDOW of the queue gets served, which is the difference between a delay and a skip.
+    // ⚠️ Only engages when the set is actually over the cap, so any room that fits — every page world — keeps
+    // start = 0 and is byte-for-byte unchanged, which is what keeps the golden replay identical.
     let processed = 0;
-  for (const i of list) {
+    const _n = list.length;
+    let _start = 0;
+    if (_n > LIQUID_MAX_PER_TICK) { _start = (roomFlowCursor[room] | 0) % _n; roomFlowCursor[room] = (_start + LIQUID_MAX_PER_TICK) % _n; }
+    else roomFlowCursor[room] = 0;
+  for (let _k = 0; _k < _n; _k++) {
+    const i = list[_start + _k < _n ? _start + _k : _start + _k - _n];
     if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); liqQCapped++; continue; }
     if (isSolid(i)) continue;
     const c = (i / FROWS) | 0, r = i - c * FROWS, canDown = r + 1 < LIQUID_FLOOR_ROW;
@@ -3705,6 +3716,18 @@ function fineEmptySegs(room) { const s = cellsOf(room); return s.fineEmptySeg ||
 // (`evictPruneOps`, the same idea for eviction, is declared next to `evictChunk` — it is in a DIFFERENT sliced
 //  block, and a counter on the wrong side of a marker is a ReferenceError in the rigs and nowhere else.)
 const roomReactCursor = {};   // room → where the capped reaction pass resumes, so no cell is permanently skipped
+// 🟥🟥 THE SAME THING FOR THE FLOW, WHICH HAD NEVER HAD ONE — and its absence is why Overworld liquid "freezes".
+// `fineLiquidTickRoom` sorts the whole active set DETERMINISTICALLY (bottom-up) and then processes the first
+// `LIQUID_MAX_PER_TICK` (9,000) of it, re-queueing the rest. Same set, same sort, same first 9,000, every tick.
+// So for the flow a capped tick was not a delay, it was a PERMANENT SKIP: with 157,000 cells queued, the 148,000
+// past the cap were never reached again. The reaction pass ten screens down documents exactly this hazard and
+// solves it with a cursor; the flow was left without one.
+// ⭐ IT EXPLAINS THE REPORT PRECISELY. The sort is by ROW DESCENDING, so cells LOW in the world go first and
+// liquid HIGH in it goes last: *"if I go all the way up into the sky and place liquid, it is frozen"* — that
+// liquid sorts behind every cell of the lake below and is never reached. It also explains why moving away does
+// not help (one Overworld room ⇒ one shared queue) and why page worlds were fine (they never exceed 9,000
+// active cells, so the cap never binds).
+const roomFlowCursor = {};
 let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCand (⇒ it is biting; see the Perf tab)
 // ⚠️ A COUNT, NOT A CLOCK. `probe_react_budget` D2 first asserted "the flow moved liquid on most ticks", which
 // gave 18/30 and then 6/30 for identical code — the budget scheduler is `performance.now()`-driven, so any
