@@ -1774,6 +1774,23 @@ PagedArray.prototype._grp = function (p) {
 // SPARSE (Part C: 58.6MB for an empty room, worse than the dense array), which is why it is fast.
 PagedArray.prototype.rp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cy + ((i >>> 6) & g.PGM)) : g.pageOf[i], d = this.dir[p >> PAGE_GRP_SH], a = d !== null && d[p & PAGE_GRP_M]; return a || this._miss(p); };
 // The cold half of rp, kept out of line so the hot path is just "load the page and return it".
+// ⭐⭐ THE SIM MAY NOT BUILD WORLD. MEASURED, panning 4,800px above the water line in EMPTY SKY: 37,025 chunks
+// produced in 35 seconds — over a thousand a second — of which 35,379 came from inside `runLiquidTick`, ~31.8s
+// of the 35 spent running the world generator. A read generates a chunk; that chunk's liquid is seeded and
+// woken; those cells read THEIR neighbours; more chunks. A self-sustaining cascade that manufactures its own
+// work out of nothing, and the "45,000 cells waiting to move" was its symptom, not its cause.
+// 🟥 PATCHING CALL SITES DID NOT WORK. Three were fixed by hand (the flow's isSolid, powder's canDisplace, three
+// in reactions) and production fell but never stopped, because `fineReactTickRoom` alone has a dozen more reads
+// and any new one silently reintroduces it. This is a property the SIM must have, so it is enforced in the one
+// place every read passes through rather than at each of them.
+// ⚠️ WHAT AN UNBUILT PAGE READS AS, AND WHY IT IS SAFE: zeros, i.e. AIR. That is the WRONG answer for anything
+// deciding support — liquid would pour through unbuilt ground — which is exactly why the three solidity sites
+// were converted to explicit peeks that answer UNBUILT ⇒ SOLID, and they do not come through here at all. Every
+// OTHER read is a reaction predicate ("is the neighbour snow / mud / sand?"), and air is the correct fail-safe
+// answer to all of them: no reaction, wait until that ground actually exists.
+// ⚠️ READS ONLY. `wp()` calls `_alloc` directly and is untouched, so a reaction that genuinely fires can still
+// write. Writes are rare (thousands per minute); reads are millions.
+let PAGE_NO_GEN = false;
 PagedArray.prototype._miss = function (p) {
   if (this.ev !== null && this.ev[p]) return this._alloc(p);       // evicted → fault it back, blob and all
   // 🟥 THE `seedEmpty` ANSWER IS MEMOISED FOR ONE PAGE, AND WITHOUT THIS THE OVERWORLD IS UNPLAYABLE.
@@ -1788,6 +1805,7 @@ PagedArray.prototype._miss = function (p) {
   // sim's row scans). A page that later gets ALLOCATED never reaches here — `rp` finds it in the directory — so
   // a stale "empty" cannot outlive the emptiness it describes.
   if (this.seedFn) {
+    if (PAGE_NO_GEN) return this.zero;      // the sim is running: read through, never build
     if (p === this._emptyP) return this._emptyV ? this.zero : this._alloc(p);
     const empty = !!(this.seedEmpty && this.seedEmpty(p));
     this._emptyP = p; this._emptyV = empty;
@@ -4101,6 +4119,10 @@ let liqIdleSkips = 0;         // ticks skipped because nobody was in the room at
 // get a ReferenceError and nothing else would. Defaulting to "yes, occupied" means a sliced rig behaves exactly
 // as it always did, so no existing guard changes meaning.
 let roomOccupied = () => true;
+// ⚠️ THE SAME NO-OP-AND-REASSIGN SEAM (F15). `PAGE_NO_GEN` lives beside `_miss` in the cell-store block, which
+// the rigs that slice the TICK do not contain — a direct reference would be a ReferenceError in them and
+// nowhere else. Defaulting to a no-op means a sliced rig behaves exactly as it always did.
+let simNoGen = () => {};
 // ...and the same thing for TIER 2, for the same reason, added 2026-08-02. `probe_budget`'s cold-start check
 // asserted "WITH the seed, tick 0 is CHEAPER" by comparing two wall-clock readings — but the effect it is
 // testing is ~1ms against several ms of run-to-run spread, so it failed about one run in five REGARDLESS of
@@ -4130,7 +4152,9 @@ const runLiquidTick = () => {
   // ⭐ Phase 6 inc 4b. Chunks produced on demand since the last tick get their liquid HERE, before anything
   // starts iterating an active-cell Set — a page fault can happen from deep inside the flow loop, and seeding
   // writes into the very Set that loop is walking. No-op (one `.size` test) unless on-demand generation is on.
-  drainGenLiquid();
+  drainGenLiquid();          // BEFORE the guard: this is the seeding pass for pages already produced
+  simNoGen(true);
+  try {
   beginWireBatch();   // ⇓ everything this tick broadcasts is collected and sent as one packet per client (see the hook)
   // ── PLAN THE ROSTER. Admit rooms in rotating order until their predicted cost fills the budget; the rest
   // are deferred whole. At least one room is ALWAYS admitted, so a single room bigger than the whole budget
@@ -4346,6 +4370,7 @@ const runLiquidTick = () => {
     }
   }
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
+  } finally { simNoGen(false); }   // a throw must never leave the world un-buildable
 };
 function restartLiquidLoop() { if (liquidTimer) clearInterval(liquidTimer); liquidTimer = setInterval(runLiquidTick, Math.max(8, Math.min(500, liquidCfg.tickMs | 0))); }
 restartLiquidLoop();
@@ -4387,6 +4412,7 @@ const roomWhere = {};
 // somebody who has joined but not yet sent a viewport beacon is still THERE, and keying only on `roomWhere`
 // would leave their world frozen until their first beacon arrived. `roomWhere` is the fallback for anything that
 // tracks presence without joining.
+simNoGen = (on) => { PAGE_NO_GEN = !!on; };
 roomOccupied = (room) => {
   const r = io.sockets.adapter.rooms.get(room);
   if (r && r.size) return true;
