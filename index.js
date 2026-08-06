@@ -2120,6 +2120,11 @@ let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0, genChunksDe
 // ReferenceError in the rigs and nowhere else. No generator ⇒ no eviction-restore to re-wake ⇒ a no-op is the
 // right answer for the sliced rigs and for every hand-built room.
 let queuePowderReseed = () => {};
+// ⚠️ THE SAME NO-OP-AND-REASSIGN SEAM, for the same reason (trap #1, ninth time): `genLiquidLoose` lives with
+// the generation seeders, outside the chunk-residency block the rigs slice, so a direct reference is a
+// ReferenceError in them and nowhere else. Defaulting to TRUE means a sliced rig wakes everything exactly as it
+// did before, so no existing guard changes meaning.
+let liquidCanMove = () => true;
 // ⭐ INCREMENT 4c/4d, ON THE SAME SEAM `wireFanout` AND `drainGenLiquid` USE, FOR THE SAME REASON.
 // `evictChunk` lives inside the block the probe rigs slice into a `new Function`, and diffing a chunk against
 // the generator needs `worldCfg` and the generator registry, both defined three thousand lines away and
@@ -2285,11 +2290,24 @@ function rehydrateChunk(room, p) {
   try { decodeChunk(s, p, blob); } finally { rec.restoring = 0; }
   // Liquid that comes back is WOKEN, not re-seeded: it resumes flowing from exactly the state it was put away in.
   const amt = s.fineAmt, tot = s.fineTotal;
+  // 🟥 THIS WOKE EVERY LIQUID CELL IN THE CHUNK, UNCONDITIONALLY — up to 4,096 of them, for every chunk you
+  // walk back into. Reported as "as I move down it jumps back up to thousands upon thousands", and that is
+  // exactly what it is: cross twenty lake chunks and eighty thousand cells re-enter the queue at once.
+  // ⭐ THE FIX IS A RULE THAT ALREADY EXISTS AND WAS ONLY APPLIED AT THE OTHER SITE. `seedGenChunkLiquid` used
+  // to do the identical unconditional wake and was changed to `genLiquidLoose` — wake only liquid that can
+  // actually MOVE (air below, a lighter fluid below, or air beside). MEASURED there at 99.5% of generated liquid
+  // being already at rest. A restored lake is a lake: it should wake nothing.
+  // ⚠️ Same conservative bias as the generation site: it wakes a superset of what must move, because
+  // under-waking leaves liquid visibly hanging until something disturbs it, which is far worse than a little
+  // extra work. And `genLiquidLoose` peeks rather than reading, so it cannot produce the chunk next door.
   if (blob.a && blob.a.length && amt && tot) { const act = fineSet(room), geom = worldGeom(room);
     for (let q = 0; q < blob.a.length; q += (1 + LIQ_T)) { const c = blob.a[q];
       const lr = (c / CHUNK_SIDE) | 0, lc = c % CHUNK_SIDE;
       const gr = (p % geom.cy) * CHUNK_SIDE + lr, gc = ((p / geom.cy) | 0) * CHUNK_SIDE + lc;
-      if (gr < geom.rows && gc < geom.cols) act.add(gc * geom.rows + gr); } }
+      if (gr >= geom.rows || gc >= geom.cols) continue;
+      const i = gc * geom.rows + gr;
+      let rid = 0; for (let rk = 0; rk < LIQ_T; rk++) if (blob.a[q + 1 + rk] > 0) { rid = LIQ_ID[rk]; break; }
+      if (liquidCfg.genWakeAll || !rid || liquidCanMove(s.terrain, i, geom, rid)) act.add(i); } }
   // ...and so is POWDER, for the same reason and by a different route. See queuePowderReseed.
   queuePowderReseed(room, p);
   return true;
@@ -6184,6 +6202,7 @@ function seedGenChunkLiquid(room, p) {
 // only added on a first production). Powder is safe to re-derive from restored terrain; liquid is not.
 const _powderPending = new Set();
 queuePowderReseed = (room, p) => { _powderPending.add(room + GEN_SEP + p); };
+liquidCanMove = genLiquidLoose;
 // The powder half of the deferred pass. Deferred for the SAME re-entrancy reason as liquid, not for tidiness:
 // this writes into the Set `powderTickRoom` iterates, and a page fault can arrive from inside that iteration.
 function reseedChunkPowder(room, p) {
