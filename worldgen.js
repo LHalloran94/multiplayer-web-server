@@ -79,6 +79,7 @@ const SALT = {
   WARPX: 220, WARPY: 221, VOLC: 230, OVH: 240, SPAG2: 260, SHAFT: 270, CAVEW: 280,   // 200-299
   ISLE_ON: 300, ISLE_SHAPE: 301, ISLE_MAT: 302,     // sky band          300-309
   HALL_ON: 310, HALL_SHAPE: 311,                    // underground band  310-319
+  POOL_ON: 320, POOL_SHAPE: 321,                    // anchored basins   320-329
   PATCH: 1000, PATCH_STEP: 16,                      // per biome: 1000 + index*16, octaves inside the step
 };
 
@@ -421,6 +422,7 @@ function makeGen(cfg) {
     VOLC: nfreq(0.0075 / G), CAVEW: nfreq(0.0045 / G), OVH: nfreq(0.024 / G), WARP: nfreq(0.010 / G),
     SPAG: nfreq(0.028 / G), SPAG2: nfreq(0.015 / G), CHEESE: nfreq(0.030 / G),
     ISLE_T: nfreq(0.085 / G), ISLE_B: nfreq(0.055 / G), HALL_T: nfreq(0.075 / G), HALL_B: nfreq(0.065 / G),
+    POOL_B: nfreq(0.070 / G),
   };
   // Per-biome patch frequency — one per entry in BIOMES, memoised because it is read in the per-cell loop.
   const NQ_PATCH = BIOMES.map(B => B.patch ? nfreq(B.patch.freq / G) : null);
@@ -501,7 +503,24 @@ function makeGen(cfg) {
     const s = Math.round(baseRow - hh) - volcanoLift(c);       // volcanoes sit on top of whatever is there
     return s < 4 * G ? 4 * G : (s > bottomRow - 10 * G ? bottomRow - 10 * G : s);
   };
-  const surfAt = (c) => heightAt(c);
+  // ⭐ MEMOISED, and it earns its keep the moment anything asks about a NEIGHBOURING column. The shoreline seal
+  // needs `surfAt(c ± 1)`, and a basin anchor probes five columns across its span — so the world's single most
+  // expensive per-column value (continentalness + erosion + mountains + detail, each an octave stack) was being
+  // recomputed three or more times for every column generated. MEASURED: putting the seal in without this took a
+  // chunk from 0.901 ms to 1.331 ms.
+  // ⚠️ Float64, NOT Int32. `heightAt` is not documented as integral and a typed-array store would truncate it
+  // SILENTLY, changing the world rather than merely caching it. A cache that alters what it caches is the worst
+  // kind of bug to go looking for.
+  // Direct-mapped on the low bits: columns are generated in order, so the working set is a handful of entries.
+  const _shN = 64, _shM = _shN - 1;
+  const _shK = new Int32Array(_shN).fill(-1 >>> 1), _shV = new Float64Array(_shN);
+  const surfAt = (c) => {
+    const i = c & _shM;
+    if (_shK[i] === c) return _shV[i];
+    const v = heightAt(c);
+    _shK[i] = c; _shV[i] = v;
+    return v;
+  };
   // ⭐ ALTITUDE OVERRIDES CLIMATE. Above the snow line the crust is snow whatever the biome says, and above the
   // ice line it is bare ice — so a mountain rising out of a desert still gets a white cap. Terraria has no
   // equivalent (its biomes are horizontal only); this is the one place the two axes genuinely interact.
@@ -838,6 +857,125 @@ function makeGen(cfg) {
     }
     return out;
   }
+  // ---- UNDERGROUND: ANCHORED BASINS. Liquid that is settled BY CONSTRUCTION. ----------------------------------
+  // ⭐⭐ THE RULE THIS REPLACES DRAPED WATER OVER THE TERRAIN. "A cell is fluid when the first solid at or below
+  // it is within `depth` rows" measures DOWNWARD FROM THE FLOOR, so on a sloping cave floor the surface slopes
+  // with it — and the sim wakes any liquid cell with AIR BESIDE IT. Every draped pool was therefore born awake
+  // along its whole surface, and levelling is diffusion. MEASURED (probe_pool_equilibrium): one 1,451-cell lake
+  // costs 1.8 MILLION cell examinations to reach level; the same water placed at rest costs 24,399. Across ten
+  // sampled windows, ≥82x the work. The generator decides height, biome, cave and ore as pure functions of
+  // position and never simulates any of them; liquid was the one thing scattered and handed to the physics
+  // engine to sort out. This brings it up to the same standard.
+  //
+  // ⭐ THE INVARIANT, and it is what makes the SHAPE free. Seal only BELOW the waterline, and fill EVERY open
+  // cell below it inside the footprint. Then there is no air below the line inside the basin at all — so
+  // "air beside" and "air below" are not avoided by choosing a good shape, they are IMPOSSIBLE, whatever shape
+  // the cave field left. Above the line nothing is suppressed, so the chamber is ordinary cave and tunnels join
+  // it normally. A passage may enter above the waterline; it just cannot open below it. That is also how a
+  // flooded cave actually looks: you see the cavern and its mouths, and the rock underwater is solid.
+  //
+  // ⚠️ THE FILL LINE COMES FROM THE ANCHOR, NEVER FROM A SCAN. Derived from the terrain — "the lowest floor in
+  // the basin" — two chunks could sample different amounts of it and disagree about where the water stops, and a
+  // one-cell step at a chunk seam wakes for ever. Anchor hash only, so every column agrees without communicating.
+  //
+  // ⚠️ THE COLLAR SUPPRESSES THE CARVE, IT DOES NOT IMPORT STONE. A stamped shell of stone would ring every pool
+  // in the same material and read as an object dropped into the world; restoring the cell's OWN base material
+  // means the basin is walled in whatever rock the biome already puts there.
+  // ⭐ THE THREE DIALS, AND THE MEASUREMENT THAT SET THEM. A first pass at one candidate per 64 columns with
+  // hw 20 / hh 8 produced 0.338% liquid world-wide, of which the underground fluids were 0.031% — lava came out
+  // at 0.006%, i.e. 468 cells in 7.7 million, which is not "less liquid", it is a biome that no longer exists.
+  // ⚠️ SIZE BEFORE FREQUENCY, deliberately. Cost is a property of SURFACES, not of volume (one sampled window
+  // held 24,072 liquid cells and woke ZERO because it was fully submerged and had no surface at all), so the
+  // same water in fewer, larger bodies is cheaper than in many small ones — and it reads better besides.
+  const POOL_STEP = Math.max(8, pow2(Math.round(40 * G)));    // one candidate basin per ~32 columns (256 px)
+  const POOL_HW = Math.round(28 * G), POOL_HH = Math.round(14 * G);
+  const POOL_COLLAR = 2;                                      // rows of rock sealing the basin below the waterline
+  const POOL_CHANCE = 0.80;                                   // ⭐ THE "LESS LIQUID" DIAL, scaled per biome by `wet`
+  // Memoised because `poolSpanAt` asks about the same two or three anchors for all 64 columns of a chunk, and an
+  // anchor costs five `surfAt` probes. Pure function of the column, so a cache cannot change what is generated.
+  const _poolMemo = new Map();
+  const poolAnchorAt = (a) => {
+    let v = _poolMemo.get(a);
+    if (v !== undefined) return v;
+    v = _poolAnchor(a);
+    if (_poolMemo.size > 256) _poolMemo.clear();
+    _poolMemo.set(a, v);
+    return v;
+  };
+  function _poolAnchor(a) {
+    if (a < POOL_HW + 8 || a > cols - 1 - POOL_HW - 8) return null;
+    const hw = Math.max(5, Math.round((0.45 + 0.55 * hc(SALT.POOL_SHAPE, a, 1)) * POOL_HW));
+    const hh = Math.max(3, Math.round((0.45 + 0.55 * hc(SALT.POOL_SHAPE, a, 2)) * POOL_HH));
+    // ⚠️ THE WATERLINE HAS TO CLEAR THE GROUND ACROSS THE WHOLE FOOTPRINT, not just at the anchor. A basin whose
+    // rim pokes out of a hillside would hang water in the open air — the failure the acceptance test calls
+    // `below-air`. Five probes across the span, which is bounded and identical from every column that asks.
+    let deepest = 0;
+    for (let k = -2; k <= 2; k++) {
+      const cc = a + Math.round(k * hw / 2), ss = surfAt(cc), d = ss + crustDepthAt(cc, ss);
+      if (d > deepest) deepest = d;
+    }
+    // ⚠️ NEVER INSIDE A DEEP HALL. Halls are the placed, habitable chambers and are deliberately dry; a basin
+    // overlapping one would both flood it and drive a collar through its wall. Rejected on horizontal proximity
+    // alone, which is conservative and costs one bounded lattice query.
+    const lo = deepest + Math.round(10 * G);
+    const hi = bottomRow - Math.round(5 * G) - hh - POOL_COLLAR - 2;
+    if (hi <= lo) return null;
+    const line = lo + Math.round(hc(SALT.POOL_ON, a, 3) * (hi - lo));
+    // ⚠️ NEVER INSIDE A DEEP HALL. Halls are the placed, habitable chambers and are deliberately dry; a basin
+    // overlapping one would both flood it and drive a collar through its wall.
+    // ⚠️ TESTED IN BOTH AXES. A first version rejected on HORIZONTAL proximity alone, which threw away every
+    // basin within ~54 columns of a hall anchor at ANY depth — a basin at row 2,000 has no quarrel with a hall
+    // at row 3,500, and half the candidates in the deep half of the world were being discarded for nothing.
+    const hr = Math.ceil((POOL_HW + HALL_HW) / HALL_STEP) + 1, nearH = Math.round(a / HALL_STEP);
+    for (let k = -hr; k <= hr; k++) {
+      const H = hallAnchorAt((nearH + k) * HALL_STEP);
+      if (H && Math.abs(H.a - a) < H.hw + hw + 4 && Math.abs(H.cy - line) < H.hh + hh + Math.round(6 * G)) return null;
+    }
+    // ONE fluid for the whole basin, chosen at the anchor. Layered liquids are never wanted (user, 2026-08-06),
+    // and picking per cell is exactly how the old rule produced lava resting on water.
+    const B = BIOMES[regionPick(a, line, surfAt(a))];
+    if (!B || !B.fluid) return null;
+    // ⭐ THE BIOME'S OWN WETNESS IS THE DENSITY DIAL, which is what keeps "less liquid" from meaning "no character".
+    // A flat chance for every anchor made the exotic fluids vanish outright — probe_worldgen D3 went to ZERO oil
+    // and ZERO acid, which is the guard for the worst bug this track has recorded (a material that generates
+    // nowhere fails SILENTLY). `wet` and `poolMul` already describe how much liquid a biome should hold; they
+    // used to drive a per-cell flood and now they drive how many basins exist, which is the same intent applied
+    // to the thing that is actually being placed.
+    if (hc(SALT.POOL_ON, a, 5) > POOL_CHANCE * (B.wet || 0) * Math.min(1.6, B.poolMul || 1)) return null;
+    return { a, hw, hh, line, fluid: B.fluid };
+  }
+  // The interior bottom row of the bowl in ONE column, or `line - 1` when this column holds no water. Roughened
+  // for the same reason the islands and halls are: a clean ellipse reads as a bubble somebody stamped there.
+  function poolBot(P, c) {
+    const dx = Math.abs(c - P.a);
+    if (dx > P.hw) return P.line - 1;
+    const q = 1 - (dx / P.hw) * (dx / P.hw);
+    const n = 1 + wave1(seed, SALT.POOL_SHAPE + 4, (c + P.a) * NQ.POOL_B.q, NQ.POOL_B.p) * 0.40;
+    const d = Math.round(P.hh * Math.sqrt(Math.max(0, q)) * n);
+    return d < 1 ? P.line - 1 : P.line + d;
+  }
+  function poolSpanAt(c) {
+    const near = Math.round(c / POOL_STEP), reach = Math.ceil((POOL_HW + POOL_COLLAR) / POOL_STEP) + 1;
+    let out = null;
+    for (let k = -reach; k <= reach; k++) {
+      const P = poolAnchorAt((near + k) * POOL_STEP); if (!P) continue;
+      if (Math.abs(c - P.a) > P.hw + POOL_COLLAR) continue;
+      const bot = poolBot(P, c);
+      // 🟥 THE COLLAR FOLLOWS THE NEIGHBOURS' DEPTH, NOT ITS OWN. The bowl narrows fast near its rim — the sqrt
+      // profile can lift the floor three or four rows in a single column — so a fixed two-row skirt under THIS
+      // column would leave a neighbour's water with open cave beside it at the rows where this column has
+      // already ended. Sealing down to the deeper of the two neighbours closes that exactly.
+      const deepest = Math.max(bot, poolBot(P, c - 1), poolBot(P, c + 1));
+      const collarTo = deepest + POOL_COLLAR;
+      if (collarTo < P.line) continue;
+      // The core is carved out of whatever is there, so a basin ALWAYS holds water rather than depending on the
+      // cave field having left a hollow. The rest of the bowl is left to the terrain and merely flooded if it is
+      // open — which is what keeps the outline irregular and the rock intrusions natural.
+      const coreBot = bot >= P.line ? P.line + Math.round((bot - P.line) * 0.75) : P.line - 1;
+      (out || (out = [])).push({ line: P.line, bot, coreBot, collarTo, fluid: P.fluid });
+    }
+    return out;
+  }
   // 🟥 LATTICE-ANCHORED SHAFTS WERE BUILT HERE AND REMOVED (user, 2026-08-05): *"the wandering vertical shafts
   // are not really good, in that they seem unnatural, and moreover, I think that the reason that the underground
   // seemed unreachable might be because in general basically all of the tunnels seem to stop before breaking
@@ -902,9 +1040,21 @@ function makeGen(cfg) {
     // `s + surfDisp`, which can be OVH rows LOWER than `s` — so the crust sits lower too, and carving from
     // `s + crust + 1` cuts straight through it. On a seabed that is a hole in the ocean floor. The seal has to
     // clear the deepest the displaced crust can reach, which is `s + OVH + crust`.
+    // ⭐⭐ THE SHORELINE SEAL. The ocean fills [seaRow, s) — a flat top resting on the seabed, which IS settled,
+    // and a column's own seabed is already protected by `carveTop`. What was not protected is the column NEXT
+    // DOOR: coastal land whose surface is above sea level but which a cave carves at rows BELOW it, giving the
+    // sea open air to spill into at its own waterline. MEASURED before this existed: 563 of 9,811 surface liquid
+    // cells wanted to move, in 12 of 30 surface chunks.
+    // So a column in or beside water is not carved between the waterline and the deepest neighbouring seabed.
+    // ⚠️ Two extra `surfAt` probes per column, and only the immediate neighbours matter — a wake needs air in the
+    // cell directly beside the water, so sealing one column either side of the body is sufficient and the caves
+    // one column further inland are untouched.
+    const sL = surfAt(c - 1), sR = surfAt(c + 1);
+    const seaDeep = Math.max(s > seaRow ? s : 0, sL > seaRow ? sL : 0, sR > seaRow ? sR : 0);
     return { s, sB, crust, top: s + crust + 1, vent: volcVentAt(c), drySurface, openable,
       carveTop: openable ? s + 1 : s + OVH + crust + 1, entr: crust + Math.round(10 * G),
-      isle: isleSpanAt(c), hall: hallSpanAt(c) };
+      seaSealTo: seaDeep ? seaDeep + crust + OVH + 2 : -1,
+      isle: isleSpanAt(c), hall: hallSpanAt(c), pool: poolSpanAt(c) };
   };
   // The solid (post-carve) material at one cell of a column whose per-column values are already in hand.
   // ⚠️ The region is looked up ONCE here and handed to both `baseAt` and `caveAt`. They used to look it up
@@ -933,21 +1083,35 @@ function makeGen(cfg) {
     // The entrance FLARE — see CAVE MOUTHS above. > 1 near the ground line on land that may open, 1 elsewhere.
     const d = rr - s;
     const flare = (!ci.openable || d >= ci.entr) ? 1 : 1 + (MOUTH_GAIN - 1) * (1 - Math.max(0, d) / ci.entr);
-    if (v && rr >= ci.carveTop && caveAt(c, rr, ci.top, s, flare, bi)) v = 0;
+    const base = v;                                          // the uncarved material — what the collar restores
+    // ⚠️ `seaSealTo`: no cave may open into the sea's body or beside it. See colInfo.
+    const seaSealed = rr >= seaRow - 1 && rr <= ci.seaSealTo;
+    if (v && !seaSealed && rr >= ci.carveTop && caveAt(c, rr, ci.top, s, flare, bi)) v = 0;
     if (ci.vent && rr >= s + 2) v = MAT.LAVA;                // the volcano conduit, straight through everything
     if (v && ci.hall && rr > ci.top && inSpan(ci.hall, rr)) v = 0;   // a deep hall is carved out of everything
+    // ⭐ ANCHORED BASINS, LAST, so the seal wins over anything that would breach it. Two effects, and only two:
+    // carve the core (so a basin always holds water instead of depending on the cave field having left a hollow)
+    // and restore the cell's own base material in the collar (so nothing below the waterline can be open).
+    if (ci.pool) for (let i = 0; i < ci.pool.length; i++) {
+      const P = ci.pool[i];
+      if (rr < P.line || rr > P.collarTo) continue;
+      if (rr <= P.coreBot) { v = 0; continue; }
+      if (rr > P.bot) v = v || base || MAT.STONE;
+    }
     return v;
   };
 
   // ---- the fast form: one column of a page at a time ------------------------------------------------------------
-  // The scratch column carries overlap at BOTH ends — POOL_MAX rows below (to find the floor) and HEAD rows above
-  // (to find the ceiling) — so both pool probes are byte reads rather than re-evaluations of the cave field,
-  // which measured 32x the random draw. Local index j corresponds to world row r0 - HEAD + j.
-  let _scratch = new Uint8Array(CHUNK_SIDE + 2 * (POOL_MAX + HEAD) + 8);
+  // ⭐ THE OVERLAP AT BOTH ENDS IS GONE (2026-08-06). It existed for the draped pool rule, which probed up to
+  // POOL_MAX rows BELOW a cell to find its floor and HEAD rows ABOVE it to find its ceiling — so the scratch
+  // column had to reach past the page in both directions. Anchored basins ask neither question: a cell is
+  // flooded because it is inside a footprint below a line, which is decided from the anchor. The column is now
+  // exactly the page, and `j` is simply `lr`.
+  let _scratch = new Uint8Array(CHUNK_SIDE + 8);
   function fillColumn(c, r0, rN, out) {
     if (c < genC0 || c > genC1) { out.fill(0, 0, rN); return; }
     const ci = colInfo(c);
-    const SPAN = HEAD + rN + POOL_MAX + 1;
+    const SPAN = rN;
     if (_scratch.length < SPAN) _scratch = new Uint8Array(SPAN + 8);
     const scratch = _scratch;
     // ⚠️ THE DOWNWARD OVERLAP IS FILLED LAZILY, AND IT IS WORTH 30% OF THE WHOLE GENERATOR. The pool rule may
@@ -955,12 +1119,10 @@ function makeGen(cfg) {
     // surcharge on every column in the world, paid so that the few air cells at the very bottom of the page
     // could look for a floor. Most columns never probe at all (solid rock, or sky). `have` is the watermark of
     // what has been computed; `at(j)` extends it on demand and is the ONLY reader below the page.
-    let have = HEAD + rN;
-    for (let k = 0; k < have; k++) scratch[k] = solidAt(c, r0 - HEAD + k, ci);
-    const at = (j) => { while (have <= j) { scratch[have] = solidAt(c, r0 - HEAD + have, ci); have++; } return scratch[j]; };
+    for (let k = 0; k < rN; k++) scratch[k] = solidAt(c, r0 + k, ci);
     const s = ci.s, lake = s > seaRow;
     for (let lr = 0; lr < rN; lr++) {
-      const rr = r0 + lr, j = HEAD + lr;
+      const rr = r0 + lr, j = lr;
       // 🟥🟥 NOTHING EXISTS BELOW THE WORLD'S LAST ROW, ASSERTED HERE RATHER THAN TRUSTED.
       // `solidAt` already returns 0 past `bottomRow`, but the POOL rule does not go through it: it ends with
       // `rr + k > bottomRow || at(j + k)` — "past the bottom of the world counts as solid" — which for a cell
@@ -976,13 +1138,24 @@ function makeGen(cfg) {
       if (!v) {
         // ⭐ ARCTIC ICE SHEET: in cold country the sea has a lid on it rather than an open surface, so you can
         // walk out over it — and, since ice is a breakable solid here, fall through it.
-        if (lake && rr >= seaRow && rr < s) v = (ci.sB === SB.SNOW && rr < seaRow + ICE_SHEET) ? MAT.ICE : MAT.WATER;
-        else if (rr > ci.top) {
-          let head = true;
-          for (let k = 1; k <= HEAD; k++) if (scratch[j - k]) { head = false; break; }
-          if (head && !inSpan(ci.hall, rr)) {                 // deep halls stay dry — see the depth-band block
-            const fl = poolCfgAt(c, rr, s);
-            if (fl) for (let k = 1; k <= fl.depth; k++) { if (rr + k > bottomRow || at(j + k)) { v = fl.fluid; break; } }
+        // 🟥 `rr < s` LEFT A GAP OF AIR UNDER THE OCEAN, and it is the user's own report from an earlier session:
+        // *"even lakes or oceans on the surface, which should do this easily enough, have a gap between the solid
+        // terrain below them and where they seem to start off."* That session read this line, concluded the fill
+        // was contiguous and went looking elsewhere. It is not contiguous: `s` is the surface LINE, but in the
+        // overhang band the ground actually begins at `s + surfDisp`, up to OVH rows lower — so the sea stopped
+        // short and the last row of water had air beneath it, for ever. It is the whole of what the acceptance
+        // test still called `below-air` once the basins landed: 48 cells, all water, all in one chunk.
+        // ⇒ fill any AIR down to the deepest the displaced ground can start. Below that the column is solid, or
+        // sealed by `seaSealTo`, so this cannot run away into a cave.
+        if (lake && rr >= seaRow && rr <= s + OVH) v = (ci.sB === SB.SNOW && rr < seaRow + ICE_SHEET) ? MAT.ICE : MAT.WATER;
+        // ⭐ FILL EVERY OPEN CELL BELOW THE LINE, WHICH IS THE WHOLE INVARIANT. Not "the bowl", not "the core" —
+        // every cell inside the footprint at or below the waterline that is not solid becomes the basin's fluid.
+        // That is what leaves no air down there for a neighbour to spill into, and it is why the shape of the
+        // opening can be anything the cave field drew. Above `line`, nothing: that is ordinary cave.
+        else if (ci.pool) {
+          for (let i = 0; i < ci.pool.length; i++) {
+            const P = ci.pool[i];
+            if (rr >= P.line && rr <= P.bot) { v = P.fluid; break; }
           }
         }
         if (!v && rr < s && moundAt(c, rr, s)) v = MAT.STONE;
@@ -1000,14 +1173,11 @@ function makeGen(cfg) {
     if (rr > bottomRow) return 0;                          // see the note in fillColumn — the pool rule leaks past it
     const ci = colInfo(c), s = ci.s;
     const v = solidAt(c, rr, ci); if (v) return v;
-    if (s > seaRow && rr >= seaRow && rr < s) return (ci.sB === SB.SNOW && rr < seaRow + ICE_SHEET) ? MAT.ICE : MAT.WATER;
-    if (rr > ci.top) {
-      let head = true;
-      for (let k = 1; k <= HEAD; k++) if (solidAt(c, rr - k, ci)) { head = false; break; }
-      if (head && !inSpan(ci.hall, rr)) {
-        const fl = poolCfgAt(c, rr, s);
-        if (fl) for (let k = 1; k <= fl.depth; k++) { if (rr + k > bottomRow || solidAt(c, rr + k, ci)) return fl.fluid; }
-      }
+    if (s > seaRow && rr >= seaRow && rr <= s + OVH) return (ci.sB === SB.SNOW && rr < seaRow + ICE_SHEET) ? MAT.ICE : MAT.WATER;
+    // The basin flood, identical to fillColumn's — see the invariant there.
+    if (ci.pool) for (let i = 0; i < ci.pool.length; i++) {
+      const P = ci.pool[i];
+      if (rr >= P.line && rr <= P.bot) return P.fluid;
     }
     if (rr < s && moundAt(c, rr, s)) return MAT.STONE;
     return 0;
@@ -1122,7 +1292,10 @@ function makeGen(cfg) {
 // at PERIOD_COLS, and the volcano/island/hall/mound lattices moved to power-of-two spacings so they tile it.
 // Frequencies moved by at most 0.05%; the anchor spacings by up to 30%. This is the LAST cheap moment to do it
 // — the whole point is that it must not have to happen once generated worlds persist.
-const WORLDGEN_VERSION = 4;
+// 5 (2026-08-06): underground liquid moved from the draped depth rule to ANCHORED BASINS, and the shoreline is
+// sealed. Different ground ⇒ every stored diff taken against version 4 is correctly refused rather than applied
+// to rock it was never cut from.
+const WORLDGEN_VERSION = 5;
 
 module.exports = { makeGen, recipeFor, mulberry32, h, vn1, vn2, fbm1, fbm2, wave1, wave2, ridge1, isFluid,
   SALT, MAT, SB, BIOMES, SURFACE, MOLTEN, CHUNK_SIDE, WORLDGEN_VERSION, PERIOD_COLS, nfreq };
