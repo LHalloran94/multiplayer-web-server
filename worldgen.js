@@ -909,17 +909,27 @@ function makeGen(cfg) {
   // ⚠️ SIZE BEFORE FREQUENCY, deliberately. Cost is a property of SURFACES, not of volume (one sampled window
   // held 24,072 liquid cells and woke ZERO because it was fully submerged and had no surface at all), so the
   // same water in fewer, larger bodies is cheaper than in many small ones — and it reads better besides.
-  const POOL_STEP = Math.max(8, pow2(Math.round(40 * G)));    // one candidate basin per ~32 columns (256 px)
-  const POOL_HW = Math.round(28 * G), POOL_HH = Math.round(14 * G);
-  const POOL_COLLAR = 2;                                      // rows of rock sealing the basin below the waterline
+  // ⭐⭐ THE WINDOW IS THE LATTICE CELL, so two anchors can never overlap. That is not a tuning choice: it deletes
+  // the question "which basin owns this cell", and with it the possibility of one basin's fluid resting on
+  // another's — the layering the user has ruled out twice. `poolSpanAt` reduces to a single anchor lookup.
+  const POOL_STEP = Math.max(8, pow2(Math.round(40 * G)));    // one candidate basin per ~128 columns (1,024 px)
+  const POOL_HALF = (POOL_STEP >> 1) - 1;                     // 63 columns either side of the anchor
+  const POOL_DROP = Math.round(16 * G);                       // how far below the scan line a floor is looked for
+  const POOL_DEEP = Math.round(14 * G);                       // the deepest body that will be made
+  const POOL_MINRUN = 5;                                      // narrower than this is a wet crack, not a pool
+  const POOL_MINCELLS = 60;                                   // a puddle is not worth a feature
+  const POOL_SCANS = 6;                                       // candidate depths tried per anchor
   // ⭐ THE "LESS LIQUID" DIAL, scaled per biome by `wet`. Raised from 0.80 once basins had to FIND a hollow
   // rather than carve one: the hollow test rejects most candidates by itself, so the hash gate is no longer the
   // thing deciding how many pools exist and a low value here just removes the ones the terrain did offer.
   const POOL_CHANCE = 1.60;
-  // Memoised because `poolSpanAt` asks about the same two or three anchors for all 64 columns of a chunk, and an
-  // anchor costs five `surfAt` probes. Pure function of the column, so a cache cannot change what is generated.
+  // Memoised because `poolSpanAt` asks about the same anchor for all 64 columns of a chunk, and an anchor costs
+  // a few thousand cave probes. Pure function of the column, so a cache cannot change what is generated.
   const poolStats = { asked: 0, edge: 0, band: 0, noRun: 0, noSeed: 0, spill: 0, small: 0, hall: 0, biome: 0, chance: 0, placed: 0 };
   const _poolMemo = new Map();
+  // Scratch, reused across anchors: the openness memo, the floor profile, and the per-column info. Sized once.
+  let _poolMemo2 = null, _poolFloor = null;
+  const _poolCols = [];
   const poolAnchorAt = (a) => {
     let v = _poolMemo.get(a);
     if (v !== undefined) return v;
@@ -952,204 +962,188 @@ function makeGen(cfg) {
     if (!baseAt(c, rr, pc.s, pc.sB, pc.crust, bi)) return true; // already air
     return rr >= pc.carveTop && !!caveAt(c, rr, pc.top, pc.s, 1, bi);
   };
+  // ⭐⭐ THE FLOOR PROFILE — WHAT THE USER DID BY EYE, WRITTEN DOWN.
+  //
+  // 🟥 THE VERSION THIS REPLACES SEARCHED FOR THE WIDEST OPEN ROW AND ANCHORED THERE, which is the MIDDLE OF A
+  // HUGE VOID: it then descended looking for a floor, found the cavern kept going, flood-filled out of its own
+  // window and refused. It refused every candidate in the world, and I concluded from that measurement that
+  // "there are no sealed basins in this world at any scale". The user disproved it in thirty seconds with
+  // screenshots of water they had placed by hand into unmodified caverns. A search that finds nothing is
+  // evidence about THE SEARCH. The basins are the dips between the rock masses LOWER DOWN; the old rule was
+  // examining the cavern's ceiling for a bowl.
+  //
+  // ⭐ So: do not look for enclosed cavities — cave systems are connected and enclosed cavities barely exist.
+  // Look for local minima in the cave FLOOR, which is a 1-D problem and far cheaper than any fill:
+  //   1. a scan line in the underground band, hashed from the anchor (this is the only thing hashed);
+  //   2. per column, the first solid at or below the water line — the floor profile;
+  //   3. the deepest column is the sump; raise the line one row at a time and keep the last level that held.
+  //
+  // ⭐ CONTAINMENT IS A PROPERTY OF THE PROFILE, not a test run after the fact, and this is the settledness proof:
+  //   below   a water cell has water beneath it, or the floor. Never air — `floor[x]` is the FIRST solid at or
+  //           below the line, so the column is open the whole way down to it. No rock-shelf case to handle.
+  //   beside  a neighbour is water (above its own floor) or rock — PROVIDED the shallower of each adjacent pair
+  //           is solid from its own floor down past the deeper one's. That is the one thing that must be probed.
+  //   above   air, which is not a wake condition. So the basin's ceiling, and its mouths, can be any shape the
+  //           cave field drew, and a tunnel may walk in from above.
+  //
+  // 🟥 AND THE PROFILE IS TAKEN AT THE WATER LINE, NOT AT THE SCAN LINE. Taking it at the scan line finds the top
+  // of a SHELF, and a shelf hangs over a void: the column reads solid where you looked and is wide open thirty
+  // rows lower, which is exactly where the water is. Doing it the cheap way cut placement from 30% of anchors to
+  // 12% and put air at the flank of the bodies it did place. The scan line's only job is to locate the sump.
   function _poolAnchor(a) {
     poolStats.asked++;
-    if (a < POOL_HW + 8 || a > cols - 1 - POOL_HW - 8) { poolStats.edge++; return null; }
-    const hw = Math.max(5, Math.round((0.45 + 0.55 * hc(SALT.POOL_SHAPE, a, 1)) * POOL_HW));
-    const hh = Math.max(3, Math.round((0.45 + 0.55 * hc(SALT.POOL_SHAPE, a, 2)) * POOL_HH));
-    // ⚠️ THE WATERLINE HAS TO CLEAR THE GROUND ACROSS THE WHOLE FOOTPRINT, not just at the anchor. A basin whose
-    // rim pokes out of a hillside would hang water in the open air — the failure the acceptance test calls
+    if (a < POOL_HALF + 8 || a > cols - 1 - POOL_HALF - 8) { poolStats.edge++; return null; }
+    const c0 = a - POOL_HALF, w = 2 * POOL_HALF + 1;
+    // ⚠️ THE BAND HAS TO CLEAR THE GROUND ACROSS THE WHOLE FOOTPRINT, not just at the anchor. A basin whose rim
+    // pokes out of a hillside would hang water in the open air — the failure the acceptance test calls
     // `below-air`. Five probes across the span, which is bounded and identical from every column that asks.
     let deepest = 0;
     for (let k = -2; k <= 2; k++) {
-      const cc = a + Math.round(k * hw / 2), ss = surfAt(cc), d = ss + crustDepthAt(cc, ss);
+      const cc = a + Math.round(k * POOL_HALF / 2), ss = surfAt(cc), d = ss + crustDepthAt(cc, ss);
       if (d > deepest) deepest = d;
     }
-    // ⚠️ NEVER INSIDE A DEEP HALL. Halls are the placed, habitable chambers and are deliberately dry; a basin
-    // overlapping one would both flood it and drive a collar through its wall. Rejected on horizontal proximity
-    // alone, which is conservative and costs one bounded lattice query.
-    const lo = deepest + Math.round(10 * G);
-    const hi = bottomRow - Math.round(5 * G) - hh - POOL_COLLAR - 2;
-    if (hi <= lo) return null;
-    // ── STAGE 1, CHEAP: is there anything here worth the flood fill? ──────────────────────────────────────────
-    // A coarse grid (16 columns, every second row) looking for a run of rows that are open across enough of the
-    // span to hold a body of water. Most anchors die here, which is what makes stage 2 affordable.
-    const cand = lo + Math.round(hc(SALT.POOL_ON, a, 3) * (hi - lo));
-    const CSTEP = Math.max(2, Math.round(hw / 8)), V = hh * 3;
-    const pcs = [];
-    for (let c = a - hw; c <= a + hw; c += CSTEP) pcs.push([c, _poolCol(c)]);
-    const minW = Math.max(3, Math.round(pcs.length * 0.28));    // a pool needs to be WIDE, or it is a wet tunnel
-    const r0 = Math.max(lo, cand - V), r1 = Math.min(hi, cand + V);
-    let bestTop = -1, bestBot = -1, runTop = -1;
-    for (let rr = r0; rr <= r1 + 1; rr += 2) {
-      let w = 0;
-      if (rr <= r1) for (let i = 0; i < pcs.length; i++) if (_poolOpen(pcs[i][1], pcs[i][0], rr)) w++;
-      if (rr <= r1 && w >= minW) { if (runTop < 0) runTop = rr; continue; }
-      if (runTop >= 0) { if (bestTop < 0 || (rr - 2 - runTop) > (bestBot - bestTop)) { bestTop = runTop; bestBot = rr - 2; } runTop = -1; }
-    }
-    if (bestTop < 0 || bestBot <= bestTop) { poolStats.noRun++; return null; }   // nothing that would hold water
+    const bandLo = deepest + Math.round(10 * G);
+    const bandHi = bedrockTop - 2 - POOL_DROP;
+    if (bandHi <= bandLo) { poolStats.band++; return null; }
 
-    // ── STAGE 2: FLOOD FILL THE CAVITY, AND LET IT DECIDE EVERYTHING ─────────────────────────────────────────
-    // 🟥 THE VERSION THIS REPLACES DREW RECTANGLES, and the user's screenshots are unarguable. Its footprint was
-    // a BOX and its rule was "fill every open cell in the box": where the cave was narrower than the box, real
-    // rock bounded the water and it looked fine — and where the cave was WIDER, or the space simply open, the
-    // BOX became the shape and a two-cell ring collar drew a border around it. A rectangle was the inevitable
-    // output of that rule, not bad luck.
-    //
-    // ⭐⭐ AND A BOUNDED FLOOD FILL IS DETERMINISTIC, which is the thing I was wrong about twice. I ruled out
-    // reading the terrain (wrong — a fixed bounded probe is fine), then ruled out flood filling (also wrong).
-    // What would break chunk-independence is clipping the fill to the CHUNK, because then two chunks compute
-    // different sets. Clipped to the ANCHOR'S window, every column that asks runs the identical fill from the
-    // identical seed over identical terrain and gets the identical answer, without communicating.
-    //
-    // ⭐ AND IT MAKES THE COLLAR UNNECESSARY — the containment test and the settledness proof are one fact.
-    // The fill is MAXIMAL: it contains every open cell reachable from the seed. So an open neighbour of a water
-    // cell is necessarily in the same cavity, and it is at the same row or below, so it is water too. Nothing
-    // can be beside or beneath the water except rock. There is nothing left to seal, and no border to draw.
-    // ⚠️ Maximality is the whole argument, so a fill that reaches the window edge has NOT been proved enclosed
-    // and the anchor is REFUSED. That is the containment test, and refusing is the correct answer: an open
-    // cavern simply does not get a pool, rather than getting a rectangle of one.
-    // 🟥 FIND THE FLOOR FIRST, AND BUILD THE WINDOW AROUND IT. A first version seeded at the bottom of the wide
-    // run and used the stage-1 window — and 917 of 1,496 anchors "spilled", placing no pools anywhere. The cave
-    // simply continues below the run: the fill ran downhill and out of the window's bottom edge, which the
-    // containment test correctly reads as draining away. The test was right and the WINDOW was wrong.
-    // ⇒ descend to the first solid floor under the run, then hang the window just below it. Now the bottom edge
-    // is only reachable through a genuine hole in the floor, which really would drain.
-    let fx = -1, fRow = -1;
-    const fLim = hh * 3;
-    for (let d = 0; d <= hw && fx < 0; d++) {
-      for (const cc of (d ? [a + d, a - d] : [a])) {
-        if (cc < a - hw || cc > a + hw) continue;
-        const pc = _poolCol(cc);
-        if (!_poolOpen(pc, cc, bestBot)) continue;
-        let rr = bestBot;
-        while (rr - bestBot < fLim && _poolOpen(pc, cc, rr + 1)) rr++;
-        if (rr - bestBot >= fLim) continue;                     // bottomless here — try another column
-        fx = cc; fRow = rr; break;
-      }
-    }
-    if (fx < 0) { poolStats.noSeed++; return null; }
-    const c0 = a - hw, w = 2 * hw + 1;
-    const wr0 = Math.max(lo, fRow - (hh * 2 + 6)), wh = Math.min(hi, fRow + 3) - wr0 + 1;
-    if (wh < 6) { poolStats.band++; return null; }
-    const OPEN = new Int8Array(w * wh);                         // -1 unknown · 0 solid · 1 open (memo for the fill)
-    OPEN.fill(-1);
-    const colCache = new Array(w);
-    const isOpen = (x, y) => {
-      const k = x * wh + y;
-      let o = OPEN[k];
+    // The openness memo. Every level of the rising line re-reads the same cells, and a cave probe is the most
+    // expensive thing in the generator, so each (column, row) is evaluated at most once per scan line.
+    const SPAN = 2 * POOL_DROP + 2 * POOL_DEEP + 2;
+    if (!_poolMemo2 || _poolMemo2.length < w * SPAN) _poolMemo2 = new Int8Array(w * SPAN);
+    if (!_poolFloor || _poolFloor.length < w) _poolFloor = new Int32Array(w);
+    const memo = _poolMemo2, fL = _poolFloor, pcs = _poolCols;
+    pcs.length = 0; pcs.length = w;
+    let base = 0;
+    // ⚠️ Outside the probe window reads as CLOSED, which is the conservative direction: it can only make a
+    // candidate look smaller or more enclosed than it is, never less.
+    const op = (x, rr) => {
+      const y = rr - base;
+      if (y < 0 || y >= SPAN || x < 0 || x >= w) return false;
+      const k = x * SPAN + y;
+      const o = memo[k];
       if (o >= 0) return o === 1;
       const cc = c0 + x;
-      const pc = colCache[x] || (colCache[x] = _poolCol(cc));
-      o = _poolOpen(pc, cc, wr0 + y) ? 1 : 0;
-      OPEN[k] = o;
-      return o === 1;
+      const r = _poolOpen(pcs[x] || (pcs[x] = _poolCol(cc)), cc, rr) ? 1 : 0;
+      memo[k] = r;
+      return r === 1;
     };
-    // Seed on the floor cell we just found — the lowest point water would collect at.
-    const sx = fx - c0, sy = fRow - wr0;
-    if (sx < 1 || sx >= w - 1 || sy < 1 || sy >= wh - 1) { poolStats.noSeed++; return null; }
-    // 🟥 THE CAVITY DOES NOT HAVE TO BE ENCLOSED — ONLY THE WATER DOES, and getting that wrong produced a world
-    // with no underground pools at all. A first version flood-filled the whole cavity and refused any that
-    // reached the window edge. Every single anchor was refused, and the reason is a fact about caves rather than
-    // a bug: a cave SYSTEM is connected — chambers join tunnels which join more tunnels — so a maximal fill from
-    // any cave cell escapes almost always, and enclosed cavities essentially do not exist.
-    // ⇒ fill only at or below a candidate waterline. Tunnels joining ABOVE it are not leaks, they are how you
-    // walk in, and "air above" is not a wake condition. The settledness proof survives intact: within rows at or
-    // below the line the fill is still maximal, so any open neighbour at the same row or lower is also water.
-    // ⭐ AND RAISING THE LINE UNTIL IT SPILLS IS THE PHYSICAL MODEL. Water rises until it finds a way out; the
-    // level it stops at is the last one that does not reach the window edge. So: rise a row at a time and keep
-    // the last level that held. That is a basin's real water line, computed rather than hashed.
-    const seen = new Uint8Array(w * wh);
-    const cells = [];
-    const fillFrom = (lineY) => {                               // returns cell list, or null if it spills
-      seen.fill(0); cells.length = 0;
-      const stack = [sx * wh + sy];
-      seen[stack[0]] = 1;
-      while (stack.length) {
-        const k = stack.pop();
-        cells.push(k);
-        const x = (k / wh) | 0, y = k - x * wh;
-        if (x === 0 || x === w - 1 || y === wh - 1) return null;   // reached the window: it would drain away
-        const nb = [k - wh, k + wh, k - 1, k + 1];
-        const nx = [x - 1, x + 1, x, x];
-        const ny = [y, y, y - 1, y + 1];
-        for (let i = 0; i < 4; i++) {
-          if (ny[i] < lineY) continue;                          // above the waterline: not water, not a leak
-          const kk = nb[i];
-          if (seen[kk]) continue;
-          seen[kk] = 1;
-          if (isOpen(nx[i], ny[i])) stack.push(kk);
-        }
-      }
-      return cells.slice();
+    // The floor of a column AT a water line: the first solid at or below it, or the line itself when the column
+    // is already closed there (a wall). -1 means nothing solid within reach, i.e. the water would drain away.
+    const FMAX = POOL_DROP + 2 * POOL_DEEP;
+    const floorAt = (x, line) => {
+      if (!op(x, line)) return line;
+      let rr = line + 1;
+      while (rr - line <= FMAX && op(x, rr)) rr++;
+      return (rr - line > FMAX) ? -1 : rr;
     };
-    let held = null, lineY = sy;
-    for (let y = sy; y >= 1; y--) {
-      const got = fillFrom(y);
-      if (!got) break;                                          // this level spills — the one below is the answer
-      held = got; lineY = y;
-      if (sy - y >= hh * 2) break;                              // deep enough; do not flood the whole cave system
-    }
-    if (!held) { poolStats.spill++; return null; }
-    if (held.length < 60) { poolStats.small++; return null; }    // a puddle is not worth a feature
-    const mask = new Uint8Array(w * wh);                        // bit 1 = water · bit 2 = wall touching water
-    let nWater = 0;
-    for (const k of held) { mask[k] |= 1; nWater++; }
-    if (nWater < 40) return null;
-    cells.length = 0; for (const k of held) cells.push(k);
-    // Mark the rock touching the water, so powder there can be turned to stone: a sand wall falls into the pool.
-    for (const k of cells) {
-      if (!(mask[k] & 1)) continue;
-      const x = (k / wh) | 0, y = k - x * wh;
-      const nb = [[x - 1, y], [x + 1, y], [x, y - 1], [x, y + 1]];
-      for (const [xx, yy] of nb) {
-        if (xx < 0 || xx >= w || yy < 0 || yy >= wh) continue;
-        const kk = xx * wh + yy;
-        if (!(mask[kk] & 1)) mask[kk] |= 2;
+    // The run of columns holding water at `line`, and whether it is sealed. Returns cells, or -1 for a leak.
+    const levelAt = (line, sump, out) => {
+      let lo = sump, hi = sump;
+      while (lo > 0 && op(lo - 1, line)) lo--;
+      while (hi < w - 1 && op(hi + 1, line)) hi++;
+      if (lo === 0 || hi === w - 1) return -1;                   // reached the window edge: not proved contained
+      for (let x = lo - 1; x <= hi + 1; x++) { const f = floorAt(x, line); if (f < 0) return -1; fL[x] = f; }
+      // Every ADJACENT PAIR, not just the two ends: a shelf in the middle of a basin hangs over a void just as
+      // happily as one at its rim, and the water beside it would have air at its flank.
+      for (let x = lo - 1; x < hi + 1; x++) {
+        const d = fL[x] < fL[x + 1] ? x : x + 1, lim = fL[x] > fL[x + 1] ? fL[x] : fL[x + 1];
+        for (let rr = fL[d]; rr < lim; rr++) if (op(d, rr)) return -1;
       }
+      let cells = 0;
+      for (let x = lo; x <= hi; x++) cells += fL[x] - line;
+      out[0] = lo; out[1] = hi;
+      return cells;
+    };
+    // ⭐ RAISE THE LINE UNTIL IT SPILLS AND KEEP THE LAST LEVEL THAT HELD — which is what water does, and it
+    // means a candidate that leaks near the top still yields the pool below the leak instead of being discarded.
+    const out = [0, 0];
+    let best = null, sawOpen = false, sawSump = false;
+    for (let k = 0; k < POOL_SCANS; k++) {
+      const u = (hc(SALT.POOL_ON, a, 40 + k) + k / POOL_SCANS) % 1;
+      const y0 = bandLo + Math.round(u * (bandHi - bandLo));
+      base = y0; memo.fill(-1, 0, w * SPAN);
+      // locate the sump: the deepest floor under the scan line. A scan line inside rock costs w probes and stops.
+      let sump = -1, sumpRow = -1;
+      for (let x = 0; x < w; x++) {
+        if (!op(x, y0)) continue;
+        sawOpen = true;
+        let rr = y0 + 1;
+        while (rr - y0 <= POOL_DROP && op(x, rr)) rr++;
+        if (rr - y0 > POOL_DROP) continue;                       // bottomless under the scan line — not a sump
+        if (rr > sumpRow) { sumpRow = rr; sump = x; }
+      }
+      if (sump < 1 || sump >= w - 1) continue;
+      sawSump = true;
+      const lineLo = Math.max(y0, sumpRow - POOL_DEEP);
+      let hold = -1, cells = 0;
+      for (let line = sumpRow - 1; line >= lineLo; line--) {
+        const n = levelAt(line, sump, out);
+        if (n < 0) break;
+        hold = line; cells = n;
+      }
+      if (hold < 0) continue;
+      if (cells > (best ? best.cells : 0)) best = { line: hold, cells, sump, y0 };
     }
-    const line = wr0 + lineY;
+    if (!best) { if (!sawOpen) poolStats.noRun++; else if (!sawSump) poolStats.noSeed++; else poolStats.spill++; return null; }
+    // Re-run the winning level to recover its floor profile — cheaper than snapshotting one per level.
+    base = best.y0; memo.fill(-1, 0, w * SPAN);
+    const cells = levelAt(best.line, best.sump, out);
+    if (cells < 0) { poolStats.spill++; return null; }           // cannot happen; a silent disagreement would be worse
+    const lo = out[0], hi = out[1], line = best.line;
+    if (hi - lo + 1 < POOL_MINRUN) { poolStats.small++; return null; }
+    if (cells < POOL_MINCELLS) { poolStats.small++; return null; }
+    const floor = new Int32Array(hi - lo + 1);
+    for (let x = lo; x <= hi; x++) floor[x - lo] = fL[x];
     // ⚠️ NEVER INSIDE A DEEP HALL. Halls are the placed, habitable chambers and are deliberately dry; a basin
-    // overlapping one would both flood it and drive a collar through its wall.
+    // overlapping one would flood it — and, worse, the hall is carved AFTER the basin, so it would take the
+    // bounding rock away and the water with it.
     // ⚠️ TESTED IN BOTH AXES. A first version rejected on HORIZONTAL proximity alone, which threw away every
     // basin within ~54 columns of a hall anchor at ANY depth — a basin at row 2,000 has no quarrel with a hall
     // at row 3,500, and half the candidates in the deep half of the world were being discarded for nothing.
-    const hr = Math.ceil((POOL_HW + HALL_HW) / HALL_STEP) + 1, nearH = Math.round(a / HALL_STEP);
+    let deepRow = line;
+    for (let x = lo; x <= hi; x++) if (fL[x] > deepRow) deepRow = fL[x];
+    const hr = Math.ceil((POOL_HALF + HALL_HW) / HALL_STEP) + 1, nearH = Math.round(a / HALL_STEP);
     for (let k = -hr; k <= hr; k++) {
       const H = hallAnchorAt((nearH + k) * HALL_STEP);
-      if (H && Math.abs(H.a - a) < H.hw + hw + 4 && Math.abs(H.cy - line) < H.hh + hh + Math.round(6 * G)) return null;
+      if (H && Math.abs(H.a - a) < H.hw + POOL_HALF + 4
+            && H.cy + H.hh > line - Math.round(6 * G) && H.cy - H.hh < deepRow + Math.round(6 * G)) { poolStats.hall++; return null; }
     }
     // ONE fluid for the whole basin, chosen at the anchor. Layered liquids are never wanted (user, 2026-08-06),
     // and picking per cell is exactly how the old rule produced lava resting on water.
     const B = BIOMES[regionPick(a, line, surfAt(a))];
-    if (!B || !B.fluid) return null;
+    if (!B || !B.fluid) { poolStats.biome++; return null; }
     // ⭐ THE BIOME'S OWN WETNESS IS THE DENSITY DIAL, which is what keeps "less liquid" from meaning "no character".
     // A flat chance for every anchor made the exotic fluids vanish outright — probe_worldgen D3 went to ZERO oil
     // and ZERO acid, which is the guard for the worst bug this track has recorded (a material that generates
     // nowhere fails SILENTLY). `wet` and `poolMul` already describe how much liquid a biome should hold; they
     // used to drive a per-cell flood and now they drive how many basins exist, which is the same intent applied
     // to the thing that is actually being placed.
-    if (hc(SALT.POOL_ON, a, 5) > POOL_CHANCE * (B.wet || 0) * Math.min(1.6, B.poolMul || 1)) return null;
-    return { a, c0, r0: wr0, w, h: wh, mask, fluid: B.fluid };
+    if (hc(SALT.POOL_ON, a, 5) > POOL_CHANCE * (B.wet || 0) * Math.min(1.6, B.poolMul || 1)) { poolStats.chance++; return null; }
+    poolStats.placed++;
+    // ⭐ A BASIN IS A LINE AND A FLOOR PROFILE — two numbers and one short array, not a bitmap. The old anchor
+    // carried a w x h mask (11 KB each, 256 memoised), which existed because a flood fill's output has no
+    // description. A profile does: the water in column x is exactly the rows [line, floor[x]).
+    return { a, c0: c0 + lo, w: hi - lo + 1, line, floor, fluid: B.fluid };
   }
-  // The anchors whose window covers this column. Everything else — where the water is, which rock touches it —
-  // is read out of the anchor's mask, because the cavity has no analytic description: it is whatever the cave
-  // field drew, which is the entire point.
+  // ⭐ ONE ANCHOR, NOT A LIST. The window is the lattice cell, so the nearest anchor is the only one that can
+  // cover this column. Still returned as an array so the three fill paths keep their shape.
   function poolSpanAt(c) {
-    const near = Math.round(c / POOL_STEP), reach = Math.ceil(POOL_HW / POOL_STEP) + 1;
-    let out = null;
-    for (let k = -reach; k <= reach; k++) {
-      const P = poolAnchorAt((near + k) * POOL_STEP); if (!P) continue;
-      if (c < P.c0 || c >= P.c0 + P.w) continue;
-      (out || (out = [])).push(P);
-    }
-    return out;
+    const P = poolAnchorAt(Math.round(c / POOL_STEP) * POOL_STEP);
+    if (!P || c < P.c0 || c >= P.c0 + P.w) return null;
+    return [P];
   }
-  // What the mask says about one cell: 0 nothing · 1 water · 2 rock touching water.
+  const _poolWater = (P, c, rr) => {
+    const x = c - P.c0;
+    if (x < 0 || x >= P.w) return false;
+    return rr >= P.line && rr < P.floor[x];
+  };
+  // 0 nothing · 1 water · 2 rock touching water (so a powder there can be turned to stone — a sand wall, or a
+  // sand ceiling directly over the surface, falls into the pool and the pool is not settled any more).
   const poolMaskAt = (P, c, rr) => {
-    const y = rr - P.r0;
-    if (y < 0 || y >= P.h) return 0;
-    return P.mask[(c - P.c0) * P.h + y];
+    if (_poolWater(P, c, rr)) return 1;
+    if (_poolWater(P, c - 1, rr) || _poolWater(P, c + 1, rr) ||
+        _poolWater(P, c, rr - 1) || _poolWater(P, c, rr + 1)) return 2;
+    return 0;
   };
   // 🟥 LATTICE-ANCHORED SHAFTS WERE BUILT HERE AND REMOVED (user, 2026-08-05): *"the wandering vertical shafts
   // are not really good, in that they seem unnatural, and moreover, I think that the reason that the underground
@@ -1497,7 +1491,9 @@ function makeGen(cfg) {
 // 5 (2026-08-06): underground liquid moved from the draped depth rule to ANCHORED BASINS, and the shoreline is
 // sealed. Different ground ⇒ every stored diff taken against version 4 is correctly refused rather than applied
 // to rock it was never cut from.
-const WORLDGEN_VERSION = 5;
+// 6 (2026-08-07): UNDERGROUND BASINS ACTUALLY PLACE. Version 5's rule refused every candidate in the world, so
+// version 5 ground has no underground liquid in it at all; version 6 puts a basin in ~18% of lattice cells.
+const WORLDGEN_VERSION = 6;
 
 module.exports = { makeGen, recipeFor, mulberry32, h, vn1, vn2, fbm1, fbm2, wave1, wave2, ridge1, isFluid,
   SALT, MAT, SB, BIOMES, SURFACE, MOLTEN, CHUNK_SIDE, WORLDGEN_VERSION, PERIOD_COLS, nfreq };
