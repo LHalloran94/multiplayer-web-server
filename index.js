@@ -4527,7 +4527,14 @@ let quiesceChunkH = () => false, rewakeChunkH = () => false;
 const chunkCfg = {
   evict: true,         // master switch (see above); `chunkEvict` on the liquid-cfg wire toggles it live
   margin: 2,           // chunks kept resident BEYOND the edge of what a player can see (2 ⇒ 1024px of headroom)
-  graceMs: 30000,      // how long a chunk stays resident after the last player stopped looking near it
+  // ⭐ 30,000 → 10,000 (2026-08-06). The 30s was a guess and it was made when residency still saved wire traffic.
+  // It does not any more: increment 3d made re-entry re-send unconditionally, and the measurement is flat —
+  // 4,741KB to come back at 30s against 4,527KB at 0s, a difference smaller than the spread within either
+  // setting. Now that the WORK is released separately (see quiesce below), the only thing this timer still buys
+  // is not having to restore or regenerate a chunk you turn straight back to, which is server CPU on the sweep
+  // rather than anything the player waits for. 10s is two sweeps: enough to cover turning around, an eighth of
+  // the memory retained for wandering. ⚠️ Not a floor — `chunkGraceMs` on the liquid-cfg wire moves it live.
+  graceMs: 10000,      // how long a chunk stays resident after the last player stopped looking near it
   sweepMs: 5000,       // how often residency is recomputed
   // ⭐ SIMULATION IS RELEASED LONG BEFORE MEMORY IS (see quiesceChunk for the measurement that motivated it).
   // 0 = as soon as a sweep finds the chunk out of everyone's view, so within `sweepMs`. `chunkQuiesce` /
