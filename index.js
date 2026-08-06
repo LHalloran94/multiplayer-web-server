@@ -2700,7 +2700,21 @@ const liquidCfg = {
   // so it stops being processed AND broadcast. Trims the settling wake-front + idle halo. Keys off "did it move (incl.
   // density sort) this tick", so an inverting cell is never frozen. Pure perf: only removes from the work-set, never
   // moves mass. A neighbour move re-adds it. OFF = no change.
-  fineQuiesce: false,
+  // ⭐⭐ ON SINCE 2026-08-06, AND THE MEASUREMENT THAT JUSTIFIES IT IS A LESSON IN ITSELF.
+  // I A/B'd this lever earlier the same day, measured 2.4% → 2.8% of the queue moving, matched the recorded
+  // "saves only 18%", and dismissed it. That measurement was taken while the sim was still GENERATING THE WORLD
+  // from inside its own tick — a far bigger cost that masked everything behind it. With that fixed, the same
+  // lever re-measured on the same 70s panning scene:
+  //     work queue          150,000–210,000  →  2,000 rising to ~70,000
+  //     cells moving/tick             ~500   →  1,200–3,300
+  //     rooms deferred/tick        0.88–0.96 →  0 for the first 30 seconds
+  // 🟥 A LEVER MEASURED BEHIND A BOTTLENECK IS MEASURED WRONG. Re-take every "we tried that, it did not help"
+  // after removing whatever was dominating at the time.
+  // ⚠️ It is a BEHAVIOUR change, not just a perf one: a cell that has not moved for `fineQuiesceTicks` leaves the
+  // work set. It cannot strand liquid — `wake()` re-adds it the moment a neighbour moves, and `wouldSort` keeps a
+  // still-inverted cell in — but the failure mode if that reasoning is wrong is liquid that stops when it should
+  // not, which is the symptom this whole track is about. `liquid-cfg {fineQuiesce:0}` turns it off for an A/B.
+  fineQuiesce: true,
   fineQuiesceTicks: 6,
   // (2) ADAPTIVE K (perf): stop sub-stepping a room early once a sub-step moves fewer than fineAdaptPct% of its active
   // cells (it has gone quiet). A settled pool then spends ~1 sub-step, a raging pour still spends the full K. The fall
