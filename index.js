@@ -2714,7 +2714,16 @@ const liquidCfg = {
   // work set. It cannot strand liquid — `wake()` re-adds it the moment a neighbour moves, and `wouldSort` keeps a
   // still-inverted cell in — but the failure mode if that reasoning is wrong is liquid that stops when it should
   // not, which is the symptom this whole track is about. `liquid-cfg {fineQuiesce:0}` turns it off for an A/B.
-  fineQuiesce: true,
+  // 🟥 BACK OFF, 2026-08-06, SAME DAY. Reported: "with quiescence on it freezes indefinitely, with it off it
+  // just does the normal, waiting-for-its-turn freeze." So the reasoning in the block above — that `wake()` and
+  // `wouldSort` between them can never strand a cell — IS WRONG, and the counter-argument was handed to me and I
+  // did not take it seriously enough: *"if huge numbers of cells are already not moving for 6 ticks, then there
+  // will be nothing near them to move and wake them."* Exactly. Retirement is only safe if something is
+  // guaranteed to wake the cell, and for the INTERIOR of a large settled-but-not-level body there is nothing
+  // adjacent that will ever move again. It retires the whole body and the body never levels.
+  // ⚠️ The 5x work-queue improvement it measured is real and is NOT the point: it was doing less work by not
+  // doing the work. A perf win measured without checking the RESULT is not a perf win.
+  fineQuiesce: false,
   fineQuiesceTicks: 6,
   // (2) ADAPTIVE K (perf): stop sub-stepping a room early once a sub-step moves fewer than fineAdaptPct% of its active
   // cells (it has gone quiet). A settled pool then spends ~1 sub-step, a raging pour still spends the full K. The fall
