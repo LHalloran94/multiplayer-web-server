@@ -2898,7 +2898,8 @@ const liquidCfg = {
 // DEBUG perf accounting (only touched when liquidCfg.perfLog): runLiquidTick tallies sim time + active cells and
 // prints a rolling ~1s summary to the console. (emitLiquidCells, which centralised the coarse `liquid-cells` emit so
 // its wire payload could be sized, went with that wire.)
-let liqPerf = { simMs: 0, simMsMax: 0, pendAt: 0, idleRooms: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actCols: 0, pending: 0 };
+let liqPerf = { simMs: 0, simMsMax: 0, pendAt: 0, idleRooms: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actCols: 0, pending: 0,
+  chunkMs: 0, chunkMsMax: 0, kMin: 99 };   // kMin: the LOWEST K tier 2 used this window (see the note where it is set)
 // Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
 // the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
 // ⭐ 0 = OFF, and that is the shipping value. Tried at 200 and the user reported prolonged lag on joining: the cost is
@@ -4206,6 +4207,19 @@ let roomOccupied = () => true;
 // the rigs that slice the TICK do not contain — a direct reference would be a ReferenceError in them and
 // nowhere else. Defaulting to a no-op means a sliced rig behaves exactly as it always did.
 let simNoGen = () => {};
+// ⭐⭐ THE CHUNK WORK QUEUE (2026-08-08). Producing terrain used to happen SYNCHRONOUSLY inside whichever socket
+// handler asked for it, in one uninterruptible turn of the event loop. Measured on the live server: one
+// exploring player caused a 152ms stall and twenty caused 466ms, and a single `chunk-want` — whose list is
+// CLIENT-SUPPLIED and bounded at 512 — delivered 777,600 cells in one message and stalled the loop 107.8ms with
+// generation switched OFF entirely. `_miss` above already records the same shape costing 8,632ms.
+// ⇒ the callers now ENQUEUE, and the tick drains up to a millisecond budget. Chunks are drained BEFORE liquid
+// and liquid gets what is left, because of the asymmetry the user put plainly: terrain that has not arrived is a
+// hole you fall through, while liquid a few hundred ms behind is just slow water.
+// ⚠️ THE SAME F15 SEAM AGAIN, and it is load-bearing here: the real function lives in the INTEREST block, which
+// the rigs that slice the TICK do not contain. A bare call would be a ReferenceError in them and nowhere else —
+// which is exactly how this track has been bitten six times. Returning 0 means a sliced rig gets the old budget
+// arithmetic unchanged, so no existing guard changes meaning.
+let drainChunkQueue = () => 0;
 // ...and the same thing for TIER 2, for the same reason, added 2026-08-02. `probe_budget`'s cold-start check
 // asserted "WITH the seed, tick 0 is CHEAPER" by comparing two wall-clock readings — but the effect it is
 // testing is ~1ms against several ms of run-to-run spread, so it failed about one run in five REGARDLESS of
@@ -4226,6 +4240,25 @@ function estRoomCost(room) {
 // per-room number does; this is the cheapest one that does not need state.
 function roomPhase(room) { let h = 0; for (let i = 0; i < room.length; i++) h = (h * 31 + room.charCodeAt(i)) | 0; return Math.abs(h); }
 const runLiquidTick = () => {
+  // ⭐⭐ CHUNKS FIRST, AND BEFORE EVERY GUARD BELOW. Three reasons, all of them load-bearing:
+  //  1. BEFORE `simNoGen(true)`. That flag makes a page miss return ZEROS instead of building the page (see
+  //     `_miss`), which is right for the sim — it must never generate world from inside the flow loop — and
+  //     catastrophic here: chunks would be delivered as solid AIR, silently, and nothing would ever correct
+  //     them. This is the single easiest way to get this increment badly wrong.
+  //  2. BEFORE the `paused` return, so pausing the LIQUID does not also stop the world arriving. Terrain
+  //     delivery and fluid simulation are different concerns and the pause switch only ever meant the latter.
+  //  3. BEFORE any active-cell Set is iterated. `sendChunkContent` calls `drainGenLiquid`, which SEEDS liquid
+  //     into those Sets — the same reason the existing `drainGenLiquid()` call sits at the top rather than in
+  //     the middle. Doing this later would mutate a Set the flow loop is walking.
+  // ⚠️ The note on `sendChunkContent` used to read "every caller of this function is a socket handler or the
+  //    beacon path, never the liquid tick". That is no longer true and the note has been corrected; what makes
+  //    it safe is the POSITION, not the caller.
+  // ⚠️ NO ARGUMENT, AND THAT IS THE POINT. The first version passed `interestCfg.queueMs` — and `interestCfg`
+  // lives in the INTEREST block, which the rigs slicing this tick do not contain, so `probe_budget` died with
+  // `ReferenceError: interestCfg is not defined` and nothing else did. Seventh time this track has hit the
+  // sliced-block boundary. The seam must own its own configuration: the tick asks for a drain, and how long a
+  // drain is allowed to take is a fact about the queue, not about the tick.
+  const _chunkMs = drainChunkQueue();
   // FROZEN. Nothing advances — not the grid, not droplets in flight, not powder or soil — until either the pause is
   // lifted or a step is requested, so what you are looking at is exactly what the sim last produced.
   if (liquidCfg.paused) { if (liquidStepsPending <= 0) return; liquidStepsPending--; }
@@ -4242,7 +4275,12 @@ const runLiquidTick = () => {
   // ── PLAN THE ROSTER. Admit rooms in rotating order until their predicted cost fills the budget; the rest
   // are deferred whole. At least one room is ALWAYS admitted, so a single room bigger than the whole budget
   // still makes progress (slowly) rather than deadlocking.
-  const _budgetMs = liquidCfg.simBudgetPct > 0 ? liquidCfg.tickMs * liquidCfg.simBudgetPct / 100 : 0;
+  // ⭐ LIQUID GETS WHAT THE CHUNKS LEFT. This is the priority decision, in one line: chunk work is taken off the
+  // top and the liquid sim absorbs the variance, because terrain that has not arrived is a hole you fall through
+  // while liquid a few hundred ms behind is just slow water.
+  // ⚠️ `_chunkMs` is 0 in every rig that slices this block (the F15 seam returns 0), so the budget arithmetic
+  // there is byte-for-byte what it was and no existing `probe_budget` check changes meaning.
+  const _budgetMs = liquidCfg.simBudgetPct > 0 ? Math.max(0, liquidCfg.tickMs * liquidCfg.simBudgetPct / 100 - _chunkMs) : 0;
   const _tickT0 = _budgetMs ? performance.now() : 0;
   // ⭐ ALWAYS A SET NOW, not only when the budget is on: an UNATTENDED room is deferred whatever the budget is
   // doing, and every downstream loop already tests `_deferred`, so this reaches sources, reactions, flow, powder
@@ -4362,6 +4400,11 @@ const runLiquidTick = () => {
       const est = estRoomCost(room);   // ⭐ seeded for a room with no EMA yet — its first tick is its biggest
       if (est > _budgetMs) { _kUsed = Math.max(1, Math.floor(_kFull * _budgetMs / est)); liquidCfg.fineLevelSteps = _kUsed; }
     }
+    // 🟥 THE READOUT'S `K` HAS ALWAYS PRINTED THE FULL VALUE, WHICH IS THE ONE NUMBER TIER 2 CHANGES.
+    // `liquidCfg.fineLevelSteps` is restored a few lines below, before the perf line is built, so a room being
+    // throttled 9 -> 2 still displayed `K=9` — the dial the budget is actually turning was invisible exactly
+    // when it was being turned. Same family as the dead `active(peak)` and `emit KB/s` counters.
+    if (_kUsed < liqPerf.kMin) liqPerf.kMin = _kUsed;
     fineLiquidTickRoom(room, cellsOf(room).fineSub || 1);
     if (_kUsed !== _kFull) { liquidCfg.fineLevelSteps = _kFull; liqK2Throttles++; }
     // EMA is kept NORMALISED TO FULL K, so a throttled room does not report a small cost, get its K
@@ -4437,6 +4480,7 @@ const runLiquidTick = () => {
   liqTickGenPages += genPagesProduced - _genAtTickStart;
   if (liquidCfg.perfLog) {
     const _dt = performance.now() - _t0; liqPerf.simMs += _dt; if (_dt > liqPerf.simMsMax) liqPerf.simMsMax = _dt;
+    liqPerf.chunkMs += _chunkMs; if (_chunkMs > liqPerf.chunkMsMax) liqPerf.chunkMsMax = _chunkMs;
     liqPerf.ticks++;
     if (liqPerf.ticks >= Math.max(1, Math.round(1000 / liquidCfg.tickMs))) {   // ~once per real second
       const _hz = 1000 / liquidCfg.tickMs, _rooms = cellRooms.fine.size;
@@ -4447,7 +4491,21 @@ const runLiquidTick = () => {
       // room rather than as 'the flow never ran'"* — neither was true, the field was simply dead.
       // It now carries the honest whole-world total (the `pending` gauge below), under its old name because
       // e2e_room_starvation, e2e_containment and probe_liquid_bottleneck all read `.active` off this wire.
-      const _stat = { rooms: _rooms, active: liqPerf.pending, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.bytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs,
+      // 🟥 `kbs` WAS COMPUTED FROM `liqPerf.bytes`, WHICH IS INCREMENTED NOWHERE IN THIS FILE. It was read here,
+      // reset every window, and never written — so the "emit KB/s" on this console line AND on the client's Perf
+      // tab ("broadcast N KB/s x clients = upload") read **0 in every state the server could be in**. Not a
+      // number that was sometimes wrong; one that was never right. Third of its family, after `active(peak)` and
+      // the `K` above. `fineBytes` IS tallied (see emitFine), and liquid diffs are what the sim broadcasts, so
+      // the honest figure is that one. `liqPerf.bytes` is gone rather than left as a zero nobody can spend.
+      const _stat = { rooms: _rooms, active: liqPerf.pending, avgMs: +(liqPerf.simMs / liqPerf.ticks).toFixed(2), maxMs: +liqPerf.simMsMax.toFixed(2), kbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), budgetMs: liquidCfg.tickMs,
+        // THE CHUNK QUEUE: ms/tick spent building terrain, chunks delivered per second, and how much is waiting.
+        // `chunkQMs` against `interestCfg.queueMs` says whether the allowance is the binding constraint; a
+        // `chunkQWait` that never falls says the world is arriving more slowly than players are asking for it.
+        chunkQMs: +(liqPerf.chunkMs / liqPerf.ticks).toFixed(2), chunkQMaxMs: +liqPerf.chunkMsMax.toFixed(2),
+        chunkQSent, chunkQDrains, chunkQDropped, chunkQBudgetMs: interestCfg.queueMs, chunkQOn: interestCfg.queue ? 1 : 0,
+        chunkQWait: chunkQueueDepth(),
+        // The K tier 2 actually USED this window (see kMin) — `steps` below is the configured maximum.
+        stepsUsed: liqPerf.kMin,
         // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
         // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
         steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
@@ -4474,7 +4532,8 @@ const runLiquidTick = () => {
         // did not run (perfLog toggled mid-window), and the panel says "Ns old" rather than printing a zero.
         pendAgeMs: Math.max(0, (liquidTickCount - (liqPerf.pendAt || 0)) * Math.max(1, liquidCfg.tickMs | 0)) };
       console.log(`[liq-perf] rooms=${_stat.rooms} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
-        (`  |  LIQUID K=${_stat.steps} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
+        (`  |  LIQUID K=${_stat.steps}${_stat.stepsUsed < _stat.steps ? '(used ' + _stat.stepsUsed + ')' : ''} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
+        (_stat.chunkQOn ? `  |  CHUNKQ ${_stat.chunkQMs}ms/tick max=${_stat.chunkQMaxMs} of ${_stat.chunkQBudgetMs}ms · sent=${_stat.chunkQSent} · waiting ${_stat.chunkQWait.chunks} for ${_stat.chunkQWait.socks} client(s)` + (_stat.chunkQDropped ? ` · dropped=${_stat.chunkQDropped}` : '') : '') +
         (`  |  REACT avg=${_stat.reactAvgMs}ms max=${_stat.reactMaxMs}ms capped=${_stat.reactSkips}`) +
         (`  |  SPREAD pending=${_stat.pending} chunks=${_stat.actChunks} cols=${_stat.actCols}`) +
         (_stat.simBudgetPct ? `  |  BUDGET ${_stat.simBudgetPct}% deferred-rooms/tick=${_stat.deferred}` +
@@ -4486,6 +4545,7 @@ const runLiquidTick = () => {
       // starts again at zero — except `pending`/`actChunks`/`actCols`, which are a snapshot of how much work is
       // queued right now. Zeroing those made "I have no reading" indistinguishable from "there is no work".
       liqPerf = { simMs: 0, simMsMax: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, idleRooms: 0, reactMs: 0, reactMsMax: 0,
+        chunkMs: 0, chunkMsMax: 0, kMin: liquidCfg.fineLevelSteps,   // kMin is a MINIMUM, so it resets to the ceiling
         actChunks: liqPerf.actChunks, actCols: liqPerf.actCols, pending: liqPerf.pending, pendAt: liqPerf.pendAt };
     }
   }
@@ -4688,8 +4748,12 @@ function sendChunkContent(sock, room, chunks) {
   // produce the ground and then read `fineTotal` back as zero on the very same cells — the client would be
   // sent a lake bed with no lake in it, and nothing would ever correct it, because a SETTLED lake broadcasts
   // no diffs. So: produce everything first, let the deferred pass run, then read it all out.
-  // ⚠️ `drainGenLiquid` is safe HERE and not everywhere: every caller of this function is a socket handler or
-  // the beacon path, never the liquid tick. Checked, not assumed.
+  // ⚠️ `drainGenLiquid` is safe HERE, and what makes it safe changed on 2026-08-08. It used to be "every caller
+  // of this function is a socket handler or the beacon path, NEVER the liquid tick". The chunk work queue means
+  // the tick IS now a caller — so the guarantee is no longer about WHO calls it but about WHERE: the drain runs
+  // at the very top of `runLiquidTick`, before `simNoGen(true)` and before any active-cell Set is iterated.
+  // Seeding liquid from inside the flow loop would write into a Set that loop is walking, which is the same
+  // hazard `genSeedFn` defers for. Move the drain later in the tick and this breaks. Checked, not assumed.
   for (const p of chunks) {
     restoreChunk(room, p);     // a chunk we are about to READ OUT must not be in a blob NOR dropped-as-pristine
     if (_genRooms.size) s.terrain.g(((((p / geom.cy) | 0) * CHUNK_SIDE) * geom.rows) + (p % geom.cy) * CHUNK_SIDE);
@@ -4718,7 +4782,34 @@ const interestCfg = {
   margin: 1,           // replication rings beyond the viewport (see above — MEASURED, not guessed)
   pushPerBeacon: 16,   // chunks repaired per beacon when re-subscribing; the rest carry over to the next one
   batch: true,         // collect a whole tick's diffs into one packet per client (per-socket opt-in — see below)
+  // ── THE CHUNK WORK QUEUE ────────────────────────────────────────────────────────────────────────────────────
+  // ⭐ SHIPS ON, which is a deliberate departure from this branch's "anything not behaviour-preserving ships
+  // OFF" convention, and the reason is that the thing it replaces is a MEASURED DEFECT rather than a candidate
+  // improvement: the synchronous path stalls the event loop for 107–466ms and has already been reported from
+  // play as "the world is invisible". Shipping the fix off would mean nobody ever sees it work. `queueMs = 0`
+  // restores the old synchronous behaviour exactly, so it is still A/B-able live — same escape hatch, opposite
+  // default.
+  queue: 1,
+  // Per-tick millisecond allowance. Sized from measurement, not taste: a player falling flat out demands
+  // 15.5–28.4 chunks/s (`probe_chunk_demand.js`), which at the shipped generator's 0.846ms/chunk is 13–24ms per
+  // SECOND — so 6ms per 40ms tick (150ms/s) carries several such players with room to spare, while costing at
+  // most 6ms of the 12ms the profile showed genuinely idle. The redesign's 2.9–11.7ms/chunk is the case this
+  // number exists for: it makes the queue take longer rather than making the tick take longer.
+  queueMs: 6,
+  // Chunks per `sendChunkContent` call while draining. The clock is checked after every batch, so this trades
+  // packet count against how far a single batch can overshoot the allowance. ⚠️ ONE CHUNK CANNOT BE
+  // INTERRUPTED, so the true overshoot bound is `queueBatch × the cost of the most expensive chunk` — which is
+  // why this is small rather than `pushPerBeacon`-sized.
+  queueBatch: 4,
+  // Hard ceiling on what one socket may have waiting. `chunk-want` takes a CLIENT-SUPPLIED list, so without
+  // this a client could pin unbounded work in the queue. Dropped requests are not lost: the next beacon
+  // re-derives what the socket is missing.
+  queueMaxPending: 4096,
 };
+// Mechanism counters — read-only, carried on the cfg wire so a test can assert the queue actually FIRED rather
+// than inferring it from an outcome. Same reasoning as `liqRateSkips` and `liqK2Throttles`: this track has been
+// bitten repeatedly by a check that measured a result instead of a mechanism.
+let chunkQSent = 0, chunkQDrains = 0, chunkQDropped = 0, chunkQCursor = 0;
 // The CELL-ADDRESSED wires, and how to walk one record. Anything not listed here is broadcast untouched.
 // ⚠️ `liquid-src` is deliberately NOT here. It is a low-rate MARKER toggle with no re-subscribe repair path, so
 // filtering it would leave a client permanently wrong about which cells are sources — cost nothing, break something.
@@ -4774,7 +4865,9 @@ function updateSubs(room, sid, v) {
   //   · and `chunkHash` is no longer called on every chunk in the world every time a socket appears.
   for (const p of want) if (!e.subs.has(p)) e.pending.add(p);   // came back (or arrived): you do not have it, here it is
   e.subs = want;
-  if (e.pending.size) flushPending(room, sid, e);
+  // ⭐ WITH THE QUEUE ON, THE BEACON DOES NOT PRODUCE ANYTHING — it only records what this socket is owed, and
+  // the tick delivers it within a budget. `e.pending` was always the queue; all that changes is who drains it.
+  if (e.pending.size && !interestCfg.queue) flushPending(room, sid, e);
 }
 function flushPending(room, sid, e) {
   if (TRACE_SUBS) console.log('[subs] flush room=' + room + ' sid=' + sid + ' pending=' + e.pending.size);
@@ -4783,6 +4876,66 @@ function flushPending(room, sid, e) {
   for (const p of e.pending) { take.push(p); if (take.length >= Math.max(1, interestCfg.pushPerBeacon | 0)) break; }
   for (const p of take) e.pending.delete(p);
   sendChunkContent(sock, room, take);
+}
+// ── enqueue, rather than produce ────────────────────────────────────────────────────────────────────────────
+// Returns true if the request was queued. False means the queue is off (or unusable for this room), and the
+// caller should do what it always did — which is what keeps `queueMs = 0` a true revert rather than a
+// degradation.
+// ⚠️ Falls back when `interestCfg.chunks` is off, because then `roomSubs` is not maintained at all and there is
+// no `pending` set to put anything in. Queueing into a structure nobody drains is how a world goes quietly
+// missing.
+function queueChunks(room, sid, list) {
+  if (!interestCfg.queue || !interestCfg.chunks || !list || !list.length) return false;
+  const e = subsEntry(room, sid);
+  const cap = Math.max(1, interestCfg.queueMaxPending | 0);
+  for (const p of list) {
+    if (e.pending.size >= cap) { chunkQDropped++; break; }
+    e.pending.add(p);
+  }
+  return true;
+}
+// ── THE DRAIN. Called from the top of the liquid tick with a millisecond allowance.
+// ⭐ ROUND-ROBIN, ONE BATCH PER SOCKET PER VISIT, with a cursor that survives across ticks. Draining one socket
+// to completion before starting the next would let a player who just teleported (hundreds of chunks pending)
+// starve everybody else's terrain for as long as it took — the same "one expensive participant crowds out the
+// cheap ones" failure the liquid roster planner already solves with cheapest-first admission.
+drainChunkQueue = function () {
+  const budgetMs = interestCfg.queueMs;
+  if (!interestCfg.queue || !(budgetMs > 0)) return 0;
+  const t0 = performance.now();
+  const jobs = [];
+  for (const room in roomSubs) {
+    const m = roomSubs[room]; if (!m) continue;
+    for (const [sid, e] of m) if (e.pending.size) jobs.push([room, sid, e]);
+  }
+  if (!jobs.length) return 0;
+  chunkQDrains++;
+  const batch = Math.max(1, interestCfg.queueBatch | 0);
+  let i = chunkQCursor % jobs.length;
+  // `jobs.length * 256` is a runaway guard, not a policy — the loop's real exit is the clock or an empty queue.
+  for (let guard = jobs.length * 256; guard > 0; guard--) {
+    if (performance.now() - t0 >= budgetMs) break;
+    let at = -1;
+    for (let k = 0; k < jobs.length; k++) { const j = jobs[(i + k) % jobs.length]; if (j[2].pending.size) { at = (i + k) % jobs.length; break; } }
+    if (at < 0) break;                                    // nothing left anywhere
+    const room = jobs[at][0], sid = jobs[at][1], e = jobs[at][2];
+    const sock = io.sockets.sockets.get(sid);
+    if (!sock) { e.pending.clear(); i = at + 1; continue; }   // gone; the disconnect handler drops the entry
+    const take = [];
+    for (const p of e.pending) { take.push(p); if (take.length >= batch) break; }
+    for (const p of take) e.pending.delete(p);
+    sendChunkContent(sock, room, take);
+    chunkQSent += take.length;
+    i = at + 1;                                           // ...and move on, whether or not this socket has more
+  }
+  chunkQCursor = i;
+  return performance.now() - t0;
+};
+// How much is waiting, for the readout. Cheap: the number of SOCKETS with work, not a walk of their sets.
+function chunkQueueDepth() {
+  let socks = 0, chunks = 0;
+  for (const room in roomSubs) { const m = roomSubs[room]; if (!m) continue; for (const e of m.values()) if (e.pending.size) { socks++; chunks += e.pending.size; } }
+  return { socks, chunks };
 }
 // Fan a cell-addressed diff out per socket, each getting only the records inside the chunks it subscribes to.
 // Cells are bucketed by chunk ONCE (O(cells)) and each socket then concatenates its own buckets (O(delivered)), so
@@ -5151,6 +5304,8 @@ function cfgWire() {
   return Object.assign({}, liquidCfg, {
     relayOn: !!relayCfg.on, relayHz: relayCfg.hz, relayCap: relayCfg.cap,
     relayFarHz: relayCfg.farHz, relayFarCap: relayCfg.farCap,
+    chunkQueue: !!interestCfg.queue, chunkQueueMs: interestCfg.queueMs, chunkQueueBatch: interestCfg.queueBatch,
+    chunkQStats: { sent: chunkQSent, drains: chunkQDrains, dropped: chunkQDropped },
     worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand, worldOverworld: !!worldCfg.overworld,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
@@ -7222,6 +7377,13 @@ io.on('connection', (socket) => {
       interestCfg.chunks = on;
     }
     if ('interestMargin' in patch) interestCfg.margin = Math.max(0, Math.min(64, patch.interestMargin | 0));
+    // ── the chunk work queue, A/B-able live for the same reason the budget's tiers are: "is terrain late because
+    // the queue is too small, or because generation is too slow?" is unanswerable from inside the game otherwise.
+    // ⚠️ Turning the queue OFF restores the old synchronous behaviour exactly — including its stalls. That is the
+    // point of keeping the switch, not an oversight.
+    if ('chunkQueue' in patch) interestCfg.queue = patch.chunkQueue ? 1 : 0;
+    if ('chunkQueueMs' in patch) interestCfg.queueMs = Math.max(0, Math.min(40, +patch.chunkQueueMs || 0));
+    if ('chunkQueueBatch' in patch) interestCfg.queueBatch = Math.max(1, Math.min(64, patch.chunkQueueBatch | 0));
     // VISIBILITY CAP (Phase 4). ⚠️ TURNING IT OFF MUST RE-OFFER, not merely stop selecting: every socket has peers
     //  it was told to mute, and those DataChannels are CLOSED. Going back to "everyone" without saying so would
     //  leave the mesh permanently short of exactly the connections the cap tore down.
@@ -8001,6 +8163,7 @@ io.on('connection', (socket) => {
     const geom = worldGeom(room), mine = chunkHashes(room), bad = [];
     for (let p = 0; p < geom.nPages && p < hashes.length; p++) if ((hashes[p] >>> 0) !== mine[p]) bad.push(p);
     socket.emit('chunk-verify-result', { mismatch: bad, total: geom.nPages });
+    if (queueChunks(room, socket.id, bad.slice(0, 12))) return;   // queued; the tick delivers it
     // Bounded: a badly out-of-date client repairs over several passes. The body of this used to be written out here;
     // Phase 4 needs exactly the same operation on every re-subscribe, so it moved into sendChunkContent and both
     // paths now share it (including the `clear` fix, which resync silently needed too).
@@ -8019,6 +8182,11 @@ io.on('connection', (socket) => {
     if (!room || !Array.isArray(chunks) || !chunks.length || !peekCells(room).terrain) return;
     const geom = worldGeom(room), want = [];
     for (const p of chunks) { const q = p | 0; if (q >= 0 && q < geom.nPages && !want.includes(q)) want.push(q); }
+    // 🟥 THIS IS THE ONE THAT MATTERED. `chunks` is a CLIENT-SUPPLIED list, so this call site decided how much
+    // uninterruptible work a single message could buy: 512 chunks, measured at 777,600 cells and a 107.8ms stall
+    // with generation OFF, and seconds with it on. Queued, the same request is spread over as many ticks as it
+    // needs and no single message can stall the server at all.
+    if (queueChunks(room, socket.id, want.slice(0, 512))) return;
     sendChunkContent(socket, room, want.slice(0, 512));
   });
   socket.on('avt-offer',  ({ to, sdp })       => { socket.to(to).emit('avt-offer',  { from: socket.id, sdp }); });
