@@ -2724,6 +2724,43 @@ const liquidCfg = {
   // room AT K=1 is estimated as its full-K EMA divided by this, not by K. Using K would under-estimate by
   // ~1.4× and fire tier 3 later than it should.
   budgetKGain: 6.5,
+  // ══ SECTORS — SCHEDULE ONE ROOM IN COLUMN STRIPS INSTEAD OF ALL AT ONCE ═══════════════════════════════════
+  // 🟥 THE PROBLEM, MEASURED ON THE LIVE SERVER 2026-08-08: the budget's only tools are "defer a whole room"
+  // (tier 1) and "rate-limit a whole room" (tier 3), and the Overworld is ONE room. So a flood at one end of the
+  // world throttles a puddle at the other, for someone who cannot see it and is nowhere near it.
+  // `probe_bystander.js` timed it: a flood in ANOTHER room costs a bystander 0.99× — nothing at all — while the
+  // same flood in the SAME room costs 2.98×. The harm is scheduling, not capacity.
+  //
+  // ⭐ WHAT THIS IS, AND WHAT IT IS NOT. A sector is a SCHEDULING unit, never a data one: one store, one set of
+  // per-cell arrays, one active set. Ticking a sector SWAPS the room's active set for just that sector's cells,
+  // runs the ordinary flow, and merges whatever is still moving back. `fineLiquidTickRoom` is untouched — it
+  // never learns that sectors exist, which is what keeps the hot loop out of this.
+  // ⚠️ Liquid crossing a boundary needs no special handling: a cell woken outside the sector being ticked lands
+  // in the same set and is bucketed to its own sector on the next tick.
+  //
+  // ⭐⭐ THE MECHANISM IS PER-SECTOR COST ATTRIBUTION, NOT THE PARTITIONING — isolated by mutation
+  // (`probe_sectors` part E, M3). Each sector carries its own `roomLiqCost` EMA, so tier 2 throttles K on the
+  // expensive sector while the cheap one keeps full K. Replacing the per-sector EMA with the room's takes the
+  // bystander from 0.99× back to 1.51× and DOUBLES the CPU. A build that partitions the cell lists but keeps one
+  // estimate per room gets half the benefit for all of the work.
+  //
+  // MEASURED (probe_sectors part E): bystander 2.37–4.30× shared → **0.97–0.99×** sectored, at **0.31–0.60× the
+  // CPU** — cheaper, because the puddle settles in 240 ticks instead of ~700 and then costs nothing at all.
+  // Mass is conserved exactly across a boundary and the seam is not special (per-column difference 1.40 beside
+  // the boundary vs 0.96 far from it, i.e. the difference is the update ORDER, not the seam).
+  //
+  // ⚠️ SHIPS OFF (0), per the branch convention for anything not behaviour-preserving. At 0 every line below is
+  // skipped and the scheduler is byte-for-byte what it was.
+  // WIDTH: part A measured a disturbance at ~220–440 columns, so 256 is the smallest width where a typical
+  // disturbance spans one or two sectors rather than being smeared over many. It is a dial; part E is how to
+  // re-decide it. ⚠️ Narrower is NOT strictly better — the partition is O(active) per tick either way, but more
+  // busy sectors means more per-sector tick calls, and a disturbance split across many sectors is advanced in
+  // more pieces.
+  // ⏭️ NOT YET SECTORED: powder, soil, reactions and sources still run per ROOM, which is exactly what they do
+  // today — so turning this on changes the FLOW's schedule and nothing else. Sectoring them means the same
+  // set-swap and they must be admitted with the SAME sector set as the flow, or a sector's reactions run without
+  // its flow. That is the next increment, not this one.
+  secW: 0,
   // ══ THE REACTION PASS'S OWN LIMITS ═══════════════════════════════════════════════════════════════════════
   // 🟥 MEASURED 2026-08-05 ON THE LIVE OVERWORLD (`scratchpad/probe_overworld_settle.js`): the flow loop ran in
   // **0% of perf windows** and turning the whole-room rate limiter OFF changed nothing — but turning REACTIONS
@@ -4239,6 +4276,96 @@ function estRoomCost(room) {
 // Stagger for tier 3, so two rate-limited rooms do not pick the same tick and stack their spikes. Any stable
 // per-room number does; this is the cheapest one that does not need state.
 function roomPhase(room) { let h = 0; for (let i = 0; i < room.length; i++) h = (h * 31 + room.charCodeAt(i)) | 0; return Math.abs(h); }
+// ── SECTORS: one room, scheduled in column strips ─────────────────────────────────────────────────────────────
+// A room key is a URL, so the separator has to be something a URL cannot contain — written as an ESCAPE, not a
+// literal, because a raw NUL byte in the source makes `grep` treat index.js as a binary file (F23).
+const SEC_SEP = '\u0000';
+let liqSecTicks = 0, liqSecDeferred = 0;
+// ⭐⭐ THE WORKING SET FOR ONE SECTOR'S TICK, AND IT REFUSES CELLS THAT ARE NOT ITS OWN.
+// 🟥 WITHOUT THIS THE SEAM IS MEASURABLY SPECIAL. A plain Set works and mass is still conserved — but a cell
+// woken ACROSS the boundary lands in the working set and is then advanced by all the REMAINING sub-steps of the
+// wrong sector's tick, on top of its own sector's tick next round. Measured (probe_sectors E2c): the per-column
+// difference beside a boundary was 2.55 against 1.25 elsewhere, i.e. the seam was 2.0x the far field — where a
+// genuinely broken boundary (mutation M1) is 4.7x and the per-sub-step-filtered variant is ~1.5x. Diverting on
+// WRITE makes it correct by construction rather than by tolerance, and costs one divide and one compare on a
+// path that was already a method call.
+// ⚠️ `super()` FIRST AND EMPTY, then the bounds, then the cells. `new Set(iterable)` calls `this.add` for every
+// element, so handing the cells to `super` would run `add` before `this.lo` existed and divert the whole sector.
+class SectorSet extends Set {
+  constructor(cells, lo, hi, frows, spill) {
+    super();
+    this.lo = lo; this.hi = hi; this.frows = frows; this.spill = spill;
+    for (const i of cells) super.add(i);
+  }
+  add(i) {
+    const c = (i / this.frows) | 0;
+    if (c < this.lo || c > this.hi) { this.spill.push(i); return this; }   // not ours — hand it back to the room
+    return super.add(i);
+  }
+}
+// Returns TRUE if it took responsibility for the room, so the caller skips its whole-room path.
+// ⭐ THE PARTITION IS A SET SWAP, NOT A PER-CELL TEST. The room's active set is replaced, for the duration of one
+// sector's tick, by a set holding only that sector's cells; `fineLiquidTickRoom` runs exactly as it always does
+// and never learns sectors exist. That is what keeps this out of the hot loop — the alternative (testing every
+// cell's sector inside the sub-step drain) re-scans the whole active set once per sub-step per sector.
+function liqTickSectors(room, kFull, budgetMs, tickT0) {
+  const st = cellsOf(room), act = st.fineActive;
+  if (!act || !act.size) return false;                  // nothing to schedule — let the ordinary path drop it
+  const SUB = st.fineSub || 1, FROWS = st.rows * SUB, W = Math.max(1, liquidCfg.secW | 0);
+  // ONE pass over the active set per tick. Column-major (increment 5), so a cell's column is `i / stride`.
+  const bySec = new Map();
+  for (const i of act) {
+    const s = (((i / FROWS) | 0) / W) | 0;
+    let a = bySec.get(s); if (a === undefined) bySec.set(s, a = []);
+    a.push(i);
+  }
+  // ⚠️ ONE BUSY SECTOR IS JUST THE ROOM. Splitting it buys nothing and costs a Set rebuild, and — more
+  // importantly — the whole-room path below carries tier 3 (whole-room rate limiting), which a single sector
+  // still needs. Falling through keeps that behaviour rather than reimplementing it here.
+  if (bySec.size < 2) return false;
+  // CHEAPEST FIRST. Measured as the load-bearing half: rotation alone admits a sector too big for the budget,
+  // which consumes all of it and defers everyone behind it (probe_sectors C1/D1).
+  const order = [...bySec.keys()].sort((a, b) => bySec.get(a).length - bySec.get(b).length);
+  const leftover = [];
+  act.clear();
+  for (const s of order) {
+    const cells = bySec.get(s);
+    if (budgetMs && performance.now() - tickT0 > budgetMs) {   // out of time: this sector waits for a later tick
+      for (const i of cells) leftover.push(i);
+      liqSecDeferred++;
+      continue;
+    }
+    const key = room + SEC_SEP + s;
+    // ⭐⭐ THE PER-SECTOR EMA IS THE MECHANISM. Mutation-tested (probe_sectors part E, M3): using the ROOM's cost
+    // here instead takes the bystander from 0.99× back to 1.51× and doubles the CPU. This one line is what lets
+    // tier 2 throttle K on the expensive sector while the cheap one keeps full K.
+    const est = roomLiqCost[key] || (liquidCfg.budgetSeed ? cells.length * liquidCfg.cellCostUs / 1000 : 0);
+    let kUsed = kFull;
+    if (budgetMs && kFull > 1 && est > budgetMs) {
+      kUsed = Math.max(1, Math.floor(kFull * budgetMs / est));
+      liquidCfg.fineLevelSteps = kUsed;
+    }
+    if (kUsed < liqPerf.kMin) liqPerf.kMin = kUsed;
+    const t0 = budgetMs ? performance.now() : 0;
+    st.fineActive = new SectorSet(cells, s * W, s * W + W - 1, FROWS, leftover);
+    fineLiquidTickRoom(room, SUB);
+    // Whatever is STILL moving comes back — including cells this sector woke in a NEIGHBOUR, which is why
+    // liquid crossing a boundary needs no special handling. They are bucketed to their own sector next tick.
+    // ⚠️ `fineLiquidTickRoom` may have called `dropFineActive`, which nulls the field; null means empty here.
+    const after = st.fineActive;
+    if (after) for (const i of after) leftover.push(i);
+    st.fineActive = act;                                // restore before anything else can observe the swap
+    if (kUsed !== kFull) { liquidCfg.fineLevelSteps = kFull; liqK2Throttles++; }
+    if (budgetMs) { const d = (performance.now() - t0) * (kFull / kUsed); roomLiqCost[key] = roomLiqCost[key] ? roomLiqCost[key] * 0.7 + d * 0.3 : d; }
+    liqSecTicks++;
+  }
+  st.fineActive = act;
+  for (const i of leftover) act.add(i);
+  // ⚠️ `dropFineActive` (called from inside the sector ticks) removes the room from the registry the caller is
+  // iterating. Put it back if there is still work, or drop it properly if there is not.
+  if (act.size) cellRooms.fine.add(room); else dropFineActive(room);
+  return true;
+}
 const runLiquidTick = () => {
   // ⭐⭐ CHUNKS FIRST, AND BEFORE EVERY GUARD BELOW. Three reasons, all of them load-bearing:
   //  1. BEFORE `simNoGen(true)`. That flag makes a page miss return ZEROS instead of building the page (see
@@ -4395,6 +4522,9 @@ const runLiquidTick = () => {
     // Uniform is the point: fewer sub-steps slows the whole room's liquid evenly, where processing only
     // some of its cells would advance one end of a pool and not the other.
     const _kFull = liquidCfg.fineLevelSteps;
+    // ⭐⭐ SECTORS. Schedule this room in column strips instead of all at once (liquidCfg.secW; 0 = off, and at 0
+    // this whole branch is skipped and the code below is exactly what it always was).
+    if (liquidCfg.secW > 0 && liqTickSectors(room, _kFull, _budgetMs, _tickT0)) continue;
     let _kUsed = _kFull;
     if (_budgetMs && _kFull > 1) {
       const est = estRoomCost(room);   // ⭐ seeded for a room with no EMA yet — its first tick is its biggest
@@ -4506,6 +4636,10 @@ const runLiquidTick = () => {
         chunkQWait: chunkQueueDepth(),
         // The K tier 2 actually USED this window (see kMin) — `steps` below is the configured maximum.
         stepsUsed: liqPerf.kMin,
+        // SECTORS: how many sector-ticks ran and how many were deferred for want of budget. `secW` 0 = off, and
+        // both counters stay at 0 — so a non-zero reading is proof the mechanism fired, not an inference from
+        // an outcome (the same reason liqRateSkips and liqK2Throttles exist).
+        secW: liquidCfg.secW, secTicks: liqSecTicks, secDeferred: liqSecDeferred,
         // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
         // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
         steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
@@ -4533,6 +4667,7 @@ const runLiquidTick = () => {
         pendAgeMs: Math.max(0, (liquidTickCount - (liqPerf.pendAt || 0)) * Math.max(1, liquidCfg.tickMs | 0)) };
       console.log(`[liq-perf] rooms=${_stat.rooms} sim/tick avg=${_stat.avgMs}ms max=${_stat.maxMs}ms  emit=${_stat.kbs}KB/s` +
         (`  |  LIQUID K=${_stat.steps}${_stat.stepsUsed < _stat.steps ? '(used ' + _stat.stepsUsed + ')' : ''} active=${_stat.fineActive} liquid/tick avg=${_stat.fineAvgMs}ms max=${_stat.fineMaxMs}ms emit=${_stat.fineKbs}KB/s changed/tick=${_stat.fineChanged}`) +
+        (_stat.secW ? `  |  SECTORS w=${_stat.secW} ticked=${_stat.secTicks} deferred=${_stat.secDeferred}` : '') +
         (_stat.chunkQOn ? `  |  CHUNKQ ${_stat.chunkQMs}ms/tick max=${_stat.chunkQMaxMs} of ${_stat.chunkQBudgetMs}ms · sent=${_stat.chunkQSent} · waiting ${_stat.chunkQWait.chunks} for ${_stat.chunkQWait.socks} client(s)` + (_stat.chunkQDropped ? ` · dropped=${_stat.chunkQDropped}` : '') : '') +
         (`  |  REACT avg=${_stat.reactAvgMs}ms max=${_stat.reactMaxMs}ms capped=${_stat.reactSkips}`) +
         (`  |  SPREAD pending=${_stat.pending} chunks=${_stat.actChunks} cols=${_stat.actCols}`) +
@@ -5304,6 +5439,7 @@ function cfgWire() {
   return Object.assign({}, liquidCfg, {
     relayOn: !!relayCfg.on, relayHz: relayCfg.hz, relayCap: relayCfg.cap,
     relayFarHz: relayCfg.farHz, relayFarCap: relayCfg.farCap,
+    secTicks: liqSecTicks, secDeferred: liqSecDeferred,
     chunkQueue: !!interestCfg.queue, chunkQueueMs: interestCfg.queueMs, chunkQueueBatch: interestCfg.queueBatch,
     chunkQStats: { sent: chunkQSent, drains: chunkQDrains, dropped: chunkQDropped },
     worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand, worldOverworld: !!worldCfg.overworld,
@@ -7336,6 +7472,10 @@ io.on('connection', (socket) => {
     if ('cellCostUs' in patch) liquidCfg.cellCostUs = Math.max(1, Math.min(500, +patch.cellCostUs || 23));
     if ('budgetRateMax' in patch) liquidCfg.budgetRateMax = Math.max(2, Math.min(64, patch.budgetRateMax | 0));
     if ('budgetCheapFirst' in patch) liquidCfg.budgetCheapFirst = patch.budgetCheapFirst ? 1 : 0;
+    // ⭐ SECTORS. A/B-able live for the same reason the budget's tiers are: "is my water slow because someone
+    // else flooded a cave, or because it is just a lot of water?" is otherwise unanswerable from inside the game.
+    // 0 = off, and off is byte-for-byte the old scheduler.
+    if ('secW' in patch) liquidCfg.secW = Math.max(0, Math.min(65536, patch.secW | 0));
     // The two reaction-pass limits ride the same wire and for the same reason: "is the liquid frozen because of
     // the flow or because reactions ate the tick ahead of it" is otherwise unanswerable from inside the game,
     // and that is precisely the question that cost this track a session.
