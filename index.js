@@ -2756,11 +2756,13 @@ const liquidCfg = {
   // re-decide it. ⚠️ Narrower is NOT strictly better — the partition is O(active) per tick either way, but more
   // busy sectors means more per-sector tick calls, and a disturbance split across many sectors is advanced in
   // more pieces.
-  // ⏭️ NOT YET SECTORED: powder, soil, reactions and sources still run per ROOM, which is exactly what they do
-  // today — so turning this on changes the FLOW's schedule and nothing else. Sectoring them means the same
-  // set-swap and they must be admitted with the SAME sector set as the flow, or a sector's reactions run without
-  // its flow. That is the next increment, not this one.
-  secW: 0,
+  // ✅ 2026-08-09 — SOURCES, CHEMISTRY, POWDER AND SOIL ARE SECTORED TOO, and a strip now takes its WHOLE turn
+  // (see `liqTickSectors`), so nothing in a strip can advance while that strip's water is frozen.
+  // ⭐ ON at 256. Measured on the shipped switch (probe_sectors part E): a bystander sharing a world with a big
+  // spill goes from 3.06× slower to 1.05×, on 0.52× the CPU. Part A says 256 is the smallest width where a
+  // typical disturbance (220–440 columns) spans only one or two strips. Live dial on the debug panel — 0 is the
+  // old whole-room behaviour, and `probe_fine_identity` proves 0 is bit-identical to before this existed.
+  secW: 256,
   // ══ THE REACTION PASS'S OWN LIMITS ═══════════════════════════════════════════════════════════════════════
   // 🟥 MEASURED 2026-08-05 ON THE LIVE OVERWORLD (`scratchpad/probe_overworld_settle.js`): the flow loop ran in
   // **0% of perf windows** and turning the whole-room rate limiter OFF changed nothing — but turning REACTIONS
