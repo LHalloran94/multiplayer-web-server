@@ -4280,6 +4280,7 @@ function roomPhase(room) { let h = 0; for (let i = 0; i < room.length; i++) h = 
 // A room key is a URL, so the separator has to be something a URL cannot contain — written as an ESCAPE, not a
 // literal, because a raw NUL byte in the source makes `grep` treat index.js as a binary file (F23).
 const SEC_SEP = '\u0000';
+const EMPTY_CELLS = [];        // shared stand-in for "this strip has no cells in that registry" — never written to
 let liqSecTicks = 0, liqSecDeferred = 0;
 // ⭐⭐ THE WORKING SET FOR ONE SECTOR'S TICK, AND IT REFUSES CELLS THAT ARE NOT ITS OWN.
 // 🟥 WITHOUT THIS THE SEAM IS MEASURABLY SPECIAL. A plain Set works and mass is still conserved — but a cell
@@ -4303,43 +4304,78 @@ class SectorSet extends Set {
     return super.add(i);
   }
 }
-// Returns TRUE if it took responsibility for the room, so the caller skips its whole-room path.
-// ⭐ THE PARTITION IS A SET SWAP, NOT A PER-CELL TEST. The room's active set is replaced, for the duration of one
-// sector's tick, by a set holding only that sector's cells; `fineLiquidTickRoom` runs exactly as it always does
-// and never learns sectors exist. That is what keeps this out of the hot loop — the alternative (testing every
-// cell's sector inside the sub-step drain) re-scans the whole active set once per sub-step per sector.
-function liqTickSectors(room, kFull, budgetMs, tickT0) {
-  const st = cellsOf(room), act = st.fineActive;
-  if (!act || !act.size) return false;                  // nothing to schedule — let the ordinary path drop it
-  const SUB = st.fineSub || 1, FROWS = st.rows * SUB, W = Math.max(1, liquidCfg.secW | 0);
-  // ONE pass over the active set per tick. Column-major (increment 5), so a cell's column is `i / stride`.
-  const bySec = new Map();
-  for (const i of act) {
-    const s = (((i / FROWS) | 0) / W) | 0;
-    let a = bySec.get(s); if (a === undefined) bySec.set(s, a = []);
-    a.push(i);
+// ⭐⭐ EVERY PER-CELL REGISTRY A STRIP'S TURN TOUCHES, IN ONE TABLE.
+// 🟥 The failure this whole increment exists to prevent is "sectored here, whole-room there" — a strip's
+// chemistry firing, or its sand falling, while its water is frozen for want of budget. That is the same failure
+// tier 1 already documents at ROOM granularity ("doing it in the flow loop instead would tick a room's reactions
+// without its flow"), and the only defence that does not rot is for the executor never to name a registry
+// directly. Bringing a new registry into lockstep is one line here.
+// ⚠️ SOURCES ARE NOT IN THIS TABLE — `src` is a Map (cell → {rank, rate}), not a Set, and the source tick
+// DELETES from it. It is handled separately below, with its deletions written back.
+const SEC_REGS = [
+  { f: 'fineActive',   get: fineSet,      drop: dropFineActive, reg: 'fine'   },
+  { f: 'fineReact',    get: fineReactSet, drop: dropFineReact,  reg: 'react'  },
+  { f: 'fineFire',     get: fineFireSet,  drop: dropFineFire,   reg: 'fire'   },
+  { f: 'powderActive', get: powderSet,    drop: dropPowderSet,  reg: 'powder' },
+  { f: 'soilActive',   get: soilSet,      drop: dropSoilSet,    reg: 'soil'   },
+];
+// Bucket a room's work into column strips, and decide the order they get their turn in. Returns null when the
+// room is not worth splitting, in which case the caller keeps the ordinary whole-room path.
+// ⚠️ PLANNED BEFORE THE TICK'S FIRST PASS RUNS, not inside the flow loop where the split used to live. A
+// sectored room now does its sources, chemistry, flow, powder and soil strip by strip, so every whole-room loop
+// in the tick has to know to leave it alone BEFORE the first of them runs.
+// ⭐ THE ROSTER IS THE UNION OF ALL SIX REGISTRIES, not just the flowing liquid. A strip whose only work is a
+// falling grain, a seeded contact or a source must still get a turn, or that work never happens at all.
+function planRoomSectors(room) {
+  const st = cellsOf(room);
+  const W = Math.max(1, liquidCfg.secW | 0), SUB = st.fineSub || 1, FROWS = st.rows * SUB;
+  if (!FROWS) return null;
+  // ONE pass per registry per tick. Column-major (increment 5), so a cell's column is `i / stride`.
+  const secOf = (i) => (((i / FROWS) | 0) / W) | 0;
+  const secs = new Set(), buckets = [];
+  for (const d of SEC_REGS) {
+    const s = st[d.f], m = new Map();
+    if (s) for (const i of s) { const k = secOf(i); let a = m.get(k); if (a === undefined) { m.set(k, a = []); secs.add(k); } a.push(i); }
+    buckets.push(m);
   }
+  const srcBySec = new Map();
+  if (st.src) for (const i of st.src.keys()) { const k = secOf(i); let a = srcBySec.get(k); if (a === undefined) { srcBySec.set(k, a = []); secs.add(k); } a.push(i); }
   // ⚠️ ONE BUSY SECTOR IS JUST THE ROOM. Splitting it buys nothing and costs a Set rebuild, and — more
-  // importantly — the whole-room path below carries tier 3 (whole-room rate limiting), which a single sector
-  // still needs. Falling through keeps that behaviour rather than reimplementing it here.
-  if (bySec.size < 2) return false;
+  // importantly — the whole-room path carries tier 3 (whole-room rate limiting), which a single sector still
+  // needs. Returning null keeps that behaviour rather than reimplementing it here.
+  if (secs.size < 2) return null;
   // CHEAPEST FIRST. Measured as the load-bearing half: rotation alone admits a sector too big for the budget,
   // which consumes all of it and defers everyone behind it (probe_sectors C1/D1).
-  const order = [...bySec.keys()].sort((a, b) => bySec.get(a).length - bySec.get(b).length);
-  const leftover = [];
-  act.clear();
+  const cost = (k) => { let n = 0; for (const m of buckets) { const a = m.get(k); if (a) n += a.length; } return n; };
+  return { W, SUB, FROWS, buckets, srcBySec, order: [...secs].sort((a, b) => cost(a) - cost(b)) };
+}
+// ⭐ THE PARTITION IS A SET SWAP, NOT A PER-CELL TEST. Each registry is replaced, for the duration of one
+// strip's turn, by a set holding only that strip's cells; every tick function runs exactly as it always has and
+// none of them ever learns sectors exist. That is what keeps this out of the hot loops — the alternative
+// (testing every cell's sector inside the sub-step drain) re-scans the whole active set once per sub-step.
+// ⭐⭐ A STRIP TAKES ITS WHOLE TURN, IN THE SAME ORDER THE WHOLE-ROOM TICK USES: sources top up, chemistry runs
+// on last tick's movers, water flows, chemistry runs again on the contacts the flow just made, grains fall, soil
+// soaks. A strip therefore gets either all of that or none of it, and lockstep is a property of the structure
+// rather than of two schedules agreeing.
+function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
+  const st = cellsOf(room);
+  const { W, SUB, FROWS, buckets, srcBySec, order } = plan;
+  const nReg = SEC_REGS.length;
+  const saved = [], leftover = [];
+  for (let n = 0; n < nReg; n++) { const s = st[SEC_REGS[n].f]; saved.push(s); leftover.push([]); if (s) s.clear(); }
+  const savedSrc = st.src;
   for (const s of order) {
-    const cells = bySec.get(s);
-    if (budgetMs && performance.now() - tickT0 > budgetMs) {   // out of time: this sector waits for a later tick
-      for (const i of cells) leftover.push(i);
+    if (budgetMs && performance.now() - tickT0 > budgetMs) {   // out of time: this strip waits for a later tick
+      for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
       liqSecDeferred++;
       continue;
     }
-    const key = room + SEC_SEP + s;
+    const key = room + SEC_SEP + s, lo = s * W, hi = s * W + W - 1;
     // ⭐⭐ THE PER-SECTOR EMA IS THE MECHANISM. Mutation-tested (probe_sectors part E, M3): using the ROOM's cost
-    // here instead takes the bystander from 0.99× back to 1.51× and doubles the CPU. This one line is what lets
-    // tier 2 throttle K on the expensive sector while the cheap one keeps full K.
-    const est = roomLiqCost[key] || (liquidCfg.budgetSeed ? cells.length * liquidCfg.cellCostUs / 1000 : 0);
+    // here instead doubles the CPU — it is what lets tier 2 throttle K on the expensive strip while the cheap
+    // one keeps full K, and no settle-time check can see it break (which is why E3 asserts the CPU directly).
+    const fineCells = buckets[0].get(s);
+    const est = roomLiqCost[key] || (liquidCfg.budgetSeed && fineCells ? fineCells.length * liquidCfg.cellCostUs / 1000 : 0);
     let kUsed = kFull;
     if (budgetMs && kFull > 1 && est > budgetMs) {
       kUsed = Math.max(1, Math.floor(kFull * budgetMs / est));
@@ -4347,24 +4383,43 @@ function liqTickSectors(room, kFull, budgetMs, tickT0) {
     }
     if (kUsed < liqPerf.kMin) liqPerf.kMin = kUsed;
     const t0 = budgetMs ? performance.now() : 0;
-    st.fineActive = new SectorSet(cells, s * W, s * W + W - 1, FROWS, leftover);
-    fineLiquidTickRoom(room, SUB);
-    // Whatever is STILL moving comes back — including cells this sector woke in a NEIGHBOUR, which is why
-    // liquid crossing a boundary needs no special handling. They are bucketed to their own sector next tick.
-    // ⚠️ `fineLiquidTickRoom` may have called `dropFineActive`, which nulls the field; null means empty here.
-    const after = st.fineActive;
-    if (after) for (const i of after) leftover.push(i);
-    st.fineActive = act;                                // restore before anything else can observe the swap
+    for (let n = 0; n < nReg; n++) st[SEC_REGS[n].f] = new SectorSet(buckets[n].get(s) || EMPTY_CELLS, lo, hi, FROWS, leftover[n]);
+    const srcKeys = srcBySec.get(s);
+    st.src = null;
+    if (srcKeys && savedSrc) { const m = new Map(); for (const i of srcKeys) if (savedSrc.has(i)) m.set(i, savedSrc.get(i)); if (m.size) st.src = m; }
+    // ⚠️ EACH PASS IS GUARDED ON ITS OWN SET BEING NON-EMPTY, and read LIVE rather than from the plan — the flow
+    // wakes contacts the post-reaction pass then has to see. It also keeps `sourceTickRoom` unreached when a
+    // strip has no sources, which matters beyond speed: `sourceTickRoomFine` lives OUTSIDE the block the probe
+    // rigs slice, so calling it there would be a ReferenceError (the sliced-block boundary, eighth time).
+    if (st.src && st.src.size) sourceTickRoom(room);
+    if (doReact && ((st.fineActive && st.fineActive.size) || (st.fineReact && st.fineReact.size) || (st.fineFire && st.fineFire.size))) fineReactTickRoom(room, SUB);
+    if (st.fineActive && st.fineActive.size) fineLiquidTickRoom(room, SUB);
+    if (doReact && ((st.fineActive && st.fineActive.size) || (st.fineReact && st.fineReact.size) || (st.fineFire && st.fineFire.size))) fineReactTickRoom(room, SUB);
+    if (st.powderActive && st.powderActive.size) powderTickRoom(room);
+    if (doSoil && st.soilActive && st.soilActive.size) soilTickRoom(room);
+    // Whatever is STILL moving comes back — including cells this strip woke in a NEIGHBOUR, which is why liquid
+    // crossing a boundary needs no special handling. They are bucketed to their own strip next tick.
+    // ⚠️ A tick function may have called drop*(), which NULLS the field; null means empty here.
+    for (let n = 0; n < nReg; n++) { const after = st[SEC_REGS[n].f]; if (after) for (const i of after) leftover[n].push(i); }
+    // Sources are the one registry the tick DELETES from (a source buried by terrain removes itself), so the
+    // deletions are written back to the room's real map rather than being thrown away with the strip's copy.
+    if (srcKeys && savedSrc) { const m = st.src; for (const i of srcKeys) if (!m || !m.has(i)) savedSrc.delete(i); }
+    st.src = savedSrc;                                  // restore before anything else can observe the swap
     if (kUsed !== kFull) { liquidCfg.fineLevelSteps = kFull; liqK2Throttles++; }
     if (budgetMs) { const d = (performance.now() - t0) * (kFull / kUsed); roomLiqCost[key] = roomLiqCost[key] ? roomLiqCost[key] * 0.7 + d * 0.3 : d; }
     liqSecTicks++;
   }
-  st.fineActive = act;
-  for (const i of leftover) act.add(i);
-  // ⚠️ `dropFineActive` (called from inside the sector ticks) removes the room from the registry the caller is
-  // iterating. Put it back if there is still work, or drop it properly if there is not.
-  if (act.size) cellRooms.fine.add(room); else dropFineActive(room);
-  return true;
+  // ⚠️ drop*() (called from inside the strip turns) removes the room from the registry the CALLER is iterating.
+  // Put each one back if there is still work, or drop it properly if there is not.
+  for (let n = 0; n < nReg; n++) {
+    const d = SEC_REGS[n], rest = leftover[n];
+    st[d.f] = saved[n];
+    if (rest.length) { const s = st[d.f] || d.get(room); for (const i of rest) s.add(i); st[d.f] = s; }
+    const s = st[d.f];
+    if (s && s.size) cellRooms[d.reg].add(room); else if (s) d.drop(room);
+  }
+  st.src = savedSrc;
+  if (savedSrc) { if (savedSrc.size) cellRooms.src.add(room); else dropSrcMap(room); }
 }
 const runLiquidTick = () => {
   // ⭐⭐ CHUNKS FIRST, AND BEFORE EVERY GUARD BELOW. Three reasons, all of them load-bearing:
@@ -4392,6 +4447,11 @@ const runLiquidTick = () => {
   const _t0 = liquidCfg.perfLog ? performance.now() : 0;
   const _genAtTickStart = genPagesProduced; genMark();      // see liqTickGenPages: how much WORLD this tick built
   liquidTickCount++;
+  // ⚠️ BUMPED HERE, NOT AT THE POWDER LOOP WHERE IT USED TO LIVE. A sectored room runs its powder inside the
+  // flow loop, i.e. BEFORE that loop is reached, and `powderTickRoom` reads this counter for its symmetry
+  // breaking — so leaving the bump where it was gave sectored and unsectored rooms different tick numbers in
+  // the same tick. Still exactly one bump per tick, so the value every reader sees is unchanged.
+  powderTickCount++;
   // ⭐ Phase 6 inc 4b. Chunks produced on demand since the last tick get their liquid HERE, before anything
   // starts iterating an active-cell Set — a page fault can happen from deep inside the flow loop, and seeding
   // writes into the very Set that loop is walking. No-op (one `.size` test) unless on-demand generation is on.
@@ -4476,8 +4536,24 @@ const runLiquidTick = () => {
   // same membership in the same first-touch order (see the registries in the cell-store block). Where the body can
   // drop the room it is iterating, the registry is SNAPSHOTTED and re-checked per room, which is exactly what
   // `for…in` did: V8 enumerates a cached key list but re-tests existence before yielding each key.
+  // ⭐⭐ SECTORS — PLANNED HERE, BEFORE THE TICK'S FIRST PASS, AND THAT POSITION IS THE POINT.
+  // A sectored room does its sources, chemistry, flow, powder and soil STRIP BY STRIP (see `liqTickSectors`), so
+  // every whole-room loop below has to know to leave it alone before the first of them runs — otherwise a strip
+  // the budget froze still gets its chemistry and its falling sand, which is the exact failure tier 1 documents
+  // at room granularity. Every loop below therefore tests `_secPlans` alongside `_deferred`.
+  // ⚠️ Only rooms with FLOWING LIQUID are candidates: `cellRooms.fine` is the registry every other one is a
+  // subset of in practice, and a room reached only through `src`/`powder` keeps the whole-room path unchanged.
+  // ⚠️ `secW = 0` leaves this Map empty and every path below byte-identical to what it always was —
+  // `probe_fine_identity` compares 500 ticks against a golden file to prove exactly that.
+  const _secPlans = new Map();
+  if (liquidCfg.secW > 0) for (const room of cellRooms.fine) {
+    if (_deferred.has(room)) continue;
+    const _p = planRoomSectors(room);
+    if (_p) _secPlans.set(room, _p);
+  }
+  const _secDoSoil = (liquidTickCount & 3) === 0;   // the soil gate, read ONCE so a strip's turn uses the same answer the whole-room loop does
   genSince('drain');
-  for (const room of Array.from(cellRooms.src)) { if (!cellRooms.src.has(room)) continue; if (_deferred && _deferred.has(room)) continue; sourceTickRoom(room); }
+  for (const room of Array.from(cellRooms.src)) { if (!cellRooms.src.has(room)) continue; if (_deferred && _deferred.has(room)) continue; if (_secPlans.has(room)) continue; sourceTickRoom(room); }
   genSince('src');   // sources top up first, so their liquid is ordinary pooled liquid to everything below
   // FINE-CELL liquid (experimental) — a parallel sim in its own arrays, ticked only when liquidCfg.fine.
   // Timed SEPARATELY from the coarse sim so the Perf tab can isolate the fine cost at various fineLevelSteps (K).
@@ -4499,7 +4575,7 @@ const runLiquidTick = () => {
   const _reactInner = () => {
     const seenRooms = new Set();
     for (const reg of [cellRooms.fine, cellRooms.react, cellRooms.fire])   // a room may be quiet but still have a seeded contact or a burning slick
-      for (const room of Array.from(reg)) { if (!reg.has(room) || seenRooms.has(room) || (_deferred && _deferred.has(room))) continue; seenRooms.add(room); fineReactTickRoom(room, cellsOf(room).fineSub || 1); }
+      for (const room of Array.from(reg)) { if (!reg.has(room) || seenRooms.has(room) || (_deferred && _deferred.has(room)) || _secPlans.has(room)) continue; seenRooms.add(room); fineReactTickRoom(room, cellsOf(room).fineSub || 1); }
   };
   if (liquidCfg.reactions) _react();
   for (const room of Array.from(cellRooms.fine)) {
@@ -4522,9 +4598,12 @@ const runLiquidTick = () => {
     // Uniform is the point: fewer sub-steps slows the whole room's liquid evenly, where processing only
     // some of its cells would advance one end of a pool and not the other.
     const _kFull = liquidCfg.fineLevelSteps;
-    // ⭐⭐ SECTORS. Schedule this room in column strips instead of all at once (liquidCfg.secW; 0 = off, and at 0
-    // this whole branch is skipped and the code below is exactly what it always was).
-    if (liquidCfg.secW > 0 && liqTickSectors(room, _kFull, _budgetMs, _tickT0)) continue;
+    // ⭐⭐ SECTORS. This room is scheduled in column strips instead of all at once, and the strip's turn covers
+    // its sources, chemistry, powder and soil as well as its flow — which is why the loops above and below skip
+    // it. Planned before the tick's first pass; `secW = 0` leaves `_secPlans` empty and the code below is
+    // exactly what it always was.
+    const _plan = _secPlans.get(room);
+    if (_plan) { liqTickSectors(room, _plan, _kFull, _budgetMs, _tickT0, !!liquidCfg.reactions, _secDoSoil); continue; }
     let _kUsed = _kFull;
     if (_budgetMs && _kFull > 1) {
       const est = estRoomCost(room);   // ⭐ seeded for a room with no EMA yet — its first tick is its biggest
@@ -4602,9 +4681,9 @@ const runLiquidTick = () => {
     liqPerf.pendAt = liquidTickCount;  // …and the reading is STAMPED, so a stale one can say so instead of reading 0
   }
   genSince('flow');
-  powderTickCount++; for (const room of Array.from(cellRooms.powder)) { if (!cellRooms.powder.has(room)) continue; if (_deferred && _deferred.has(room)) continue; powderTickRoom(room); }   // powder runs in lockstep with liquid → consistent gravity
+  for (const room of Array.from(cellRooms.powder)) { if (!cellRooms.powder.has(room)) continue; if (_deferred && _deferred.has(room)) continue; if (_secPlans.has(room)) continue; powderTickRoom(room); }   // powder runs in lockstep with liquid → consistent gravity
   genSince('powder');
-  if ((liquidTickCount & 3) === 0) for (const room of Array.from(cellRooms.soil)) { if (!cellRooms.soil.has(room)) continue; if (_deferred && _deferred.has(room)) continue; soilTickRoom(room); }
+  if (_secDoSoil) for (const room of Array.from(cellRooms.soil)) { if (!cellRooms.soil.has(room)) continue; if (_deferred && _deferred.has(room)) continue; if (_secPlans.has(room)) continue; soilTickRoom(room); }
   if (liquidCfg.perfLog && _deferred) liqPerf.deferred += _deferred.size;
   genSince('soil');
   liqTickGenPages += genPagesProduced - _genAtTickStart;
