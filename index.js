@@ -17,6 +17,9 @@ const path = require('path');
 const MWSim = require('./avatar-sim'); // shared authoritative avatar simulation
 const WORLDGEN = require('./worldgen'); // Phase 6 inc 4: chunk-on-demand world generation (the Overworld's generator)
 const DOMAINS = require('./domains');   // Phase 6 inc 6: which column of the Overworld a site spawns at
+const MATGEN = require('./materials');  // Phase 6 world-redesign port inc 1: the generator's materials, ids 18..89
+                                        // ⚠️ ALSO INLINED INTO THE CLIENT BUNDLE by extension/build.js (as MWMats),
+                                        // the same way avatar-sim.js is. One table, two readers — never copy rows out.
 
 const app = express();
 const server = http.createServer(app);
@@ -2474,7 +2477,9 @@ const domains = DOMAINS.makeDomains({
 function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', worldGeom(room), room)); }
 function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', worldGeom(room), room)); }
 // Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
-const BUILTIN_STRENGTH = { 2: 3, 4: 2, 5: 2, 17: 2 };  // stone tough, ice/mud/drain middling (matches client TERRAIN_MATS); others 1
+// ⚠️ 1..17 are the LEVEL CREATOR's built-ins and are listed here; 18..89 are the world generator's and are
+// merged in from materials.js, which is the one place they are declared. Anything absent is strength 1.
+const BUILTIN_STRENGTH = Object.assign({ 2: 3, 4: 2, 5: 2, 17: 2 }, MATGEN.STRENGTH);  // stone tough, ice/mud/drain middling (matches client TERRAIN_MATS); others 1
 function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return BUILTIN_STRENGTH[v] || 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
 const BUILTIN_UNBREAKABLE = new Set([7, 13]);          // built-in conveyor belts are unbreakable (matches client TERRAIN_MATS)
 function matBreakableSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return !BUILTIN_UNBREAKABLE.has(v); const d = mats[v]; return !d || d.breakable !== false; }
@@ -3085,7 +3090,22 @@ function sourceTickRoom(room) {
 // real solids (dig / collision / render unchanged); movement broadcasts over the existing `liquid-cells` wire (it already
 // carries arbitrary gridId changes — the client sets grid+hp from it). Only PLAYER edits (paint/dig) + cascades wake powder,
 // so generated worlds keep their designed shape until disturbed. Validated in scratchpad/powder_sim.js (18/18, fuzz 40/40).
-const isPowderId = (v) => v === 3 || v === 8;
+// ⭐ TWO QUESTIONS, NOT ONE — and the world redesign is what forced them apart.
+//   isPowderId(v)     "does this cell MOVE like a grain?"   sand · snow · scree · ash · AND EVERY PLANT
+//   isPowderSeedId(v) "should generation WAKE this cell?"   sand · snow · scree · ash only
+// A canopy overhangs — that is what a canopy is — so plant cells with air beneath them are the shape, not a
+// defect. Measured in the spike: 6.1% of all falling cells have no support and `frond` (a palm crown, which is
+// nothing but overhang) is 81.6%. Reseeding plant cells the way sand is reseeded would shed every forest in the
+// world on the first tick. So plants get the same MOVEMENT and a different WAKE: they enter the active set only
+// when a neighbouring cell is EDITED, which is exactly the cut-the-trunk case the user asked for.
+// ⚠️ THE SLICED-BLOCK SEAM (the failure this file has hit eight times). These tables are filled for the two
+// built-in powders HERE, inside the block the probe rigs compile on their own, and topped up from
+// materials.js BELOW the block — the declare-a-stub-and-reassign pattern `wireFanout`/`drainGenLiquid` use.
+// A rig therefore sees exactly today's behaviour (sand + snow) instead of a ReferenceError.
+const POWDER_MOVE = new Uint8Array(256), POWDER_SEED = new Uint8Array(256), MAT_HANGS = new Uint8Array(256);
+POWDER_MOVE[3] = POWDER_MOVE[8] = POWDER_SEED[3] = POWDER_SEED[8] = 1;
+const isPowderId = (v) => POWDER_MOVE[v] === 1;
+const isPowderSeedId = (v) => POWDER_SEED[v] === 1;
 // (`powderActive` on the cell store: Set<cellIndex> of powder cells that might still move.)
 let powderTickCount = 0;                               // ticked in lockstep with the liquid sim → grains fall at the same gravity speed
 function powderSet(room) { const s = cellsOf(room); if (!s.powderActive) { s.powderActive = new Set(); cellRooms.powder.add(room); } return s.powderActive; }
@@ -3093,7 +3113,9 @@ function powderSet(room) { const s = cellsOf(room); if (!s.powderActive) { s.pow
 // unsupported grains. The r0-1 margin seeds the cascade — each moving grain then wakes the one above it.
 function activatePowderRect(room, grid, c0, r0, c1, r1) {
   const COLS = grid.geom.cols, ROWS = grid.geom.rows;
-  c0 = Math.max(0, c0); r0 = Math.max(0, r0 - 1); c1 = Math.min(COLS - 1, c1); r1 = Math.min(ROWS - 1, r1);
+  // …and one row BELOW as well, for materials held up from above (vine): cutting its anchor is an edit in the
+  // rect, and the cell that has to fall is the one under the last cell the brush touched.
+  c0 = Math.max(0, c0); r0 = Math.max(0, r0 - 1); c1 = Math.min(COLS - 1, c1); r1 = Math.min(ROWS - 1, r1 + 1);
   const s = powderSet(room);
   for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const i = c * ROWS + r; if (isPowderId(grid.g(i))) s.add(i); }
   if (!s.size) dropPowderSet(room);
@@ -3161,7 +3183,7 @@ function seedPowderActivity(room) {
   const ROWS = grid.geom.rows;
   const set = powderSet(room);
   grid.scan((i, _o, page) => {
-    if (!isPowderId(page[_o])) return;
+    if (!isPowderSeedId(page[_o])) return;              // SEED, not MOVE: never wake a plant at generation
     if ((i % ROWS) + 1 >= ROWS) return;                 // resting on the bottom row of the world
     const below = grid.g(i + 1);                        // column-major: +1 is the cell BELOW
     if (!below || isFluidId(below)) set.add(i);
@@ -3216,7 +3238,14 @@ function powderTickRoom(room) {
   const list = Array.from(active); active.clear();
   list.sort((a, b) => (b % ROWS) - (a % ROWS));   // bottom-up so a falling column cascades in a single pass
   const changedSet = new Set(), fineChanged = new Set();
-  const wakeAround = (i) => { const r = i % ROWS; if (r <= 0) return; for (const j of [i - 1, i - ROWS - 1, i + ROWS - 1]) if (j >= 0 && j < nn && isPowderId(peekG(j))) active.add(j); };   // wake grains above the vacated cell → column keeps falling
+  // wake grains above the vacated cell → column keeps falling. The cell BELOW is woken too, for the one
+  // material that is held up from ABOVE (vine): removing its anchor is what makes it fall, not removing its floor.
+  const wakeAround = (i) => {
+    const r = i % ROWS;
+    if (r < ROWS - 1) { const d = i + 1; if (d < nn && MAT_HANGS[peekG(d)]) active.add(d); }
+    if (r <= 0) return;
+    for (const j of [i - 1, i - ROWS - 1, i + ROWS - 1]) if (j >= 0 && j < nn && isPowderId(peekG(j))) active.add(j);
+  };
   const swapMove = (src, dst) => {
     const P = grid.g(src), hpP = hp.g(src);
     {
@@ -3234,8 +3263,14 @@ function powderTickRoom(room) {
     if (liquidCfg.reactions) { seedFineReactAround(room, src); seedFineReactAround(room, dst); }   // a grain landing in a pool is a new contact (snow dropped into water → ice)
   };
   for (const i of list) {
-    if (!isPowderId(grid.g(i))) continue;
+    const gv = grid.g(i);
+    if (!isPowderId(gv)) continue;
     const c = (i / ROWS) | 0, r = i - c * ROWS; if (r + 1 >= FLOOR_ROW) continue;
+    // 🟥 SUPPORT HAS A DIRECTION, and for one material it is UP. Everything else rests on what is beneath it;
+    // a vine hangs off what is above it, so it has air below by definition and the ordinary rule would make it
+    // destroy itself the first tick it was woken. The spike recorded this as a bit on the material it could not
+    // test (nothing there runs a sim) — this is the sim reading it.
+    if (MAT_HANGS[gv] && r > 0 && !canDisplace(i - 1)) continue;   // still hanging from something solid
     const below = i + 1;
     if (canDisplace(below)) { swapMove(i, below); continue; }
     // DIAGONAL SLIDE — the grain must be able to pass THROUGH the side cell, not just land in the target. Checking only
@@ -3940,6 +3975,19 @@ const FREACT_BAKE_COST_F = 0.0625; // lava spent baking one mud cell → earth
 const FREACT_FUSE_COST_F = 0.0625; // lava spent fusing one sand cell → glass
 const FREACT_OIL_BURN_F = 0.09375;  // oil consumed per pass by a BURNING cell
 const FREACT_FREEZE_COST_F = 0.375; // water consumed when a snow cell freezes into ice
+// ⭐ SALT + WATER → BRINE. The world redesign's one new reaction (user's call 2026-08-09). The game already has
+// brine as a fluid, so this is a new PAIR, not a new substance: a salt cell touching water dissolves away and
+// what is left in its place is brine (rank 2, heavier than water — so it sinks under the lake that made it).
+// ⚠️ BOUNDED THE SAME WAY EVERY OTHER REACTION HERE IS: a reaction is anchored on a cell that MOVED this tick
+// (or one a player just edited), so a settled lake sitting against a settled salt bed does nothing at all. It
+// eats into the salt only while water is actually flowing over it. That is what stops a salt dome quietly
+// dissolving itself overnight, and it is why this needs no rate limiter of its own.
+// ⚠️ The water pays for it, so the lake that dissolves a salt bed visibly drops as it does.
+// ⚠️ SALT_ID is assigned BELOW the sliced block (see the POWDER_MOVE note). -1 until then, and -1 can never
+// equal a Uint8 cell value, so a probe rig compiling this block alone simply has no salt in its world.
+let SALT_ID = -1;
+const FREACT_BRINE_AMT_F = 0.5;     // brine left where a dissolved salt cell was (< a full cell ⇒ it flows away)
+const FREACT_DISSOLVE_COST_F = 0.375; // water consumed dissolving one salt cell
 // ACID at 8px. The coarse bite was one 24px cell per 8 ticks = 3px of penetration per tick; an 8px cell eaten at the
 // same cadence would only be 1px/tick, i.e. 3× slower through the same wall. Biting every 3rd tick restores the
 // original physical eat-rate — the reaction is unchanged, only the cadence is re-derived for the smaller cell.
@@ -4162,19 +4210,25 @@ function fineReactTickRoom(room, SUB) {
     const pa = amt.rp(i), b = amt.o(i);
     if (pa[b] > 0 || pa[b + 4] <= 0) continue;
     const r = i % ROWS, NB = [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS];
-    let snowJ = -1, ss = null;
+    let snowJ = -1, saltJ = -1, ss = null;
     for (const j of NB) {
       if (j < 0 || j >= N) continue;
       const g = grid.g(j);
       if (g === 8 && snowJ < 0) snowJ = j;
+      if (g === SALT_ID && saltJ < 0) saltJ = j;
       if (g === 1 || g === 3 || g === 5) { if (!ss) ss = soilSet(room); ss.add(j); }   // earth/sand/mud beside water → absorb
     }
-    if (snowJ < 0) continue;
+    if (snowJ < 0 && saltJ < 0) continue;
     let nearLava = false; for (const j of NB) { if (j >= 0 && j < N && amt.rp(j)[amt.o(j)] > 0) { nearLava = true; break; } }
     if (!nearLava) {
-      convertSolid(snowJ, 4, 2);                                            // the snow itself becomes the ice, so nothing survives to slide on
+      // One reaction per water cell per tick, freeze first — same shape as the lava phase, and it keeps the
+      // water's cost from being charged twice for a cell that happens to touch both snow and salt.
+      if (snowJ >= 0) convertSolid(snowJ, 4, 2);                            // the snow itself becomes the ice, so nothing survives to slide on
+      else setLiquid(saltJ, 2, capFrac(FREACT_BRINE_AMT_F));                // the salt cell itself becomes the brine (rank 2)
       const pw = amt.wp(i);
-      let q = capFrac(FREACT_FREEZE_COST_F); for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = pw[b + rk]; if (a <= 0) continue; const mv = a < q ? a : q; pw[b + rk] = a - mv; q -= mv; }
+      let q = capFrac(snowJ >= 0 ? FREACT_FREEZE_COST_F : FREACT_DISSOLVE_COST_F);
+      for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = pw[b + rk]; if (a <= 0) continue; const mv = a < q ? a : q; pw[b + rk] = a - mv; q -= mv; }
+      if (snowJ < 0) addFx(saltJ, 9);                                       // fizz where the salt went
       recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
     }   // BOTH the snow and the water become one ice cell — the snow must not survive to slide on and freeze a trail
   }
@@ -5637,10 +5691,35 @@ function rescaleAllLiquid(newCap) {
 }
 
 const TERRAIN_MAT_MAX = 17;                           // built-in material ids 1..17 (earth/stone/sand/ice/mud/bouncy/belt→/snow/water/quicksand/lava/acid/belt←/brine/oil/glass/drain); 0 = empty
-const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → custom material ids live in 16..255
+const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → material ids live in 1..255
+// 🟥 249 IS THE HIGHEST ID A CUSTOM BLOCK MAY BE ALLOCATED, and 255 is the reason. The client's terrain window
+// reads a cell it is not holding as TW_UNKNOWN = 255 — which is a legal INDEX into TERRAIN_MATS and not a legal
+// material. That was a latent bug before the window existed (an uninstalled custom mat did the same thing) and
+// it threw every frame the first time the window was switched on. Allocating up to 255 would make it reachable
+// by an ordinary player creating enough blocks. 250..254 are left spare on purpose.
+const CUSTOM_MAT_HI = 249;
 // ---- Custom material registry (Stage 6 feature A): per-room map of custom mat id → opaque appearance/property def.
 // The server stores + dedups + assigns ids; it does NOT interpret the def physically (the client clones a base mat).
-const CUSTOM_MAT_MIN = 18, CUSTOM_MAT_CAP = 200;     // custom mat ids start at 18 (built-ins 1..17: Glass=16, Drain=17 — the client's CUSTOM_MAT_FLOOR must match); up to 200 custom mats per room
+// ⚠️ MOVED 18 → 90 by the world-redesign port (increment 1): ids 18..89 are now the generator's 72 materials.
+// Checked before moving it, because an id space is the one thing in this increment that stored data could
+// depend on: `published_worlds` is EMPTY, live rooms are in-memory, and the client's saved custom-block library
+// stores DEFINITIONS (name/base/colour) with no id in them — ids are allocated per room at install time. So
+// nothing on disk holds a custom id and no remap is needed. If that ever stops being true, the import path at
+// 16a's `CUSTOM_MAT_FLOOR` remap is where it would go.
+// 255 stays reserved: it is the client's TW_UNKNOWN (a cell outside the terrain window), not a material.
+const CUSTOM_MAT_MIN = MATGEN.GEN_MAT_MAX + 1, CUSTOM_MAT_CAP = 160;   // custom mat ids start at 90 (built-ins 1..17 + generator 18..89 — the client's CUSTOM_MAT_FLOOR must match); 90..249 fit 160
+// ⭐ THE OTHER HALF OF THE POWDER/PLANT/SALT SEAM (see the `POWDER_MOVE` note in the liquid sim block). The
+// tables are declared inside that block, knowing sand and snow on their own; materials.js tops them up here.
+// scree + ash fall and are reseeded · the twelve plant materials fall but are NEVER reseeded · vine hangs.
+// 🟥 IT LIVES HERE, BESIDE THE OTHER `MATGEN` WIRING, AND THAT IS THE POINT. My first attempt put it directly
+// under `==LIQUID_SIM_BLOCK_END==`, which looked outside the block and is not: `probe_budget` slices to the
+// WIDER `==LIQUID_TICK_BLOCK_END==` marker, so it compiled `MATGEN` into a `new Function` with no modules and
+// died. That is the ninth time this exact boundary has bitten on this track. Anything referencing a required
+// module belongs below EVERY block-end marker, not below the nearest one.
+for (const id of MATGEN.POWDER_IDS) { POWDER_MOVE[id] = 1; POWDER_SEED[id] = 1; }
+for (const id of MATGEN.PLANT_IDS) POWDER_MOVE[id] = 1;
+for (const id of MATGEN.HANGS_IDS) MAT_HANGS[id] = 1;
+SALT_ID = MATGEN.NAMES['Salt'];   // the salt + water → brine reaction's reagent, same seam and the same reason
 const roomMats = {};                                 // room → { id: def }
 function ensureMats(room) { return roomMats[room] || (roomMats[room] = {}); }
 
@@ -6655,7 +6734,7 @@ function seedGenChunkLiquid(room, p) {
       // ⚠️ `grid.g(i + 1)` may fault the chunk BELOW this one. That is bounded and intended — a grain at the
       // bottom edge of a chunk genuinely needs to know whether there is ground under it, and producing one
       // neighbour is what the pool rule's column overlap already costs on the generator side.
-      if (isPowderId(v)) {
+      if (isPowderSeedId(v)) {                                     // SEED, not MOVE — plants are never woken by generation
         if ((i % geom.rows) + 1 < geom.rows) {
           // 🟥 THIS READ MUST NOT FAULT, AND WHEN IT DID IT RAN AWAY DOWN THE WORLD. `.g()` produces the page it
           // lands on, so a grain at a chunk's BOTTOM EDGE produced the chunk beneath it — whose own powder
@@ -6720,7 +6799,7 @@ function reseedChunkPowder(room, p) {
   let n = 0;
   for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
     for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
-      if (!isPowderId(page[lr * CHUNK_SIDE + lc])) continue;
+      if (!isPowderSeedId(page[lr * CHUNK_SIDE + lc])) continue;   // SEED, not MOVE: a re-entering forest must not shed
       const i = (c0 + lc) * geom.rows + r0 + lr;
       if ((i % geom.rows) + 1 >= geom.rows) continue;        // resting on the bottom row of the world
       // ⚠️ Same rule as seedPowderActivity: only grains that could ACTUALLY move. A grain with something solid
@@ -8613,7 +8692,7 @@ io.on('connection', (socket) => {
     for (const id in mats) if (matSig(mats[id]) === sig) { if (typeof ack === 'function') ack({ id: +id, def: mats[id] }); return; }
     if (Object.keys(mats).length >= CUSTOM_MAT_CAP) { if (typeof ack === 'function') ack(null); return; }
     let id = -1;
-    for (let i = CUSTOM_MAT_MIN; i <= TERRAIN_MAT_HI; i++) if (!mats[i]) { id = i; break; }
+    for (let i = CUSTOM_MAT_MIN; i <= CUSTOM_MAT_HI; i++) if (!mats[i]) { id = i; break; }
     if (id < 0) { if (typeof ack === 'function') ack(null); return; }
     mats[id] = def;
     io.to(currentAvatarRoom).emit('mat-defined', { id, def });
