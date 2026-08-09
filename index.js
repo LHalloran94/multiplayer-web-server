@@ -2937,7 +2937,7 @@ const liquidCfg = {
 // DEBUG perf accounting (only touched when liquidCfg.perfLog): runLiquidTick tallies sim time + active cells and
 // prints a rolling ~1s summary to the console. (emitLiquidCells, which centralised the coarse `liquid-cells` emit so
 // its wire payload could be sized, went with that wire.)
-let liqPerf = { simMs: 0, simMsMax: 0, pendAt: 0, idleRooms: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actCols: 0, pending: 0,
+let liqPerf = { simMs: 0, simMsMax: 0, pendAt: 0, idleRooms: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, reactMs: 0, reactMsMax: 0, actChunks: 0, actCols: 0, pending: 0,
   chunkMs: 0, chunkMsMax: 0, kMin: 99 };   // kMin: the LOWEST K tier 2 used this window (see the note where it is set)
 // Wall-clock slice the gen pre-settle may spend before handing the rest to the live sim. It is a SYNCHRONOUS stall on
 // the first join, so this is a latency budget, not a quality dial — see the note in ensureWorldGenerated.
@@ -4760,7 +4760,7 @@ const runLiquidTick = () => {
       // ⭐ COUNTERS RESET, GAUGES DO NOT. Everything here is a sum or a peak over the window just printed, so it
       // starts again at zero — except `pending`/`actChunks`/`actCols`, which are a snapshot of how much work is
       // queued right now. Zeroing those made "I have no reading" indistinguishable from "there is no work".
-      liqPerf = { simMs: 0, simMsMax: 0, bytes: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, idleRooms: 0, reactMs: 0, reactMsMax: 0,
+      liqPerf = { simMs: 0, simMsMax: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, idleRooms: 0, reactMs: 0, reactMsMax: 0,
         chunkMs: 0, chunkMsMax: 0, kMin: liquidCfg.fineLevelSteps,   // kMin is a MINIMUM, so it resets to the ceiling
         actChunks: liqPerf.actChunks, actCols: liqPerf.actCols, pending: liqPerf.pending, pendAt: liqPerf.pendAt };
     }
@@ -5016,6 +5016,14 @@ const interestCfg = {
   // packet count against how far a single batch can overshoot the allowance. ⚠️ ONE CHUNK CANNOT BE
   // INTERRUPTED, so the true overshoot bound is `queueBatch × the cost of the most expensive chunk` — which is
   // why this is small rather than `pushPerBeacon`-sized.
+  // ⏭️ DROP THIS TO 2 WHEN THE WORLD REDESIGN LANDS, and do it in the same increment. `probe_worldgen` B5a
+  // asserts `queueMs + queueBatch × worstChunk ≤ tickMs`; today's generator has a worst chunk of ~2ms, so 4 sits
+  // at 13.9 of 40ms with 4.3× margin. The redesign's worst chunk is 7.2ms ⇒ 34.7 of 40, margin 1.18×, and a
+  // single batch then costs ~29ms of a 6ms allowance, which leaves the liquid sim NOTHING on any tick with
+  // terrain pending. At 2 the same generator gives 20.4ms (2.4× margin), liquid keeps ~14ms, and sustained
+  // throughput is still 50 chunks/s against a measured demand of 28.4 — better on every axis, at the cost of
+  // twice the packets. It is not worth changing before then: at today's ~1ms chunks both values deliver the
+  // same 8 chunks per drain.
   queueBatch: 4,
   // Hard ceiling on what one socket may have waiting. `chunk-want` takes a CLIENT-SUPPLIED list, so without
   // this a client could pin unbounded work in the queue. Dropped requests are not lost: the next beacon
