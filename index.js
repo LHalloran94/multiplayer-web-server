@@ -5652,7 +5652,12 @@ function cfgWire() {
     // thing actually FIRED rather than inferring it from an outcome. The panel's sync loop skips any key it has
     // no control for, so these are invisible there. Same reasoning as liqRateSkips and liqK2Throttles: this
     // track has been bitten three times by a check that measured a result instead of a mechanism.
-    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, powderSeeded: genPowderSeeded, powderRewoken: genPowderRewoken, dropped: genChunksDropped, deltad: genChunksDeltad },
+    // ⚠️ `saved`/`loaded`/`liqRestored`/`flushed` are here so a test can assert the MECHANISM rather than the
+    // outcome. "The hole is still there after a restart" is also true of a build that stored nothing and simply
+    // regenerated a cave in the same place; the load counter is what tells the two apart. Same reasoning as
+    // `liqRateSkips` and `liqK2Throttles`, which this track needed for the same reason.
+    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, powderSeeded: genPowderSeeded, powderRewoken: genPowderRewoken, dropped: genChunksDropped, deltad: genChunksDeltad,
+      saved: worldSaved, loaded: worldLoaded, applied: worldApplied, liqRestored: worldLiquidRestored, flushes: worldFlushes, flushed: worldFlushWrites, saveErrors: worldSaveErrors },
   });
 }
 
@@ -6039,7 +6044,9 @@ function unpackDelta(buf, ver) {
   for (let i = 0; i < n; i++) { d[i] = buf.readUInt16LE(i * 4); m[i] = buf[i * 4 + 2]; hp[i] = buf[i * 4 + 3]; }
   return { v: ver, d, m, hp, a: null };
 }
-let worldSaved = 0, worldLoaded = 0, worldSaveErrors = 0;    // diagnostics; a silent persistence layer is untestable
+// Diagnostics; a silent persistence layer is untestable. `worldApplied` is the one that matters to a test — a
+// row being READ proves nothing, a row being laid over real ground is the mechanism.
+let worldSaved = 0, worldLoaded = 0, worldApplied = 0, worldSaveErrors = 0;
 // ⚠️ A HOOK, for the reason recorded ten times on this track: `evictChunk` lives inside the block the probe rigs
 // slice out and run in a bare `new Function`, where `_putChunkRow` does not exist. Declared as a no-op INSIDE
 // that block (search `saveChunkBlob = `) and reassigned to this, below the block, at load.
@@ -6898,6 +6905,7 @@ function storedFor(room) {
         const b = unpackDelta(Buffer.from(r.terrain), r.ver);
         b.liq = r.liquid ? Buffer.from(r.liquid) : null;   // the liquid half rides the same row and the same version check
         m.set(r.chunk | 0, b);
+        worldLoaded++;
       }
     } catch (e) { console.log('world_chunks load failed: ' + e.message); }
     _storedChunks.set(room, m);
@@ -6971,6 +6979,7 @@ applyStoredEdit = function (room, p, page, field) {
   if (!blob || !blob.d) return;
   const src = field === 'terrain' ? blob.m : blob.hp;
   for (let k = 0; k < blob.d.length; k++) page[blob.d[k]] = src[k];
+  if (field === 'terrain') worldApplied++;    // the mechanism, countable: a stored edit was laid over real ground
 };
 // (`chunkIsPristine` and its revision bookkeeping lived here. Deleted 2026-08-04: see the note in evictChunk —
 // recording "what untouched looks like" during a RESTORE recorded the restored state, so an edited chunk could
