@@ -24,8 +24,44 @@
 // ==============================================================================================================
 
 const { buildWorld } = require('./worldgen2/pipeline.js');
-const { prepare, MATS, M } = require('./worldgen2/cells.js');
+const { prepare, fillColumn: spikeFillColumn, columnInfo, MATS, M } = require('./worldgen2/cells.js');
 const { PERIOD_COLS } = require('./worldgen2/noise.js');
+const MG = require('./materials.js');
+
+const CHUNK_SIDE = 64;                                  // must match worldgen.js / chunkGeom
+
+// ══ SPIKE MATERIAL ID → GAME MATERIAL ID ══════════════════════════════════════════════════════════════════════
+// ⭐ THE PORT'S ONE TRANSLATION, BUILT ONCE. The generator's modules speak in indices into `cells.js`'s `MATS`
+// palette; the game speaks in the ids `materials.js` allocated. `MG.idOf` THROWS on an unknown name, and that
+// is the point — the alternative is `undefined`, which stores into a `Uint8Array` as **0 = AIR**, the way
+// `MAT.OIL`/`GLASS`/`ACID` twice vanished from the shipped generator and the way `ooze` would have left a hole
+// in the sea floor. Building the table eagerly means an unmapped material is a loud failure at STARTUP rather
+// than a quiet hole discovered in play.
+// ⚠️ `MATS[0]` is air and is 0 on both sides — the single exemption, and `probe_worldgen2` M1b pins it.
+const XLAT = new Uint8Array(256);
+{
+  const bad = [];
+  MATS.forEach(([k], i) => {
+    if (i === 0) return;                                 // air
+    const v = MG.NAME_TO_ID[k];
+    if (v === undefined) bad.push(`${i}:${k}`); else XLAT[i] = v;
+  });
+  if (bad.length) throw new Error('worldgen2: spike materials with no game id: ' + bad.join(', ')
+    + ' — add a row to server/materials.js; an unmapped id stores as 0 = AIR.');
+}
+// Hits to break, by GAME id. The generated rows carry their own; the dozen built-ins the spike aliases onto
+// keep the values `index.js`'s BUILTIN_STRENGTH already uses (mirrored by worldgen.js's DEF_STRENGTH).
+const BUILTIN_STRENGTH = { 2: 3, 4: 2, 5: 2, 17: 2 };
+const STRENGTH = new Uint8Array(256).fill(1);
+STRENGTH[0] = 0;
+for (const k of Object.keys(BUILTIN_STRENGTH)) STRENGTH[k] = BUILTIN_STRENGTH[k];
+for (const k of Object.keys(MG.STRENGTH)) STRENGTH[k] = MG.STRENGTH[k];
+// Which GAME ids flow. `bandGroundAt` has to know, because liquid is neither a floor nor headroom.
+// ⚠️ DERIVED FROM THE BEHAVIOUR TABLE, NEVER LISTED — `guard.js`'s standing rule, which has already caught two
+// probes holding `air || water` while eight new liquids went by.
+const IS_FLUID = new Uint8Array(256);
+for (const [id, def] of Object.entries(MG.DEFS)) if (def.behavior === 'fluid' || def.behavior === 'hazard') IS_FLUID[id] = 1;
+for (const id of [9, 10, 11, 12, 14, 15]) IS_FLUID[id] = 1;   // the six built-in fluids (index.js TERRAIN_MATS_FLUID)
 
 // ══ THE LAYOUT'S FIXED EXTENT ═════════════════════════════════════════════════════════════════════════════════
 // ⭐ The layout covers **exactly one period** and never the room's `cols`. A narrower or wider room is a WINDOW
@@ -43,6 +79,31 @@ const LAYOUT_STEPS = 200;
 // against this number; the Overworld is `OVERWORLD_DIMS`' 4,096 rows deep (index.js), so sea sits a little
 // under halfway and the sky band is the 1,900 rows above it.
 const SEA_ROW = 1900;
+// The world's depth, and the room shape the Overworld uses. `OVERWORLD_DIMS` in index.js is the same numbers;
+// they are repeated rather than imported because requiring index.js from here would be a cycle.
+const LAYOUT_ROWS = 4096;
+const LAYOUT_COLS = LAYOUT_N * LAYOUT_DX;
+
+// How far above `columnInfo`'s ground line content can still exist — flora crowns, lake surfaces standing proud
+// of their banks, rock mounds. ⚠️ NOT A GUESS: `probe_worldgen2` Part E measures the true worst gap and fails if
+// it ever reaches half of this, so the margin cannot rot as the world grows taller things.
+const SKY_LIFT = 256;
+// A sky island's `topRow` is the top of its CORE; relief is added above it, measured at up to 141 rows on one
+// island and given a 3.6× margin here. A lake stands proud of its own column's ground by up to its own depth.
+// ⚠️ All three are MEASURED margins, not model extents — Part E fails if the real worst gap reaches half of
+// any of them, which is what stops them rotting as the world grows taller things.
+const ISLE_LIFT = 512;
+const LAKE_LIFT = 256;
+// Floating ice stands proud of the water line (one ninth of its thickness, by the polar-sea design), so the
+// sea's cap is above SEA_ROW, not at it. Measured at 3 rows on pack ice; a berg is far thicker.
+const ICE_LIFT = 128;
+
+// The signed shortest way round the ring, for "how far is this column from that record". A column one period
+// along is otherwise half a million cells from every record in the world — the same `wdc` the spike applies 35
+// times, needed here for the identical reason.
+const HALF_P = PERIOD_COLS >> 1;
+const wrapDelta = (d) => (d >= -HALF_P && d <= HALF_P) ? d
+  : ((((d % PERIOD_COLS) + PERIOD_COLS + HALF_P) % PERIOD_COLS) - HALF_P);
 
 if (LAYOUT_N * LAYOUT_DX !== PERIOD_COLS) {
   throw new Error(`worldgen2: layout width ${LAYOUT_N * LAYOUT_DX} != PERIOD_COLS ${PERIOD_COLS} — the world `
@@ -90,15 +151,144 @@ function makeGen2(cfg) {
   const t1 = Date.now();
   const C = prepare(W, SEA_ROW);
   const t2 = Date.now();
+  // ══ THE WINDOW ══════════════════════════════════════════════════════════════════════════════════════════════
+  // ⭐ A ROOM IS A WINDOW ON THE LAYOUT, and the offsets are the whole of it (user decision, 2026-08-10 — see
+  // kickoff_port.md). The Overworld is the window at (0, 0) covering the full 4,096 rows, so this changes
+  // nothing today. It exists now because the alternative — assuming a room starts at world column 0 — is baked
+  // into every call site and reopening it later is a sweep.
+  // ⚠️ THE ROW OFFSET IS AS NECESSARY AS THE COLUMN ONE, and that was not obvious: a page room is 405 rows of a
+  // 4,096-row world, so a window has to be placed VERTICALLY too or it shows nothing but sky.
+  const originCol = (cfg && cfg.originCol) | 0;
+  const originRow = (cfg && cfg.originRow) | 0;
+  const rows = (cfg && cfg.rows) ? cfg.rows | 0 : LAYOUT_ROWS;
+
+  // ── the cell queries. ABSOLUTE WORLD COORDINATES, always. ───────────────────────────────────────────────────
+  // `out` receives GAME material ids. The spike writes its own palette indices and they are translated in place
+  // — one extra pass over 64 bytes, against a column that costs microseconds to synthesise.
+  function fillColumn(c, r0, rN, out) {
+    spikeFillColumn(W, C, c, r0, rN, out);
+    for (let k = 0; k < rN; k++) { const v = out[k]; if (v) out[k] = XLAT[v]; }
+  }
+  const _one = new Uint8Array(1);
+  function matAt(c, rr) { fillColumn(c, rr, 1, _one); return _one[0]; }
+  function strengthOf(v) { return STRENGTH[v]; }
+
+  // ── one 64x64 page of the ROOM ──────────────────────────────────────────────────────────────────────────────
+  // Page indexing is `worldgen.js`'s exactly — chunks numbered down-then-across (increment 5's column-major
+  // address space), `page` optionally strided, `hpPage` optionally null. Copied in shape deliberately: the two
+  // generators are read by the same `_alloc`/`fillPage` seam in index.js and must not differ about what page
+  // `p` means.
+  const _colBuf = new Uint8Array(CHUNK_SIDE);
+  function fillPage(page, hpPage, p, geom, T) {
+    const stride = (T | 0) || 1;
+    const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
+    const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
+    if (rN <= 0 || cN <= 0) return;
+    const col = _colBuf;
+    for (let lc = 0; lc < cN; lc++) {
+      fillColumn(originCol + c0 + lc, originRow + r0, rN, col);
+      for (let lr = 0; lr < rN; lr++) {
+        const v = col[lr];
+        if (v) { const o = lr * CHUNK_SIDE + lc; page[o * stride] = v; if (hpPage) hpPage[o] = STRENGTH[v]; }
+      }
+    }
+  }
+
+  // ── "is this page provably empty?" ──────────────────────────────────────────────────────────────────────────
+  // 🟥🟥 THE ONE PLACE A MISTAKE HERE IS **INVISIBLE TERRAIN**. Answering "empty" means the page is never
+  // allocated, so whatever was there is never stored and the client renders air the player then collides with.
+  // It may therefore only ever say "empty" when that is CERTAIN, and every source of content above the plain
+  // ground line has to be allowed for.
+  // 🟥🟥 THE FIRST VERSION OF THIS WAS WRONG AND THE BRUTE-FORCE CHECK FOUND IT: **62 of 1,154 pages it called
+  // empty actually had content in them.** I wrote "I am not enumerating the sources and trusting the list"
+  // directly above the code that did exactly that. Two sources were missing, and neither was a margin problem —
+  // no amount of widening `SKY_LIFT` would have fixed either:
+  //   1. **THE SEA.** Water fills every open cell from row `SEA_ROW` (1900) DOWN to the sea bed at ~2,600. A
+  //      whole page of ocean sits 350+ rows above the ground line the ground-line test was measuring from.
+  //      ⭐ `worldgen.js` already had this exact clause and I did not carry it across: an ocean column is capped
+  //      at the water line, not at its own sea bed.
+  //   2. **A SKY ISLAND'S `topRow` IS NOT ITS TOP.** Column 14208's island runs rows 842..1021 while its record
+  //      says `topRow` 983 — the true top is **141 rows higher**, because relief is added above the core. Using
+  //      the record's own number as the extent was the mistake.
+  // ⇒ both now carry a MEASURED margin rather than a modelled extent, and `probe_worldgen2` Part E asserts the
+  // real worst gap never reaches half of either. The final safety net is Part B's brute force, which generates
+  // every page it was told is empty and fails on a single non-zero cell — the only check here that cannot be
+  // fooled by my model of the world being wrong, which it demonstrably was.
+  function pageEmpty(p, geom) {
+    const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
+    const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
+    if (rN <= 0 || cN <= 0) return true;
+    const r1 = originRow + r0 + rN - 1;
+    if (r1 < 0) return true;
+    let top = Infinity;
+    for (let lc = 0; lc < cN; lc++) { const t = topLimitAt(originCol + c0 + lc); if (t < top) top = t; }
+    return r1 < top;
+  }
+
+  // ⭐ THE PER-COLUMN LIMIT, EXPOSED — the highest row at which this column can hold anything. `pageEmpty` is
+  // nothing but the minimum of this over its columns, so there is ONE definition and Part E can measure the
+  // shipped rule directly against the real topmost cell instead of against a proxy for it.
+  // 🟥 THAT MATTERS: Part E's first form measured "how far above `surfRow` is the topmost cell", which on an
+  // ocean column is the SEA — a thing a different clause already handles — so it reported 775 rows of breach
+  // against a rule that was fine, and would have sent me to widen the wrong constant. Measure what ships.
+  function topLimitAt(c) {
+    const s = columnInfo(W, C, c).surfRow;
+    // ground, plus whatever stands on it (flora crowns, mounds).
+    let t = s - SKY_LIFT;
+    // where the ground is below the sea, everything between the two is ocean.
+    // 🟥 AND THE SEA IS NOT THE HIGHEST THING IN AN OCEAN COLUMN. Pack ice and bergs FLOAT — one ninth proud by
+    // design — so ice stands ABOVE the water line: measured at row 1897 against a sea line of 1900. Capping at
+    // `SEA_ROW` exactly left that ice outside the limit, and B5 missed it only because 64-row page alignment
+    // happened to put the ice and the water line in the same page. Luck, not correctness.
+    if (s > SEA_ROW) t = Math.min(t, SEA_ROW - ICE_LIFT);
+    // a lake stands ABOVE its own column's ground by definition, and a mountain lake's surface is above the sea
+    // line, so neither clause above covers it.
+    const lakeE = C.lakeLevelAt(c);
+    if (lakeE > -1e8) t = Math.min(t, SEA_ROW - lakeE - LAKE_LIFT);
+    // Floating islands sit in what would otherwise be provably empty sky. Bounded record list, so the columns
+    // are exact; the vertical extent is not, hence ISLE_LIFT.
+    for (let i = 0; i < C.sky.length; i++) {
+      const isle = C.sky[i];
+      if (Math.abs(wrapDelta(c - isle.at)) > isle.hwPx + 2) continue;
+      const it = isle.topRow - ISLE_LIFT;
+      if (it < t) t = it;
+    }
+    return t;
+  }
+
+  // ── "where can somebody stand in this row range?" ────────────────────────────────────────────────────────────
+  // The query domain placement asks. Absolute world coordinates; walks at most (r1 - r0) rows of ONE column.
+  // 🟥 It reads the FINISHED column, not pre-liquid ground — otherwise it reports the floor of a lava lake as
+  // somewhere to stand and counts the water above a lake bed as headroom. Same bug worldgen.js records fixing.
+  function bandGroundAt(c, r0, r1, clear) {
+    const need = clear == null ? 5 : clear;               // 5 cells = the 40x40px player blob, exactly
+    const lo = Math.max(0, r0 | 0), hi = Math.min(LAYOUT_ROWS - 1, r1 | 0);
+    const n = hi - lo + 1; if (n <= 0) return -1;
+    const buf = new Uint8Array(n);
+    fillColumn(c, lo, n, buf);
+    let air = 0;
+    for (let k = 0; k < n; k++) {
+      const v = buf[k];
+      if (!v) { air++; continue; }
+      if (!IS_FLUID[v] && air >= need) return lo + k;      // solid floor, clear space above
+      air = 0;                                             // liquid is neither a floor nor headroom
+    }
+    return -1;
+  }
+
   return {
     seed, W, C,
-    seaRow: SEA_ROW,
+    seaRow: SEA_ROW, rows, cols: LAYOUT_COLS, cell: 8, bottomRow: LAYOUT_ROWS - 1,
+    originCol, originRow,
     periodCols: PERIOD_COLS,
     layout: { n: LAYOUT_N, dx: LAYOUT_DX, steps: LAYOUT_STEPS },
     env: activeEnvSwitches(),
     buildMs: t1 - t0, prepareMs: t2 - t1, ms: t2 - t0,
-    // ⏭️ INCREMENT 4 adds the interface `index.js` calls — the same object shape `worldgen.js`'s `makeGen`
-    // returns, so `genFor`/`genCfgFor` need no changes at all. Nothing is exposed until it is guarded.
+    // the surface `index.js` actually consumes — measured, not assumed: `fillPage` (3 call sites),
+    // `pageEmpty` (1, via `PagedArray.seedEmpty`) and `bandGroundAt` (2, the spawn seam). The rest are here
+    // because the probes and previewers need them.
+    fillPage, pageEmpty, topLimitAt, bandGroundAt, fillColumn, matAt, strengthOf,
+    XLAT, STRENGTH, IS_FLUID, SKY_LIFT,
   };
 }
 
@@ -107,4 +297,5 @@ function makeGen2(cfg) {
 const RECORD_LISTS = ['volc', 'vents', 'voids', 'caves', 'sky', 'deep', 'forms', 'descents', 'rim', 'cliffs'];
 
 module.exports = { makeGen2, PERIOD_COLS, SEA_ROW, LAYOUT_N, LAYOUT_DX, LAYOUT_STEPS, RECORD_LISTS,
+  LAYOUT_ROWS, LAYOUT_COLS, CHUNK_SIDE, SKY_LIFT, ISLE_LIFT, LAKE_LIFT, ICE_LIFT, XLAT, STRENGTH, IS_FLUID,
   ENV_SWITCHES, activeEnvSwitches, MATS, M };
