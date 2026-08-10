@@ -7833,11 +7833,7 @@ io.on('connection', (socket) => {
     // ⚠️ The switch ALONE changes nothing you can see: a world is generated once per room per server lifetime,
     // so flipping this only affects rooms generated from here on. That is on purpose — silently rebuilding
     // every live world would throw away whatever anyone had built in it.
-    if ('worldChunked' in patch) worldCfg.chunked = patch.worldChunked ? 1 : 0;
-    // ⚠️ On-demand only means anything WITH the chunked generator — the shipping one has no way to produce a
-    // single chunk, which is the entire reason increment 4 exists. Ticking this alone must therefore not look
-    // like it did something, so it turns the generator on too.
-    if ('worldOnDemand' in patch) { worldCfg.onDemand = patch.worldOnDemand ? 1 : 0; if (worldCfg.onDemand) worldCfg.chunked = 1; }
+    // (`worldChunked` / `worldOnDemand` were settable here. See the note below.)
     // ⭐ Turning the Overworld on turns the other two on with it, for the same reason `worldOnDemand` turns
     // `worldChunked` on: they are not independent choices, and a half-set combination is not a configuration
     // anybody wants. `ensureWorldGenerated` does not RELY on this (it reads `overworldRooms`), so the flags
@@ -7851,16 +7847,15 @@ io.on('connection', (socket) => {
     // `worldOnDemand` turns `worldChunked` on: worldgen2 has no eager whole-world path, so they are not
     // independent choices and a half-set combination is not a configuration anybody wants.
     // ⚠️ Takes effect for rooms generated FROM HERE ON. Press "Rebuild this world" to see it where you are.
-    if ('worldGen2' in patch) {
-      worldCfg.gen2 = patch.worldGen2 ? 1 : 0;
-      if (worldCfg.gen2) { worldCfg.chunked = 1; worldCfg.onDemand = 1; }
-    }
-    if ('worldOverworld' in patch) {
-      const _was = worldCfg.overworld;
-      worldCfg.overworld = patch.worldOverworld ? 1 : 0;
-      if (worldCfg.overworld) { worldCfg.chunked = 1; worldCfg.onDemand = 1; }
-      if (_was !== worldCfg.overworld) io.emit('avt-retransport', { relay: relayCfg.on });   // re-join → land in (or leave) the Overworld
-    }
+    // 🟥 `worldGen2`, `worldOverworld`, `worldChunked` and `worldOnDemand` ARE NO LONGER SETTABLE AT RUNTIME,
+    // and that is a deliberate removal rather than an oversight (user, 2026-08-10: *"since this is the default
+    // now, the debug menu options shouldn't even be necessary and only really serve to confuse and potentially
+    // cause problems anyway"*). They were global switches deciding, for every player at once, which generator
+    // ran and which world you entered — and one of them was found sitting at the wrong value on a live server,
+    // with the client's own reset map disagreeing with the server's defaults, so a reset turned the shared
+    // world off for everybody. A control whose only correct setting is its default is not a control.
+    // ⚠️ ROLLBACK IS NOT LOST, it is just no longer one click away: the four constants still live in
+    // `worldCfg` above, and switching any of them is an edit plus a restart. That is a deliberate act.
     if ('worldDropPristine' in patch) worldCfg.dropPristine = patch.worldDropPristine ? 1 : 0;
     // ── and the button that makes the switch testable: rebuild THIS room's world with the current generator.
     // ⭐ Why a rebuild in place rather than "go and visit a different page": the seed is keyed on the URL, so a
@@ -8406,7 +8401,15 @@ io.on('connection', (socket) => {
     // ⚠️ A non-URL room (a user-created Room with a DB row) is NOT the Overworld either — SHARED-WORLD.md
     // §"Non-URL rooms": *"Not part of the overworld. Continue as they are today."* It has no domain identity, so
     // placing it would allocate a column against a room id.
-    const _isOver = !!worldCfg.overworld && type === 'world' && !rinfo && isDomainHome(roomId);
+    // 🟥 THE RUNTIME FLAG IS GONE FROM THIS TEST, AND THAT IS THE FIX FOR A REAL BUG THE USER HIT.
+    // `worldCfg.overworld` was a GLOBAL switch, so it decided for every player at once and overrode the
+    // per-URL rule completely: the world you got depended on the debug panel rather than on the page you were
+    // on. Worse, the client's own "reset to default" map still read `worldOverworld: false, worldGen2: false`,
+    // so any reset silently switched the shared world off server-wide with nothing to show for it. Found with
+    // the flag sitting at `false` on a running server and no one having deliberately set it.
+    // ⇒ **which world you enter is a property of the URL, and of nothing else.** Rolling back is a one-line
+    // edit here plus a restart, which is a deliberate act rather than a stray click in a debug menu.
+    const _isOver = type === 'world' && !rinfo && isDomainHome(roomId);
     const avRoom = _isOver ? OVERWORLD_ROOM : avatarRoomKey(roomId, levelIndex);
     if (_isOver) overworldRooms.add(avRoom);
     // Where in the Overworld THIS socket arrives: an allocation against the page's permanent identity, which is
