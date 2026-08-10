@@ -15,7 +15,8 @@ const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
 const MWSim = require('./avatar-sim'); // shared authoritative avatar simulation
-const WORLDGEN = require('./worldgen'); // Phase 6 inc 4: chunk-on-demand world generation (the Overworld's generator)
+const WORLDGEN = require('./worldgen');
+const WORLDGEN2 = require('./worldgen2'); // the PORTED world redesign (port inc 3-6). Ships OFF: worldCfg.gen2 // Phase 6 inc 4: chunk-on-demand world generation (the Overworld's generator)
 const DOMAINS = require('./domains');   // Phase 6 inc 6: which column of the Overworld a site spawns at
 const MATGEN = require('./materials');  // Phase 6 world-redesign port inc 1: the generator's materials, ids 18..89
                                         // ⚠️ ALSO INLINED INTO THE CLIENT BUNDLE by extension/build.js (as MWMats),
@@ -2086,13 +2087,29 @@ function encodeChunk(s, p) {
     if (any) { a.push(c); for (let k = 0; k < LIQ_T; k++) a.push(amt[b + k]); } } out.a = a; }
   return out;
 }
-function decodeChunk(s, p, blob) {
+// 🟥 A HOOK, NOT A DIRECT CALL — the sliced-block boundary for the TENTH time on this track. `decodeChunk`
+// lives inside the block `probe_chunking` and `probe_budget` slice out of this file and run in a bare
+// `new Function`; `genVersion` lives outside it, beside `_genRooms`. Calling it directly was a ReferenceError
+// in the rigs and nowhere else. So it is declared HERE as a no-op that reproduces the old global behaviour
+// exactly, and reassigned below to the real thing — the `wireFanout` seam this file already establishes, which
+// `probe_worldgen` guards as a CLASS rather than as a list of one-offs.
+let genVersion = () => WORLDGEN.WORLDGEN_VERSION;
+// ⚠️ `ver` is the version of the generator THIS ROOM was made by, passed in rather than read from a global.
+// Two generators can now be live at once (worldgen.js and worldgen2.js), so "the current version" is not a
+// property of the process — it is a property of the room. A diff is meaningless without the ground it was
+// taken against, and applying one to the other generator's rock is exactly the silent corruption
+// WORLDGEN_VERSION exists to make detectable.
+function decodeChunk(s, p, blob, room) {
   // ⭐ 4d: a DIFF is applied ON TOP of the ground the generator just rebuilt, rather than replacing it. The
   // base is always there by the time this runs — every path into here faults the page first, and faulting a
   // page of a generated room runs the generator (see genSeedFn). ⚠️ Only the listed cells are written; the
   // rest of the page is deliberately left exactly as the generator made it.
   if (blob.d) {
-    if (blob.v !== WORLDGEN.WORLDGEN_VERSION) return;    // taken against different ground — see WORLDGEN_VERSION
+    // ⚠️ LOOKED UP HERE, INSIDE `if (blob.d)`, NOT PASSED IN AS AN ARGUMENT. An argument is evaluated eagerly,
+    // so it ran even for blobs with no diff — and in the probe rigs, which slice this block out and run it
+    // without the module's requires, that turned a line that had never executed into a ReferenceError. The
+    // original control flow reached this only when there was a diff to check, and it still does.
+    if (blob.v !== genVersion(room)) return;             // taken against different ground — see WORLDGEN_VERSION
     const tp = s.terrain && s.terrain.wpPage(p), hpp = s.terrainHp && s.terrainHp.wpPage(p);
     if (tp) for (let k = 0; k < blob.d.length; k++) { tp[blob.d[k]] = blob.m[k]; if (hpp) hpp[blob.d[k]] = blob.hp[k]; }
     if (blob.a && blob.a.length && s.fineAmt && s.fineTotal) {
@@ -2173,7 +2190,7 @@ function encodeChunkDelta(s, p, gen, geom) {
   // The generator version travels WITH the diff. A diff only means anything alongside the ground it was taken
   // against, so when the content redesign changes the generator, a stale diff must be detectable rather than
   // quietly applied to different rock. See WORLDGEN_VERSION in worldgen.js.
-  return { v: WORLDGEN.WORLDGEN_VERSION, d: idx, m: mat, hp: dmg, a: null };
+  return { v: gen.version || WORLDGEN.WORLDGEN_VERSION, d: idx, m: mat, hp: dmg, a: null };
 }
 // ⭐ SCALE COUNTER (see liqScanRows in the sim block for the reasoning). Key-deletes done pruning the work sets
 // when a chunk is evicted. It MUST stay independent of |fineActive|: the version that walked the whole set made
@@ -2355,7 +2372,7 @@ function rehydrateChunk(room, p) {
   // `_alloc` (the page is installed before the flag is cleared), but very reachable through `restoreChunk`,
   // which is what `sendChunkContent` calls.
   rec.restoring = 1;
-  try { decodeChunk(s, p, blob); } finally { rec.restoring = 0; }
+  try { decodeChunk(s, p, blob, room); } finally { rec.restoring = 0; }
   // Liquid that comes back is WOKEN, not re-seeded: it resumes flowing from exactly the state it was put away in.
   const amt = s.fineAmt, tot = s.fineTotal;
   // 🟥 THIS WOKE EVERY LIQUID CELL IN THE CHUNK, UNCONDITIONALLY — up to 4,096 of them, for every chunk you
@@ -5078,7 +5095,7 @@ const interestCfg = {
   // throughput is still 50 chunks/s against a measured demand of 28.4 — better on every axis, at the cost of
   // twice the packets. It is not worth changing before then: at today's ~1ms chunks both values deliver the
   // same 8 chunks per drain.
-  queueBatch: 4,
+  queueBatch: 2,
   // Hard ceiling on what one socket may have waiting. `chunk-want` takes a CLIENT-SUPPLIED list, so without
   // this a client could pin unbounded work in the queue. Dropped requests are not lost: the next beacon
   // re-derives what the socket is missing.
@@ -5586,6 +5603,7 @@ function cfgWire() {
     chunkQueue: !!interestCfg.queue, chunkQueueMs: interestCfg.queueMs, chunkQueueBatch: interestCfg.queueBatch,
     chunkQStats: { sent: chunkQSent, drains: chunkQDrains, dropped: chunkQDropped },
     worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand, worldOverworld: !!worldCfg.overworld,
+    worldGen2: !!worldCfg.gen2,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
     // thing actually FIRED rather than inferring it from an outcome. The panel's sync loop skips any key it has
@@ -6552,6 +6570,16 @@ const worldCfg = {
   // cannot be built eagerly, and `ensureWorldGenerated` reads `overworldRooms` rather than the flags for that
   // reason. Turning this on without them is not a broken combination, it is simply not a combination.
   overworld: 0,
+  // ⭐⭐ PORT INCREMENT 6 — THE REDESIGNED WORLD (server/worldgen2.js). Ships OFF.
+  // With this on, a world is built by the ported spike instead of worldgen.js: designed landforms, 17 biomes,
+  // a layered underground, real cave mouths, karst, rimstone, sky islands, an ocean with a floor worth swimming
+  // to. `probe_worldgen2` (48 checks) guards it and proves it delivers the spike's world cell for cell.
+  // ⚠️ IT IMPLIES chunked + onDemand, for the same reason `overworld` does: worldgen2 has no eager whole-world
+  // path and is not meant to have one.
+  // ⚠️ THE FIRST JOIN INTO A gen2 ROOM BLOCKS THE SERVER FOR ~2 SECONDS while the layout pass runs
+  // (buildWorld + prepare, measured at ~2.1s and ~5MB). That is plan risk R3, it is known, and it is per ROOM
+  // per server lifetime. Acceptable for one Overworld; it is why page rooms keep worldgen.js.
+  gen2: 0,
 };
 const _roomGens = new Map();                          // avatarRoom → the generator for its seed+shape, built once
 // Everything worldgen.js needs to know about a room, gathered in one place so there is one definition of
@@ -6567,9 +6595,24 @@ function genCfgFor(avatarRoom, seed, band) {
 }
 function genFor(avatarRoom, seed, band) {
   let g = _roomGens.get(avatarRoom);
-  if (!g) { g = WORLDGEN.makeGen(genCfgFor(avatarRoom, seed, band)); _roomGens.set(avatarRoom, g); }
+  if (!g) {
+    const cfg = genCfgFor(avatarRoom, seed, band);
+    // ⚠️ Which generator a room uses is decided ONCE, when its generator is first built, and then never
+    // re-read. That is deliberate: a room's stored diffs are taken against its generator's ground, so a room
+    // that changed generator mid-life would be applying tunnels to different rock. Flipping the flag affects
+    // rooms created from here on — the same rule `worldChunked` already follows.
+    g = worldCfg.gen2 ? WORLDGEN2.makeGen2(cfg) : WORLDGEN.makeGen(cfg);
+    _roomGens.set(avatarRoom, g);
+  }
   return g;
 }
+// Which generator made this room's ground, as a version number. ⚠️ NOT a global: two generators can be live at
+// once, so "the current version" is a property of the ROOM. `_genRooms` holds on-demand rooms; `_roomGens` holds
+// every room that has a generator at all, and a room with neither predates generation and keeps worldgen.js's.
+genVersion = function (room) {
+  const g = _genRooms.get(room) || _roomGens.get(room);
+  return (g && g.version) || WORLDGEN.WORLDGEN_VERSION;
+};
 // The whole world, built one page at a time through exactly the code path a single on-demand page fault will
 // take. That is deliberate: it means the eager path and the on-demand path cannot produce different worlds,
 // because they are the same function called in a different order — which is the property `probe_worldgen`
@@ -7752,6 +7795,14 @@ io.on('connection', (socket) => {
     // the natural thing to click instead, Rebuild, stalled the server. Which room you are in is decided at
     // `avt-join`, so a flag flipped mid-session changes nothing until you re-join; every client is now ASKED to
     // re-join, on the same `avt-retransport` seam the relay switch already uses for the same reason.
+    // ⭐ PORT INCREMENT 6 — the redesigned world. Turns chunked + onDemand on with it, for the same reason
+    // `worldOnDemand` turns `worldChunked` on: worldgen2 has no eager whole-world path, so they are not
+    // independent choices and a half-set combination is not a configuration anybody wants.
+    // ⚠️ Takes effect for rooms generated FROM HERE ON. Press "Rebuild this world" to see it where you are.
+    if ('worldGen2' in patch) {
+      worldCfg.gen2 = patch.worldGen2 ? 1 : 0;
+      if (worldCfg.gen2) { worldCfg.chunked = 1; worldCfg.onDemand = 1; }
+    }
     if ('worldOverworld' in patch) {
       const _was = worldCfg.overworld;
       worldCfg.overworld = patch.worldOverworld ? 1 : 0;

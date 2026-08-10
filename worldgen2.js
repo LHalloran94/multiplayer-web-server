@@ -98,12 +98,43 @@ const LAKE_LIFT = 256;
 // sea's cap is above SEA_ROW, not at it. Measured at 3 rows on pack ice; a berg is far thicker.
 const ICE_LIFT = 128;
 
+// ⭐ BUMP THIS WHENEVER THE GENERATOR'S OUTPUT CHANGES — the same contract `worldgen.js`'s WORLDGEN_VERSION
+// carries, and for the same reason: stored changes are kept as a DIFF against generated ground, so they are
+// only meaningful alongside the generator that made them.
+// ⚠️ 7 is the FIRST value, and it deliberately continues worldgen.js's sequence (which is at 6) rather than
+// starting again at 1. The two generators stamp the SAME field on stored diffs, so overlapping numbers would
+// make a gen2 diff look like valid gen1 ground — a stale-diff check that cannot tell the two apart is worse
+// than none, because it would apply somebody's tunnel to entirely different rock and report success.
+const WORLDGEN2_VERSION = 7;
+
 // The signed shortest way round the ring, for "how far is this column from that record". A column one period
 // along is otherwise half a million cells from every record in the world — the same `wdc` the spike applies 35
 // times, needed here for the identical reason.
 const HALF_P = PERIOD_COLS >> 1;
 const wrapDelta = (d) => (d >= -HALF_P && d <= HALF_P) ? d
   : ((((d % PERIOD_COLS) + PERIOD_COLS + HALF_P) % PERIOD_COLS) - HALF_P);
+
+// ── where a room-sized window sits, when nobody says ──────────────────────────────────────────────────────────
+// ⚠️ SIMPLEST-THING-THAT-WORKS, deliberately, and not the page-rooms-as-windows design (which wants a
+// rejection test — no bare ocean, no solid rock, no open air — and a registry recording where each site
+// landed, so a page keeps its place). These two functions exist so that turning the generator on shows you
+// GROUND instead of the empty sky an origin of (0,0) would frame.
+// A window as wide as the world is not a window: it starts at 0 and there is nothing to choose.
+function defaultOriginCol(seed, cols) {
+  if (cols >= LAYOUT_COLS) return 0;
+  // Different seeds land in different parts of the world, so two page rooms are two places rather than the
+  // same view twice. Snapped to a chunk so a room's pages line up with the world's.
+  const h = Math.imul(seed ^ 0x9e3779b9, 2654435761) >>> 0;
+  return (h % (LAYOUT_COLS - cols)) & ~(CHUNK_SIDE - 1);
+}
+// Frame on the ground at the middle of the window rather than on a fixed row: sea level is 1,900 but land
+// reaches 1,865 rows above it and the sea bed is 700 below, so any constant is wrong somewhere in the world.
+function defaultOriginRow(W, C, originCol, cols, rows) {
+  if (rows >= LAYOUT_ROWS) return 0;
+  const s = columnInfo(W, C, originCol + (cols >> 1)).surfRow;
+  const want = Math.round(s - rows * 0.45);                 // ground a little below the middle, sky above it
+  return Math.max(0, Math.min(LAYOUT_ROWS - rows, want)) & ~(CHUNK_SIDE - 1);
+}
 
 if (LAYOUT_N * LAYOUT_DX !== PERIOD_COLS) {
   throw new Error(`worldgen2: layout width ${LAYOUT_N * LAYOUT_DX} != PERIOD_COLS ${PERIOD_COLS} — the world `
@@ -158,9 +189,17 @@ function makeGen2(cfg) {
   // into every call site and reopening it later is a sweep.
   // ⚠️ THE ROW OFFSET IS AS NECESSARY AS THE COLUMN ONE, and that was not obvious: a page room is 405 rows of a
   // 4,096-row world, so a window has to be placed VERTICALLY too or it shows nothing but sky.
-  const originCol = (cfg && cfg.originCol) | 0;
-  const originRow = (cfg && cfg.originRow) | 0;
   const rows = (cfg && cfg.rows) ? cfg.rows | 0 : LAYOUT_ROWS;
+  const cols = (cfg && cfg.cols) ? cfg.cols | 0 : LAYOUT_COLS;
+  // 🟥 A WINDOW WITH NO DEFAULTS SHOWS SKY, and that would have been the first thing anybody saw. A page room
+  // is 405 rows of a 4,096-row world, so an origin of (0,0) frames the top-left corner — which is empty air
+  // 1,500 rows above the ground. Both defaults exist so that turning this on gives you a place rather than a
+  // void; NEITHER is the page-rooms-as-windows design, which needs a rejection test (no bare ocean, no solid
+  // rock, no open air) and a registry recording where each site landed. This is the simplest thing that makes
+  // the generator viewable, and it is labelled as such.
+  const originCol = (cfg && cfg.originCol != null) ? cfg.originCol | 0 : defaultOriginCol(seed, cols);
+  const originRow = (cfg && cfg.originRow != null) ? cfg.originRow | 0
+    : defaultOriginRow(W, C, originCol, cols, rows);
 
   // ── the cell queries. ABSOLUTE WORLD COORDINATES, always. ───────────────────────────────────────────────────
   // `out` receives GAME material ids. The spike writes its own palette indices and they are translated in place
@@ -278,6 +317,7 @@ function makeGen2(cfg) {
 
   return {
     seed, W, C,
+    version: WORLDGEN2_VERSION,
     seaRow: SEA_ROW, rows, cols: LAYOUT_COLS, cell: 8, bottomRow: LAYOUT_ROWS - 1,
     originCol, originRow,
     periodCols: PERIOD_COLS,
@@ -297,5 +337,5 @@ function makeGen2(cfg) {
 const RECORD_LISTS = ['volc', 'vents', 'voids', 'caves', 'sky', 'deep', 'forms', 'descents', 'rim', 'cliffs'];
 
 module.exports = { makeGen2, PERIOD_COLS, SEA_ROW, LAYOUT_N, LAYOUT_DX, LAYOUT_STEPS, RECORD_LISTS,
-  LAYOUT_ROWS, LAYOUT_COLS, CHUNK_SIDE, SKY_LIFT, ISLE_LIFT, LAKE_LIFT, ICE_LIFT, XLAT, STRENGTH, IS_FLUID,
+  LAYOUT_ROWS, LAYOUT_COLS, CHUNK_SIDE, WORLDGEN2_VERSION, SKY_LIFT, ISLE_LIFT, LAKE_LIFT, ICE_LIFT, XLAT, STRENGTH, IS_FLUID,
   ENV_SWITCHES, activeEnvSwitches, MATS, M };
