@@ -2007,6 +2007,9 @@ function ChunkRec() {
   // see it, while the chunk itself stays in memory for the whole eviction grace. Cleared by `rewakeChunk` when
   // it comes back into view. Declared here rather than assigned ad hoc so every record keeps one hidden shape.
   this.quiet = 0;
+  // The content hash as of the last time this chunk was written to the database. The periodic flush compares
+  // against it so an untouched chunk costs one integer comparison rather than a regenerate-and-diff.
+  this.savedHash = -1;
 }
 const NO_CHUNK_REC = Object.freeze(new ChunkRec());   // what `peek` answers for a chunk nothing has happened to
 function RoomChunks(nPages) {
@@ -2144,6 +2147,16 @@ let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0, genChunksDe
 // ReferenceError in the rigs and nowhere else. No generator ⇒ no eviction-restore to re-wake ⇒ a no-op is the
 // right answer for the sliced rigs and for every hand-built room.
 let queuePowderReseed = () => {};
+// ⚠️ THE SAME SEAM AGAIN (twelfth instance): `restoreChunk` is inside the block the probe rigs slice into a bare
+// `new Function`, and `_genPending` lives with the generator three thousand lines below, outside the slice. A
+// direct reference is a ReferenceError in the rigs and nowhere else.
+// ⭐ WHY A COLD-START RESTORE HAS TO QUEUE AT ALL. `rehydrateChunk` sets `restoring`, which tells the generator's
+// seeder "this is a restore, not a birth — do not seed liquid", and for an IN-MEMORY eviction blob that is right:
+// the blob carries the whole liquid state. A blob loaded from DISK carries a DIFF, and the ground under it has
+// just been generated fresh with no liquid at all — so the generated liquid has to be seeded and the diff then
+// laid over it. Without this a chunk you had edited came back after a restart with no water in it whatsoever,
+// which is a bug the terrain half shipped with and nobody had noticed.
+let queueGenLiquid = () => {};
 // ⚠️ THE SAME NO-OP-AND-REASSIGN SEAM, for the same reason (trap #1, ninth time): `genLiquidLoose` lives with
 // the generation seeders, outside the chunk-residency block the rigs slice, so a direct reference is a
 // ReferenceError in them and nowhere else. Defaulting to TRUE means a sliced rig wakes everything exactly as it
@@ -2240,7 +2253,11 @@ function evictChunk(room, p) {
   // re-derived from the seed — which is what keeps the database proportional to what players built.
   // ⚠️ Through a hook: `saveChunkBlob` is a no-op declared below and reassigned outside this block, because the
   // probe rigs slice this block out and run it without the module's `db`. Tenth instance of that trap.
-  if (!rec.gen && rec.blob) saveChunkBlob(room, p, rec.blob);
+  // ⚠️ CALLED EVEN WHEN THERE IS NOTHING TO SAVE. A chunk that has gone back to being pristine — somebody filled
+  // their hole in — must DROP any row it used to have, or the next restart re-applies a diff describing a hole
+  // that is no longer there. The hook decides; `null` is "store nothing, and forget whatever was stored".
+  saveChunkBlob(room, p, (!rec.gen && rec.blob) ? rec.blob : null);
+  rec.savedHash = rec.evHash;                // …and it is now written, so the periodic flush can skip it
   ch.evicted[p] = 1;
   for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
   for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === worldGeom(room).nPages) s[f].dropPage(p);
@@ -2373,7 +2390,10 @@ function restoreChunk(room, p) {
   // path rather than two that can disagree.
   if (!rec.blob) {
     const fromDisk = loadChunkBlobFor(room, p);
-    if (fromDisk) { rec.blob = fromDisk; rec.gen = 0; return rehydrateChunk(room, p); }
+    // ⚠️ A DISK BLOB IS NOT AN EVICTION BLOB. It holds a terrain DIFF and a liquid DIFF, over ground that is about
+    // to be generated fresh — so unlike a restore from memory it needs the generator's own liquid seeding to run
+    // first, with the stored diff applied over the top on the deferred pass. See queueGenLiquid.
+    if (fromDisk) { rec.blob = fromDisk; rec.gen = 0; const ok = rehydrateChunk(room, p); queueGenLiquid(room, p); return ok; }
   }
   if (!rec.gen) return false;
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
@@ -6025,7 +6045,7 @@ let worldSaved = 0, worldLoaded = 0, worldSaveErrors = 0;    // diagnostics; a s
 // that block (search `saveChunkBlob = `) and reassigned to this, below the block, at load.
 function persistChunkBlob(room, p, blob, ver) {
   if (!blob || !blob.d) return;                              // pristine, or the whole-chunk fallback (kind 1, later)
-  try { _putChunkRow.run(room, p, ver, 0, packDelta(blob), null); worldSaved++; }
+  try { _putChunkRow.run(room, p, ver, 0, packDelta(blob), blob.liq || null); worldSaved++; }
   catch (e) { worldSaveErrors++; if (worldSaveErrors < 5) console.log('world_chunks save failed: ' + e.message); }
 }
 function loadChunkBlob(room, p, ver) {
@@ -6037,7 +6057,9 @@ function loadChunkBlob(room, p, ver) {
   // which is the correct loss, and the alternative is silent corruption.
   if (row.ver !== ver) { try { _delChunkRow.run(room, p); } catch (e) { /* best effort */ } return null; }
   worldLoaded++;
-  return unpackDelta(Buffer.from(row.terrain), row.ver);
+  const b = unpackDelta(Buffer.from(row.terrain), row.ver);
+  b.liq = row.liquid ? Buffer.from(row.liquid) : null;
+  return b;
 }
 function worldSeedFor(url) {
   const row = _getWorldSeed.get(url);
@@ -6860,7 +6882,7 @@ function genSeedFn(field, room) {
 // Which chunks of a room have stored edits. Loaded ONCE per room, as indices only: the hot path (a page fault,
 // which can come from inside the liquid tick) must never touch the database, and the overwhelming majority of
 // chunks have no row at all. The blob itself is read only for a chunk actually in this set.
-const _listChunkRows = db.prepare('SELECT chunk, ver, terrain FROM world_chunks WHERE room = ?');
+const _listChunkRows = db.prepare('SELECT chunk, ver, terrain, liquid FROM world_chunks WHERE room = ?');
 function storedFor(room) {
   let m = _storedChunks.get(room);
   if (!m) {
@@ -6873,7 +6895,9 @@ function storedFor(room) {
         // against, so applying one across a generator change would cut somebody's tunnel through different
         // rock. Losing the edit is the correct loss; silent corruption is not.
         if (r.ver !== want || !r.terrain) { stale++; continue; }
-        m.set(r.chunk | 0, unpackDelta(Buffer.from(r.terrain), r.ver));
+        const b = unpackDelta(Buffer.from(r.terrain), r.ver);
+        b.liq = r.liquid ? Buffer.from(r.liquid) : null;   // the liquid half rides the same row and the same version check
+        m.set(r.chunk | 0, b);
       }
     } catch (e) { console.log('world_chunks load failed: ' + e.message); }
     _storedChunks.set(room, m);
@@ -6884,9 +6908,56 @@ function storedFor(room) {
   return m;
 }
 saveChunkBlob = function (room, p, blob) {
+  // ⭐ NO DIFF ⇒ DELETE THE ROW, and that is not tidiness. A chunk can go back to being pristine — fill in the
+  // hole you dug and it is generated ground again — and leaving the old row behind means the next restart
+  // re-applies a diff describing a hole that no longer exists. "Nothing to store" has to be written down as
+  // nothing, exactly as a drained lake needs an explicit empty marker rather than an absent one.
+  if (!blob || !blob.d) {
+    if (storedFor(room).delete(p | 0)) { try { _delChunkRow.run(room, p); } catch (e) { /* best effort */ } }
+    return;
+  }
   persistChunkBlob(room, p, blob, genVersion(room));
   storedFor(room).set(p | 0, blob);                    // keep memory and disk agreeing without a re-read
 };
+// ⭐⭐ WRITING AT EVICTION IS NOT ENOUGH ON ITS OWN, and the gap is exactly the case anybody would test first.
+// A chunk is written when it is put AWAY, which is precisely when nobody is looking at it — so the ground you
+// are standing on, the hole you have just dug, is the one part of the world that has never been saved. Pull the
+// plug then and you lose the most recent change you made, which is the one you would go and check for.
+// ⇒ a periodic sweep of RESIDENT chunks. It is cheap because it asks the content hash first, and that hash is
+// cached against the summed page revisions — so an untouched chunk costs one integer comparison, and the ~0.9ms
+// regenerate-and-compare is paid only by chunks that have actually changed since they were last written.
+// ⚠️ CAPPED PER PASS. A room with a lot of liquid moving can present many changed chunks at once and a flush must
+// never become a stall; the remainder simply carries to the next pass.
+// ⚠️ Generated rooms only. A published or hand-built room has no generator to diff against and persists through
+// an entirely different path (`published_worlds`).
+let worldFlushes = 0, worldFlushWrites = 0;
+const WORLD_FLUSH_MS = 30000, WORLD_FLUSH_MAX = 48;
+function worldFlush(max) {
+  const cap = max || WORLD_FLUSH_MAX;
+  let wrote = 0;
+  for (const room of Array.from(roomCells.keys())) {
+    if (wrote >= cap) break;
+    if (!_genRooms.has(room)) continue;
+    const s = roomCells.get(room); if (!s || !s.terrain || (s.fineSub || 1) !== 1) continue;
+    const ch = chunksOf(room), cand = new Set();
+    for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) pa.eachPage((p) => { cand.add(p); return false; }); }
+    for (const p of cand) {
+      if (wrote >= cap) break;
+      const h = chunkHash(room, p), rec = ch.peek(p);
+      if (rec.savedHash === h) continue;                 // nothing has changed here since it was last written
+      const d = chunkDelta(room, p);
+      ch.at(p).savedHash = h;
+      // A pristine chunk stores nothing AND drops whatever it used to store (see saveChunkBlob). A null delta
+      // means this room cannot be diffed at all, which is not a state to record a hash for.
+      if (!d) continue;
+      saveChunkBlob(room, p, d.pristine ? null : d);
+      if (!d.pristine) wrote++;
+    }
+  }
+  worldFlushes++; worldFlushWrites += wrote;
+  return wrote;
+}
+setInterval(() => { try { worldFlush(); } catch (e) { worldSaveErrors++; } }, WORLD_FLUSH_MS);
 loadChunkBlobFor = function (room, p) {
   const b = storedFor(room).get(p | 0);
   return b || null;
@@ -6905,21 +6976,102 @@ applyStoredEdit = function (room, p, page, field) {
 // recording "what untouched looks like" during a RESTORE recorded the restored state, so an edited chunk could
 // be judged untouched and thrown away. "The diff is empty" needs no bookkeeping and cannot drift.)
 // A chunk is stored as a DIFF only if there is a generator to diff it against and to rebuild it from.
+// ⭐⭐ LIQUID PERSISTENCE — THE SAME TRICK AS TERRAIN, ONE LEVEL UP, AND IT IS THE WHOLE DESIGN.
+// Storing a chunk's liquid raw is 28KB (six layers per cell plus a total), and liquid MOVES, so a naive scheme
+// rewrites the oceans constantly. But generated liquid is RE-DERIVABLE, exactly like generated terrain: the
+// seeder's fluid branch is one line — a fluid material means that rank at LIQUID_MAX, single-layer, nothing else
+// — so the generated liquid of a cell is a pure function of the generated TERRAIN cell, which `encodeChunkDelta`
+// has just regenerated into `_dScratchT` anyway. So store only the DIFFERENCE:
+//   · an untouched lake, ocean or volcano conduit  ⇒ zero bytes
+//   · a lake somebody drained                      ⇒ only the cells they emptied
+//   · a pond somebody dug and filled               ⇒ only those cells
+// One entry per (cell, LAYER) that differs, at 4 bytes: (index u16, rank u8, amount u8). A cell holding more
+// than one liquid — which only the SIM produces, never generation — needs no special case: it simply has more
+// than one entry, which is why this shape was chosen over a fixed six-byte record.
+// ⭐ `rank = 0xFF` IS "THERE IS NO LIQUID HERE", and it is the entry that makes a drained lake stay drained.
+// Without it, "empty" and "no entry at all" are the same thing on the wire, and every restart would refill it.
+const LIQ_REMOVED = 0xFF;
+function encodeLiquidDelta(s, p, genT) {
+  const amt = s.fineAmt && s.fineAmt.pageAt(p);
+  const out = [];
+  for (let k = 0; k < CHUNK_CELLS; k++) {
+    const gv = genT[k], gFluid = isFluidId(gv), gRank = gFluid ? LIQ_RANK[gv] : -1;
+    let n = 0, only = -1, onlyAmt = 0;
+    if (amt) { const b = k * LIQ_T; for (let r = 0; r < LIQ_T; r++) { const v = amt[b + r]; if (v) { n++; only = r; onlyAmt = v; } } }
+    // The one shape generation can produce: exactly one layer, at the terrain material's rank, brim full.
+    if (gFluid ? (n === 1 && only === gRank && onlyAmt === LIQUID_MAX) : n === 0) continue;
+    if (n === 0) { out.push(k & 255, k >> 8, LIQ_REMOVED, 0); continue; }
+    const b = k * LIQ_T;
+    for (let r = 0; r < LIQ_T; r++) { const v = amt[b + r]; if (v) out.push(k & 255, k >> 8, r, v); }
+  }
+  return out.length ? Buffer.from(out) : null;
+}
 chunkDelta = (room, p) => {
   const gen = _genRooms.get(room); if (!gen || !worldCfg.dropPristine) return null;
   const st = roomCells.get(room); if (!st || !st.terrain) return null;
   const b = encodeChunkDelta(st, p, gen, worldGeom(room));
   if (!b) return null;                                  // diff bigger than the chunk ⇒ store it whole
-  b.a = encodeChunk(st, p).a;                           // liquid keeps its existing SPARSE encoding
-  // ⚠️ LIQUID IS JUDGED BY WHETHER A PAGE EXISTS, NOT BY WHETHER IT HOLDS ANYTHING. A generated lake that has
-  // since drained leaves an ALLOCATED but empty liquid page and an unchanged terrain diff — so by content
-  // alone the chunk would look untouched, be thrown away, and come back with its lake restored. Conservative
-  // on purpose: any chunk that has ever held liquid is stored.
-  const wet = !!((st.fineAmt && st.fineAmt.pageAt(p)) || (st.fineTotal && st.fineTotal.pageAt(p)));
-  b.pristine = b.d.length === 0 && !wet;
+  // ⚠️ FIRST, AND THE ORDER IS LOAD-BEARING. `_dScratchT` is a shared scratch page that `encodeChunkDelta` has
+  // just filled with what the generator WOULD produce here; anything that regenerates a page before this line
+  // would silently diff the liquid against the wrong ground.
+  b.liq = encodeLiquidDelta(st, p, _dScratchT);
+  b.a = encodeChunk(st, p).a;                           // liquid keeps its existing SPARSE encoding IN MEMORY (whole state, not a diff)
+  // ⭐ LIQUID IS NOW JUDGED BY WHAT IT HOLDS, NOT BY WHETHER A PAGE EXISTS — which closes a defect increment 4d
+  // recorded and could not fix: a generated lake that had since DRAINED left an allocated-but-empty liquid page
+  // and an unchanged terrain diff, so by content alone the chunk looked untouched, would be thrown away, and
+  // would come back full. A liquid diff makes that difference visible, so this is a correctness fix as much as a
+  // persistence one — and it also stops every ocean chunk being stored merely for being wet.
+  b.pristine = b.d.length === 0 && !b.liq;
   if (!b.pristine) genChunksDeltad++;
   return b;
 };
+// The read half: put a stored liquid diff back. Layers of the listed cells are cleared first, so an entry list
+// REPLACES those cells rather than adding to whatever generation seeded — which is what makes a 0xFF marker mean
+// "empty" and a rank entry mean "exactly this".
+// 🟥 THIS MUST NOT RUN INSIDE A PAGE FAULT. It writes `fineAmt`/`fineTotal` and wakes cells in the active Set, and
+// a page fault can arrive from deep inside `fineLiquidTickRoom` while it is iterating that very Set — the hazard
+// `probe_worldgen` F7 exists to catch. It rides the existing deferred pass (`drainGenLiquid`) instead, AFTER the
+// generator's own seeding for the chunk, so the stored state wins. Reverse that order and a drained lake refills
+// itself on every restart.
+let worldLiquidRestored = 0;
+function applyStoredLiquid(room, p) {
+  const blob = storedFor(room).get(p | 0);
+  const buf = blob && blob.liq;
+  if (!buf || !buf.length) return 0;
+  const s = roomCells.get(room); if (!s || !s.fineAmt || !s.fineTotal) return 0;
+  const amt = s.fineAmt.wpPage(p), tot = s.fineTotal.wpPage(p);
+  if (!amt || !tot) return 0;
+  for (let q = 0; q + 3 < buf.length; q += 4) {         // pass 1: clear every listed cell, so the entries below are the whole truth about it
+    const c = buf[q] | (buf[q + 1] << 8), b = c * LIQ_T;
+    for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0;
+    tot[c] = 0;
+  }
+  const geom = worldGeom(room), act = fineSet(room);
+  const pc0 = ((p / geom.cy) | 0) * CHUNK_SIDE, pr0 = (p % geom.cy) * CHUNK_SIDE;
+  let n = 0;
+  for (let q = 0; q + 3 < buf.length; q += 4) {         // pass 2: write what was stored
+    const c = buf[q] | (buf[q + 1] << 8), rk = buf[q + 2], v = buf[q + 3];
+    if (rk === LIQ_REMOVED) continue;                   // an explicit "nothing here" — pass 1 already did the work
+    const b = c * LIQ_T;
+    amt[b + rk] = v;
+    const t = tot[c] + v; tot[c] = t > 255 ? 255 : t;
+    n++;
+  }
+  // ⚠️ WOKEN, not left to be discovered, and every listed cell — including the emptied ones, whose NEIGHBOURS may
+  // now have somewhere to go. This is liquid a PLAYER moved, so unlike generated liquid it has no claim to being
+  // at rest: it may have been mid-flow when the server went down. The list is short (changed cells only), so
+  // waking all of it costs nothing, and under-waking leaves water visibly hanging until something disturbs it.
+  // ⚠️ A page is laid out ROW-MAJOR WITHIN THE CHUNK (`lr * CHUNK_SIDE + lc`) while the world index is
+  // column-major (increment 5) — hence the conversion rather than an offset.
+  for (let q = 0; q + 3 < buf.length; q += 4) {
+    const c = buf[q] | (buf[q + 1] << 8);
+    const lr = (c / CHUNK_SIDE) | 0, lc = c - lr * CHUNK_SIDE;
+    if (pc0 + lc >= geom.cols || pr0 + lr >= geom.rows) continue;
+    if (act.size < LIQUID_MAX_ACTIVE) act.add((pc0 + lc) * geom.rows + (pr0 + lr));
+  }
+  worldLiquidRestored += n;
+  return n;
+}
 // Attach (or remove) the seeders for a room. Idempotent, and safe to call after the fields already exist —
 // which matters because `ensureTerrain` may have run long before anybody decided this room was generated.
 function setRoomGenerator(room, gen) {
@@ -7045,6 +7197,7 @@ function seedGenChunkLiquid(room, p) {
 // only added on a first production). Powder is safe to re-derive from restored terrain; liquid is not.
 const _powderPending = new Set();
 queuePowderReseed = (room, p) => { _powderPending.add(room + GEN_SEP + p); };
+queueGenLiquid = (room, p) => { _genPending.add(room + GEN_SEP + p); };
 liquidCanMove = genLiquidLoose;
 // The powder half of the deferred pass. Deferred for the SAME re-entrancy reason as liquid, not for tidiness:
 // this writes into the Set `powderTickRoom` iterates, and a page fault can arrive from inside that iteration.
@@ -7078,6 +7231,10 @@ drainGenLiquid = function () {
       const room = key.slice(0, cut), p = +key.slice(cut + 1);
       if (!roomCells.has(room)) continue;
       n += seedGenChunkLiquid(room, p) || 0;
+      // ⭐ AND THE STORED LIQUID GOES ON TOP, HERE, IN THIS ORDER. Seed what the generator says should be there,
+      // then overwrite it with what was actually there when this chunk was last put away. Reverse the two and a
+      // lake somebody drained refills itself on every restart — which is the entire correctness of the design.
+      applyStoredLiquid(room, p);
     }
     genLiquidSeeded += n;
   }
@@ -9612,7 +9769,20 @@ io.on('connection', (socket) => {
 
 server.listen(3000, () => console.log('Server running on port 3000'));
 
+// ⚠️ A BEST EFFORT, NOT THE MECHANISM. `restart-server.ps1` force-kills the process on Windows, where there is no
+// signal to catch at all — so the periodic flush is what actually protects recent work, and this only helps a
+// Ctrl+C or a clean stop. Uncapped on purpose: at shutdown there is no tick left to stall.
+function worldFlushAll(why) {
+  try { const n = worldFlush(1e9); if (n) console.log(`world persistence: flushed ${n} resident chunk(s) on ${why}`); }
+  catch (e) { console.log('world flush on ' + why + ' failed: ' + e.message); }
+}
 process.on('SIGTERM', () => {
+  worldFlushAll('SIGTERM');
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+});
+process.on('SIGINT', () => {
+  worldFlushAll('SIGINT');
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 5000).unref();
 });
