@@ -3164,6 +3164,21 @@ function sourceTickRoom(room) {
 // A rig therefore sees exactly today's behaviour (sand + snow) instead of a ReferenceError.
 const POWDER_MOVE = new Uint8Array(256), POWDER_SEED = new Uint8Array(256), MAT_HANGS = new Uint8Array(256);
 POWDER_MOVE[3] = POWDER_MOVE[8] = POWDER_SEED[3] = POWDER_SEED[8] = 1;
+// ⭐ A THIRD KIND OF FALLING THING: A RIGID BLOCK. Sand and snow are GRAINS — they sink through water and they
+// slide off a heap into a 45° pile, because that is what a heap of grains does. Ice is neither: it FLOATS, and a
+// slab of it does not trickle sideways. Both consequences come off one flag, because they are one fact about the
+// material (it is a rigid solid less dense than water) rather than two tunable behaviours:
+//   · it never displaces a fluid, so a floe rests ON the sea instead of sinking through it — which is also what
+//     makes the generator's pack ice and bergs stable without generation having to know about the sim;
+//   · it does not slide diagonally, so digging under a sheet drops it straight down instead of turning it into
+//     a scree slope.
+// ⚠️ NOT in POWDER_SEED, deliberately. Generated ice is either a floe (which the float rule already holds up) or
+// ice on solid ground, so seeding it would wake cells that cannot move — and this track has already measured
+// what that costs: a chunk that settles itself stops being throw-away-able, which is what increments 4c/4d were
+// built to avoid. Player edits wake it through `activatePowderRect`, which is the dig-under-it case.
+const MAT_RIGID = new Uint8Array(256);
+MAT_RIGID[4] = 1;                                      // ice
+POWDER_MOVE[4] = 1;
 const isPowderId = (v) => POWDER_MOVE[v] === 1;
 const isPowderSeedId = (v) => POWDER_SEED[v] === 1;
 // (`powderActive` on the cell store: Set<cellIndex> of powder cells that might still move.)
@@ -3295,6 +3310,8 @@ function powderTickRoom(room) {
   const genRoom = !!grid.seedFn;
   const peekG = genRoom ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
   const canDisplace = (j) => { const v = peekG(j); return v === 0 || isFluidId(v); };   // -1 (unbuilt) is neither
+  // …and the same question asked on behalf of a RIGID block, which floats: air yes, fluid no. See MAT_RIGID.
+  const canEnter = (gv, j) => (MAT_RIGID[gv] ? peekG(j) === 0 : canDisplace(j));
   const list = Array.from(active); active.clear();
   list.sort((a, b) => (b % ROWS) - (a % ROWS));   // bottom-up so a falling column cascades in a single pass
   const changedSet = new Set(), fineChanged = new Set();
@@ -3332,7 +3349,8 @@ function powderTickRoom(room) {
     // test (nothing there runs a sim) — this is the sim reading it.
     if (MAT_HANGS[gv] && r > 0 && !canDisplace(i - 1)) continue;   // still hanging from something solid
     const below = i + 1;
-    if (canDisplace(below)) { swapMove(i, below); continue; }
+    if (canEnter(gv, below)) { swapMove(i, below); continue; }
+    if (MAT_RIGID[gv]) continue;                              // a slab falls straight down or not at all — it does not trickle into a pile
     // DIAGONAL SLIDE — the grain must be able to pass THROUGH the side cell, not just land in the target. Checking only
     // the destination let a grain squeeze between two solids that touch only at their corners: it tunnelled through a
     // sealed diagonal crack, and in a pool it slipped past the ice it had just made and froze a diagonal trail behind it.

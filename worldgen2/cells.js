@@ -943,6 +943,40 @@ function fillColumn(W, C, c, r0, rN, out) {
     out[k] = v;
   }
 
+  // ⭐ SNOW LIES ON ICE — a POST-PASS over the finished column, for the same reason the speleothems are one.
+  // "Put snow on the sea ice" would need the sea-ice rule to know about it; "put snow on the glaciers" would
+  // need the glacier rule to as well; and a frozen lake, a berg and a rimstone pool that froze would each need
+  // their own. One rule that finds every ice cell with open air above it covers all of them, including ice put
+  // there by a rule written later.
+  // ⚠️ THREE CONDITIONS, AND EACH ONE IS LOAD-BEARING:
+  //   · air ABOVE — snow settles on an exposed surface, not on the ice under the waterline;
+  //   · ice BELOW — otherwise a one-cell floe would be turned entirely into snow, and snow is a POWDER that
+  //     sinks through water, so the floe would dissolve into the sea on the first tick. Capping only ice that
+  //     has ice under it means the sheet is always still a sheet;
+  //   · a low-frequency FIELD, not a per-column coin flip — the user asked for variation, and dice give a
+  //     one-cell salt-and-pepper mess rather than drifts you can see the shape of. Same objection, and the same
+  //     cure, as the pack ice's leads twenty lines above.
+  // ⚠️ Two cells deep only where the field is strongly positive AND there is ice to spare, so a thin sheet is
+  // never mostly snow.
+  // ⚠️ COLD COLUMNS ONLY, AND THAT IS A COST DECISION AS WELL AS A CORRECTNESS ONE. This is a full extra pass
+  // over the column; gating it on the climate the user actually described ("arctic and similar places") means
+  // the ~90% of the world that is not cold pays one comparison. An ice cell in a temperate cave gets no snow,
+  // which is also right — snow does not fall indoors.
+  if (ci.temp < 0.22) {
+    const sn = fb1(seed, 823, c * nd(210).q, 3, nd(210).p);
+    if (sn > 0.44) {
+      const deep = sn > 0.70;
+      for (let k = 0; k < rN; k++) {
+        if (out[k] !== M.ice) continue;
+        if (k > 0 && out[k - 1] !== M.air) continue;                  // not the top of an exposed run
+        if (k + 1 >= rN || out[k + 1] !== M.ice) continue;            // nothing underneath to keep it a sheet
+        out[k] = M.snow;
+        if (deep && k + 2 < rN && out[k + 2] === M.ice) out[k + 1] = M.snow;
+        break;                                                        // the FIRST exposed ice surface only; deeper runs are inside the ice
+      }
+    }
+  }
+
   // ── VEGETATION AS TERRAIN CELLS — the user's decision, and it costs nothing structurally ──────────────────
   // ⚠️ Placed AFTER the ground so it can sit on it. A tree is a trunk plus a canopy, both ordinary cells; it is
   // destructible for free and needs no object system, which is the whole reason for doing it this way.
