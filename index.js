@@ -7282,6 +7282,12 @@ function overworldIdentity(avatarRoom) {
   const a = s.indexOf(':'), b = s.lastIndexOf(':');
   return (a >= 0 && b > a) ? s.slice(a + 1, b) : s;
 }
+// ⭐ A SHORT DROP, NOT A PLACEMENT FLUSH ON THE GROUND. Standing a body exactly on the surface row means any
+// disagreement between the generator's idea of the surface and the cells that actually arrive puts the feet
+// INSIDE rock, and a body that starts inside rock has no clean way out. Starting a few cells up costs a
+// quarter-second of freefall and turns every such disagreement into a landing. `bandGroundAt` is asked for 5
+// cells of clearance, so 3 cells of it is air by construction.
+const SPAWN_DROP_PX = TERRAIN_CELL * 3;
 function worldSpawnFor(avatarRoom, rec) {
   const x = spawnXOf(avatarRoom, rec);
   const col0 = Math.floor(x / TERRAIN_CELL);
@@ -7295,13 +7301,13 @@ function worldSpawnFor(avatarRoom, rec) {
     const gen = _roomGens.get(avatarRoom), b = domains.bandRows(rec.band);
     if (gen && b) {
       const r = gen.bandGroundAt(col0, b.r0, b.r1, 5);
-      if (r >= 0) return { x, y: r * TERRAIN_CELL };
+      if (r >= 0) return { x, y: Math.max(0, r * TERRAIN_CELL - SPAWN_DROP_PX) };
       // ⚠️ NO GROUND IN THE BAND IS A REAL OUTCOME, not an error — the generator guarantees ground in every band
       // at SOME column, not at every column. Falling back to the surface band is better than falling to the
       // world floor, which for a sky site would be 32,000px of freefall.
       const s = domains.bandRows('surface');
       const sr = gen.bandGroundAt(col0, s.r0, s.r1, 5);
-      if (sr >= 0) return { x, y: sr * TERRAIN_CELL };
+      if (sr >= 0) return { x, y: Math.max(0, sr * TERRAIN_CELL - SPAWN_DROP_PX) };
     }
   }
   const grid = peekCells(avatarRoom).terrain;
@@ -8682,7 +8688,8 @@ io.on('connection', (socket) => {
     // constant, so a second world shape was not expressible at all; it now reshapes to whatever this says.
     // `roomDims` returns the page shape for every room today, so this is the value the client already had.
     const _rd = roomDims(avRoom);
-    socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: (type === 'world') ? worldSpawnFor(avRoom, _overCol) : null,
+    const _spawn = (type === 'world') ? worldSpawnFor(avRoom, _overCol) : null;
+    socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: _spawn,
       dims: { w: _rd.cols * TERRAIN_CELL, h: _rd.rows * TERRAIN_CELL, cell: TERRAIN_CELL },
       // ⭐ WHERE YOU CAME FROM, said by the SERVER rather than re-derived on the client. The routing rule
       // (`isDomainHome` + `normalizeIdentity`) is subtle enough — shell paths, `www.`, ports, two-label public
@@ -8695,6 +8702,22 @@ io.on('connection', (socket) => {
       // "Is this the Overworld" is a fact the server knows; making the client guess it from a pixel count is
       // how the two ends drift apart.
       overworld: _isOver ? 1 : 0 });
+    // ⭐ THE GROUND UNDER THE SPAWN, ASKED FOR BEFORE THE CLIENT CAN ASK FOR IT. The client holds its body still
+    // until the chunks around its spawn have arrived (see the spawn gate in 16e), so how long that hold lasts is
+    // decided entirely by how soon those chunks are queued. Waiting for the first beacon costs a round trip plus
+    // up to the beacon interval; queueing them here puts them at the FRONT of this socket's queue, which is
+    // drained in insertion order, so they arrive before the rest of the viewport rather than somewhere inside it.
+    // ⚠️ QUEUED, NOT PRODUCED. `queueChunks` hands them to the tick's drain with its own millisecond allowance —
+    // generating nine chunks inline on the join path is exactly the whole-world-replay stall this join stopped
+    // doing.
+    if (_spawn && _isOver) {
+      const _g = worldGeom(avRoom), _sc = Math.floor(_spawn.x / TERRAIN_CELL) >> 6, _sr = Math.floor(_spawn.y / TERRAIN_CELL) >> 6, _near = [];
+      for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) {
+        const gx = _sc + dc, gy = _sr + dr;
+        if (gx >= 0 && gy >= 0 && gx < _g.cx && gy < _g.cy) _near.push(gx * _g.cy + gy);
+      }
+      if (_near.length) queueChunks(avRoom, socket.id, _near);
+    }
     // Identity, once, rather than on every position packet — see roomProfile. Both directions: the joiner
     // needs everyone already here, and everyone here needs the joiner. Harmless when the relay is off (an
     // un-relayed client simply has no handler for these, and gets names off the mesh as it always has).
