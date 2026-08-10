@@ -175,13 +175,30 @@ function activeEnvSwitches() {
 //  once and is not fine per page room, which is why page rooms keep `worldgen.js`. `buildMs`/`prepareMs`/`ms`
 //  are reported on the returned object so the number is measured on the real path rather than quoted from here.
 // ==============================================================================================================
-function makeGen2(cfg) {
-  const seed = (cfg && cfg.seed) | 0;
+// ⭐⭐ THE LAYOUT IS SEPARABLE FROM THE WINDOW, AND THAT IS WHAT MAKES THE GENERATOR AFFORDABLE AS A DEFAULT.
+// `buildWorld` + `prepare` cost ~1.8 s and depend on ONE thing: the layout seed. A room additionally has a
+// window (which columns and rows of that world it shows), which costs nothing. Keeping them separate means a
+// single layout can serve any number of rooms — otherwise every new page world freezes the whole server for
+// 1.8 s, which is exactly why the plan had page rooms staying on `worldgen.js`.
+// ⚠️ THERE IS NO CACHE IN HERE, DELIBERATELY. `makeGen2` always builds unless it is HANDED a layout, so
+// `probe_worldgen2` A2 — "the same seed twice, with a different seed in between, gives the identical layout" —
+// keeps testing a real build rather than being handed the same object back and passing trivially. The cache
+// lives in `index.js` beside `_roomGens`, where its lifetime is a server's and not a module's.
+function layoutFor(seed) {
   const t0 = Date.now();
-  const W = buildWorld({ seed, n: LAYOUT_N, dx: LAYOUT_DX, steps: LAYOUT_STEPS });
+  const W = buildWorld({ seed: seed | 0, n: LAYOUT_N, dx: LAYOUT_DX, steps: LAYOUT_STEPS });
   const t1 = Date.now();
   const C = prepare(W, SEA_ROW);
-  const t2 = Date.now();
+  return { seed: seed | 0, W, C, buildMs: t1 - t0, prepareMs: Date.now() - t1 };
+}
+
+function makeGen2(cfg) {
+  const seed = (cfg && cfg.seed) | 0;
+  // `seed` decides the WINDOW; `layout.seed` decides the WORLD. They are the same number when nobody separates
+  // them, which is what keeps a plain `makeGen2({ seed })` behaving exactly as it did before.
+  const L = (cfg && cfg.layout) ? cfg.layout : layoutFor(seed);
+  const W = L.W, C = L.C;
+  const t0 = Date.now(), t1 = t0 + (L.buildMs || 0), t2 = t1 + (L.prepareMs || 0);
   // ══ THE WINDOW ══════════════════════════════════════════════════════════════════════════════════════════════
   // ⭐ A ROOM IS A WINDOW ON THE LAYOUT, and the offsets are the whole of it (user decision, 2026-08-10 — see
   // kickoff_port.md). The Overworld is the window at (0, 0) covering the full 4,096 rows, so this changes
@@ -317,6 +334,7 @@ function makeGen2(cfg) {
 
   return {
     seed, W, C,
+    layoutSeed: L.seed,
     version: WORLDGEN2_VERSION,
     seaRow: SEA_ROW, rows, cols: LAYOUT_COLS, cell: 8, bottomRow: LAYOUT_ROWS - 1,
     originCol, originRow,
@@ -336,6 +354,6 @@ function makeGen2(cfg) {
 // list and go stale when a seventeenth kind of record is added. Order is `prepare`'s own placement order.
 const RECORD_LISTS = ['volc', 'vents', 'voids', 'caves', 'sky', 'deep', 'forms', 'descents', 'rim', 'cliffs'];
 
-module.exports = { makeGen2, PERIOD_COLS, SEA_ROW, LAYOUT_N, LAYOUT_DX, LAYOUT_STEPS, RECORD_LISTS,
+module.exports = { makeGen2, layoutFor, PERIOD_COLS, SEA_ROW, LAYOUT_N, LAYOUT_DX, LAYOUT_STEPS, RECORD_LISTS,
   LAYOUT_ROWS, LAYOUT_COLS, CHUNK_SIDE, WORLDGEN2_VERSION, SKY_LIFT, ISLE_LIFT, LAKE_LIFT, ICE_LIFT, XLAT, STRENGTH, IS_FLUID,
   ENV_SWITCHES, activeEnvSwitches, MATS, M };

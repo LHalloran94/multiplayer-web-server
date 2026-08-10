@@ -6565,11 +6565,15 @@ const worldCfg = {
   // ⭐⭐ INCREMENT 7 — THE OVERWORLD ITSELF. With this on, a 'world' join goes to ONE shared world instead of a
   // per-page one, and the page you came from decides only WHERE IN IT YOU ARRIVE. That is the whole Stage 7
   // model: identity (which page you are) is separate from location (which column you spawn at).
-  // ⚠️ Ships OFF. It changes what "join a world" means, so it is a switch, not a migration.
+  // ⭐⭐ ON BY DEFAULT 2026-08-10, THE USER'S CALL, TAKEN WITH THE GAPS STATED AND ACCEPTED:
+  //   · NOTHING PERSISTS — no per-chunk diff is written to disk, so a server restart discards everything
+  //     anybody has built in the Overworld. This is the next thing to fix.
+  //   · no objects or trees generate (blocked on an object-streaming design that does not exist)
+  //   · the no-build box that protects a spawn point is off, because there are thousands of spawn points.
   // ⚠️ It IMPLIES chunked + onDemand for the Overworld room regardless of those flags: a 524,224 x 4,096 world
   // cannot be built eagerly, and `ensureWorldGenerated` reads `overworldRooms` rather than the flags for that
   // reason. Turning this on without them is not a broken combination, it is simply not a combination.
-  overworld: 0,
+  overworld: 1,
   // ⭐⭐ PORT INCREMENT 6 — THE REDESIGNED WORLD (server/worldgen2.js). Ships OFF.
   // With this on, a world is built by the ported spike instead of worldgen.js: designed landforms, 17 biomes,
   // a layered underground, real cave mouths, karst, rimstone, sky islands, an ocean with a floor worth swimming
@@ -6579,8 +6583,33 @@ const worldCfg = {
   // ⚠️ THE FIRST JOIN INTO A gen2 ROOM BLOCKS THE SERVER FOR ~2 SECONDS while the layout pass runs
   // (buildWorld + prepare, measured at ~2.1s and ~5MB). That is plan risk R3, it is known, and it is per ROOM
   // per server lifetime. Acceptable for one Overworld; it is why page rooms keep worldgen.js.
-  gen2: 0,
+  // ⭐⭐ ON BY DEFAULT 2026-08-10 (user's call, after eyeballing it): *"since this all seems to work, can we go
+  // about making it the default and only generator"*. `worldgen.js` is NOT deleted — it stays reachable by
+  // unticking this, as the rollback path the whole port was built around. Delete it once this has had real use.
+  gen2: 1,
 };
+// ⭐⭐ THE LAYOUT IS SHARED; ONLY THE WINDOW IS PER ROOM. `buildWorld` + `prepare` cost ~1.8-2.5s and depend on
+// nothing but the layout seed, so building one PER ROOM would freeze the whole server for that long every time
+// anybody opened a new page — which is exactly why the plan had page rooms staying on `worldgen.js`. A room
+// takes a WINDOW on a shared layout instead: the room's own seed picks where the window sits, so every page is
+// still a different place, and the second room off a layout costs 0ms (measured).
+// ⚠️ TWO LAYOUTS, NOT ONE, and the reason is the user's: page rooms must be a *separate instance* from the
+// Overworld *"so as to not take up space inside the existing overworld"*. Sharing a layout would satisfy that
+// literally (different rooms, different edits) but would put a page's ground in the Overworld's landscape.
+// A second layout is ~5MB and one more build.
+const GEN2_LAYOUT_SEED = { overworld: 0x0ADE0000, page: 0x0ADE0001 };
+const _gen2Layouts = new Map();
+function gen2LayoutFor(which) {
+  const seed = GEN2_LAYOUT_SEED[which];
+  let L = _gen2Layouts.get(seed);
+  if (!L) {
+    const t0 = Date.now();
+    L = WORLDGEN2.layoutFor(seed);
+    console.log(`worldgen2: built the ${which} layout in ${Date.now() - t0}ms (once per server lifetime)`);
+    _gen2Layouts.set(seed, L);
+  }
+  return L;
+}
 const _roomGens = new Map();                          // avatarRoom → the generator for its seed+shape, built once
 // Everything worldgen.js needs to know about a room, gathered in one place so there is one definition of
 // "what shape and seed is this world" rather than several that can drift.
@@ -6601,7 +6630,13 @@ function genFor(avatarRoom, seed, band) {
     // re-read. That is deliberate: a room's stored diffs are taken against its generator's ground, so a room
     // that changed generator mid-life would be applying tunnels to different rock. Flipping the flag affects
     // rooms created from here on — the same rule `worldChunked` already follows.
-    g = worldCfg.gen2 ? WORLDGEN2.makeGen2(cfg) : WORLDGEN.makeGen(cfg);
+    if (worldCfg.gen2) {
+      // The room's own seed still decides WHERE it lands; the layout decides what world it lands in.
+      cfg.layout = gen2LayoutFor(overworldRooms.has(avatarRoom) ? 'overworld' : 'page');
+      g = WORLDGEN2.makeGen2(cfg);
+    } else {
+      g = WORLDGEN.makeGen(cfg);
+    }
     _roomGens.set(avatarRoom, g);
   }
   return g;
