@@ -7059,6 +7059,23 @@ function spawnXOf(avatarRoom, rec) {
 }
 // The identity an Overworld room is placed BY. `avatarRoomKey` is 'av:<roomId>:<levelIndex>' and the roomId is the
 // page URL, so the identity is the middle field — normalised to a host by domains.normalizeIdentity.
+// ⭐ IS THIS A SITE'S FRONT DOOR? The one test that decides Overworld-versus-island, kept beside
+// `overworldIdentity` because the two are halves of the same question: this decides WHETHER you go, that one
+// decides WHERE. Room keys are `hostname + pathname + search`.
+// ⚠️ THE QUERY STRING IS IGNORED, DELIBERATELY. `example.com/?utm_source=twitter` is a front door wearing a
+// tracking tag, and sending it to an island instead would be the friendlier failure inverted — a huge share of
+// real links to home pages carry campaign parameters. The cost is that a bare-host search page
+// (`google.com/?q=...`) reads as Google's front door. Judged the better trade; revisit with the middle tier.
+// ⚠️ `index.html` and friends are NOT special-cased. Named here so it is a known gap rather than a surprise.
+function isDomainHome(roomKey) {
+  let s = String(roomKey == null ? '' : roomKey).trim().toLowerCase();
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');          // protocol
+  s = s.replace(/^www\./, '');
+  s = s.replace(/[?#].*$/, '');                          // query and hash are not a different PAGE
+  const slash = s.indexOf('/');
+  if (!s) return false;                                  // an empty key is not a front door
+  return slash < 0 || s.slice(slash) === '/';            // bare host, or host + a single trailing slash
+}
 function overworldIdentity(avatarRoom) {
   const s = String(avatarRoom);
   const a = s.indexOf(':'), b = s.lastIndexOf(':');
@@ -8376,7 +8393,20 @@ io.on('connection', (socket) => {
     // ⚠️ `overworldRooms.add` happens HERE, before anything asks for the room's shape. `roomDims`, `worldGeom`
     // and `genCfgFor` all read this Set, so registering late would create page-shaped fields for an
     // Overworld-shaped world — and the fields are allocated by the first thing that touches them.
-    const _isOver = !!worldCfg.overworld && type === 'world';
+    // ⭐⭐ AND ONLY A SITE'S FRONT DOOR GOES THERE. SHARED-WORLD.md's model is two-tier and the second tier was
+    // never wired: *"Entering Layer 2 from a site's HOME PAGE spawns you at its coordinates"* · *"Individual
+    // pages (a Reddit post, a video, an article) are separate self-contained rooms — islands"*. Until now
+    // `_isOver` was true for every 'world' join, so `reddit.com/` and `reddit.com/r/space/comments/xyz` landed
+    // on the SAME column of the Overworld and no island room was ever reached. Measured before the fix: both at
+    // column 324,745.
+    // ⚠️ USER'S RULE, 2026-08-10, taken with the middle tier left open ON PURPOSE: **the bare host only**.
+    // `reddit.com/` is the Overworld; `reddit.com/r/space` and everything deeper is its own island. The design
+    // doc raises a third tier ("domain → sub-area → page") and whether a subreddit deserves its own coordinate
+    // is a question to answer after playing with this, not before.
+    // ⚠️ A non-URL room (a user-created Room with a DB row) is NOT the Overworld either — SHARED-WORLD.md
+    // §"Non-URL rooms": *"Not part of the overworld. Continue as they are today."* It has no domain identity, so
+    // placing it would allocate a column against a room id.
+    const _isOver = !!worldCfg.overworld && type === 'world' && !rinfo && isDomainHome(roomId);
     const avRoom = _isOver ? OVERWORLD_ROOM : avatarRoomKey(roomId, levelIndex);
     if (_isOver) overworldRooms.add(avRoom);
     // Where in the Overworld THIS socket arrives: an allocation against the page's permanent identity, which is
