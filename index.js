@@ -5981,9 +5981,28 @@ const _countChunkRows = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(te
 // a global control that can be hit by accident — or by a stale client default — breaks the world for everyone;
 // a DESTRUCTIVE one clearly must not be one click away. A restart is already how changes are picked up, so this
 // costs the user nothing and cannot be triggered by a stray click or a test harness.
-if (process.env.MW_FRESH_WORLD === '1') {
-  const _before = _countChunkRows.get();
+// 🟥 THE WHOLE ROOM'S STORED EDITS ARE LOADED INTO MEMORY IN ONE GO, AND THAT IS NOT LAZINESS — IT IS THE ONLY
+// WAY THE FAULT PATH STAYS SAFE. `applyStoredEdit` runs inside a page fault, and a page fault can arrive from
+// deep inside `fineLiquidTickRoom` while it is iterating the active-cell Set. A synchronous SQLite read there
+// puts disk latency on the tick.
+// ⚠️ Bounded by exactly the thing the whole design is bounded by — what players have BUILT. A world with
+// 10,000 changed chunks is ~20MB here, against 8GB for the entire Overworld hand-edited. If that ever stops
+// being comfortable the answer is an LRU, not lazy reads on the tick.
+// ⚠️ DECLARED HERE, ABOVE `wipeSavedWorlds`, NOT BESIDE THE CODE THAT USES IT. The startup wipe runs at module
+// load and clears this map; with the declaration further down the file that is a TDZ ReferenceError on every
+// `-FreshWorld` start. Same trap `PAGE_DIMS` set on this project once already.
+const _storedChunks = new Map();                       // room → Map<chunk index, decoded blob>
+// ⭐ ONE IMPLEMENTATION, TWO DOORS. The startup flag and the debug panel's button both call this, so they
+// cannot drift into meaning different things — the panel forgetting to clear the in-memory index would look
+// exactly like "the wipe did not work".
+function wipeSavedWorlds() {
+  const before = _countChunkRows.get();
   db.exec('DELETE FROM world_chunks');
+  _storedChunks.clear();                                 // the in-memory mirror, or a wiped chunk still comes back
+  return before;
+}
+if (process.env.MW_FRESH_WORLD === '1') {
+  const _before = wipeSavedWorlds();
   console.log(`MW_FRESH_WORLD=1 — wiped ${_before.n} stored chunk(s), ${(_before.b / 1024).toFixed(1)}KB of edits`);
 }
 
@@ -6841,15 +6860,6 @@ function genSeedFn(field, room) {
 // Which chunks of a room have stored edits. Loaded ONCE per room, as indices only: the hot path (a page fault,
 // which can come from inside the liquid tick) must never touch the database, and the overwhelming majority of
 // chunks have no row at all. The blob itself is read only for a chunk actually in this set.
-// 🟥 THE WHOLE ROOM'S STORED EDITS ARE LOADED INTO MEMORY IN ONE GO, AND THAT IS NOT LAZINESS — IT IS THE ONLY
-// WAY THE FAULT PATH STAYS SAFE. `applyStoredEdit` runs inside a page fault, and a page fault can arrive from
-// deep inside `fineLiquidTickRoom` while it is iterating the active-cell Set. A synchronous SQLite read there
-// puts disk latency on the tick. I wrote "no database I/O on this path" and then put a row read on it; this is
-// that comment being made true rather than argued with.
-// ⚠️ Bounded by exactly the thing the whole design is bounded by — what players have BUILT. A world with
-// 10,000 changed chunks is ~20MB here, against 8GB for the entire Overworld hand-edited. If that ever stops
-// being comfortable the answer is an LRU, not lazy reads on the tick.
-const _storedChunks = new Map();                       // room → Map<chunk index, decoded blob>
 const _listChunkRows = db.prepare('SELECT chunk, ver, terrain FROM world_chunks WHERE room = ?');
 function storedFor(room) {
   let m = _storedChunks.get(room);
@@ -7236,14 +7246,36 @@ function spawnXOf(avatarRoom, rec) {
 // real links to home pages carry campaign parameters. The cost is that a bare-host search page
 // (`google.com/?q=...`) reads as Google's front door. Judged the better trade; revisit with the middle tier.
 // ⚠️ `index.html` and friends are NOT special-cased. Named here so it is a known gap rather than a surprise.
+// ⭐⭐ A SITE'S FRONT DOOR IS OFTEN NOT THE BARE HOST, which is the user's report: *"if I go to x.com, the main
+// home page is x.com/home, and it loads into a page-world rather than an overworld... this is undesirable"*.
+// Typing `x.com` lands you on `x.com/home`; `github.com` on `/dashboard`; plenty of apps do this.
+// 🟥 THE OBVIOUS LOOSENING IS WRONG: "allow one path segment" would send `youtube.com/watch`,
+// `x.com/i/status/…` and `reddit.com/r/space` to the Overworld too, and those are pages, not front doors.
+// ⇒ bare host, OR a single path segment that is a known APP-SHELL word. Short, readable, and extensible; the
+// bare host always works, so an unknown shell word costs an island room rather than anything broken.
+// ⚠️ This is a heuristic about the web, not a fact about it, and it will be wrong sometimes in both
+// directions. That is why HOME_PATH_FOR exists: a per-domain override for anything the list cannot express.
+const HOME_PATHS = new Set(['home', 'feed', 'dashboard', 'index', 'index.html', 'index.htm', 'index.php',
+  'main', 'explore', 'timeline', 'for-you', 'foryou', 'start', 'portal', 'default.aspx']);
+// Per-domain overrides, for sites whose front door is a path no general rule would guess. The value is the
+// path (no leading slash) that counts AS the front door, in addition to the bare host.
+const HOME_PATH_FOR = new Map([
+  ['mail.google.com', 'mail/u/0'],
+]);
 function isDomainHome(roomKey) {
   let s = String(roomKey == null ? '' : roomKey).trim().toLowerCase();
   s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, '');          // protocol
   s = s.replace(/^www\./, '');
   s = s.replace(/[?#].*$/, '');                          // query and hash are not a different PAGE
-  const slash = s.indexOf('/');
   if (!s) return false;                                  // an empty key is not a front door
-  return slash < 0 || s.slice(slash) === '/';            // bare host, or host + a single trailing slash
+  const slash = s.indexOf('/');
+  if (slash < 0) return true;                            // bare host
+  const host = s.slice(0, slash);
+  const p = s.slice(slash + 1).replace(/\/+$/, '');      // path with no leading or trailing slash
+  if (!p) return true;                                   // host + a single trailing slash
+  const override = HOME_PATH_FOR.get(host);
+  if (override && p === override) return true;
+  return p.indexOf('/') < 0 && HOME_PATHS.has(p);        // ONE segment, and it is a shell word
 }
 function overworldIdentity(avatarRoom) {
   const s = String(avatarRoom);
@@ -8026,6 +8058,17 @@ io.on('connection', (socket) => {
     // ⚠️ ROLLBACK IS NOT LOST, it is just no longer one click away: the four constants still live in
     // `worldCfg` above, and switching any of them is an edit plus a restart. That is a deliberate act.
     if ('worldDropPristine' in patch) worldCfg.dropPristine = patch.worldDropPristine ? 1 : 0;
+    // ⭐ WIPE EVERY STORED CHANGE — the panel's version of `restart-server.ps1 -FreshWorld`. The user asked for
+    // it here; it keeps the flag's safety property by taking two clicks in the UI.
+    // ⚠️ It clears the DISK and the in-memory index of what is on disk. Rooms already loaded keep whatever they
+    // are holding until they are rebuilt or the server restarts — said plainly in the panel rather than implied,
+    // because "I wiped it and my hole is still there" is otherwise a bug report.
+    if (patch.worldWipeSaved) {
+      const before = wipeSavedWorlds();
+      socket.emit('liquid-cfg-note', { text: `Wiped ${before.n} stored chunk(s), ${(before.b / 1024).toFixed(1)}KB. `
+        + `Worlds already loaded keep what they have until a rebuild or a restart.` });
+      console.log(`world persistence: WIPED ${before.n} stored chunk(s), ${(before.b / 1024).toFixed(1)}KB (debug panel)`);
+    }
     // ── and the button that makes the switch testable: rebuild THIS room's world with the current generator.
     // ⭐ Why a rebuild in place rather than "go and visit a different page": the seed is keyed on the URL, so a
     // different page is a different world, and comparing two different worlds tells you nothing. Rebuilt in
@@ -8641,6 +8684,11 @@ io.on('connection', (socket) => {
     const _rd = roomDims(avRoom);
     socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: (type === 'world') ? worldSpawnFor(avRoom, _overCol) : null,
       dims: { w: _rd.cols * TERRAIN_CELL, h: _rd.rows * TERRAIN_CELL, cell: TERRAIN_CELL },
+      // ⭐ WHERE YOU CAME FROM, said by the SERVER rather than re-derived on the client. The routing rule
+      // (`isDomainHome` + `normalizeIdentity`) is subtle enough — shell paths, `www.`, ports, two-label public
+      // suffixes — that a second copy on the client would drift, and then the badge would confidently describe
+      // a decision that was not the one taken. `identity` is the part of the URL that placed you.
+      origin: { url: String(roomId || ''), identity: domains.normalizeIdentity(roomId), home: _isOver ? 1 : 0 },
       // ⚠️ SAID EXPLICITLY, not inferred from `dims` being large. The client has to ignore its Level's SIZE
       // PRESET in the Overworld — a preset belongs to a page's Level, and the Overworld is entered THROUGH a
       // page, so it would otherwise fence the shared world down to whatever that page's Level 1 was set to.
