@@ -117,10 +117,24 @@
     ['Realgar', '#e0522c', 'solid', 1], // 87 realgar
     ['Orpiment', '#f2c024', 'solid', 1], // 88 orpiment
     ['Conglomerate', '#a89273', 'solid', 3], // 89 conglomerate
+    // 🟥 APPENDED 2026-08-10, during port increment 4. **THE PORT'S TABLES GO STALE, BECAUSE THE SPIKE IS STILL
+    // BEING DEVELOPED — that is the finding, and it is not a counting mistake.** Increment 1 ported 88 spike
+    // materials on 2026-08-09 and 88 was correct that day; the sea-features work added `ooze` to the spike on
+    // 2026-08-10 (commit 7306444, "abyssal ooze, atolls, brine pools"), and the port had no way to know.
+    // ⚠️ **`probe_materials_ids` B2 CAUGHT IT AND NAMED IT** — "every spike material has a game id — unmapped:
+    // ooze" — and had been failing ever since. Nothing was wrong with the guard; it had not been RUN. So the
+    // lesson is cadence, not counting: a port that copies from a moving spike must re-run the guard that
+    // compares the two, every time it re-copies. `probe_worldgen2` A1 makes the drift itself visible.
+    // ⚠️ It is not an obscure material: ooze is the abyssal sediment covering the whole deep-ocean floor
+    // (`cells.js` ~776), and it is why the abyssal plain is the flattest surface in the world. Emitting it with
+    // no id gives `undefined`, which stores into a Uint8Array as **0 = AIR** — a hole in the sea floor.
+    // Appended rather than filed with the other sediments, per the "never insert" rule at the top of ROWS —
+    // in-order placement would renumber 40+ ids for a cosmetic gain.
+    ['Ooze', '#cfc9b4', 'solid', 1], // 90 ooze — abyssal sediment, barely consolidated (the softest solid here)
   ];
 
   const GEN_MAT_MIN = 18;
-  const GEN_MAT_MAX = GEN_MAT_MIN + ROWS.length - 1;   // 89
+  const GEN_MAT_MAX = GEN_MAT_MIN + ROWS.length - 1;   // 90
 
   // ---- colour derivation ---------------------------------------------------------------------------------
   // ⭐ THE CAP, THE SHADE AND THE DEBRIS HUE ARE DERIVED, NOT LISTED. Seventy-two hand-written colour triples
