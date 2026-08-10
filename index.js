@@ -2196,6 +2196,14 @@ function encodeChunkDelta(s, p, gen, geom) {
 // when a chunk is evicted. It MUST stay independent of |fineActive|: the version that walked the whole set made
 // eviction more expensive the more there was to do, which is what turns a slow world into a stuck one.
 let evictPruneOps = 0;
+// ⚠️ THE PERSISTENCE HOOKS, declared INSIDE the sliced block as no-ops and reassigned below it at load. This is
+// the `wireFanout` seam, and it is here because `evictChunk` / `restoreChunk` live inside the block that
+// `probe_chunking` and `probe_budget` cut out and run in a bare `new Function` — where `db` does not exist. A
+// direct call is a ReferenceError in the rigs and nowhere else, which is the trap this file has hit ten times.
+// The no-op default is also the correct behaviour for the rigs: they test in-memory eviction, not durability.
+let saveChunkBlob = () => {};
+let loadChunkBlobFor = () => null;
+let applyStoredEdit = () => {};
 function evictChunk(room, p) {
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
   const ch = chunksOf(room);
@@ -2227,6 +2235,12 @@ function evictChunk(room, p) {
   rec.gen = (_d && _d.pristine) ? 1 : 0;
   rec.blob = rec.gen ? null : (_d || encodeChunk(s, p));
   if (rec.gen) genChunksDropped++;
+  // ⭐ PERSISTENCE. A chunk is evicted precisely when nobody is looking at it, and the diff has just been
+  // computed anyway, so this is the seam that costs nothing extra. A pristine chunk stores NOTHING — it is
+  // re-derived from the seed — which is what keeps the database proportional to what players built.
+  // ⚠️ Through a hook: `saveChunkBlob` is a no-op declared below and reassigned outside this block, because the
+  // probe rigs slice this block out and run it without the module's `db`. Tenth instance of that trap.
+  if (!rec.gen && rec.blob) saveChunkBlob(room, p, rec.blob);
   ch.evicted[p] = 1;
   for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
   for (const f of CHUNK_SCRATCH) if (s[f] && s[f].geom.nPages === worldGeom(room).nPages) s[f].dropPage(p);
@@ -2352,6 +2366,15 @@ function onChunkFault(room, p) {
 function restoreChunk(room, p) {
   const rec = chunksOf(room).peek(p);
   if (rec.blob) return rehydrateChunk(room, p);
+  // ⭐ PERSISTENCE, THE READ HALF. After a restart nothing is in memory, so a chunk somebody built in comes back
+  // from the database instead. It is looked up ONLY when there is no in-memory blob, so a running server never
+  // touches disk on this path — the DB is the cold-start source, not a second cache.
+  // ⚠️ A hit is turned into exactly the in-memory shape `rehydrateChunk` already expects, so there is one decode
+  // path rather than two that can disagree.
+  if (!rec.blob) {
+    const fromDisk = loadChunkBlobFor(room, p);
+    if (fromDisk) { rec.blob = fromDisk; rec.gen = 0; return rehydrateChunk(room, p); }
+  }
   if (!rec.gen) return false;
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
   const g = worldGeom(room);
@@ -5916,6 +5939,87 @@ const SPAWN_CLEAR_H = 96;                             // headroom kept clear abo
 db.exec('CREATE TABLE IF NOT EXISTS avatar_worlds (url TEXT PRIMARY KEY, seed INTEGER NOT NULL)');
 const _getWorldSeed = db.prepare('SELECT seed FROM avatar_worlds WHERE url = ?');
 const _insWorldSeed = db.prepare('INSERT OR IGNORE INTO avatar_worlds (url, seed) VALUES (?, ?)');
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  WORLD PERSISTENCE — what players have BUILT survives a restart. See `scratchpad/kickoff_persistence.md`.
+//
+//  Until now nothing was written at all: increment 4d's per-chunk diffs lived in `rec.blob` in memory, so every
+//  restart discarded everything anybody had built in the Overworld. That became live-affecting the moment the
+//  Overworld became the default.
+//
+//  ⭐ THE ENCODER ALREADY EXISTED AND IS NOT REBUILT HERE. `evictChunk` calls `chunkDelta`, which regenerates
+//  the chunk and compares, so an untouched chunk stores NOTHING (it is re-derived from the seed) and a changed
+//  one stores only the differing cells at 4 bytes each. Storage is proportional to what players have BUILT and
+//  to nothing else — not world size, not distance walked. Ceiling: 8 GB for the entire Overworld hand-edited.
+//  ⚠️ `ver` is PER ROW, not per database: two generators can be live at once, so "the current version" is a
+//  property of the room (`genVersion`). A row whose version does not match is DROPPED on read rather than
+//  applied to ground it was never cut from.
+//  ⚠️ `liquid` is declared now and written by increment 2, so that half needs no migration. The design is in
+//  the kickoff: diff against `seedGenChunkLiquid`, which is deterministic per chunk, so an untouched lake costs
+//  nothing and only water somebody actually moved is stored.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+db.exec(`CREATE TABLE IF NOT EXISTS world_chunks (
+  room    TEXT    NOT NULL,
+  chunk   INTEGER NOT NULL,
+  ver     INTEGER NOT NULL,
+  kind    INTEGER NOT NULL,
+  terrain BLOB,
+  liquid  BLOB,
+  updated INTEGER NOT NULL,
+  PRIMARY KEY (room, chunk)
+)`);
+const _putChunkRow = db.prepare(`INSERT INTO world_chunks (room, chunk, ver, kind, terrain, liquid, updated)
+  VALUES (?, ?, ?, ?, ?, ?, unixepoch())
+  ON CONFLICT(room, chunk) DO UPDATE SET ver=excluded.ver, kind=excluded.kind,
+    terrain=excluded.terrain, liquid=excluded.liquid, updated=excluded.updated`);
+const _getChunkRow = db.prepare('SELECT ver, kind, terrain, liquid FROM world_chunks WHERE room = ? AND chunk = ?');
+const _delChunkRow = db.prepare('DELETE FROM world_chunks WHERE room = ? AND chunk = ?');
+const _countChunkRows = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(terrain)), 0) AS b FROM world_chunks');
+
+// ⭐ RESET, AND IT IS DELIBERATELY NOT CLICKABLE. `MW_FRESH_WORLD=1` (via `restart-server.ps1 -FreshWorld`)
+// wipes every stored change at startup. The four world switches were just removed from the debug panel because
+// a global control that can be hit by accident — or by a stale client default — breaks the world for everyone;
+// a DESTRUCTIVE one clearly must not be one click away. A restart is already how changes are picked up, so this
+// costs the user nothing and cannot be triggered by a stray click or a test harness.
+if (process.env.MW_FRESH_WORLD === '1') {
+  const _before = _countChunkRows.get();
+  db.exec('DELETE FROM world_chunks');
+  console.log(`MW_FRESH_WORLD=1 — wiped ${_before.n} stored chunk(s), ${(_before.b / 1024).toFixed(1)}KB of edits`);
+}
+
+// A diff packs to (index u16, material u8, damage u8) per changed cell — the shape `encodeChunkDelta` already
+// produces, laid out as one buffer so SQLite stores it as a BLOB rather than as JSON (which would be ~4x).
+function packDelta(d) {
+  const n = d.d.length, buf = Buffer.allocUnsafe(n * 4);
+  for (let i = 0; i < n; i++) { buf.writeUInt16LE(d.d[i], i * 4); buf[i * 4 + 2] = d.m[i]; buf[i * 4 + 3] = d.hp[i]; }
+  return buf;
+}
+function unpackDelta(buf, ver) {
+  const n = (buf.length / 4) | 0;
+  const d = new Uint16Array(n), m = new Uint8Array(n), hp = new Uint8Array(n);
+  for (let i = 0; i < n; i++) { d[i] = buf.readUInt16LE(i * 4); m[i] = buf[i * 4 + 2]; hp[i] = buf[i * 4 + 3]; }
+  return { v: ver, d, m, hp, a: null };
+}
+let worldSaved = 0, worldLoaded = 0, worldSaveErrors = 0;    // diagnostics; a silent persistence layer is untestable
+// ⚠️ A HOOK, for the reason recorded ten times on this track: `evictChunk` lives inside the block the probe rigs
+// slice out and run in a bare `new Function`, where `_putChunkRow` does not exist. Declared as a no-op INSIDE
+// that block (search `saveChunkBlob = `) and reassigned to this, below the block, at load.
+function persistChunkBlob(room, p, blob, ver) {
+  if (!blob || !blob.d) return;                              // pristine, or the whole-chunk fallback (kind 1, later)
+  try { _putChunkRow.run(room, p, ver, 0, packDelta(blob), null); worldSaved++; }
+  catch (e) { worldSaveErrors++; if (worldSaveErrors < 5) console.log('world_chunks save failed: ' + e.message); }
+}
+function loadChunkBlob(room, p, ver) {
+  let row = null;
+  try { row = _getChunkRow.get(room, p); } catch (e) { return null; }
+  if (!row || !row.terrain) return null;
+  // 🟥 A STALE ROW IS DELETED, NOT APPLIED. A diff is meaningless without the ground it was taken against, so a
+  // version mismatch means somebody's tunnel would be cut through different rock. Dropping it loses that edit —
+  // which is the correct loss, and the alternative is silent corruption.
+  if (row.ver !== ver) { try { _delChunkRow.run(room, p); } catch (e) { /* best effort */ } return null; }
+  worldLoaded++;
+  return unpackDelta(Buffer.from(row.terrain), row.ver);
+}
 function worldSeedFor(url) {
   const row = _getWorldSeed.get(url);
   if (row && Number.isFinite(row.seed)) return row.seed >>> 0;
@@ -6714,6 +6818,14 @@ function genSeedFn(field, room) {
     }
     page.set(field === 'terrain' ? _genMemo.t : _genMemo.h);
     genPagesProduced++;
+    // ⭐⭐ PERSISTENCE ON A COLD START, AND THIS IS THE SEAM IT HAS TO BE. After a restart nothing is "evicted" —
+    // the chunks simply do not exist — so `restoreChunk` is never reached and the ground is PRODUCED instead.
+    // A stored edit therefore has to be laid over the freshly generated page here, at birth.
+    // ⚠️ NO DATABASE I/O ON THIS PATH, and that is load-bearing rather than tidy: a page fault can arrive from
+    // deep inside `fineLiquidTickRoom` while it iterates the active-cell Set, so a synchronous row read here
+    // would put disk latency straight on the tick. The room's stored edits are loaded into memory in one go
+    // (`storedFor`), and this is a Map lookup and a short write loop — nothing else.
+    applyStoredEdit(room, p, page, field);
     // ⚠️ ONLY A FIRST PRODUCTION QUEUES LIQUID. An EVICTION restore also runs this seedFn — `_alloc` seeds and
     // then lets `rehydrateChunk` decode the blob over the top — and re-seeding liquid from the regenerated
     // terrain afterwards would resurrect a lake that had since drained, clobbering the restored state.
@@ -6722,6 +6834,63 @@ function genSeedFn(field, room) {
     if (!_ch.evicted[p] && !_ch.peek(p).restoring) _genPending.add(room + GEN_SEP + p);
   };
 }
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  PERSISTENCE, WIRED. The three hooks declared as no-ops inside the cell-store block get their real bodies
+//  here, OUTSIDE it — the `wireFanout` seam. `probe_worldgen` guards this as a class.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// Which chunks of a room have stored edits. Loaded ONCE per room, as indices only: the hot path (a page fault,
+// which can come from inside the liquid tick) must never touch the database, and the overwhelming majority of
+// chunks have no row at all. The blob itself is read only for a chunk actually in this set.
+// 🟥 THE WHOLE ROOM'S STORED EDITS ARE LOADED INTO MEMORY IN ONE GO, AND THAT IS NOT LAZINESS — IT IS THE ONLY
+// WAY THE FAULT PATH STAYS SAFE. `applyStoredEdit` runs inside a page fault, and a page fault can arrive from
+// deep inside `fineLiquidTickRoom` while it is iterating the active-cell Set. A synchronous SQLite read there
+// puts disk latency on the tick. I wrote "no database I/O on this path" and then put a row read on it; this is
+// that comment being made true rather than argued with.
+// ⚠️ Bounded by exactly the thing the whole design is bounded by — what players have BUILT. A world with
+// 10,000 changed chunks is ~20MB here, against 8GB for the entire Overworld hand-edited. If that ever stops
+// being comfortable the answer is an LRU, not lazy reads on the tick.
+const _storedChunks = new Map();                       // room → Map<chunk index, decoded blob>
+const _listChunkRows = db.prepare('SELECT chunk, ver, terrain FROM world_chunks WHERE room = ?');
+function storedFor(room) {
+  let m = _storedChunks.get(room);
+  if (!m) {
+    m = new Map();
+    const want = genVersion(room);
+    let stale = 0;
+    try {
+      for (const r of _listChunkRows.all(room)) {
+        // 🟥 A STALE ROW IS DROPPED, NOT APPLIED. A diff is meaningless without the ground it was taken
+        // against, so applying one across a generator change would cut somebody's tunnel through different
+        // rock. Losing the edit is the correct loss; silent corruption is not.
+        if (r.ver !== want || !r.terrain) { stale++; continue; }
+        m.set(r.chunk | 0, unpackDelta(Buffer.from(r.terrain), r.ver));
+      }
+    } catch (e) { console.log('world_chunks load failed: ' + e.message); }
+    _storedChunks.set(room, m);
+    if (m.size || stale) console.log(`world persistence: ${m.size} stored chunk(s) for ${room}`
+      + (stale ? `, ${stale} dropped as stale (generator version changed)` : ''));
+    if (stale) { try { db.prepare('DELETE FROM world_chunks WHERE room = ? AND ver != ?').run(room, want); } catch (e) { /* best effort */ } }
+  }
+  return m;
+}
+saveChunkBlob = function (room, p, blob) {
+  persistChunkBlob(room, p, blob, genVersion(room));
+  storedFor(room).set(p | 0, blob);                    // keep memory and disk agreeing without a re-read
+};
+loadChunkBlobFor = function (room, p) {
+  const b = storedFor(room).get(p | 0);
+  return b || null;
+};
+// Lay a stored edit over a freshly generated page. Called from inside the page fault, once per FIELD — terrain
+// carries the material, terrainHp the damage, and the one diff holds both, so each field takes its own half.
+// ⭐ PURE MEMORY: a Map lookup and a short write loop. No database, no allocation, nothing that can touch the
+// liquid arrays or the active-cell Set — which is the property `probe_worldgen` F7 exists to protect.
+applyStoredEdit = function (room, p, page, field) {
+  const blob = storedFor(room).get(p | 0);
+  if (!blob || !blob.d) return;
+  const src = field === 'terrain' ? blob.m : blob.hp;
+  for (let k = 0; k < blob.d.length; k++) page[blob.d[k]] = src[k];
+};
 // (`chunkIsPristine` and its revision bookkeeping lived here. Deleted 2026-08-04: see the note in evictChunk —
 // recording "what untouched looks like" during a RESTORE recorded the restored state, so an edited chunk could
 // be judged untouched and thrown away. "The diff is empty" needs no bookkeeping and cannot drift.)
