@@ -5664,6 +5664,7 @@ function cfgWire() {
     chunkQueue: !!interestCfg.queue, chunkQueueMs: interestCfg.queueMs, chunkQueueBatch: interestCfg.queueBatch,
     chunkQStats: { sent: chunkQSent, drains: chunkQDrains, dropped: chunkQDropped },
     worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand, worldOverworld: !!worldCfg.overworld,
+    dayCycleMin: Math.round(worldClock.cycleMs / 60000), dayOffsetMin: Math.round(worldClock.offsetMs / 60000),
     worldGen2: !!worldCfg.gen2,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
@@ -7466,6 +7467,21 @@ function overworldIdentity(avatarRoom) {
   const a = s.indexOf(':'), b = s.lastIndexOf(':');
   return (a >= 0 && b > a) ? s.slice(a + 1, b) : s;
 }
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  ONE CLOCK FOR EVERYBODY. The sky was a day/night cycle driven by each viewer's OWN wall clock, so two people
+//  standing next to each other could be in daylight and midnight — which is merely odd while the sky is a
+//  backdrop, and incoherent the moment the sun casts the shadows everyone is walking through.
+//  ⭐ IT IS A FUNCTION OF THE WALL CLOCK, NOT A TICKING COUNTER, and that is the whole design: there is no state
+//  to keep, nothing to broadcast per tick, nothing to resynchronise after a restart, and a client that joins an
+//  hour later computes the same phase everyone else already has. Clients whose clocks disagree by a few seconds
+//  disagree by a few seconds out of a four-hour cycle, which is nothing.
+//  ⚠️ The epoch is fixed (Unix 0), not "when the server started" — otherwise every restart would jerk the world
+//  back to the same time of day, which players would notice long before anybody thought to look for it.
+//  ⭐ FOUR HOURS by default (user's call): short enough that anyone playing in a normal evening sees both day and
+//  night, long enough that neither is over before you have done anything.
+const worldClock = { cycleMs: 4 * 3600 * 1000, offsetMs: 0 };
+function worldClockWire() { return { cycleMs: worldClock.cycleMs, offsetMs: worldClock.offsetMs }; }
+
 // ⭐ A SHORT DROP, NOT A PLACEMENT FLUSH ON THE GROUND. Standing a body exactly on the surface row means any
 // disagreement between the generator's idea of the surface and the cells that actually arrive puts the feet
 // INSIDE rock, and a body that starts inside rock has no clean way out. Starting a few cells up costs a
@@ -8220,6 +8236,15 @@ io.on('connection', (socket) => {
     // Batching is behaviour-preserving (same events, same order, one envelope), so unlike the two above it needs
     // no repair when toggled — the next tick simply arrives unwrapped.
     if ('interestBatch' in patch) interestCfg.batch = !!patch.interestBatch;
+    // ── THE SHARED DAY LENGTH. Global on purpose: this is the one setting where a per-browser value would be
+    // meaningless, since the entire point is that everybody is standing in the same afternoon. Broadcast so a
+    // client that is already in the world picks up the new length without re-joining.
+    if ('dayCycleMin' in patch) {
+      worldClock.cycleMs = Math.max(1, Math.min(1440, patch.dayCycleMin | 0)) * 60000;
+      io.emit('world-clock', worldClockWire());
+    }
+    // Shift the whole cycle, for landing on a particular time of day while tuning rather than waiting for it.
+    if ('dayOffsetMin' in patch) { worldClock.offsetMs = (patch.dayOffsetMin | 0) * 60000; io.emit('world-clock', worldClockWire()); }
     // ── PHASE 6 INCREMENT 4: which world generator (see worldgen.js) ──────────────────────────────────────────
     // ⚠️ The switch ALONE changes nothing you can see: a world is generated once per room per server lifetime,
     // so flipping this only affects rooms generated from here on. That is on purpose — silently rebuilding
@@ -8885,6 +8910,9 @@ io.on('connection', (socket) => {
       // page, so it would otherwise fence the shared world down to whatever that page's Level 1 was set to.
       // "Is this the Overworld" is a fact the server knows; making the client guess it from a pixel count is
       // how the two ends drift apart.
+      // ⭐ THE SHARED CLOCK, on the same server-decided seam as `spawn` / `dims` / `relay`. The sky (and now the
+      // lighting) was per-browser; a sun that casts shadows has to be the same sun for everyone in the room.
+      clock: worldClockWire(),
       overworld: _isOver ? 1 : 0 });
     // ⭐ THE GROUND UNDER THE SPAWN, ASKED FOR BEFORE THE CLIENT CAN ASK FOR IT. The client holds its body still
     // until the chunks around its spawn have arrived (see the spawn gate in 16e), so how long that hold lasts is
