@@ -9005,7 +9005,7 @@ io.on('connection', (socket) => {
   // hold ANYTHING — a pure arithmetic function of the column, producing no chunks — so every row above it is
   // guaranteed empty, and "the field starts above that row" is exactly "sunlight reaches the field's top edge".
   // ⚠️ Sent only when the column range CHANGES. It is one Int16 per column, and the beacon fires twice a second.
-  let skyRangeC0 = -1, skyRangeC1 = -1;
+  let skyRangeC0 = -1, skyRangeC1 = -1, skySentKeys = 0;
   function sendSkyRows(room, rect) {
     const gen = _roomGens.get(room);
     if (!gen || typeof gen.surfAt !== 'function') return;       // no generator (or an older one) ⇒ the client keeps its fallback
@@ -9036,7 +9036,20 @@ io.on('connection', (socket) => {
     const oc = gen.originCol | 0, orow = gen.originRow | 0;
     const surf = new Array(n);
     for (let k = 0; k < n; k++) surf[k] = Math.max(0, Math.min(geom.rows, (gen.surfAt(oc + c0 + k) | 0) - orow));
-    socket.emit('world-sky', { c0, surf, sea: Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL });
+    // ⭐ AND WHICH REGION EACH COLUMN IS IN. Nothing has ever told the client where it is, which is why the sky
+    // and the distant hills are the same picture in a rainforest and on an ice cap. One byte per column, on the
+    // range and the throttle that already exist — the surface row beside it is an Int16, so this is a third more
+    // of a message that is only sent when the visible column range changes.
+    // ⚠️ The KEYS ride along, because a byte with no table is not information; the client keeps the last set it
+    // was given. An older generator without `biomeAt` simply omits both and the client falls back to one region.
+    const msg = { c0, surf, sea: Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL };
+    if (typeof gen.biomeAt === 'function') {
+      const reg = new Array(n);
+      for (let k = 0; k < n; k++) reg[k] = gen.biomeAt(oc + c0 + k) & 255;
+      msg.reg = reg;
+      if (gen.biomeKeys && !skySentKeys) { msg.regKeys = gen.biomeKeys; skySentKeys = 1; }
+    }
+    socket.emit('world-sky', msg);
   }
   // ⭐ SOMEWHERE TO GO. The Overworld is 4.19 million pixels wide and the only way in was to walk, so anything
   // that only happens at a volcano, a sky island or the bottom of a cave system was effectively untestable.

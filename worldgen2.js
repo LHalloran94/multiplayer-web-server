@@ -23,7 +23,7 @@
 //  deleted once the new generator is proven in play.
 // ==============================================================================================================
 
-const { buildWorld } = require('./worldgen2/pipeline.js');
+const { buildWorld, BIOME } = require('./worldgen2/pipeline.js');
 const { prepare, fillColumn: spikeFillColumn, columnInfo, MATS, M } = require('./worldgen2/cells.js');
 const { PERIOD_COLS } = require('./worldgen2/noise.js');
 const MG = require('./materials.js');
@@ -296,6 +296,13 @@ function makeGen2(cfg) {
   // the sky starts", that makes every column under a floating island answer "there is no sky above me", and the
   // ground beneath one goes black. Named in this file's interface comment from the start; never implemented.
   function surfAt(c) { return columnInfo(W, C, c).surfRow; }
+  // ⭐ WHICH REGION IS THIS COLUMN IN — the one fact the client has never been told, and the reason the backdrop
+  // is the same picture in a rainforest and on an ice cap. The generator classifies every coarse sample into one
+  // of `BIOME`'s entries from temperature, moisture and relief; `columnInfo` already resolves a column to its
+  // sample, so this is a lookup and not a computation, and it rides the memoised column cache like `surfAt`.
+  // ⚠️ A REGION IS DRESSING, NOT FORM. It says what covers the ground, never what shape the ground is — so it is
+  // exactly the right thing to hang a BACKDROP off, and exactly the wrong thing to hang terrain off.
+  function biomeAt(c) { const gi = columnInfo(W, C, c).sample; return (W.biome && gi >= 0) ? (W.biome[gi] | 0) : 0; }
   function topLimitAt(c) {
     const s = columnInfo(W, C, c).surfRow;
     // ground, plus whatever stands on it (flora crowns, mounds).
@@ -354,7 +361,10 @@ function makeGen2(cfg) {
     // the surface `index.js` actually consumes — measured, not assumed: `fillPage` (3 call sites),
     // `pageEmpty` (1, via `PagedArray.seedEmpty`) and `bandGroundAt` (2, the spawn seam). The rest are here
     // because the probes and previewers need them.
-    fillPage, pageEmpty, topLimitAt, surfAt, bandGroundAt, fillColumn, matAt, strengthOf,
+    fillPage, pageEmpty, topLimitAt, surfAt, biomeAt, bandGroundAt, fillColumn, matAt, strengthOf,
+    // The region names, so the wire can carry a byte and the client can still say what it means. ONE list, two
+    // readers — the rule this whole port exists to keep.
+    biomeKeys: BIOME.map(b => b.key), biomeNames: BIOME.map(b => b.name),
     XLAT, STRENGTH, IS_FLUID, SKY_LIFT,
   };
 }
