@@ -8995,10 +8995,34 @@ io.on('connection', (socket) => {
   socket.on('wire-caps', (c) => { if (c && c.batch) wireBatchOk.add(socket.id); else wireBatchOk.delete(socket.id); });
   // Phase 4 rides the SAME beacon: what has to be replicated to a client and what has to be resident on the server
   // are both "what that player can see", so a second signal would only be a second thing to get out of step.
+  // ⭐⭐ WHERE THE SKY STARTS, PER COLUMN — the one fact the client cannot work out for itself.
+  // The client lights the world from a field clamped to the terrain window, and the honest question at the
+  // field's top edge is "is there open sky above me?". Answering it from the client's own data is impossible:
+  // it holds a ~1,024-row slice of a 4,096-row world, so anything above the window reads as UNKNOWN. Seeding
+  // sunlight wherever the top edge merely LOOKS open is worse than wrong — it makes a sealed underground
+  // chamber as bright as a meadow the moment its ceiling happens to sit above the window.
+  // ⭐ The generator answers it exactly and for free. `topLimitAt(c)` is the highest row at which a column can
+  // hold ANYTHING — a pure arithmetic function of the column, producing no chunks — so every row above it is
+  // guaranteed empty, and "the field starts above that row" is exactly "sunlight reaches the field's top edge".
+  // ⚠️ Sent only when the column range CHANGES. It is one Int16 per column, and the beacon fires twice a second.
+  let skyRangeC0 = -1, skyRangeC1 = -1;
+  function sendSkyRows(room, rect) {
+    const gen = _roomGens.get(room);
+    if (!gen || typeof gen.topLimitAt !== 'function') return;   // no generator (or an older one) ⇒ the client keeps its fallback
+    const geom = worldGeom(room);
+    const c0 = Math.max(0, (rect.cx0 - 1) * CHUNK_SIDE), c1 = Math.min(geom.cols - 1, (rect.cx1 + 2) * CHUNK_SIDE - 1);
+    if (c0 === skyRangeC0 && c1 === skyRangeC1) return;
+    skyRangeC0 = c0; skyRangeC1 = c1;
+    const n = c1 - c0 + 1;
+    if (n <= 0 || n > 65536) return;
+    const rows = new Array(n);
+    for (let k = 0; k < n; k++) rows[k] = Math.max(0, Math.min(geom.rows, gen.topLimitAt(c0 + k) | 0));
+    socket.emit('world-sky', { c0, rows, sea: (gen.seaRow | 0) * TERRAIN_CELL });
+  }
   socket.on('avt-where', (v) => {
     if (!currentAvatarRoom) return;
     const rect = noteWhere(currentAvatarRoom, socket.id, v);
-    if (rect) updateSubs(currentAvatarRoom, socket.id, rect);
+    if (rect) { updateSubs(currentAvatarRoom, socket.id, rect); try { sendSkyRows(currentAvatarRoom, rect); } catch (e) { /* lighting hint only — never break the beacon */ } }
     if (!relayCfg.on) updatePeers(currentAvatarRoom, socket.id);   // Phase 4: re-select who is worth being meshed with.
     // ⚠️ Phase 5a: NOT while relaying — there is no mesh to maintain, and `relaySelect` re-ranks from the
     // same beacon on every relay tick anyway. Emitting `avt-peers` here would tell a relayed client to
