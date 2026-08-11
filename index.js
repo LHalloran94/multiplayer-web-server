@@ -9036,20 +9036,42 @@ io.on('connection', (socket) => {
     const oc = gen.originCol | 0, orow = gen.originRow | 0;
     const surf = new Array(n);
     for (let k = 0; k < n; k++) surf[k] = Math.max(0, Math.min(geom.rows, (gen.surfAt(oc + c0 + k) | 0) - orow));
-    // ⭐ AND WHICH REGION EACH COLUMN IS IN. Nothing has ever told the client where it is, which is why the sky
-    // and the distant hills are the same picture in a rainforest and on an ice cap. One byte per column, on the
-    // range and the throttle that already exist — the surface row beside it is an Int16, so this is a third more
-    // of a message that is only sent when the visible column range changes.
-    // ⚠️ The KEYS ride along, because a byte with no table is not information; the client keeps the last set it
-    // was given. An older generator without `biomeAt` simply omits both and the client falls back to one region.
-    const msg = { c0, surf, sea: Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL };
-    if (typeof gen.biomeAt === 'function') {
-      const reg = new Array(n);
-      for (let k = 0; k < n; k++) reg[k] = gen.biomeAt(oc + c0 + k) & 255;
-      msg.reg = reg;
-      if (gen.biomeKeys && !skySentKeys) { msg.regKeys = gen.biomeKeys; skySentKeys = 1; }
-    }
-    socket.emit('world-sky', msg);
+    socket.emit('world-sky', { c0, surf, sea: Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL });
+  }
+  // ⭐ WHICH REGION EACH COLUMN IS IN — a SEPARATE, COARSER, MUCH WIDER strip, and all three of those words are
+  // the point.
+  //   COARSER: the layout samples the world every 64 columns and takes the biome from the NEAREST sample, so a
+  //     region boundary can only ever fall on a 64-column line. One byte per column was 64× more data than the
+  //     generator has answers for.
+  //   WIDER: the client smooths the backdrop over a BLOCK of ~1,024 columns, and cannot smooth over data it has
+  //     not got. At one byte per 64 columns, 1,024 entries is 65,536 columns — 524,000px of world — for 1KB.
+  //   SEPARATE: it therefore has its own throttle. The surface rows follow the viewport chunk by chunk; this
+  //     only needs re-sending when you have walked a quarter of the way out of the strip you already hold.
+  // 🟥 THE MEASUREMENT THAT FORCED THIS. I told the user region runs were "hundreds of columns" off ONE
+  // 448-column window; they walked around and said it changes far more often. `probe_region_runs.js` says the
+  // median run is 704 columns — but **12% are 128 columns or less**, i.e. under 1,024px, which is less than a
+  // third of a screen. Those slivers restyle the entire horizon and restyle it back, and they are what "jarring"
+  // means here. Smoothing them out is a client decision; having enough data to smooth over is this.
+  const REG_STEP = 64;                    // the generator's own sample spacing — finer carries no information
+  const REG_SPAN = 1024;                  // entries ⇒ 65,536 columns
+  let regCentre = null;
+  function sendRegions(room, rect) {
+    const gen = _roomGens.get(room);
+    if (!gen || typeof gen.biomeAt !== 'function') return;   // no generator (or an older one) ⇒ one flat region
+    const geom = worldGeom(room);
+    const mid = Math.max(0, Math.min(geom.cols - 1, Math.round((rect.cx0 + rect.cx1) * CHUNK_SIDE / 2)));
+    const half = (REG_SPAN * REG_STEP) >> 1;
+    if (regCentre !== null && Math.abs(mid - regCentre) < (half >> 1)) return;
+    regCentre = mid;
+    const c0 = Math.max(0, Math.floor((mid - half) / REG_STEP) * REG_STEP);
+    const oc = gen.originCol | 0;
+    const reg = new Array(REG_SPAN);
+    for (let k = 0; k < REG_SPAN; k++) reg[k] = gen.biomeAt(oc + c0 + k * REG_STEP) & 255;
+    const msg = { c0, step: REG_STEP, reg };
+    // The KEYS ride along once: a byte with no table is not information, and the client keeps the last set it
+    // was given rather than re-reading it every beacon.
+    if (gen.biomeKeys && !skySentKeys) { msg.keys = gen.biomeKeys; skySentKeys = 1; }
+    socket.emit('world-regions', msg);
   }
   // ⭐ SOMEWHERE TO GO. The Overworld is 4.19 million pixels wide and the only way in was to walk, so anything
   // that only happens at a volcano, a sky island or the bottom of a cave system was effectively untestable.
@@ -9095,7 +9117,7 @@ io.on('connection', (socket) => {
   socket.on('avt-where', (v) => {
     if (!currentAvatarRoom) return;
     const rect = noteWhere(currentAvatarRoom, socket.id, v);
-    if (rect) { updateSubs(currentAvatarRoom, socket.id, rect); try { sendSkyRows(currentAvatarRoom, rect); } catch (e) { /* lighting hint only — never break the beacon */ } }
+    if (rect) { updateSubs(currentAvatarRoom, socket.id, rect); try { sendSkyRows(currentAvatarRoom, rect); sendRegions(currentAvatarRoom, rect); } catch (e) { /* lighting + backdrop hints only — never break the beacon */ } }
     if (!relayCfg.on) updatePeers(currentAvatarRoom, socket.id);   // Phase 4: re-select who is worth being meshed with.
     // ⚠️ Phase 5a: NOT while relaying — there is no mesh to maintain, and `relaySelect` re-ranks from the
     // same beacon on every relay tick anyway. Emitting `avt-peers` here would tell a relayed client to
