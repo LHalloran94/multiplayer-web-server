@@ -106,7 +106,9 @@ const ICE_LIFT = 128;
 // make a gen2 diff look like valid gen1 ground — a stale-diff check that cannot tell the two apart is worse
 // than none, because it would apply somebody's tunnel to entirely different rock and report success.
 // 8 (2026-08-11): snow lies on exposed sea ice and glaciers, in patches, from a post-pass in cells.js.
-const WORLDGEN2_VERSION = 8;
+// 9 (2026-08-11): …and that post-pass no longer paints a row of snow through the middle of a floe at every
+//                 chunk boundary (it treated row 0 of a chunk SLICE as though it had air above it).
+const WORLDGEN2_VERSION = 9;
 
 // The signed shortest way round the ring, for "how far is this column from that record". A column one period
 // along is otherwise half a million cells from every record in the world — the same `wdc` the spike applies 35

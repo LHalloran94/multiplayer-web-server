@@ -968,7 +968,13 @@ function fillColumn(W, C, c, r0, rN, out) {
       const deep = sn > 0.70;
       for (let k = 0; k < rN; k++) {
         if (out[k] !== M.ice) continue;
-        if (k > 0 && out[k - 1] !== M.air) continue;                  // not the top of an exposed run
+        // 🟥 `k === 0` IS THE TOP OF THIS CHUNK'S SLICE, NOT THE TOP OF THE WORLD. The first version read
+        // `k > 0 && out[k-1] !== M.air`, which SKIPPED the air test entirely at k = 0 — so every 64 rows, at
+        // each chunk boundary that happened to fall inside a body of ice, a row of snow was painted straight
+        // through the middle of it. Reported from play as "random slices of snow in the middle of ice", and
+        // visible as a clean horizontal white line across a floe. We do not know what is above row 0 of a
+        // slice, so the honest answer is to place nothing; the true surface is almost never exactly there.
+        if (k === 0 || out[k - 1] !== M.air) continue;                // not the top of an exposed run (and not an unknown boundary)
         if (k + 1 >= rN || out[k + 1] !== M.ice) continue;            // nothing underneath to keep it a sheet
         out[k] = M.snow;
         if (deep && k + 2 < rN && out[k + 2] === M.ice) out[k + 1] = M.snow;

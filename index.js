@@ -9019,6 +9019,47 @@ io.on('connection', (socket) => {
     for (let k = 0; k < n; k++) rows[k] = Math.max(0, Math.min(geom.rows, gen.topLimitAt(c0 + k) | 0));
     socket.emit('world-sky', { c0, rows, sea: (gen.seaRow | 0) * TERRAIN_CELL });
   }
+  // ⭐ SOMEWHERE TO GO. The Overworld is 4.19 million pixels wide and the only way in was to walk, so anything
+  // that only happens at a volcano, a sky island or the bottom of a cave system was effectively untestable.
+  // The generator already knows where every one of those is — `prepare` placed them and kept the records — so
+  // this is a read of a list that exists rather than a search.
+  // ⚠️ THE ROW COMES FROM `bandGroundAt`, NOT FROM THE RECORD. A record says where a feature IS; it does not say
+  // where a body can stand, and the spawn seam already learned that the hard way. Asking the generator for a
+  // floor with clearance in the right depth band is the one call that answers "somewhere I can be dropped".
+  // ⚠️ Produces nothing: `bandGroundAt` walks the column arithmetically. Landing there is what produces chunks.
+  const PLACE_KINDS = [
+    ['volc', 'Volcano', 'surface'], ['vents', 'Vent field', 'surface'], ['forms', 'Landform', 'surface'],
+    ['cliffs', 'Cliff', 'surface'], ['sky', 'Sky island', 'sky'], ['caves', 'Cave system', 'underground'],
+    ['descents', 'Descent', 'underground'], ['rim', 'Rimstone pools', 'underground'], ['voids', 'Void', 'underground'],
+  ];
+  socket.on('world-places', () => {
+    const room = currentAvatarRoom; if (!room) return;
+    const gen = _roomGens.get(room);
+    if (!gen || !gen.C || typeof gen.bandGroundAt !== 'function') { socket.emit('world-places', { places: [] }); return; }
+    const geom = worldGeom(room), places = [];
+    const originCol = gen.originCol | 0;
+    for (const [key, label, band] of PLACE_KINDS) {
+      const list = gen.C[key];
+      if (!Array.isArray(list) || !list.length) continue;
+      const b = domains.bandRows(band) || domains.bandRows('surface');
+      const take = Math.min(6, list.length), stepN = Math.max(1, Math.floor(list.length / take));
+      let n = 0;
+      for (let i = 0; i < list.length && n < take; i += stepN) {
+        const rec = list[i];
+        // Records address the generator's own column space; the room's grid starts at `originCol`.
+        const at = rec.at != null ? rec.at : (rec.entryC != null ? rec.entryC : (rec.l != null ? (rec.l + rec.r) / 2 : (rec.c0 != null ? rec.c0 : null)));
+        if (at == null) continue;
+        const col = Math.round(at) - originCol;
+        if (col < 4 || col >= geom.cols - 4) continue;
+        let r = gen.bandGroundAt(col, b.r0, b.r1, 5);
+        if (r < 0) { const s = domains.bandRows('surface'); r = gen.bandGroundAt(col, s.r0, s.r1, 5); }
+        if (r < 0) continue;
+        n++;
+        places.push({ label: label + ' ' + n, x: (col + 0.5) * TERRAIN_CELL, y: Math.max(0, r * TERRAIN_CELL - TERRAIN_CELL * 3) });
+      }
+    }
+    socket.emit('world-places', { places });
+  });
   socket.on('avt-where', (v) => {
     if (!currentAvatarRoom) return;
     const rect = noteWhere(currentAvatarRoom, socket.id, v);
