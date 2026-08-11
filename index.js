@@ -9086,12 +9086,21 @@ io.on('connection', (socket) => {
     ['cliffs', 'Cliff', 'surface'], ['sky', 'Sky island', 'sky'], ['caves', 'Cave system', 'underground'],
     ['descents', 'Descent', 'underground'], ['rim', 'Rimstone pools', 'underground'], ['voids', 'Void', 'underground'],
   ];
-  socket.on('world-places', () => {
+  // A record's own sub-type where it has one, so the list says what the thing IS. `kind` is the generator's word
+  // for it (voids are arches and notches, formations are crystal, sulphur and talus), and a bare "Landform 3"
+  // was the user's complaint: it names the list the record came out of, not the thing you are going to see.
+  const PLACE_KIND_NAMES = {
+    crystal: 'Crystal formation', sulphur: 'Sulphur mound', talus: 'Talus slope',
+    arch: 'Natural arch', notch: 'Notch', hoodoo: 'Hoodoos', mesa: 'Mesa', dunes: 'Dune sea', crater: 'Crater',
+  };
+  socket.on('world-places', (req) => {
     const room = currentAvatarRoom; if (!room) return;
     const gen = _roomGens.get(room);
-    if (!gen || !gen.C || typeof gen.bandGroundAt !== 'function') { socket.emit('world-places', { places: [] }); return; }
+    if (!gen || !gen.C || typeof gen.bandGroundAt !== 'function') { socket.emit('world-places', { places: [], regions: [] }); return; }
     const geom = worldGeom(room), places = [];
     const originCol = gen.originCol | 0;
+    const regionOf = (col) => (typeof gen.biomeAt === 'function' && gen.biomeNames)
+      ? (gen.biomeNames[gen.biomeAt(originCol + col)] || '') : '';
     for (const [key, label, band] of PLACE_KINDS) {
       const list = gen.C[key];
       if (!Array.isArray(list) || !list.length) continue;
@@ -9106,13 +9115,73 @@ io.on('connection', (socket) => {
         const col = Math.round(at) - originCol;
         if (col < 4 || col >= geom.cols - 4) continue;
         let r = gen.bandGroundAt(col, b.r0, b.r1, 5);
-        if (r < 0) { const s = domains.bandRows('surface'); r = gen.bandGroundAt(col, s.r0, s.r1, 5); }
+        // 🟥 THE FALLBACK IS WHY SOME ENTRIES "DO NOT MATCH THEIR LABEL". A cave system with no standable floor
+        // in the UNDERGROUND band used to fall back to the surface band and still be listed as "Cave system" —
+        // so the label promised a cave and the trip delivered a hillside. Landing on the surface above a cave is
+        // a perfectly reasonable place to go, so it is kept and SAID: the label now carries where you will
+        // actually arrive, rather than where the record lives.
+        let arrived = band;
+        if (r < 0) { const s = domains.bandRows('surface'); r = gen.bandGroundAt(col, s.r0, s.r1, 5); arrived = 'surface'; }
         if (r < 0) continue;
         n++;
-        places.push({ label: label + ' ' + n, x: (col + 0.5) * TERRAIN_CELL, y: Math.max(0, r * TERRAIN_CELL - TERRAIN_CELL * 3) });
+        const kindName = (rec.kind && PLACE_KIND_NAMES[rec.kind]) || (rec.sub && PLACE_KIND_NAMES[rec.sub]) || label;
+        const reg = regionOf(col);
+        const suffix = (arrived !== band) ? ' — on the surface above' : '';
+        places.push({
+          label: kindName + ' ' + n + (reg ? ' · ' + reg : '') + suffix,
+          x: (col + 0.5) * TERRAIN_CELL, y: Math.max(0, r * TERRAIN_CELL - TERRAIN_CELL * 3),
+        });
       }
     }
-    socket.emit('world-places', { places });
+    // ⭐ AND A SECOND LIST: GO TO A REGION. The user asked for it in as many words — *"perhaps features is the
+    // wrong term, I may have meant more regions"* — and it is a different question from a feature. A feature is
+    // ONE placed thing at ONE column; a region is a stretch of country, and what you want from it is somewhere
+    // that looks like it, not a coordinate.
+    // ⚠️ READ STRAIGHT OFF THE LAYOUT ARRAY, not through `biomeAt`. `biomeAt` resolves a column through
+    // `columnInfo`, which computes the whole column; scanning the world that way would be thousands of full
+    // column syntheses for a dropdown. `W.biome[i]` is the same answer already computed, one array read.
+    // ⚠️ AND A RUN, NOT A SAMPLE. The nearest single sample of a biome can be a 64-column sliver — the exact
+    // thing that made the backdrop flicker — so "go to tundra" would land somewhere that does not look like
+    // tundra at all. Only runs of 4+ samples (256 columns) count, and you arrive at the middle of one.
+    const regions = [];
+    const W = gen.W;
+    if (W && W.biome && W.dx && gen.biomeNames) {
+      const pc = (req && req.x != null) ? Math.round(req.x / TERRAIN_CELL) : Math.round(geom.cols / 2);
+      const pi = Math.round((pc + originCol) / W.dx), n = W.biome.length;
+      // ⚠️ ALL the qualifying patches per region, nearest first — not just the nearest one. Half the world's
+      // regions went missing from the first version of this list because their NEAREST patch happened to have
+      // no standable ground: an ocean column has none by definition, and a patch that lands on a cliff face has
+      // none either. One failed candidate meant the whole region was unreachable. Try the next.
+      const cands = new Map();
+      let i = 0;
+      while (i < n) {
+        const b = W.biome[i];
+        let j = i; while (j + 1 < n && W.biome[j + 1] === b) j++;
+        if (j - i + 1 >= 4) {                                  // 4 samples = 256 columns; smaller is a sliver
+          if (!cands.has(b)) cands.set(b, []);
+          cands.get(b).push({ d: Math.abs(((i + j) >> 1) - pi), mid: (i + j) >> 1, len: j - i + 1 });
+        }
+        i = j + 1;
+      }
+      const s = domains.bandRows('surface');
+      for (const [b, list] of cands) {
+        list.sort((a, b2) => a.d - b2.d);
+        for (const rec of list.slice(0, 8)) {
+          const col = rec.mid * W.dx - originCol;
+          if (col < 4 || col >= geom.cols - 4) continue;
+          const r = gen.bandGroundAt(col, s.r0, s.r1, 5);
+          if (r < 0) continue;                                  // nowhere to stand here — try the next patch
+          regions.push({
+            label: (gen.biomeNames[b] || ('region ' + b)) + ' · ' + Math.round(rec.len * W.dx * TERRAIN_CELL / 1000) + 'k px wide',
+            x: (col + 0.5) * TERRAIN_CELL, y: Math.max(0, r * TERRAIN_CELL - TERRAIN_CELL * 3),
+            d: rec.d,
+          });
+          break;
+        }
+      }
+      regions.sort((a, b2) => a.d - b2.d);   // nearest first, which is what "go there" usually means
+    }
+    socket.emit('world-places', { places, regions });
   });
   socket.on('avt-where', (v) => {
     if (!currentAvatarRoom) return;
