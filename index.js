@@ -9015,9 +9015,19 @@ io.on('connection', (socket) => {
     skyRangeC0 = c0; skyRangeC1 = c1;
     const n = c1 - c0 + 1;
     if (n <= 0 || n > 65536) return;
+    // 🟥 THE GENERATOR HAS ITS OWN COORDINATE SPACE AND THIS IS WHERE IT BITES. A room is a WINDOW on one fixed
+    // world: `generator column = originCol + room column`, `generator row = originRow + room row` (see
+    // `fillPage`/`pageEmpty`, which both do exactly this conversion). The first version passed room coordinates
+    // straight in and returned generator rows straight out, so every column's sky boundary was the answer for
+    // some entirely different column, in the wrong row space.
+    // ⭐ THAT IS WHY "THE SUN DOES NOTHING". A wrong boundary makes `r0 < skyLimit` false almost everywhere, the
+    // client concludes no column is open to the sky, NO SUNLIGHT IS SEEDED AT ALL — and the whole world is then
+    // lit only by the player's torch. Which is also exactly why "loss through air still affects surface light":
+    // with the sun gone, every lit cell was reached by propagation through air.
+    const oc = gen.originCol | 0, orow = gen.originRow | 0;
     const rows = new Array(n);
-    for (let k = 0; k < n; k++) rows[k] = Math.max(0, Math.min(geom.rows, gen.topLimitAt(c0 + k) | 0));
-    socket.emit('world-sky', { c0, rows, sea: (gen.seaRow | 0) * TERRAIN_CELL });
+    for (let k = 0; k < n; k++) rows[k] = Math.max(0, Math.min(geom.rows, (gen.topLimitAt(oc + c0 + k) | 0) - orow));
+    socket.emit('world-sky', { c0, rows, sea: Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL });
   }
   // ⭐ SOMEWHERE TO GO. The Overworld is 4.19 million pixels wide and the only way in was to walk, so anything
   // that only happens at a volcano, a sky island or the bottom of a cave system was effectively untestable.
