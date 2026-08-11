@@ -6768,7 +6768,14 @@ const worldCfg = {
 // Overworld *"so as to not take up space inside the existing overworld"*. Sharing a layout would satisfy that
 // literally (different rooms, different edits) but would put a page's ground in the Overworld's landscape.
 // A second layout is ~5MB and one more build.
-const GEN2_LAYOUT_SEED = { overworld: 0x0ADE0000, page: 0x0ADE0001 };
+// ⚠️ THE OVERWORLD'S SEED IS THE WORLD. Changing it replaces the entire landscape — every region, every
+// volcano, every coastline — and stored player edits are diffs against generated ground, so `WORLDGEN2_VERSION`
+// must move with it or those diffs get applied to different rock and reported as restored. Bumped to 10 for
+// exactly this change; the seed itself is not stamped on a diff, so the version is the only guard there is.
+// 1234 chosen 2026-08-11 by comparing rendered terrain across seeds (`render_overworld_terrain.js`).
+// The page layout is deliberately untouched: page rooms are a separate instance, and there is no reason to
+// throw their worlds away too.
+const GEN2_LAYOUT_SEED = { overworld: 1234, page: 0x0ADE0001 };
 const _gen2Layouts = new Map();
 function gen2LayoutFor(which) {
   const seed = GEN2_LAYOUT_SEED[which];

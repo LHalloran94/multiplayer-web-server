@@ -108,7 +108,12 @@ const ICE_LIFT = 128;
 // 8 (2026-08-11): snow lies on exposed sea ice and glaciers, in patches, from a post-pass in cells.js.
 // 9 (2026-08-11): …and that post-pass no longer paints a row of snow through the middle of a floe at every
 //                 chunk boundary (it treated row 0 of a chunk SLICE as though it had air above it).
-const WORLDGEN2_VERSION = 9;
+// 🟥 10 (2026-08-11): THE OVERWORLD'S LAYOUT SEED CHANGED, and that is why this is bumped even though not one
+//                 line of the generator did. The seed is NOT part of a stored diff — only this version is — so
+//                 a new seed silently means every saved tunnel and wall would be re-applied to entirely
+//                 different rock and reported as a success. The version is the only thing standing between a
+//                 seed change and that, which makes bumping it part of changing the seed rather than optional.
+const WORLDGEN2_VERSION = 10;
 
 // The signed shortest way round the ring, for "how far is this column from that record". A column one period
 // along is otherwise half a million cells from every record in the world — the same `wdc` the spike applies 35
