@@ -185,6 +185,24 @@
     if (behavior === 'plant') PLANT_IDS.push(id);
   });
 
+  // ---- EMISSION — which materials give off light of their own ----------------------------------------------
+  // ⭐ A PROPERTY OF THE MATERIAL, NOT A LIST IN THE RENDERER. `drawLight` builds a 256-entry table off
+  // `TERRAIN_MATS[v].emit` once a frame and never asks what a material IS — so adding a glowing rock is a number
+  // here and nothing anywhere else. The value is the light level the cell is seeded at, on the same 0..255 scale
+  // the sun and the torch use (the sun is 255 at noon), so 110 is "clearly a light source, does not read as
+  // daylight". The Light tab scales all of them together.
+  // ⚠️ Named rather than filed as a 6th column in ROWS, because 73 rows would have to gain a `null` to reach it
+  // and only three of them have anything to say. NAMES is the same table's own index, so a typo is a silent
+  // no-op — B-checks in `probe_worldgen` assert the ids resolve.
+  // ⚠️ LAVA IS NOT HERE: it is built-in id 11, which lives in the client's hand-written palette (see the header
+  // note on ids 1..17), and it carries by far the largest emission in the game.
+  const EMIT = {
+    Crystal: 110,     // 36 — the cave-crystal look; bright enough to light a chamber it grows in
+    Fluorite: 90,     // 86 — fluorescence is the one thing everyone knows about fluorite
+    Uranium: 70,      // 74 — a sickly green glow. Radiation damage is still unbuilt; this is only light.
+  };
+  Object.keys(EMIT).forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].emit = EMIT[n]; });
+
   // ---- the spike's name → this game's id ------------------------------------------------------------------
   // ⭐ THE PORT'S ONE LOOKUP. The generator (increment 4) emits spike names; this is the only place that turns
   // one into a number, so an unmapped name is a loud failure here rather than `undefined` stored into a
@@ -206,7 +224,7 @@
   }
 
   return {
-    ROWS, DEFS, NAMES, NAME_TO_ID, idOf, STRENGTH,
+    ROWS, DEFS, NAMES, NAME_TO_ID, idOf, STRENGTH, EMIT,
     GEN_MAT_MIN, GEN_MAT_MAX,
     POWDER_IDS, PLANT_IDS, HANGS_IDS,
     COUNT: ROWS.length,
