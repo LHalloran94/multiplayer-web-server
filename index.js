@@ -9008,7 +9008,7 @@ io.on('connection', (socket) => {
   let skyRangeC0 = -1, skyRangeC1 = -1;
   function sendSkyRows(room, rect) {
     const gen = _roomGens.get(room);
-    if (!gen || typeof gen.topLimitAt !== 'function') return;   // no generator (or an older one) ⇒ the client keeps its fallback
+    if (!gen || typeof gen.surfAt !== 'function') return;       // no generator (or an older one) ⇒ the client keeps its fallback
     const geom = worldGeom(room);
     const c0 = Math.max(0, (rect.cx0 - 1) * CHUNK_SIDE), c1 = Math.min(geom.cols - 1, (rect.cx1 + 2) * CHUNK_SIDE - 1);
     if (c0 === skyRangeC0 && c1 === skyRangeC1) return;
@@ -9024,10 +9024,19 @@ io.on('connection', (socket) => {
     // client concludes no column is open to the sky, NO SUNLIGHT IS SEEDED AT ALL — and the whole world is then
     // lit only by the player's torch. Which is also exactly why "loss through air still affects surface light":
     // with the sun gone, every lit cell was reached by propagation through air.
+    // 🟥 THE GROUND, NOT `topLimitAt`. This sent `topLimitAt` — "the highest row this column could hold anything
+    // in" — and used it as "where the sky starts". Those are different questions, and the difference is exactly
+    // a SKY ISLAND: `topLimitAt` deliberately lifts itself above one (that is its job, proving a page empty), so
+    // every column underneath an island answered "there is no sky above me" and the ground beneath went black.
+    // Found from play — the sun worked ON the islands and nowhere under them, which is the observation that
+    // identifies the mechanism exactly.
+    // ⭐ The right quantity is the SURFACE. The field's top edge sees the sun when it is above the ground, and
+    // an island between the two is ordinary terrain: it sits inside the field and casts its shadow through the
+    // occlusion sweep like anything else.
     const oc = gen.originCol | 0, orow = gen.originRow | 0;
-    const rows = new Array(n);
-    for (let k = 0; k < n; k++) rows[k] = Math.max(0, Math.min(geom.rows, (gen.topLimitAt(oc + c0 + k) | 0) - orow));
-    socket.emit('world-sky', { c0, rows, sea: Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL });
+    const surf = new Array(n);
+    for (let k = 0; k < n; k++) surf[k] = Math.max(0, Math.min(geom.rows, (gen.surfAt(oc + c0 + k) | 0) - orow));
+    socket.emit('world-sky', { c0, surf, sea: Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL });
   }
   // ⭐ SOMEWHERE TO GO. The Overworld is 4.19 million pixels wide and the only way in was to walk, so anything
   // that only happens at a volcano, a sky island or the bottom of a cave system was effectively untestable.

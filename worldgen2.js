@@ -290,6 +290,12 @@ function makeGen2(cfg) {
   // 🟥 THAT MATTERS: Part E's first form measured "how far above `surfRow` is the topmost cell", which on an
   // ocean column is the SEA — a thing a different clause already handles — so it reported 775 rows of breach
   // against a rule that was fine, and would have sent me to widen the wrong constant. Measure what ships.
+  // ⭐ WHERE THE GROUND ACTUALLY IS, which is a different question from `topLimitAt`'s "where could ANYTHING
+  // be" — and confusing the two broke the lighting in a way only play could show. `topLimitAt` deliberately
+  // lifts itself above sky islands, lakes and flora, because its job is to prove a page EMPTY. Used as "where
+  // the sky starts", that makes every column under a floating island answer "there is no sky above me", and the
+  // ground beneath one goes black. Named in this file's interface comment from the start; never implemented.
+  function surfAt(c) { return columnInfo(W, C, c).surfRow; }
   function topLimitAt(c) {
     const s = columnInfo(W, C, c).surfRow;
     // ground, plus whatever stands on it (flora crowns, mounds).
@@ -348,7 +354,7 @@ function makeGen2(cfg) {
     // the surface `index.js` actually consumes — measured, not assumed: `fillPage` (3 call sites),
     // `pageEmpty` (1, via `PagedArray.seedEmpty`) and `bandGroundAt` (2, the spawn seam). The rest are here
     // because the probes and previewers need them.
-    fillPage, pageEmpty, topLimitAt, bandGroundAt, fillColumn, matAt, strengthOf,
+    fillPage, pageEmpty, topLimitAt, surfAt, bandGroundAt, fillColumn, matAt, strengthOf,
     XLAT, STRENGTH, IS_FLUID, SKY_LIFT,
   };
 }
