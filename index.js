@@ -2141,6 +2141,11 @@ function decodeChunk(s, p, blob, room) {
 // call-time evaluation was safe either way, but `PAGE_DIMS` and `rpOn` both taught this track that a `let`
 // below its reader is a trap not worth setting.
 let genLiquidSeeded = 0, genPagesProduced = 0, genChunksDropped = 0, genChunksDeltad = 0, genPowderSeeded = 0, genPowderRewoken = 0;
+// ⭐ HOW MANY CELLS THE NEW LATERAL-DENSITY WAKE CONDITION WOKE, and it is here for the reason this track has
+// learned three times over (`liqRateSkips`, `liqK2Throttles`, `powderRewoken`): a check that a mechanism WORKED
+// is a coin flip unless something reports that the mechanism FIRED. Zero here with a two-liquid lake on screen
+// means the condition is not reaching the cells, not that the world is clean.
+let genFaceWoken = 0;
 // Same seam as chunkDelta / drainGenLiquid / wireFanout, for the fifth time on this track: `onChunkFault` and
 // `rehydrateChunk` are inside the block the probe rigs slice into a `new Function`, and the pending set this
 // queues into lives with the generator three thousand lines below, outside the slice. A bare call would give a
@@ -2930,6 +2935,12 @@ const liquidCfg = {
   // doing the work. A perf win measured without checking the RESULT is not a perf win.
   fineQuiesce: false,
   fineQuiesceTicks: 6,
+  // ⭐⭐ WAKE GENERATED LIQUID THAT HAS A DIFFERENT-DENSITY FLUID BESIDE IT. See `genLiquidLoose`, which is
+  // where the whole argument lives. ON by default — unlike everything else on this branch, because OFF is the
+  // behaviour that was reported as a bug, and because it wakes only the defect (measured: 184 cells of
+  // different-rank horizontal contact against 655,112 of same-rank, over 12 windows of the live Overworld).
+  // Turn it off on the wire to A/B against the old world.
+  wakeDensityFace: true,
   // (2) ADAPTIVE K (perf): stop sub-stepping a room early once a sub-step moves fewer than fineAdaptPct% of its active
   // cells (it has gone quiet). A settled pool then spends ~1 sub-step, a raging pour still spends the full K. The fall
   // steps always run first (see fineConstFall) so descent is never starved. OFF = always exactly K sub-steps.
@@ -5675,7 +5686,7 @@ function cfgWire() {
     // outcome. "The hole is still there after a restart" is also true of a build that stored nothing and simply
     // regenerated a cave in the same place; the load counter is what tells the two apart. Same reasoning as
     // `liqRateSkips` and `liqK2Throttles`, which this track needed for the same reason.
-    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, powderSeeded: genPowderSeeded, powderRewoken: genPowderRewoken, dropped: genChunksDropped, deltad: genChunksDeltad,
+    worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, powderSeeded: genPowderSeeded, powderRewoken: genPowderRewoken, faceWoken: genFaceWoken, dropped: genChunksDropped, deltad: genChunksDeltad,
       saved: worldSaved, loaded: worldLoaded, applied: worldApplied, liqRestored: worldLiquidRestored, flushes: worldFlushes, flushed: worldFlushWrites, saveErrors: worldSaveErrors },
   });
 }
@@ -7155,8 +7166,36 @@ function genLiquidLoose(terr, i, geom, v) {
     // LIQ_RANK is 0 = heaviest, so this cell sinks past the one below only when its rank is SMALLER.
     if (b > 0 && isFluidId(b) && LIQ_RANK[v] < LIQ_RANK[b]) return true;
   }
-  if (c > 0 && peekCellAt(terr, i - rows) === 0) return true;     // air to the left ⇒ spills
-  if (c + 1 < geom.cols && peekCellAt(terr, i + rows) === 0) return true;
+  // ⭐⭐ …AND A FLUID OF A DIFFERENT DENSITY BESIDE IT (2026-08-12). ⚠️ NOTE THE ASYMMETRY WITH THE TEST ABOVE:
+  // BELOW, only a LIGHTER fluid is a reason to move, because a heavier one underneath is already the right way
+  // up. BESIDE, ANY difference is, because side by side has no right way up at all — one of the two must go
+  // under the other, and which one it is does not change that the pair is not at rest.
+  // 🟥 THIS CONDITION WAS MISSING, AND IT IS THE WHOLE OF WHY THE WORLD HOLDS HARD VERTICAL WALLS BETWEEN TWO
+  // LIQUIDS. Reported from play: *"different density liquids should not be sitting next to each other like
+  // that, they should be sorted"*. `probe_liquid_sort.js` measured both halves rather than reading them: two
+  // settled bodies meeting at a vertical face DO sort completely when their cells are awake (12 cells of
+  // different-rank contact -> 0, the heavy body ending 6 rows below the light one), and do NOTHING WHATSOEVER
+  // over 800 ticks when woken by this function, because not one of the three conditions above fires on them.
+  // The sim was never broken; nothing ever asked it to look.
+  // ⚠️ BOTH SIDES WAKE, deliberately. An exchange has two ends, and leaving one asleep makes the result depend
+  // on which of the pair the seeding pass happened to reach first.
+  // ⚠️ IT IS NOT A COST. A homogeneous body contains no such pair anywhere in it, so a lake pays one rank
+  // comparison per cell and wakes nothing: measured over 12 windows of 384 columns × 4,096 rows of the live
+  // Overworld, 655,112 cells of same-rank horizontal contact against 184 of different-rank
+  // (`probe_liquid_patches.js`). What it wakes is exactly the defect and nothing else.
+  // ⚠️ ON BY DEFAULT with a live toggle, rather than the branch's usual ships-off, because OFF is the reported
+  // bug. `liquid-cfg {wakeDensityFace:0}` restores the old behaviour for an A/B.
+  const face = liquidCfg.wakeDensityFace;
+  if (c > 0) {
+    const l = peekCellAt(terr, i - rows);
+    if (l === 0) return true;                                     // air to the left ⇒ spills
+    if (face && l > 0 && isFluidId(l) && LIQ_RANK[l] !== LIQ_RANK[v]) { genFaceWoken++; return true; }
+  }
+  if (c + 1 < geom.cols) {
+    const rt = peekCellAt(terr, i + rows);
+    if (rt === 0) return true;                                    // air to the right ⇒ spills
+    if (face && rt > 0 && isFluidId(rt) && LIQ_RANK[rt] !== LIQ_RANK[v]) { genFaceWoken++; return true; }
+  }
   return false;
 }
 function seedGenChunkLiquid(room, p) {
@@ -8117,7 +8156,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
