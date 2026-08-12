@@ -9100,6 +9100,21 @@ io.on('connection', (socket) => {
   // means here. Smoothing them out is a client decision; having enough data to smooth over is this.
   const REG_STEP = 64;                    // the generator's own sample spacing — finer carries no information
   const REG_SPAN = 1024;                  // entries ⇒ 65,536 columns
+  // ⭐⭐ AND THE SURFACE OVER THE SAME STRETCH, WHICH IS WHAT A WORLD-DERIVED BACKDROP IS MADE OF.
+  //  `world-sky` above sends one row per column, exactly, for the INTEREST RECT — about a screen plus four
+  //  chunks. That is everything the lighting needs and nowhere near enough for a distant layer: a backdrop drawn
+  //  at a twentieth of the camera's rate shows twenty screens of country across one screen of glass, so it runs
+  //  off the end of its own data within a few hundred pixels of walking. The regions were already wide for
+  //  exactly this reason; the heights were not, and that mismatch is the whole constraint.
+  //  ⭐ `surfAt` is a pure arithmetic function of the column — it produces no chunks and touches no storage — so
+  //  a coarse wide strip costs nothing but the samples. One every 16 columns over the region strip's own 65,536
+  //  gives 4,096 entries, and it rides the SAME message so the two can never disagree about which stretch of
+  //  world they describe or when it was taken.
+  //  ⚠️ 16 COLUMNS = 128px IS THE RESOLUTION OF THE PICTURE, and it is a trade against the span rather than a
+  //  budget: the NEAREST distant layer wants fine detail over a few screens, the furthest wants coarse detail
+  //  over twenty. One strip has to serve both, so it is sampled finely enough for the near one and wide enough
+  //  for the far one, and the client smooths between samples.
+  const FAR_STEP = 16;
   let regCentre = null;
   function sendRegions(room, rect) {
     const gen = _roomGens.get(room);
@@ -9117,6 +9132,15 @@ io.on('connection', (socket) => {
     // The KEYS ride along once: a byte with no table is not information, and the client keeps the last set it
     // was given rather than re-reading it every beacon.
     if (gen.biomeKeys && !skySentKeys) { msg.keys = gen.biomeKeys; skySentKeys = 1; }
+    // ⚠️ Room rows, like `world-sky`'s: the generator has its own row space and a strip in the wrong one would
+    // put the whole distance hundreds of rows out. Same conversion, same clamp, deliberately written the same way.
+    if (typeof gen.surfAt === 'function') {
+      const nS = (REG_SPAN * REG_STEP / FAR_STEP) | 0;
+      const orow = gen.originRow | 0, surf = new Array(nS);
+      for (let k = 0; k < nS; k++) surf[k] = Math.max(0, Math.min(geom.rows, (gen.surfAt(oc + c0 + k * FAR_STEP) | 0) - orow));
+      msg.surfStep = FAR_STEP; msg.surf = surf;
+      msg.sea = Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL;
+    }
     socket.emit('world-regions', msg);
   }
   // ⭐ SOMEWHERE TO GO. The Overworld is 4.19 million pixels wide and the only way in was to walk, so anything
