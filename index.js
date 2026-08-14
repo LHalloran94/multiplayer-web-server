@@ -9052,12 +9052,32 @@ io.on('connection', (socket) => {
   // guaranteed empty, and "the field starts above that row" is exactly "sunlight reaches the field's top edge".
   // ⚠️ Sent only when the column range CHANGES. It is one Int16 per column, and the beacon fires twice a second.
   let skyRangeC0 = -1, skyRangeC1 = -1, skySentKeys = 0;
+  // ⭐⭐ AND IT REACHES MUCH FURTHER THAN THE VIEWPORT, because a SECOND reader wants it and wants a different
+  //  width. The lighting needs the surface over the screen and nothing more; the BACKDROP draws the distance from
+  //  this same strip wherever it reaches (`farReal`) and from a 16-column spline everywhere else, and its stack of
+  //  parallax depths reaches about 18,000px either side. So all but the nearest sliver of the picture was drawn
+  //  from one height every 128 world px — enough for the shape of a range, not for a cliff, a notch or a sea stack.
+  //  ⭐ IT IS NEARLY FREE, and for the reason the region strip's own note gives: `surfAt` is pure arithmetic on the
+  //  column, producing no chunks and touching no storage. Widening this does NOT mean widening the terrain window
+  //  — the client's exact surface comes off this wire, not out of its cell mirror — so none of the memory or
+  //  chunk-traffic arguments about the window apply. It is 2 bytes a column of one message.
+  //  ⚠️ WHICH IS WHY THE THROTTLE HAD TO CHANGE WITH IT. It used to resend whenever the interest rect moved by a
+  //  chunk, which for a strip this wide would be 25KB every 64 columns walked. It now resends only when the rect
+  //  approaches the edge of the strip the client already holds — the same hysteresis `sendRegions` uses, and for
+  //  the same reason.
+  const SKY_MARGIN = 2048;                // columns of exact surface either side of the interest rect
   function sendSkyRows(room, rect) {
     const gen = _roomGens.get(room);
     if (!gen || typeof gen.surfAt !== 'function') return;       // no generator (or an older one) ⇒ the client keeps its fallback
     const geom = worldGeom(room);
-    const c0 = Math.max(0, (rect.cx0 - 1) * CHUNK_SIDE), c1 = Math.min(geom.cols - 1, (rect.cx1 + 2) * CHUNK_SIDE - 1);
-    if (c0 === skyRangeC0 && c1 === skyRangeC1) return;
+    const cr0 = Math.max(0, (rect.cx0 - 1) * CHUNK_SIDE), cr1 = Math.min(geom.cols - 1, (rect.cx1 + 2) * CHUNK_SIDE - 1);
+    // Still holding a strip with a quarter of the margin to spare either side of what they can see? Then nothing
+    // has to be sent. ⚠️ The lighting reads this too, so the test is on the RECT — what they can see — never on
+    // how far they have walked.
+    const keep = SKY_MARGIN >> 2;
+    if (skyRangeC0 >= 0 && cr0 >= skyRangeC0 + keep && cr1 <= skyRangeC1 - keep) return;
+    const c0 = Math.max(0, cr0 - SKY_MARGIN), c1 = Math.min(geom.cols - 1, cr1 + SKY_MARGIN);
+    if (c0 === skyRangeC0 && c1 === skyRangeC1) return;         // …at the edge of the world it cannot grow further
     skyRangeC0 = c0; skyRangeC1 = c1;
     const n = c1 - c0 + 1;
     if (n <= 0 || n > 65536) return;
