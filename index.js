@@ -6800,6 +6800,7 @@ function gen2LayoutFor(which) {
   return L;
 }
 const _roomGens = new Map();                          // avatarRoom → the generator for its seed+shape, built once
+const _roomWideSurf = new Map();                      // …and its whole-world surface profile: see wideSurfFor
 // Everything worldgen.js needs to know about a room, gathered in one place so there is one definition of
 // "what shape and seed is this world" rather than several that can drift.
 function genCfgFor(avatarRoom, seed, band) {
@@ -9135,7 +9136,34 @@ io.on('connection', (socket) => {
   //  over twenty. One strip has to serve both, so it is sampled finely enough for the near one and wide enough
   //  for the far one, and the client smooths between samples.
   const FAR_STEP = 16;
-  let regCentre = null;
+  // ══ ⭐⭐ AND A SECOND, MUCH COARSER STRIP OVER THE **WHOLE WORLD**, SENT ONCE ═══════════════════════════════
+  //  Reported from play: *"the depth layers … after a certain point it just becomes completely flat; even if it
+  //  had to be coarse approximations."* Exactly right, and the arithmetic says how badly. The fine strip above
+  //  covers 65,536 columns — 262,144px either side of you — and a deep depth at the settings now in use asks
+  //  for **hundreds of millions**: with the horizontal squash at 900% and 36 depths the furthest one holds more
+  //  world than exists. Past the strip's end every column reads the same clamped value, so it draws a flat line.
+  //  ⭐ THE ANSWER IS NOT A WIDER FINE STRIP, IT IS A SECOND COARSE ONE, because the two ends of this want
+  //  opposite things: the near depths want detail over a few screens and the far ones want ANY shape at all over
+  //  the whole world. One strip serving both is what forced the compromise in the first place.
+  //  ⭐ IT NEVER CHANGES AND IS THEREFORE SENT ONCE. `surfAt` is a pure function of the seed and the column, so
+  //  the whole-world profile is fixed the moment the layout is: no centre, no hysteresis, no re-sends. About
+  //  4,096 samples whatever the world's width — 8KB, one time — and cached per ROOM rather than per socket,
+  //  since every player in the Overworld is looking at the same world.
+  //  ⚠️ THE STEP IS DERIVED FROM THE WIDTH, not fixed: a page room is a few thousand columns wide and a fixed
+  //  128-column step would describe it with thirty samples.
+  const WIDE_N = 4096;
+  function wideSurfFor(room, gen, geom) {
+    const hit = _roomWideSurf.get(room);
+    if (hit) return hit;
+    const step = Math.max(FAR_STEP, Math.pow(2, Math.ceil(Math.log2(Math.max(1, geom.cols / WIDE_N)))));
+    const n = Math.max(2, Math.ceil(geom.cols / step));
+    const oc = gen.originCol | 0, orow = gen.originRow | 0, rows = new Array(n);
+    for (let k = 0; k < n; k++) rows[k] = Math.max(0, Math.min(geom.rows, (gen.surfAt(oc + k * step) | 0) - orow));
+    const rec = { step, rows };
+    _roomWideSurf.set(room, rec);
+    return rec;
+  }
+  let regCentre = null, wideSent = 0;
   function sendRegions(room, rect) {
     const gen = _roomGens.get(room);
     if (!gen || typeof gen.biomeAt !== 'function') return;   // no generator (or an older one) ⇒ one flat region
@@ -9160,6 +9188,8 @@ io.on('connection', (socket) => {
       for (let k = 0; k < nS; k++) surf[k] = Math.max(0, Math.min(geom.rows, (gen.surfAt(oc + c0 + k * FAR_STEP) | 0) - orow));
       msg.surfStep = FAR_STEP; msg.surf = surf;
       msg.sea = Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL;
+      // …and the whole-world profile, once. See wideSurfFor: it cannot go stale, so it rides the first strip.
+      if (!wideSent) { const w = wideSurfFor(room, gen, geom); msg.wideStep = w.step; msg.wide = w.rows; wideSent = 1; }
     }
     socket.emit('world-regions', msg);
   }
