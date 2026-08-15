@@ -9151,15 +9151,28 @@ io.on('connection', (socket) => {
   //  since every player in the Overworld is looking at the same world.
   //  ⚠️ THE STEP IS DERIVED FROM THE WIDTH, not fixed: a page room is a few thousand columns wide and a fixed
   //  128-column step would describe it with thirty samples.
+  //  🟥🟥 AND IT SWEEPS THE WHOLE SHARED LAYOUT, NOT THE ROOM — which is the difference between this fixing the
+  //  report and not. MEASURED against the running server with `e2e_wide_strip.js`: an ordinary page world is
+  //  **1,920 columns, 15,360px**, and the stack at 36 depths asks its deepest one for 263 MILLION. Sweeping the
+  //  ROOM gave a strip 15,360px wide — everything past it still flat, i.e. essentially the whole picture.
+  //  ⭐ A page room is a WINDOW into the shared layout at `originCol`, and `surfAt` is defined across all of it,
+  //  so the country beyond the room's edges is real and free to describe: the backdrop shows what the window is
+  //  a window ONTO. ⚠️ `c0` is therefore in ROOM columns and is NEGATIVE for every page room — the strip starts
+  //  a long way to the left of the room's own column 0.
   const WIDE_N = 4096;
   function wideSurfFor(room, gen, geom) {
     const hit = _roomWideSurf.get(room);
     if (hit) return hit;
-    const step = Math.max(FAR_STEP, Math.pow(2, Math.ceil(Math.log2(Math.max(1, geom.cols / WIDE_N)))));
-    const n = Math.max(2, Math.ceil(geom.cols / step));
-    const oc = gen.originCol | 0, orow = gen.originRow | 0, rows = new Array(n);
-    for (let k = 0; k < n; k++) rows[k] = Math.max(0, Math.min(geom.rows, (gen.surfAt(oc + k * step) | 0) - orow));
-    const rec = { step, rows };
+    const oc = gen.originCol | 0, orow = gen.originRow | 0;
+    const span = Math.max(geom.cols, (WORLDGEN2 && WORLDGEN2.LAYOUT_COLS) ? WORLDGEN2.LAYOUT_COLS | 0 : geom.cols);
+    const step = Math.max(FAR_STEP, Math.pow(2, Math.ceil(Math.log2(Math.max(1, span / WIDE_N)))));
+    const n = Math.max(2, Math.ceil(span / step));
+    const rows = new Array(n);
+    // ⚠️ Clamped to the LAYOUT's rows, not the room's — see the fine strip above for why that distinction is
+    // the whole difference between a distant range and a flat line.
+    const RLIM = (WORLDGEN2 && WORLDGEN2.LAYOUT_ROWS) ? WORLDGEN2.LAYOUT_ROWS | 0 : geom.rows;
+    for (let k = 0; k < n; k++) rows[k] = Math.max(-RLIM, Math.min(RLIM, (gen.surfAt(k * step) | 0) - orow));
+    const rec = { step, rows, c0: -oc };
     _roomWideSurf.set(room, rec);
     return rec;
   }
@@ -9185,11 +9198,21 @@ io.on('connection', (socket) => {
     if (typeof gen.surfAt === 'function') {
       const nS = (REG_SPAN * REG_STEP / FAR_STEP) | 0;
       const orow = gen.originRow | 0, surf = new Array(nS);
-      for (let k = 0; k < nS; k++) surf[k] = Math.max(0, Math.min(geom.rows, (gen.surfAt(oc + c0 + k * FAR_STEP) | 0) - orow));
+      // 🟥🟥 CLAMPED TO THE LAYOUT'S ROWS, NOT TO THE ROOM'S — and this is the real cause of the flat distance a
+      // page room shows, found by measuring the wire rather than by looking at the picture. A page room is 405
+      // rows tall and is a WINDOW into a layout 4,096 rows deep; both strips describe tens of thousands of
+      // columns, i.e. country whose ground is thousands of rows above or below anything in this room. Clamping
+      // that into 0..405 pinned every distant column to the room's ceiling or its floor — 77% of the samples
+      // came back equal to their neighbour, which is a flat horizon written down as data.
+      // ⚠️ The rows may now be NEGATIVE (country higher than this room's top) and may exceed its bottom. That is
+      // correct: they are a height relative to the room's origin, and the backdrop draws them at whatever scale
+      // its depth implies. Only the room's own TERRAIN has to fit in the room.
+      const RLIM = (WORLDGEN2 && WORLDGEN2.LAYOUT_ROWS) ? WORLDGEN2.LAYOUT_ROWS | 0 : geom.rows;
+      for (let k = 0; k < nS; k++) surf[k] = Math.max(-RLIM, Math.min(RLIM, (gen.surfAt(oc + c0 + k * FAR_STEP) | 0) - orow));
       msg.surfStep = FAR_STEP; msg.surf = surf;
       msg.sea = Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL;
       // …and the whole-world profile, once. See wideSurfFor: it cannot go stale, so it rides the first strip.
-      if (!wideSent) { const w = wideSurfFor(room, gen, geom); msg.wideStep = w.step; msg.wide = w.rows; wideSent = 1; }
+      if (!wideSent) { const w = wideSurfFor(room, gen, geom); msg.wideStep = w.step; msg.wide = w.rows; msg.wideC0 = w.c0; wideSent = 1; }
     }
     socket.emit('world-regions', msg);
   }
