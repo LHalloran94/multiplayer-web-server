@@ -9564,6 +9564,18 @@ io.on('connection', (socket) => {
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
   // Destructible terrain: paint/carve a circle into the room grid, then rebroadcast the op so every
   // client rasterizes it identically (client also applies optimistically). Only echoes on a real change.
+  // ⭐ A CLIENT DIAGNOSTIC, PRINTED HERE. The dev page relays console errors to its own terminal, but the
+  // EXTENSION has no such path — so a diagnostic only reached me if the tester happened to be on the dev page,
+  // and a measurement you can only take on one of two surfaces is a measurement that will be missed. Routing it
+  // over the socket the client already holds works on both.
+  // Rate-limited rather than trusted: this writes to the server's stdout.
+  let _logBudget = 400, _logWindow = 0;
+  socket.on('client-log', (msg) => {
+    const now = Date.now();
+    if (now - _logWindow > 60000) { _logWindow = now; _logBudget = 400; }
+    if (_logBudget-- <= 0 || typeof msg !== 'string') return;
+    console.log('[client ' + socket.id.slice(0, 4) + '] ' + msg.slice(0, 4000));
+  });
   // A dig turned terrain into a pile on the ground. The client says WHAT it dug (it already had to know, to
   // apply the carve optimistically); the server decides the id, the resting position and whether it exists at
   // all — which is the part that has to be authoritative, because two players must not both collect one pile.
