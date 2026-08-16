@@ -26,6 +26,9 @@
 const { buildWorld, BIOME } = require('./worldgen2/pipeline.js');
 const { prepare, fillColumn: spikeFillColumn, columnInfo, MATS, M } = require('./worldgen2/cells.js');
 const { PERIOD_COLS } = require('./worldgen2/noise.js');
+// ⚠️ READ-ONLY, like every other require of that directory: `worldgen2/*.js` are byte-for-byte spike copies and
+// are checksummed. `skyTop`/`skyBot` are pure functions of (record, column) and are exported for exactly this.
+const { skyTop, skyBot } = require('./worldgen2/sky.js');
 const MG = require('./materials.js');
 
 const CHUNK_SIDE = 64;                                  // must match worldgen.js / chunkGeom
@@ -333,6 +336,41 @@ function makeGen2(cfg) {
     return t;
   }
 
+  // ══ ⭐⭐ THE FLOATING ISLANDS AS A SHORT LIST — for the client's BACKDROP, which cannot draw them any other way.
+  //  The distance is a HEIGHTFIELD renderer: one surface row per column, filled from that line down to the bottom
+  //  of the screen. A floating island has air UNDERNEATH it, which a heightfield cannot express at all — fill from
+  //  its top and you paint a column of rock all the way down to the ground. So the backdrop needs them as
+  //  discrete CLOSED BODIES, with a top and a bottom, and that is already exactly how they are held here.
+  //  ⭐ THE WHOLE WORLD, IN ONE MESSAGE, ONCE. There are about a hundred of them across 4.19M px, so this is a few
+  //  KB, and it cannot go stale: the layout is fixed by the seed and shared by every room. Same argument as the
+  //  whole-world coarse surface strip, and the same reason it needs no interest management.
+  //  ⚠️ `alt` IS THE ALTITUDE TO COLOUR IT AT, AND IT IS DELIBERATELY NOT ITS REAL HEIGHT. `prepareSky` dresses an
+  //  island at a third of its height above the ground, capped, because at their true altitude 83 of 101 came out
+  //  under snow — a monotonous white band, the opposite of "floating versions of different landscapes". The
+  //  backdrop must colour them at the same virtual altitude or it will paint every one of them white, for exactly
+  //  the same reason and with exactly the same complaint.
+  //  ⚠️ ROWS AND COLUMNS ARE THE GENERATOR'S OWN, absolute. `index.js` shifts them into room space, the way it
+  //  already does for `surfAt` and `seaRow`.
+  // ⚠️ 32, NOT 20, AND IT WAS THE FIRST RENDER THAT SAID SO: an island is up to ~1,800 columns across and carries
+  // its own relief, so 20 samples is one every 700px and the drawn top came out as sawteeth.
+  const ISLE_PROF = 32;
+  function skyIsles() {
+    const seed = W.o.seed, out = [];
+    for (let i = 0; i < C.sky.length; i++) {
+      const I = C.sky[i];
+      const top = new Array(ISLE_PROF), bot = new Array(ISLE_PROF);
+      // ⚠️ STRICTLY INSIDE THE RIM: both profiles answer null at |t| >= 1, and a body has to close.
+      for (let k = 0; k < ISLE_PROF; k++) {
+        const t = (k / (ISLE_PROF - 1)) * 2 - 1;
+        const c = I.at + Math.round(t * (I.hwPx - 2));
+        top[k] = skyTop(I, c, seed) | 0;
+        bot[k] = skyBot(I, c, seed) | 0;
+      }
+      out.push({ at: I.at, hw: I.hwPx, top, bot, alt: Math.max(0, Math.round(I.dressElev)) });
+    }
+    return out;
+  }
+
   // ── "where can somebody stand in this row range?" ────────────────────────────────────────────────────────────
   // The query domain placement asks. Absolute world coordinates; walks at most (r1 - r0) rows of ONE column.
   // 🟥 It reads the FINISHED column, not pre-liquid ground — otherwise it reports the floor of a lava lake as
@@ -366,7 +404,7 @@ function makeGen2(cfg) {
     // the surface `index.js` actually consumes — measured, not assumed: `fillPage` (3 call sites),
     // `pageEmpty` (1, via `PagedArray.seedEmpty`) and `bandGroundAt` (2, the spawn seam). The rest are here
     // because the probes and previewers need them.
-    fillPage, pageEmpty, topLimitAt, surfAt, biomeAt, bandGroundAt, fillColumn, matAt, strengthOf,
+    fillPage, pageEmpty, topLimitAt, surfAt, biomeAt, bandGroundAt, fillColumn, matAt, strengthOf, skyIsles,
     // The region names, so the wire can carry a byte and the client can still say what it means. ONE list, two
     // readers — the rule this whole port exists to keep.
     biomeKeys: BIOME.map(b => b.key), biomeNames: BIOME.map(b => b.name),

@@ -9105,6 +9105,33 @@ io.on('connection', (socket) => {
     for (let k = 0; k < n; k++) surf[k] = Math.max(0, Math.min(geom.rows, (gen.surfAt(oc + c0 + k) | 0) - orow));
     socket.emit('world-sky', { c0, surf, sea: Math.max(0, (gen.seaRow | 0) - orow) * TERRAIN_CELL });
   }
+  // ══ ⭐⭐ THE FLOATING ISLANDS, ONCE — the one thing in the world the backdrop's heightfield cannot express.
+  //  Every other wire here answers a QUESTION PER COLUMN, and a column has one surface. An island has air under
+  //  it, so it is not a surface at all; the backdrop needs it as a closed body with a top and a bottom, which is
+  //  how `worldgen2` already holds them (see `skyIsles` there for the profile and for what `alt` means).
+  //  ⚠️ NO THROTTLE AND NO INTEREST RECT, deliberately: there are about a hundred of them in the whole 4.19M-px
+  //  layout, so this is a few KB sent once and it CANNOT go stale — the layout is fixed by the seed and shared
+  //  by every room. That is the same argument the whole-world coarse strip is sent on.
+  let islesSent = false;
+  function sendIsles(room) {
+    if (islesSent) return;
+    const gen = _roomGens.get(room);
+    if (!gen || typeof gen.skyIsles !== 'function') { islesSent = true; return; }   // page room, or an older generator
+    const oc = gen.originCol | 0, orow = gen.originRow | 0;
+    let list = null;
+    try { list = gen.skyIsles(); } catch (e) { islesSent = true; return; }
+    islesSent = true;
+    if (!list || !list.length) return;
+    // ⚠️ ROOM SPACE, like `world-sky`'s rows: a room is a WINDOW on the shared layout, so `c` is routinely
+    // negative or past the room's own width. That is correct — the backdrop draws the country the window looks
+    // out onto, and the same is already true of the wide surface strip's `c0`.
+    const isles = list.map((I) => ({
+      c: I.at - oc, hw: I.hw | 0,
+      top: I.top.map((r) => r - orow), bot: I.bot.map((r) => r - orow),
+      alt: (I.alt | 0) * TERRAIN_CELL,
+    }));
+    socket.emit('world-isles', { isles });
+  }
   // ⭐ WHICH REGION EACH COLUMN IS IN — a SEPARATE, COARSER, MUCH WIDER strip, and all three of those words are
   // the point.
   //   COARSER: the layout samples the world every 64 columns and takes the biome from the NEAREST sample, so a
@@ -9329,7 +9356,7 @@ io.on('connection', (socket) => {
   socket.on('avt-where', (v) => {
     if (!currentAvatarRoom) return;
     const rect = noteWhere(currentAvatarRoom, socket.id, v);
-    if (rect) { updateSubs(currentAvatarRoom, socket.id, rect); try { sendSkyRows(currentAvatarRoom, rect); sendRegions(currentAvatarRoom, rect); } catch (e) { /* lighting + backdrop hints only — never break the beacon */ } }
+    if (rect) { updateSubs(currentAvatarRoom, socket.id, rect); try { sendSkyRows(currentAvatarRoom, rect); sendRegions(currentAvatarRoom, rect); sendIsles(currentAvatarRoom); } catch (e) { /* lighting + backdrop hints only — never break the beacon */ } }
     if (!relayCfg.on) updatePeers(currentAvatarRoom, socket.id);   // Phase 4: re-select who is worth being meshed with.
     // ⚠️ Phase 5a: NOT while relaying — there is no mesh to maintain, and `relaySelect` re-ranks from the
     // same beacon on every relay tick anyway. Emitting `avt-peers` here would tell a relayed client to
