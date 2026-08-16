@@ -1528,6 +1528,17 @@ const roomAvatars = {}; // legacy (old position-broadcast model; kept for back-c
 const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel mesh (Stage 6 pivot)
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
+// ---- Dropped material (dig → item on the ground → inventory) ----
+// One drop per dig swing, not one per cell: a 7×7 bite is a single entity carrying its composition, which is
+// what keeps this affordable at Overworld scale. The server owns the LIST (so two players cannot both collect
+// the same pile) but not the FALL — it resolves the resting row once, at spawn, by scanning down to the first
+// solid cell, and every client animates the drop from spawn to rest itself. That means one message per drop
+// for its whole life, and no per-tick position stream.
+const roomDrops = {};   // room → Map<dropId, drop>   drop = { id, x, y, gy, t0, mats:[[matId,count],…], n }
+let dropSeq = 0;
+const MAX_DROPS_PER_ROOM = 300;    // oldest are culled first; a pile of drops is litter, not state worth keeping
+const DROP_TTL_MS = 4 * 60 * 1000; // un-collected material rots away, so a dug-out area does not accumulate forever
+const DROP_FALL_MAX_CELLS = 96;    // how far down the resting scan looks — bounded because the scan can FAULT PAGES IN (see dropRestY)
 const MAX_OBJECTS_PER_ROOM = 150;  // Phase 6: per-Level cap on USER-placed objects (generated 'world-' scatter exempt); mirrors client OBJECT_CAP. Over-cap spawns are rejected.
 const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter)
 const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
@@ -8030,6 +8041,44 @@ function autosavePersistentWorlds() {
 }
 setInterval(autosavePersistentWorlds, 30000);
 
+// ---- Dropped material: spawn / collect / expire ----
+// Where does a drop come to rest? Straight down from the cell it was dug out of, to the top of the first solid
+// cell. ⚠️ `grid.g()` FAULTS A PAGE IN on an on-demand room (F21 — reads are transparent to eviction), so the
+// scan is deliberately short: a pile that falls a couple of chunks is already absurd, and an unbounded scan
+// would let one dig over a shaft materialise a column of the world nobody is looking at.
+// ⚠️ Order matters and it is not an accident: the client emits `terrain-edit` (the carve) before
+// `terrain-drop`, and socket.io preserves per-socket order, so the cell the drop spawns in is already air.
+function dropRestY(room, x, y) {
+  const s = peekCells(room); const grid = s.terrain;
+  const dims = roomDims(room);
+  const c = Math.max(0, Math.min(dims.cols - 1, Math.floor(x / TERRAIN_CELL)));
+  let r = Math.max(0, Math.floor(y / TERRAIN_CELL));
+  if (!grid) return (Math.min(dims.rows - 1, r) + 0.5) * TERRAIN_CELL;
+  const rows = dims.rows, lim = Math.min(rows - 1, r + DROP_FALL_MAX_CELLS);
+  for (; r <= lim; r++) if (isSolidCell(grid.g(c * rows + r))) return (r - 0.5) * TERRAIN_CELL;   // rest ON TOP of the solid cell
+  return (lim + 0.5) * TERRAIN_CELL;
+}
+function spawnDrop(room, x, y, mats) {
+  const map = roomDrops[room] || (roomDrops[room] = new Map());
+  if (map.size >= MAX_DROPS_PER_ROOM) { const oldest = map.keys().next().value; if (oldest !== undefined) { map.delete(oldest); io.to(room).emit('drop-removed', { id: oldest }); } }
+  let n = 0; for (const [, k] of mats) n += k;
+  const d = { id: 'd' + (++dropSeq), x, y, gy: dropRestY(room, x, y), t0: Date.now(), mats, n };
+  map.set(d.id, d);
+  io.to(room).emit('drop-add', d);
+  return d;
+}
+// Expire un-collected drops. One sweep over every room's list — the lists are capped, so this is bounded by
+// (rooms × 300) and runs once a second, not per tick.
+setInterval(() => {
+  const cut = Date.now() - DROP_TTL_MS;
+  for (const room in roomDrops) {
+    const map = roomDrops[room]; const gone = [];
+    for (const [id, d] of map) if (d.t0 < cut) { map.delete(id); gone.push(id); }
+    if (gone.length) io.to(room).emit('drops-removed', { ids: gone });
+    if (!map.size) delete roomDrops[room];
+  }
+}, 1000);
+
 io.on('connection', (socket) => {
   let currentRoom = null;
   let currentUsername = null;
@@ -8987,6 +9036,7 @@ io.on('connection', (socket) => {
     // Replay the current world objects to the new joiner (late-joiner sync). `levelIndex` lets the client
     // drop a replay that arrives AFTER it has switched Levels again (rapid switching → stale cross-Level bleed).
     socket.emit('avatar-objects-init', { levelIndex, objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
+    socket.emit('drops-init', { drops: roomDrops[avRoom] ? [...roomDrops[avRoom].values()] : [] });   // material lying on the ground (capped + TTL'd, so this list is small)
     // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
     // 🟥 THE WHOLE-WORLD JOIN REPLAY IS FATAL IN THE OVERWORLD AND IS WHAT HUNG THE SERVER.
     // `terrainRLE` walks the entire index space — 524,224 x 4,096 = 2.15 BILLION cells, 33.5 million page
@@ -9514,6 +9564,32 @@ io.on('connection', (socket) => {
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
   // Destructible terrain: paint/carve a circle into the room grid, then rebroadcast the op so every
   // client rasterizes it identically (client also applies optimistically). Only echoes on a real change.
+  // A dig turned terrain into a pile on the ground. The client says WHAT it dug (it already had to know, to
+  // apply the carve optimistically); the server decides the id, the resting position and whether it exists at
+  // all — which is the part that has to be authoritative, because two players must not both collect one pile.
+  socket.on('terrain-drop', ({ x, y, mats }) => {
+    if (!currentAvatarRoom || !canBuild()) return;
+    if (!isFinite(x) || !isFinite(y) || !Array.isArray(mats) || !mats.length || mats.length > 8) return;
+    const dims = roomDims(currentAvatarRoom);
+    const cx = Math.max(0, Math.min(dims.cols * TERRAIN_CELL, x)), cy = Math.max(0, Math.min(dims.rows * TERRAIN_CELL, y));
+    const clean = []; let total = 0;
+    for (const e of mats) {
+      if (!Array.isArray(e)) continue;
+      const m = e[0] | 0, n = e[1] | 0;
+      if (m < 1 || m > TERRAIN_MAT_HI || n < 1) continue;
+      const k = Math.min(64, n); clean.push([m, k]); total += k;
+    }
+    if (!clean.length || total > 64) return;      // 64 = the largest brush (7×7 = 49 cells) with room to spare
+    spawnDrop(currentAvatarRoom, cx, cy, clean);
+  });
+  // Collect a pile. The taker already holds its contents (from drop-add / drops-init), so the reply carries only
+  // the id + who won it — everyone removes it, and the winner adds its own copy's materials to their inventory.
+  socket.on('drop-take', ({ id }) => {
+    const map = currentAvatarRoom && roomDrops[currentAvatarRoom];
+    if (!map || !map.has(id)) return;             // already gone — someone else got there first
+    map.delete(id);
+    io.to(currentAvatarRoom).emit('drop-removed', { id, by: socket.id });
+  });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard }) => {
     if (!currentAvatarRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!canBuild()) return;                                // Phase 3: L2 build permission
