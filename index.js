@@ -9611,7 +9611,6 @@ io.on('connection', (socket) => {
     const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
     const sq = shape === 'square';
     const hd = op === 'carve' && !!hard;                 // editor Carve tool: hard delete (any block); gameplay slam stays soft
-    if (op === 'paint' && aabbHitsClear(spawnClearRect(currentAvatarRoom), cx - rr, cy - rr, cx + rr, cy + rr)) return; // no building on the spawn (world mode)
     const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
     // The sender already applied this op optimistically, so echo to OTHERS only — carve = hp decrement is
     // NOT idempotent, double-applying would desync the sender's per-cell hp from everyone else's.
@@ -9656,15 +9655,15 @@ io.on('connection', (socket) => {
     if (!currentAvatarRoom || !Array.isArray(cells) || cells.length > 16384) return;
     if (!canBuild()) return;                                // Phase 3: L2 build permission
     const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
-    const clear = spawnClearRect(currentAvatarRoom);     // null in sandbox; clamps any spawn-box fill back to empty (kept consistent on rebroadcast)
+    // ⚠️ The spawn keep-clear box no longer applies to TERRAIN. Keeping the ground empty was the wrong half of
+    // the problem: it stopped players building near a spawn without helping at all when the spawn point was
+    // inside terrain for any of the other reasons it can be. The client settles a respawn out of the ground
+    // instead, which covers every cause. It still applies to OBJECTS (below/above), because nothing settles a
+    // body out of a platform.
     let changed = false;
     for (let k = 0; k + 1 < cells.length; k += 2) {
       const i = cells[k] | 0;
-      let v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
-      if (v && clear) {
-        const cc = (Math.floor(i / grid.geom.rows) + 0.5) * TERRAIN_CELL, cr = (i % grid.geom.rows + 0.5) * TERRAIN_CELL;
-        if (aabbHitsClear(clear, cc, cr, cc, cr)) { v = 0; cells[k + 1] = 0; }
-      }
+      const v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
       if (i >= 0 && i < grid.length) { if (grid.g(i) !== v) { grid.s(i, v); changed = true; } hp.s(i, v ? matStrengthSrv(mats, v) : 0); }
       // Same rule for an explicit cell write (undo / paste / a test scene): anything that is no longer the liquid it
       // was drops its source flag. Only a cell that stays a liquid keeps refilling.
