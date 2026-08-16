@@ -9590,7 +9590,7 @@ io.on('connection', (socket) => {
     map.delete(id);
     io.to(currentAvatarRoom).emit('drop-removed', { id, by: socket.id });
   });
-  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard }) => {
+  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq }) => {
     if (!currentAvatarRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!canBuild()) return;                                // Phase 3: L2 build permission
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
@@ -9636,7 +9636,9 @@ io.on('connection', (socket) => {
         const EROWS = grid.geom.rows;
         for (let r = br0; r <= br1; r++) for (let c = bc0; c <= bc1; c++) { const i = c * EROWS + r;
           if (op === 'paint' && isFluidId(m) && grid.g(i) === m) { const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[m]] = LIQUID_MAX; for (const x of fineSetBlock(currentAvatarRoom, 1, c, r, ca)) changedFine.push(x); grid.s(i, 0); hp.s(i, 0); }
-          else if (op === 'carve' || (op === 'paint' && isSolidCell(grid.g(i)))) for (const x of fineClearBlock(currentAvatarRoom, 1, c, r)) changedFine.push(x);
+          // `keepLiq` (the play-mode dig and the slam): remove the SOLID ground and leave the fine liquid where
+          // it is. The wake below still runs, so a dig into the side of a lake sloshes it instead of deleting it.
+          else if ((op === 'carve' && !keepLiq) || (op === 'paint' && isSolidCell(grid.g(i)))) for (const x of fineClearBlock(currentAvatarRoom, 1, c, r)) changedFine.push(x);
         }
         fineWakeRect(currentAvatarRoom, bc0 - 1, br0 - 1, bc1 + 1, br1 + 1);
         emitFineCells(currentAvatarRoom, changedFine);
