@@ -9590,7 +9590,7 @@ io.on('connection', (socket) => {
     map.delete(id);
     io.to(currentAvatarRoom).emit('drop-removed', { id, by: socket.id });
   });
-  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq }) => {
+  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits }) => {
     if (!currentAvatarRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!canBuild()) return;                                // Phase 3: L2 build permission
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
@@ -9614,7 +9614,13 @@ io.on('connection', (socket) => {
     const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
     // The sender already applied this op optimistically, so echo to OTHERS only — carve = hp decrement is
     // NOT idempotent, double-applying would desync the sender's per-cell hp from everyone else's.
-    if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd)) {
+    // ⚠️ `hits` — how many chips this one swing lands. A carve of a strength>1 material only DAMAGES, and the
+    // client counts the same number of hits locally, so the two hp values only stay in step if the count
+    // travels. Applying the raster N times is the whole implementation: one pass IS one hit per cell.
+    const nHits = (op === 'carve') ? Math.max(1, Math.min(8, (hits | 0) || 1)) : 1;
+    let _did = false;
+    for (let _h = 0; _h < nHits; _h++) if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd)) _did = true;
+    if (_did) {
       // Wake any liquid in/around the edit so it flows into the freed space (dig-out) or spreads (poured).
       {
         // Liquid is DECOUPLED from the grid. A fluid paint → seed the fine block + set the grid back to EMPTY
@@ -9644,7 +9650,9 @@ io.on('connection', (socket) => {
         emitFineCells(currentAvatarRoom, changedFine);
       }
       activatePowderRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);   // dig removes support / paint drops grains
-      socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd });
+      // `hits`/`keepLiq` ride the rebroadcast too, or every OTHER client lands a different number of chips
+      // than the sender did and their hp drifts apart — the same desync, one step removed.
+      socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd, hits: nHits, keepLiq: keepLiq ? 1 : undefined });
       // A CARVE removes any source in the dug-out area. Digging the cell out is the obvious way to get rid of a
       // source, and without this it kept refilling the hole you had just made with no way to stop it -- a source is
       // invisible in the terrain data, so there was nothing left to delete.
