@@ -232,9 +232,10 @@ function makeGen2(cfg) {
   // ── the cell queries. ABSOLUTE WORLD COORDINATES, always. ───────────────────────────────────────────────────
   // `out` receives GAME material ids. The spike writes its own palette indices and they are translated in place
   // — one extra pass over 64 bytes, against a column that costs microseconds to synthesise.
-  function fillColumn(c, r0, rN, out) {
-    spikeFillColumn(W, C, c, r0, rN, out);
+  function fillColumn(c, r0, rN, out, outBack) {
+    spikeFillColumn(W, C, c, r0, rN, out, outBack);
     for (let k = 0; k < rN; k++) { const v = out[k]; if (v) out[k] = XLAT[v]; }
+    if (outBack) for (let k = 0; k < rN; k++) { const v = outBack[k]; if (v) outBack[k] = XLAT[v]; }
   }
   const _one = new Uint8Array(1);
   function matAt(c, rr) { fillColumn(c, rr, 1, _one); return _one[0]; }
@@ -259,6 +260,27 @@ function makeGen2(cfg) {
         if (v) { const o = lr * CHUNK_SIDE + lc; page[o * stride] = v; if (hpPage) hpPage[o] = STRENGTH[v]; }
       }
     }
+  }
+
+  // ── ONE 64x64 PAGE OF THE **UNCARVED** WORLD ────────────────────────────────────────────────────────────────
+  //  The rock this page is made of, before caves, voids, descents, vents and volcano tubes were cut out of it —
+  //  which is what the client draws behind a hollow. Same page indexing and same column loop as `fillPage`; the
+  //  only difference is which of the two arrays `fillColumn` fills gets kept.
+  //  ⚠️ It GENERATES, it does not READ THE STORE — so it can never fault a page in and can never materialise
+  //  storage, however many chunks are asked for. That is the property `sendChunkContent` relies on.
+  //  ⚠️ And it answers about the world as GENERATED, so a cave a player dug is not in it. That is the point:
+  //  what is behind your tunnel is the ground you dug through, and the client fills that half in itself.
+  const _backBuf = new Uint8Array(CHUNK_SIDE), _backCol = new Uint8Array(CHUNK_SIDE);
+  function backingPage(out, p, geom) {
+    const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
+    const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
+    if (rN <= 0 || cN <= 0) return false;
+    for (let lc = 0; lc < cN; lc++) {
+      _backBuf.fill(0); _backCol.fill(0);
+      fillColumn(originCol + c0 + lc, originRow + r0, rN, _backCol, _backBuf);
+      for (let lr = 0; lr < rN; lr++) out[lr * CHUNK_SIDE + lc] = _backBuf[lr];
+    }
+    return true;
   }
 
   // ── "is this page provably empty?" ──────────────────────────────────────────────────────────────────────────
@@ -404,7 +426,7 @@ function makeGen2(cfg) {
     // the surface `index.js` actually consumes — measured, not assumed: `fillPage` (3 call sites),
     // `pageEmpty` (1, via `PagedArray.seedEmpty`) and `bandGroundAt` (2, the spawn seam). The rest are here
     // because the probes and previewers need them.
-    fillPage, pageEmpty, topLimitAt, surfAt, biomeAt, bandGroundAt, fillColumn, matAt, strengthOf, skyIsles,
+    fillPage, backingPage, pageEmpty, topLimitAt, surfAt, biomeAt, bandGroundAt, fillColumn, matAt, strengthOf, skyIsles,
     // The region names, so the wire can carry a byte and the client can still say what it means. ONE list, two
     // readers — the rule this whole port exists to keep.
     biomeKeys: BIOME.map(b => b.key), biomeNames: BIOME.map(b => b.name),

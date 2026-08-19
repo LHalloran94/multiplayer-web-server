@@ -5141,7 +5141,40 @@ function sendChunkContent(sock, room, chunks) {
       }
   }
   if (TRACE_SUBS) console.log('[subs] readout done ' + chunks.length + ' chunks, ' + (tc.length / 2) + ' cells, ' + (Date.now() - _T0) + 'ms, pagesProduced=' + genPagesProduced);
-  if (tc.length) sock.emit('terrain-set', { cells: tc });
+  // ⭐⭐ THE BACKING SLICE — WHAT THE GROUND LOOKED LIKE BEFORE ANYTHING WAS HOLLOWED OUT OF IT.
+  //  The client draws it behind every open cell, so a cave reads as a hollow in a solid world rather than a
+  //  hole cut through to the sky. It can derive an answer itself from the nearest rock, and does where this is
+  //  absent — but a derived answer moves when somebody builds nearby, and it cannot know what was behind a cave
+  //  the GENERATOR carved, because that rock was never in the terrain at all.
+  //  ⚠️ ONLY THE CELLS THAT WILL ACTUALLY BE DRAWN: uncarved rock where the terrain is now open. A solid cell's
+  //  backing is behind its own body and can never be seen, and open sky has nothing behind it — so a chunk of
+  //  bedrock and a chunk of sky both send NOTHING, and a pristine underground chunk sends only its caves.
+  //  ⚠️ `backingPage` GENERATES rather than reading the store, so this can never fault a page in. Given that
+  //  the whole of increment 4b turns on "the only faulting reader is driven by what a player can SEE", a
+  //  second reader here that could materialise storage would be the one way to undo it.
+  const back = [];
+  if (worldCfg.backing) {
+    // Same lookup `genVersion` uses, and for the same reason: two generators can be live at once, so which one
+    // made this room's ground is a property of the ROOM. `worldgen.js` has no `backingPage` and simply sends
+    // nothing, which leaves the client on its derived answer — a graceful degrade, not a hole.
+    const g = _genRooms.get(room) || _roomGens.get(room);
+    if (g && g.backingPage) {
+      const bp = new Uint8Array(CHUNK_SIDE * CHUNK_SIDE);
+      for (const p of chunks) {
+        bp.fill(0);
+        if (!g.backingPage(bp, p, geom)) continue;
+        const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
+        for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
+          for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
+            const bv = bp[lr * CHUNK_SIDE + lc];
+            if (!bv) continue;
+            const i = (c0 + lc) * geom.rows + r0 + lr;
+            if (s.terrain.g(i) === 0) back.push(i, bv);
+          }
+      }
+    }
+  }
+  if (tc.length || back.length) sock.emit('terrain-set', back.length ? { cells: tc, back } : { cells: tc });
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
   sock.emit('liquid-fine-cells', { sub: 1, cols: geom.cols, cells, clear: chunks.slice() });
   if (TRACE_SUBS) console.log('[subs] ...emitted in ' + (Date.now() - _T0) + 'ms total');
@@ -5686,6 +5719,7 @@ function cfgWire() {
     chunkQueue: !!interestCfg.queue, chunkQueueMs: interestCfg.queueMs, chunkQueueBatch: interestCfg.queueBatch,
     chunkQStats: { sent: chunkQSent, drains: chunkQDrains, dropped: chunkQDropped },
     worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand, worldOverworld: !!worldCfg.overworld,
+    worldBacking: !!worldCfg.backing,
     dayCycleMin: Math.round(worldClock.cycleMs / 60000), dayOffsetMin: Math.round(worldClock.offsetMs / 60000),
     worldGen2: !!worldCfg.gen2,
     worldDropPristine: !!worldCfg.dropPristine,
@@ -6751,6 +6785,11 @@ const worldCfg = {
   // `probe_worldgen` Part D is an A/B against it — same seed, both generators — and it is how the redesign's
   // structural stats are kept honest. It is now reachable only by explicitly unticking this.
   chunked: 1,          // 0 = generateWorld (legacy, A/B only) · 1 = worldgen.js. Applies to worlds generated from now on.
+  // ⭐ Send each chunk's UNCARVED ground with its content, so the client can draw the world behind a hollow
+  // from what was actually there rather than from whatever rock is nearest now. Costs one generator pass per
+  // chunk sent and carries only the cells that will be drawn (uncarved rock where the terrain is now open), so
+  // a chunk of solid bedrock and a chunk of sky both send nothing at all. Off = the client derives it.
+  backing: 1,
   onDemand: 1,         // 4b: with `chunked`, do not build the world at all — produce each chunk when it is first read.
   dropPristine: 1,     // 4c: evict an UNCHANGED chunk to nothing at all rather than storing a blob of it.
                        // ⚠️ Defaults ON because it only ever applies to rooms `onDemand` produced, which itself ships OFF —
@@ -8369,6 +8408,11 @@ io.on('connection', (socket) => {
     // ⚠️ ROLLBACK IS NOT LOST, it is just no longer one click away: the four constants still live in
     // `worldCfg` above, and switching any of them is an edit plus a restart. That is a deliberate act.
     if ('worldDropPristine' in patch) worldCfg.dropPristine = patch.worldDropPristine ? 1 : 0;
+    // ⚠️ SETTABLE, unlike the four above, and the distinction is the one that note draws: those decide WHICH
+    // WORLD you are in, this decides only whether an extra payload rides along with a chunk. Flipping it
+    // changes nothing already sent and nothing stored — the next chunk a socket subscribes to simply carries
+    // the uncarved ground or does not — which makes it an honest A/B rather than a global mode.
+    if ('worldBacking' in patch) worldCfg.backing = patch.worldBacking ? 1 : 0;
     // ⭐ WIPE EVERY STORED CHANGE — the panel's version of `restart-server.ps1 -FreshWorld`. The user asked for
     // it here; it keeps the flag's safety property by taking two clicks in the UI.
     // ⚠️ It clears the DISK and the in-memory index of what is on disk. Rooms already loaded keep whatever they

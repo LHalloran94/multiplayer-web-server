@@ -627,7 +627,7 @@ function computeColumn(W, C, c) {
 }
 
 // One column of cells, written into `out` (length rN), for rows [r0, r0+rN).
-function fillColumn(W, C, c, r0, rN, out) {
+function fillColumn(W, C, c, r0, rN, out, outBack) {
   const seed = W.o.seed;
   const ci = columnInfo(W, C, c);
   const { surfRow, lith } = ci;
@@ -913,6 +913,14 @@ function fillColumn(W, C, c, r0, rN, out) {
         if (sealed(VS, c, r, C.seaRow, surfRow, seed)) carve = M.basalt;
       }
     }
+    // ⭐ THE WORLD BEFORE IT WAS HOLLOWED OUT. `v` at this exact line is the rock this column is MADE of — the
+    // lithology, its cover, its ores, an island's stone — and `carve` is everything that later takes a bite out
+    // of it: caves, voids, sky gaps, descents, vents, volcano tubes. So the uncarved world is not a second
+    // generator or a second pass; it is this one value, read one line earlier. It is what the client draws
+    // BEHIND a cave, so a hollow reads as a hollow in solid ground rather than a hole cut through to the sky.
+    // ⚠️ Above the ground `v` is already air here and stays air, which is right — there is nothing behind sky.
+    // The surface water body is applied AFTER the carve, so the sea backs onto air too, which is also right.
+    if (outBack) outBack[k] = v;
     if (carve >= 0) v = carve;
     // ── water: every air cell at or below the body's LEVEL. Flat by construction, shoreline exactly where the
     // ground crosses the line, and no coarse-sample boundary anywhere in the answer.
