@@ -5719,6 +5719,13 @@ function cfgWire() {
     chunkQueue: !!interestCfg.queue, chunkQueueMs: interestCfg.queueMs, chunkQueueBatch: interestCfg.queueBatch,
     chunkQStats: { sent: chunkQSent, drains: chunkQDrains, dropped: chunkQDropped },
     worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand, worldOverworld: !!worldCfg.overworld,
+    // 🟥 REPORTED BACK SO A TEST CAN PUT THEM BACK. `e2e_worldgen_edit` and `e2e_worldgen_restart` shorten the
+    // residency and drop the replication margin to make a chunk evict inside the life of a run — and then
+    // restored HARD-CODED values on the way out, which were the defaults when they were written and are not the
+    // defaults now. Every run of either left this server with a 30s grace and, worse, with `worldChunked` and
+    // `worldOnDemand` switched OFF, both of which ship ON. A dial the wire can set and cannot read is a dial a
+    // test cannot leave the way it found it.
+    chunkGraceMs: chunkCfg.graceMs, chunkMargin: chunkCfg.margin, paused: !!liquidCfg.paused,
     worldBacking: !!worldCfg.backing,
     dayCycleMin: Math.round(worldClock.cycleMs / 60000), dayOffsetMin: Math.round(worldClock.offsetMs / 60000),
     worldGen2: !!worldCfg.gen2,
