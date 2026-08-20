@@ -2261,6 +2261,12 @@ function evictChunk(room, p) {
   // simply "the comparison found nothing". It costs one generation (~0.35ms) per evicted chunk — which the
   // diff was going to pay anyway — on a sweep that runs every five seconds.
   const _d = chunkDelta(room, p);
+  // ── THE EDIT TRACE, half two: does the server think anybody has touched this chunk? ────────────────────
+  // This is the OTHER way a dug hole comes back, and it is invisible from the outside: the diff comes out
+  // empty, the chunk is thrown away rather than stored, and the next visit rebuilds it from the seed. If a
+  // chunk somebody just dug in reports `pristine`, that is the bug, stated in one line.
+  if (worldCfg.trace) console.log(`[trace] evict chunk ${p}: ${_d ? (_d.pristine ? 'PRISTINE — thrown away, will regenerate from the seed'
+    : (_d.d ? _d.d.length : 0) + ' changed cell(s) stored') : 'no diff (not a generated room) — stored whole'}`);
   rec.gen = (_d && _d.pristine) ? 1 : 0;
   rec.blob = rec.gen ? null : (_d || encodeChunk(s, p));
   if (rec.gen) genChunksDropped++;
@@ -2391,7 +2397,11 @@ function materializeRoom(room) {
 function onChunkFault(room, p) {
   const rec = chunksOf(room).peek(p);
   if (rec.blob) return rehydrateChunk(room, p);
-  if (rec.gen) { chunksOf(room).evicted[p] = 0; rec.gen = 0; queuePowderReseed(room, p); return true; }
+  if (rec.gen) {
+    // …and the moment it actually happens: this chunk is coming back from the SEED, not from anything stored.
+    if (worldCfg.trace) console.log(`[trace] chunk ${p} faulted back in FROM THE SEED (it was thrown away as unchanged)`);
+    chunksOf(room).evicted[p] = 0; rec.gen = 0; queuePowderReseed(room, p); return true;
+  }
   return false;
 }
 // "Make sure this chunk is really here", for callers that are about to read it out. Blob → decode; dropped as
@@ -2400,16 +2410,41 @@ function restoreChunk(room, p) {
   const rec = chunksOf(room).peek(p);
   if (rec.blob) return rehydrateChunk(room, p);
   // ⭐ PERSISTENCE, THE READ HALF. After a restart nothing is in memory, so a chunk somebody built in comes back
-  // from the database instead. It is looked up ONLY when there is no in-memory blob, so a running server never
-  // touches disk on this path — the DB is the cold-start source, not a second cache.
+  // from the database instead.
+  // 🟥🟥 AND IT MUST ONLY HAPPEN WHEN WE ARE HOLDING NOTHING. The guard used to be "there is no in-memory blob",
+  // on the reasoning that "a running server never touches disk on this path — the DB is the cold-start source,
+  // not a second cache". That reasoning is wrong, and it was destroying player work every few minutes: a
+  // RESIDENT chunk has no in-memory blob either. So every time anybody re-entered an area, `sendChunkContent`
+  // called this for each chunk, found no blob, read the stored row, and laid a diff written MINUTES AGO back
+  // over live pages — silently undoing everything dug or built since that row was written. Reproduced with the
+  // edit trace: `carve … 25 were solid → 25 now air` immediately followed by `restore … disk HIT` and
+  // `rehydrate … applying stored blob (469 diff cells)`, the same 469 as before the dig, and the hole was gone.
+  // It is INTERMITTENT because it needs the row to exist and the area to be re-entered, which is why digging
+  // sometimes sticks and sometimes does not, and why it always looked like generated ground coming back.
+  // ⇒ the real question is "do we hold this chunk at all", which is the same test `evictChunk` asks before it
+  // decides there is anything to put away. If any page is live, the live pages ARE the truth and the database
+  // is a stale snapshot of them.
   // ⚠️ A hit is turned into exactly the in-memory shape `rehydrateChunk` already expects, so there is one decode
   // path rather than two that can disagree.
-  if (!rec.blob) {
+  const _s0 = roomCells.get(room);
+  const _held = !!(_s0 && CHUNK_CONTENT.some(f => _s0[f] && _s0[f].pageAt(p)));
+  if (!rec.blob && !_held) {
     const fromDisk = loadChunkBlobFor(room, p);
+    if (worldCfg.trace) console.log(`[trace] restore chunk ${p}: nothing held, disk ${fromDisk ? 'HIT' : 'miss'}, gen=${rec.gen}, evicted=${chunksOf(room).evicted[p]}`);
     // ⚠️ A DISK BLOB IS NOT AN EVICTION BLOB. It holds a terrain DIFF and a liquid DIFF, over ground that is about
     // to be generated fresh — so unlike a restore from memory it needs the generator's own liquid seeding to run
     // first, with the stored diff applied over the top on the deferred pass. See queueGenLiquid.
-    if (fromDisk) { rec.blob = fromDisk; rec.gen = 0; const ok = rehydrateChunk(room, p); queueGenLiquid(room, p); return ok; }
+    // 🟥🟥 `at(p)`, NOT the `rec` from `peek` ABOVE, AND THIS WAS SILENTLY THROWING AWAY EVERYTHING ANYBODY
+    // BUILT. `peek` answers `NO_CHUNK_REC` for a chunk nothing has happened to — and that object is
+    // `Object.freeze`d. This file is not in strict mode, so `rec.blob = fromDisk` on it is not an error, it is
+    // a NO-OP: the row was read out of the database, assigned to a frozen shared object, and dropped on the
+    // floor. `rehydrateChunk` then found no blob, applied nothing, and the chunk read as freshly generated
+    // ground — so a dug-out hole came back, permanently, every time that chunk had to come from disk.
+    // ⚠️ It is INTERMITTENT, which is why it survived: a chunk that already has a record for any other reason
+    // (it was produced, evicted, or touched this session) gets a real, writable one from `peek` and restores
+    // correctly. Only the cold path — no record, straight from the database — silently lost the edit.
+    // ⚠️ `at` creates the record, which is exactly what "this chunk now has a blob" means.
+    if (fromDisk) { const r2 = chunksOf(room).at(p); r2.blob = fromDisk; r2.gen = 0; const ok = rehydrateChunk(room, p); queueGenLiquid(room, p); return ok; }
   }
   if (!rec.gen) return false;
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
@@ -2420,6 +2455,7 @@ function restoreChunk(room, p) {
 function rehydrateChunk(room, p) {
   const s = roomCells.get(room); if (!s) return false;
   const ch = chunksOf(room), rec = ch.peek(p), blob = rec.blob;
+  if (worldCfg.trace) console.log(`[trace] rehydrate chunk ${p}: ${blob ? 'applying stored blob (' + (blob.d ? blob.d.length + ' diff cells' : 'whole') + ')' : 'NO BLOB — nothing to apply'}`);
   if (!blob) return false;                   // (a blob implies a record, so `rec` here is never the shared empty)
   rec.blob = null; ch.evicted[p] = 0;
   // 🟥 `restoring` EXISTS BECAUSE OF A REAL BUG, and the flag ordering above is what caused it. Decoding
@@ -6798,6 +6834,15 @@ const worldCfg = {
   // a chunk of solid bedrock and a chunk of sky both send nothing at all. Off = the client derives it.
   backing: 1,
   onDemand: 1,         // 4b: with `chunked`, do not build the world at all — produce each chunk when it is first read.
+  // ⭐⭐ THE EDIT TRACE — a diagnostic for "I dug this out and it came back". Off by default, live-togglable on
+  // the liquid-cfg wire (`worldTrace`), because the question it answers cannot be answered by reading: a dug
+  // cell that reappears was either NEVER CARVED ON THE SERVER (the client and the server disagreed at edit
+  // time) or CARVED AND THEN PUT BACK (the chunk was judged unchanged and regenerated from the seed). Those
+  // two have identical symptoms and completely different causes.
+  // It logs, per carve: the box, how many cells the server's own raster actually changed, and the hp left on
+  // the cells it merely chipped. And per chunk eviction: whether the diff came out EMPTY — i.e. whether the
+  // server thinks nobody has touched that chunk — which is the second cause, stated directly.
+  trace: 0,
   dropPristine: 1,     // 4c: evict an UNCHANGED chunk to nothing at all rather than storing a blob of it.
                        // ⚠️ Defaults ON because it only ever applies to rooms `onDemand` produced, which itself ships OFF —
                        // and where it applies, NOT doing it is measurably worse than doing it (the blob is 1.93x the pages).
@@ -8305,6 +8350,7 @@ io.on('connection', (socket) => {
     }
     if ('chunkMargin' in patch) chunkCfg.margin = Math.max(0, Math.min(64, patch.chunkMargin | 0));
     if ('chunkGraceMs' in patch) chunkCfg.graceMs = Math.max(0, Math.min(600000, patch.chunkGraceMs | 0));
+    if ('worldTrace' in patch) { worldCfg.trace = patch.worldTrace ? 1 : 0; console.log('[trace] edit tracing ' + (worldCfg.trace ? 'ON' : 'off')); }
     if ('chunkQuiesce' in patch) chunkCfg.quiesce = !!patch.chunkQuiesce;
     if ('chunkQuiesceMs' in patch) chunkCfg.quiesceMs = Math.max(0, Math.min(600000, patch.chunkQuiesceMs | 0));
     // INTEREST-LIMITED REPLICATION (Phase 4) — same reasoning as chunkEvict: it has to be A/B-able live, because
@@ -9681,8 +9727,31 @@ io.on('connection', (socket) => {
     // client counts the same number of hits locally, so the two hp values only stay in step if the count
     // travels. Applying the raster N times is the whole implementation: one pass IS one hit per cell.
     const nHits = (op === 'carve') ? Math.max(1, Math.min(8, (hits | 0) || 1)) : 1;
+    // ── THE EDIT TRACE, half one: what did the SERVER's own raster actually do with this message? ──────────
+    // ⚠️ Sampled the same way the raster picks cells, so "the server disagreed about which cells are in the
+    // box" cannot hide inside "the server disagreed about whether to break them".
+    let _tr = null;
+    if (worldCfg.trace && op === 'carve') {
+      const _R = grid.geom.rows, _C = grid.geom.cols;
+      _tr = { box: [], solidBefore: 0 };
+      const _c0 = Math.max(0, Math.floor((cx - rr) / TERRAIN_CELL)), _c1 = Math.min(_C - 1, Math.floor((cx + rr) / TERRAIN_CELL));
+      const _r0 = Math.max(0, Math.floor((cy - rr) / TERRAIN_CELL)), _r1 = Math.min(_R - 1, Math.floor((cy + rr) / TERRAIN_CELL));
+      for (let ry = _r0; ry <= _r1; ry++) for (let cc = _c0; cc <= _c1; cc++) {
+        const ccx = (cc + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
+        if (Math.abs(ccx - cx) > rr || Math.abs(ccy - cy) > rr) continue;
+        const i = cc * _R + ry; _tr.box.push(i); if (grid.g(i)) _tr.solidBefore++;
+      }
+    }
     let _did = false;
     for (let _h = 0; _h < nHits; _h++) if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd)) _did = true;
+    if (_tr) {
+      let cleared = 0, chipped = 0, left = [];
+      for (const i of _tr.box) { const v = grid.g(i); if (!v) cleared++; else { chipped++; if (left.length < 6) left.push(v + ':hp' + hp.g(i) + '/' + matStrengthSrv(mats, v)); } }
+      const _p = geomPage(grid.geom, _tr.box[0] || 0);
+      console.log(`[trace] carve @${cx | 0},${cy | 0} r=${rr} ${sq ? 'square' : 'circle'} hits=${nHits} hard=${hd ? 1 : 0}`
+        + ` | box ${_tr.box.length} cells, ${_tr.solidBefore} were solid → ${cleared} now air, ${chipped} still solid`
+        + (left.length ? ' [' + left.join(' ') + ']' : '') + ` | chunk ${_p}`);
+    }
     if (_did) {
       // Wake any liquid in/around the edit so it flows into the freed space (dig-out) or spreads (poured).
       {
