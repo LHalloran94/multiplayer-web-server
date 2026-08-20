@@ -5146,7 +5146,7 @@ function sendChunkContent(sock, room, chunks) {
   if (!chunks || !chunks.length) return;
   const _T0 = TRACE_SUBS ? Date.now() : 0;
   const s = peekCells(room); if (!s.terrain) return;
-  const geom = worldGeom(room), tc = [], fine = [];
+  const geom = worldGeom(room), tc = [], fine = [], dmg = [], mats = roomMats[room] || {};
   // ⭐ PHASE 6 INCREMENT 4b — TWO PASSES, AND THE SPLIT IS LOAD-BEARING.
   // With on-demand production, reading a chunk's terrain is what PRODUCES it, and a freshly produced chunk's
   // liquid is deliberately seeded on a deferred pass (see genSeedFn: seeding from inside a page fault would
@@ -5173,6 +5173,21 @@ function sendChunkContent(sock, room, chunks) {
       for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
         const i = (c0 + lc) * geom.rows + r0 + lr;
         tc.push(i, s.terrain.g(i));
+        // ⭐⭐ AND THE DAMAGE, which was never sent at all. A cell part-way through being dug carries `hp` on the
+        // server and nothing on the client — the client rebuilds its own `terrainHp` from scratch, and a
+        // windowed client throws that away the moment the chunk leaves the window. So the two sides' idea of
+        // how much life a block has left drifted apart every time anybody walked away: the server would clear a
+        // block on the swing the client thought was the first, and the block vanished without warning.
+        // ⚠️ SPARSE, not a third value per cell. Damaged cells are rare — a handful per chunk against 4,096 —
+        // so this is a short list where widening the main array would cost 50% of every chunk send.
+        // ⚠️ ONLY CELLS THAT ARE ACTUALLY PART-DUG — `hp > 0` is not that test. The generator writes FULL hp on
+        // every solid cell it makes, so "has hp" is true of nearly the whole world: the first version of this
+        // put 85,025 entries on a single chunk send, roughly doubling it. Damaged means hp BELOW the material's
+        // strength, which is a handful of cells wherever somebody has been swinging a pick.
+        if (s.terrainHp) {
+          const v = s.terrain.g(i);
+          if (v) { const h = s.terrainHp.g(i); if (h > 0 && h < matStrengthSrv(mats, v)) dmg.push(i, h); }
+        }
         if (s.fineTotal && s.fineTotal.g(i) > 0) fine.push(i);
       }
   }
@@ -5210,7 +5225,12 @@ function sendChunkContent(sock, room, chunks) {
       }
     }
   }
-  if (tc.length || back.length) sock.emit('terrain-set', back.length ? { cells: tc, back } : { cells: tc });
+  if (tc.length || back.length) {
+    const _msg = { cells: tc };
+    if (back.length) _msg.back = back;
+    if (dmg.length) _msg.dmg = dmg;      // sparse [wireIndex, hpLeft, …] — see the note where it is gathered
+    sock.emit('terrain-set', _msg);
+  }
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
   sock.emit('liquid-fine-cells', { sub: 1, cols: geom.cols, cells, clear: chunks.slice() });
   if (TRACE_SUBS) console.log('[subs] ...emitted in ' + (Date.now() - _T0) + 'ms total');
