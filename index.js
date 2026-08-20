@@ -2583,8 +2583,13 @@ function cellView(field) {
 // with a bigger radius, meaning more room to scatter its arrivals, NOT a bigger claim on land. Territory is
 // still never granted; it grows from activity.
 const domainCfg = { spacingPx: 10240 };
+// ⚠️ HOOKS, NOT `db` DIRECTLY, for the reason this file records nine times over: the persistence code lives in
+// its own section far below, and a `db.prepare` evaluated up here would run before that section has decided what
+// the tables are. Declared as no-ops and reassigned down there (search `domainRowWrite =`).
+let domainRowWrite = () => {}, domainRowDrop = () => {};
 const domains = DOMAINS.makeDomains({
   cols: OVERWORLD_DIMS.cols, rows: OVERWORLD_DIMS.rows, cell: TERRAIN_CELL, spacingPx: domainCfg.spacingPx,
+  onPlace: (rec) => domainRowWrite(rec), onRelease: (rec) => domainRowDrop(rec),
 });
 function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', worldGeom(room), room)); }
 function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', worldGeom(room), room)); }
@@ -6139,6 +6144,55 @@ const _getChunkRow = db.prepare('SELECT ver, kind, terrain, liquid FROM world_ch
 const _delChunkRow = db.prepare('DELETE FROM world_chunks WHERE room = ? AND chunk = ?');
 const _countChunkRows = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(terrain)), 0) AS b FROM world_chunks');
 
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  🟥🟥 WHERE EACH SITE LIVES, ON DISK. THE ONE THING ABOVE IS MEANINGLESS WITHOUT.
+//  Every chunk row above is keyed by (room, CHUNK) — an absolute column in the shared Overworld. Which column a
+//  site occupies was decided by `server/domains.js`, an ALLOCATION whose result "depends on the ORDER sites were
+//  first placed, which is fine BECAUSE it is recorded". It was not recorded. The registry was memory-only, on a
+//  note that said so and called it "fine while the Overworld does not survive a restart either" — which stopped
+//  being true the day Overworld persistence landed, and nothing brought the two together.
+//  ⇒ On every restart, every site was re-allocated in whatever order sites happened to join. A site placed
+//  second in one process and first in the next got a DIFFERENT COLUMN, so its terrain and liquid stayed behind
+//  in the database at the old one, unreachable, while the player arrived at untouched ground. Intermittent by
+//  construction: land on the same column and everything is fine, which is why it read as "liquid after a restart
+//  is sometimes wrong" rather than as a placement bug.
+//  ⚠️ FOUND BY TRACING THE LIVE SERVER ACROSS A RESTART, not by reading. `[persist] spawn` printed
+//  `col 264794` before and `col 264474` after for the same identity; every theory before that had been about the
+//  liquid encoder, which was innocent.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+db.exec(`CREATE TABLE IF NOT EXISTS domain_sites (
+  id      TEXT PRIMARY KEY,
+  col     INTEGER NOT NULL,
+  band    TEXT    NOT NULL,
+  sep     INTEGER,
+  weight  REAL,
+  rung    INTEGER,
+  family  TEXT,
+  cat     TEXT,
+  placed  INTEGER NOT NULL
+)`);
+const _putSiteRow = db.prepare(`INSERT INTO domain_sites (id, col, band, sep, weight, rung, family, cat, placed)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+  ON CONFLICT(id) DO UPDATE SET col=excluded.col, band=excluded.band, sep=excluded.sep,
+    weight=excluded.weight, rung=excluded.rung, family=excluded.family, cat=excluded.cat`);
+const _delSiteRow = db.prepare('DELETE FROM domain_sites WHERE id = ?');
+const _allSiteRows = db.prepare('SELECT id, col, band, sep, weight, rung, family, cat FROM domain_sites');
+domainRowWrite = (rec) => {
+  try { _putSiteRow.run(rec.id, rec.col | 0, String(rec.band), rec.sep | 0, +rec.weight || 1, rec.rung | 0, rec.family || rec.id, rec.cat || null); }
+  catch (e) { console.log('domain_sites save failed: ' + e.message); }
+};
+// ⚠️ A RELEASE IS A DELETE, and it has to be: rung 5 takes a dormant site's column for a new arrival, and a stale
+// row for the victim would be adopted next start alongside the site standing in its place.
+domainRowDrop = (rec) => { try { _delSiteRow.run(rec.id); } catch (e) { /* best effort */ } };
+// ⚠️ AT LOAD, BEFORE ANYTHING CAN JOIN — a site placed before the layout is read back would be allocated against
+// an empty world and could take a column somebody already owns.
+{
+  let rows = [];
+  try { rows = _allSiteRows.all(); } catch (e) { console.log('domain_sites load failed: ' + e.message); }
+  const r = domains.adopt(rows);
+  if (r.adopted || r.dropped) console.log(`domains: ${r.adopted} site placement(s) restored${r.dropped ? ', ' + r.dropped + ' dropped as unusable' : ''}`);
+}
+
 // ⭐ RESET, AND IT IS DELIBERATELY NOT CLICKABLE. `MW_FRESH_WORLD=1` (via `restart-server.ps1 -FreshWorld`)
 // wipes every stored change at startup. The four world switches were just removed from the debug panel because
 // a global control that can be hit by accident — or by a stale client default — breaks the world for everyone;
@@ -6190,6 +6244,7 @@ let worldSaved = 0, worldLoaded = 0, worldApplied = 0, worldSaveErrors = 0;
 // that block (search `saveChunkBlob = `) and reassigned to this, below the block, at load.
 function persistChunkBlob(room, p, blob, ver) {
   if (!blob || !blob.d) return;                              // pristine, or the whole-chunk fallback (kind 1, later)
+  if (worldCfg.tracePersist) console.log(`[persist] write chunk ${p}: ${blob.d.length} terrain cell(s), ${blob.liq ? (blob.liq.length / 4) + ' liquid entr(ies)' : 'no liquid diff'}`);
   try { _putChunkRow.run(room, p, ver, 0, packDelta(blob), blob.liq || null); worldSaved++; }
   catch (e) { worldSaveErrors++; if (worldSaveErrors < 5) console.log('world_chunks save failed: ' + e.message); }
 }
@@ -6863,6 +6918,16 @@ const worldCfg = {
   // the cells it merely chipped. And per chunk eviction: whether the diff came out EMPTY — i.e. whether the
   // server thinks nobody has touched that chunk — which is the second cause, stated directly.
   trace: 0,
+  // ⭐ A SECOND TRACE, FOR THE PERSISTENCE PATH SPECIFICALLY, AND IT IS AN ENV VAR RATHER THAN A WIRE TOGGLE
+  // BECAUSE OF WHAT IT HAS TO WATCH. `trace` above is set over the socket, which is fine for a symptom you can
+  // reproduce while connected — but the thing being chased here is what happens ACROSS A RESTART, and a wire
+  // toggle dies with the process it was set on. `MW_TRACE_PERSIST=1` (restart-server.ps1 -TracePersist) is
+  // picked up by both halves of the run.
+  // It logs the four points the restart path actually goes through and nothing else: a chunk written to disk, a
+  // stored terrain edit laid over freshly generated ground, a stored liquid diff applied, and — the one worth
+  // having — a liquid diff being ENCODED against an absent liquid page, which writes "there is no liquid here"
+  // for every generated fluid cell in the chunk.
+  tracePersist: process.env.MW_TRACE_PERSIST ? 1 : 0,
   dropPristine: 1,     // 4c: evict an UNCHANGED chunk to nothing at all rather than storing a blob of it.
                        // ⚠️ Defaults ON because it only ever applies to rooms `onDemand` produced, which itself ships OFF —
                        // and where it applies, NOT doing it is measurably worse than doing it (the blob is 1.93x the pages).
@@ -7139,7 +7204,10 @@ applyStoredEdit = function (room, p, page, field) {
   if (!blob || !blob.d) return;
   const src = field === 'terrain' ? blob.m : blob.hp;
   for (let k = 0; k < blob.d.length; k++) page[blob.d[k]] = src[k];
-  if (field === 'terrain') worldApplied++;    // the mechanism, countable: a stored edit was laid over real ground
+  if (field === 'terrain') {
+    worldApplied++;    // the mechanism, countable: a stored edit was laid over real ground
+    if (worldCfg.tracePersist) console.log(`[persist] apply terrain ${p}: ${blob.d.length} stored cell(s) over freshly generated ground`);
+  }
 };
 // (`chunkIsPristine` and its revision bookkeeping lived here. Deleted 2026-08-04: see the note in evictChunk —
 // recording "what untouched looks like" during a RESTORE recorded the restored state, so an edited chunk could
@@ -7162,6 +7230,23 @@ applyStoredEdit = function (room, p, page, field) {
 const LIQ_REMOVED = 0xFF;
 function encodeLiquidDelta(s, p, genT) {
   const amt = s.fineAmt && s.fineAmt.pageAt(p);
+  // 🟥 AN ABSENT LIQUID PAGE IS "NOBODY HAS SEEDED THIS YET", NOT "THE LAKE WAS DRAINED" — and encoding it as
+  // the latter is permanent. `pageAt` is a PEEK: it does not fault. So a chunk whose liquid page has not been
+  // allocated read `n === 0` for every cell, and every cell the GENERATOR fills therefore came out as an
+  // explicit `LIQ_REMOVED` — a stored diff that says "this lake does not exist", laid over the generated ground
+  // on every future restore. Caught in the live server's log (`[persist] ⚠️ chunk 256095 … over 79 generated
+  // fluid cell(s)`), not by reading.
+  // ⭐ The safe answer is NO DIFF AT ALL, and it does not lose a real edit: liquid seeding is DEFERRED a tick
+  // (see drainGenLiquid), so an absent page means seeding has not run here — whereas a player draining a lake
+  // WRITES those cells, which allocates the page. And `encodeLiquidDelta` runs before `dropPage` in
+  // `evictChunk`, so the ordinary eviction path always has the page if it ever existed.
+  if (!amt) {
+    if (worldCfg.tracePersist) {
+      let fluid = 0; for (let k = 0; k < CHUNK_CELLS; k++) if (isFluidId(genT[k])) fluid++;
+      if (fluid) console.log(`[persist] chunk ${p}: no liquid page yet, over ${fluid} generated fluid cell(s) — storing NO liquid diff rather than "it is all empty"`);
+    }
+    return null;
+  }
   const out = [];
   for (let k = 0; k < CHUNK_CELLS; k++) {
     const gv = genT[k], gFluid = isFluidId(gv), gRank = gFluid ? LIQ_RANK[gv] : -1;
@@ -7206,10 +7291,13 @@ let worldLiquidRestored = 0;
 function applyStoredLiquid(room, p) {
   const blob = storedFor(room).get(p | 0);
   const buf = blob && blob.liq;
-  if (!buf || !buf.length) return 0;
-  const s = roomCells.get(room); if (!s || !s.fineAmt || !s.fineTotal) return 0;
+  // ⚠️ Traced with the REASON, not just the outcome. Every early return below looks identical from outside —
+  // "the water came back wrong" — and they are four different faults.
+  if (!buf || !buf.length) { if (worldCfg.tracePersist && blob) console.log(`[persist] apply liquid ${p}: the stored row has no liquid diff`); return 0; }
+  const s = roomCells.get(room); if (!s || !s.fineAmt || !s.fineTotal) { if (worldCfg.tracePersist) console.log(`[persist] apply liquid ${p}: NO LIQUID FIELDS in the room`); return 0; }
   const amt = s.fineAmt.wpPage(p), tot = s.fineTotal.wpPage(p);
-  if (!amt || !tot) return 0;
+  if (!amt || !tot) { if (worldCfg.tracePersist) console.log(`[persist] apply liquid ${p}: could not get a writable liquid page`); return 0; }
+  if (worldCfg.tracePersist) console.log(`[persist] apply liquid ${p}: ${buf.length / 4} stored entr(ies)`);
   for (let q = 0; q + 3 < buf.length; q += 4) {         // pass 1: clear every listed cell, so the entries below are the whole truth about it
     const c = buf[q] | (buf[q + 1] << 8), b = c * LIQ_T;
     for (let k = 0; k < LIQ_T; k++) amt[b + k] = 0;
@@ -7376,6 +7464,7 @@ function seedGenChunkLiquid(room, p) {
       n++;
     }
   if (!n && !act.size) dropFineActive(room);
+  if (worldCfg.tracePersist) console.log(`[persist] seed liquid ${p}: ${n} generated cell(s)`);
   return n;
 }
 // 🟥 SAND HANGING IN MID-AIR OFF A FLOATING ISLAND. `evictChunk` PRUNES the room's work sets — it deletes every
@@ -7670,6 +7759,10 @@ function worldSpawnFor(avatarRoom, rec) {
     const gen = _roomGens.get(avatarRoom), b = domains.bandRows(rec.band);
     if (gen && b) {
       const r = gen.bandGroundAt(col0, b.r0, b.r1, 5);
+      // ⚠️ Traced with the COLUMN AND THE BAND, not just the coordinate: the two are decided by different
+      // things (the registry allocates the column, the generator finds the ground in the band), so a spawn that
+      // moves across a restart says nothing about WHICH of them moved unless both are on the line.
+      if (worldCfg.tracePersist) console.log(`[persist] spawn ${avatarRoom}: col ${col0} band ${rec.band} → row ${r} (x ${x}, y ${Math.max(0, r * TERRAIN_CELL - SPAWN_DROP_PX)})`);
       if (r >= 0) return { x, y: Math.max(0, r * TERRAIN_CELL - SPAWN_DROP_PX) };
       // ⚠️ NO GROUND IN THE BAND IS A REAL OUTCOME, not an error — the generator guarantees ground in every band
       // at SOME column, not at every column. Falling back to the surface band is better than falling to the

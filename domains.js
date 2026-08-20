@@ -197,16 +197,25 @@ function makeDomains(cfg) {
     return ORIGIN + Math.round((h / 4294967296) * 2 * half) - half;
   }
 
-  function insert(rec) {
+  // ⭐⭐ PERSISTENCE HOOKS, AND THE REGISTRY STILL KNOWS NOTHING ABOUT STORAGE. This module is pure — it has its
+  // own guard and is exercised by building whole layouts in memory — so it announces the only two events that
+  // change a layout and lets the host decide what to do with them. `adopt` below is the read half.
+  // ⚠️ `onRelease` MATTERS AS MUCH AS `onPlace`, and it is the half that is easy to forget: rung 5 RECLAIMS a
+  // dormant site's column for a new one. If only the placement were written, the victim's stale row would be
+  // adopted on the next start alongside the site that took its place, and both would stand in the same column.
+  const onPlace = cfg.onPlace || null, onRelease = cfg.onRelease || null;
+  function insert(rec, quiet) {
     const arr = lanes.get(rec.band);
     arr.splice(lowerBound(arr, rec.col), 0, rec);
     byId.set(rec.id, rec);
+    if (!quiet && onPlace) onPlace(rec);       // `quiet` = this record CAME from storage; writing it back is a no-op at best
     return rec;
   }
   function remove(rec) {
     const arr = lanes.get(rec.band); const i = arr.indexOf(rec);
     if (i >= 0) arr.splice(i, 1);
     byId.delete(rec.id);
+    if (onRelease) onRelease(rec);
   }
 
   const api = {
@@ -218,6 +227,37 @@ function makeDomains(cfg) {
     // The identity a raw URL is placed by, AFTER shared-platform collapsing. Exposed because the caller usually
     // wants to know that `me.tumblr.com` is really `tumblr.com` before it does anything else.
     identityFor(raw) { return resolveHost(normalizeIdentity(raw)); },
+
+    // ⭐⭐ PUT BACK A LAYOUT THAT WAS DECIDED BEFORE. This is the other half of "identity is permanent, location
+    // is revocable": a location that is revocable by the DESIGN must not also be revoked by a power cut.
+    // The records go in verbatim — no walk, no `fits` test, no re-hash. A stored column was legal when it was
+    // written, and the world built at it is keyed by that column; re-deciding it would move the site and orphan
+    // everything at the old one, which is exactly the failure this exists to stop.
+    // ⚠️ VALIDATED, NOT TRUSTED, and dropped rather than clamped. A column is only meaningful against the world
+    // width and band table it was decided under; if those have changed, standing somebody at a clamped
+    // approximation of where they used to live is worse than placing them afresh, because it looks like it
+    // worked. A dropped row simply means the next `place` decides again.
+    adopt(rows) {
+      let adopted = 0, dropped = 0;
+      for (const r of (rows || [])) {
+        const id = r && r.id;
+        if (!id || byId.has(id)) { dropped++; continue; }
+        const col = r.col | 0;
+        if (!(col >= 0 && col < COLS) || !lanes.has(r.band)) { dropped++; continue; }
+        const seed = seedOf(id);
+        insert({
+          id, col, band: r.band,
+          sep: (r.sep | 0) > 0 ? (r.sep | 0) : SPACING,
+          weight: (+r.weight > 0) ? +r.weight : (seed ? seed[1] : 1),
+          rung: r.rung | 0,
+          family: r.family || parentIdentity(id) || id,
+          cat: r.cat || (seed ? seed[0] : null),
+          seen: ++clock,
+        }, true);
+        adopted++;
+      }
+      return { adopted, dropped };
+    },
 
     peek(raw) { return byId.get(this.identityFor(raw)) || null; },
     count() { return byId.size; },
