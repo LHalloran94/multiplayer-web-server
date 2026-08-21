@@ -5335,7 +5335,12 @@ const interestCfg = {
   // throughput is still 50 chunks/s against a measured demand of 28.4 — better on every axis, at the cost of
   // twice the packets. It is not worth changing before then: at today's ~1ms chunks both values deliver the
   // same 8 chunks per drain.
-  queueBatch: 1,
+  // ⚠️ WENT 2 → 1 → 2 IN ONE SESSION, AND THE ROUND TRIP IS THE POINT. It was dropped to 1 to bound the
+  // overshoot while a chunk cost ~14ms. With `_genMemo` fixed a chunk costs ~5.8ms IN A BATCH and ~9ms alone —
+  // batch 1 pays `drainGenLiquid`, the restore loop and two socket emits per chunk, so it is now the more
+  // expensive setting as well as the slower one. At 2 the worst overshoot is ~16ms on top of the 20ms
+  // allowance, i.e. 36 of a 40ms tick, which is the bound `probe_worldgen` B5a exists to keep.
+  queueBatch: 2,
   // Hard ceiling on what one socket may have waiting. `chunk-want` takes a CLIENT-SUPPLIED list, so without
   // this a client could pin unbounded work in the queue. Dropped requests are not lost: the next beacon
   // re-derives what the socket is missing.
@@ -7138,7 +7143,31 @@ const _genRooms = new Map();                          // avatarRoom → generato
 // One page of scratch shared by the terrain and hp seeders. They are two separate PagedArrays with two separate
 // seed functions, but one call to `fillPage` produces both — so whichever faults first fills the pair and the
 // other reads it back, halving the cost instead of generating the same chunk twice.
-const _genMemo = { room: null, p: -1, gen: null, t: new Uint8Array(CHUNK_CELLS), h: new Uint8Array(CHUNK_CELLS) };
+// 🟥🟥 THIS WAS A SINGLE SLOT, AND THE CALLER GUARANTEES IT MISSES. `sendChunkContent` is deliberately TWO
+// passes — produce every chunk, drain the deferred liquid, then read it all out — so by the time the readout
+// asks for chunk 1's HP page, the slot holds chunk 32's. Every HP page in a batch was therefore regenerated
+// from scratch, which is the whole point of the memo defeated by the shape of its only hot caller.
+// MEASURED on the live server with `MW_TRACE_SUBS` (restart-server.ps1 -Trace), a 32-chunk batch:
+//     produced 32 chunks in 173ms · readout done ... 347ms      ⇐ and `pagesProduced` climbed by 32 DURING the
+//                                                                  readout, i.e. the second 174ms is the same
+//                                                                  32 chunks being generated a second time.
+// ⚠️ It was invisible at `queueBatch = 1`, where produce-then-read-out for one page hits the slot — which is
+// exactly why the single-chunk trace reads a healthy 7+1+1+1 and the batch reads 10.8ms/chunk. Do not conclude
+// from the queued path that batched callers are fine: `flushPending` takes 16, `chunk-verify` 12, and the
+// synchronous path takes the client's whole list.
+// ⚠️ KEYED ON THE GENERATOR TOO, not just room+page: which rock a page number means is a property of the
+// generator instance, and two can be live at once (worldgen + worldgen2).
+// Bounded to a couple of window-fulls; 8KB a page (terrain + hp).
+const GEN_MEMO_MAX = 192;
+const _genMemo = new Map();                           // "room\0p" → { gen, t, h }
+function _genMemoGet(room, p, gen) {
+  const k = room + GEN_SEP + p, e = _genMemo.get(k);
+  if (e && e.gen === gen) return e;
+  const rec = { gen, t: new Uint8Array(CHUNK_CELLS), h: new Uint8Array(CHUNK_CELLS), fresh: true };
+  if (_genMemo.size >= GEN_MEMO_MAX) { const old = _genMemo.keys().next().value; _genMemo.delete(old); }
+  _genMemo.set(k, rec);
+  return rec;
+}
 // A room key is a URL, so the separator has to be something a URL cannot contain. Written as an ESCAPE, not
 // as a literal: a raw NUL byte in the source makes grep treat index.js as a binary file, which quietly breaks
 // every text search over the server.
@@ -7147,12 +7176,9 @@ const _genPending = new Set();                        // "room page" — produce
 function genSeedFn(field, room) {
   return function (page, p, geom) {
     const g = _genRooms.get(room); if (!g) return;
-    if (_genMemo.room !== room || _genMemo.p !== p || _genMemo.gen !== g) {
-      _genMemo.t.fill(0); _genMemo.h.fill(0);
-      g.fillPage(_genMemo.t, _genMemo.h, p, geom, 1);
-      _genMemo.room = room; _genMemo.p = p; _genMemo.gen = g;
-    }
-    page.set(field === 'terrain' ? _genMemo.t : _genMemo.h);
+    const memo = _genMemoGet(room, p, g);
+    if (memo.fresh) { g.fillPage(memo.t, memo.h, p, geom, 1); memo.fresh = false; }
+    page.set(field === 'terrain' ? memo.t : memo.h);
     genPagesProduced++;
     // ⭐⭐ PERSISTENCE ON A COLD START, AND THIS IS THE SEAM IT HAS TO BE. After a restart nothing is "evicted" —
     // the chunks simply do not exist — so `restoreChunk` is never reached and the ground is PRODUCED instead.
