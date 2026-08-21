@@ -2217,11 +2217,22 @@ let chunkDelta = () => null;
 // ⇒ what the server keeps becomes proportional to what players have BUILT, and to nothing else: not to world
 // size, not to how far anyone has walked, not to how many chunks exist.
 const _dScratchT = new Uint8Array(CHUNK_CELLS), _dScratchH = new Uint8Array(CHUNK_CELLS);
+// 🟥🟥 THIS GENERATION IS THE MOST EXPENSIVE THING THE SERVER DOES PERIODICALLY, AND IT WAS UNCACHED.
+// The note below used to read "it costs one generation (~0.35ms) per evicted chunk … on a sweep that runs every
+// five seconds", and that number is from `server/worldgen.js`, the ROLLBACK generator — the third stale cost
+// figure on this track. The live one is ~2.5ms, and the residency sweep evicts a whole traversal's worth at
+// once: MEASURED at `residency sweep took 534ms — 473 resident, 215 evicted`, i.e. 215 × 2.5ms, recurring, on
+// the main loop. That is the *"on a long run it gets stalled and has to catch up"* report.
+// ⇒ routed through the same page cache the fault path uses (`_genMemo`), where a chunk being evicted or flushed
+// has almost certainly just been produced. ⚠️ VIA A HOOK, because `_genMemo` lives outside this sliced
+// cell-store block and referencing it directly is the ReferenceError that has bitten this track eight times
+// (`saveChunkBlob` immediately below is a no-op-and-reassign for exactly the same reason).
+let genPageCached = (gen, p, geom, t, h) => { gen.fillPage(t, h, p, geom, 1); };
 function encodeChunkDelta(s, p, gen, geom) {
   const t = s.terrain && s.terrain.pageAt(p), hp = s.terrainHp && s.terrainHp.pageAt(p);
   if (!t) return null;
   _dScratchT.fill(0); _dScratchH.fill(0);
-  gen.fillPage(_dScratchT, _dScratchH, p, geom, 1);
+  genPageCached(gen, p, geom, _dScratchT, _dScratchH);
   // 🟥🟥 AN ABSENT HP PAGE MEANS "NOBODY HAS DUG HERE", NOT "EVERY CELL HAS ZERO HIT POINTS".
   // `terrainHp` is a SEPARATE PagedArray from `terrain` and faults in independently, so a chunk nobody has hit
   // has terrain but no hp page at all — and `pageAt` deliberately does not fault one in. Reading that absence
@@ -5100,6 +5111,8 @@ function noteWhere(avRoom, sid, v) {
 }
 function chunkResidencySweep() {
   if (!chunkCfg.evict) return;
+  const _t0 = Date.now();
+  let _ev = 0, _qu = 0, _cand = 0;
   const now = Date.now(), M = Math.max(0, chunkCfg.margin | 0);
   for (const room of Array.from(roomCells.keys())) {
     const s = roomCells.get(room); if (!s || !s.terrain || (s.fineSub || 1) !== 1) continue;
@@ -5127,15 +5140,22 @@ function chunkResidencySweep() {
     // Ascending order is preserved (the union is sorted) so eviction order is unchanged.
     const cand = new Set();
     for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) pa.eachPage((p) => { cand.add(p); return false; }); }
+    _cand += cand.size;
     for (const p of Array.from(cand).sort((a, b) => a - b)) {
       const age = now - ch.peek(p).lastNear;
-      if (age > chunkCfg.graceMs) { evictChunk(room, p); continue; }
+      if (age > chunkCfg.graceMs) { evictChunk(room, p); _ev++; continue; }
       // ⭐ NOT YET OLD ENOUGH TO PUT AWAY, BUT ALREADY TOO OLD TO SIMULATE. See quiesceChunk: the memory and the
       // CPU are two different questions and only the memory one wants a long grace. At quiesceMs = 0 this fires
       // on the first sweep after a chunk leaves everyone's view, i.e. within `sweepMs`.
-      if (chunkCfg.quiesce && age > chunkCfg.quiesceMs) quiesceChunkH(room, p);
+      if (chunkCfg.quiesce && age > chunkCfg.quiesceMs) { quiesceChunkH(room, p); _qu++; }
     }
   }
+  // ⭐ SAME REASONING AS THE WORLD FLUSH'S LOG. This runs on the main loop, so a long sweep is felt as terrain
+  // arriving late and is indistinguishable from the chunk queue being slow — which is exactly how the flush
+  // hid for as long as it did. After a long traversal a whole exploration's worth of chunks falls out of grace
+  // at once, so the burst is proportional to how far the player has been.
+  const _ms = Date.now() - _t0;
+  if (_ms > 60) console.log(`[world] residency sweep took ${_ms}ms — ${_cand} resident, ${_ev} evicted, ${_qu} quiesced`);
 }
 // ==CHUNK_RESIDENCY_BLOCK_END==
 quiesceChunkH = quiesceChunk; rewakeChunkH = rewakeChunk;   // see the seam note at the block start
@@ -7158,16 +7178,35 @@ const _genRooms = new Map();                          // avatarRoom → generato
 // ⚠️ KEYED ON THE GENERATOR TOO, not just room+page: which rock a page number means is a property of the
 // generator instance, and two can be live at once (worldgen + worldgen2).
 // Bounded to a couple of window-fulls; 8KB a page (terrain + hp).
-const GEN_MEMO_MAX = 192;
-const _genMemo = new Map();                           // "room\0p" → { gen, t, h }
-function _genMemoGet(room, p, gen) {
-  const k = room + GEN_SEP + p, e = _genMemo.get(k);
-  if (e && e.gen === gen) return e;
-  const rec = { gen, t: new Uint8Array(CHUNK_CELLS), h: new Uint8Array(CHUNK_CELLS), fresh: true };
+// ⭐ 1024 SINCE 2026-08-22, up from 192, and the number is a MEASUREMENT: the residency sweep's own log reports
+// **473–641 chunks resident** during a long traversal, so a 192-entry cache was thrashing against the live
+// working set. 8KB an entry (terrain + hp) ⇒ ~8MB, which is nothing beside what it saves.
+const GEN_MEMO_MAX = 1024;
+// ⚠️ KEYED ON THE GENERATOR, NOT THE ROOM. `encodeChunkDelta` — the eviction and flush path, and the biggest
+// consumer of this cache — is handed a generator and a page and has no room in scope at all. Each room builds
+// its own generator (`_roomGens`), so the generator identifies the rock just as well as the room does, and a
+// WeakMap serial keeps the key a short string without pinning dead generators alive.
+let _genSerial = 0;
+const _genIds = new WeakMap();
+const genIdOf = (g) => { let id = _genIds.get(g); if (id == null) _genIds.set(g, id = ++_genSerial); return id; };
+const _genMemo = new Map();                           // "genId:p" → { t, h, fresh }
+function _genMemoGet(p, gen) {
+  const k = genIdOf(gen) + ':' + p, e = _genMemo.get(k);
+  if (e) return e;
+  const rec = { t: new Uint8Array(CHUNK_CELLS), h: new Uint8Array(CHUNK_CELLS), fresh: true };
   if (_genMemo.size >= GEN_MEMO_MAX) { const old = _genMemo.keys().next().value; _genMemo.delete(old); }
   _genMemo.set(k, rec);
   return rec;
 }
+// The seam `encodeChunkDelta` calls (declared as a no-op inside the cell-store block — see the note there).
+// ⚠️ COPIES OUT rather than handing the cached arrays over: the caller owns its scratch buffers and the diff
+// compares against them, so aliasing the cache into a caller that might write to it would corrupt every
+// subsequent hit. A 4KB memcpy against a 2.5ms generation is not a trade worth thinking about.
+genPageCached = (gen, p, geom, t, h) => {
+  const m = _genMemoGet(p, gen);
+  if (m.fresh) { gen.fillPage(m.t, m.h, p, geom, 1); m.fresh = false; }
+  t.set(m.t); h.set(m.h);
+};
 // A room key is a URL, so the separator has to be something a URL cannot contain. Written as an ESCAPE, not
 // as a literal: a raw NUL byte in the source makes grep treat index.js as a binary file, which quietly breaks
 // every text search over the server.
@@ -7176,7 +7215,7 @@ const _genPending = new Set();                        // "room page" — produce
 function genSeedFn(field, room) {
   return function (page, p, geom) {
     const g = _genRooms.get(room); if (!g) return;
-    const memo = _genMemoGet(room, p, g);
+    const memo = _genMemoGet(p, g);
     if (memo.fresh) { g.fillPage(memo.t, memo.h, p, geom, 1); memo.fresh = false; }
     page.set(field === 'terrain' ? memo.t : memo.h);
     genPagesProduced++;
