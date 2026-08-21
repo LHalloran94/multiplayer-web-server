@@ -2203,16 +2203,31 @@ function encodeChunkDelta(s, p, gen, geom) {
   if (!t) return null;
   _dScratchT.fill(0); _dScratchH.fill(0);
   gen.fillPage(_dScratchT, _dScratchH, p, geom, 1);
+  // 🟥🟥 AN ABSENT HP PAGE MEANS "NOBODY HAS DUG HERE", NOT "EVERY CELL HAS ZERO HIT POINTS".
+  // `terrainHp` is a SEPARATE PagedArray from `terrain` and faults in independently, so a chunk nobody has hit
+  // has terrain but no hp page at all — and `pageAt` deliberately does not fault one in. Reading that absence
+  // as 0 made every solid cell in every untouched chunk differ from the generator's `STRENGTH[v]`, so it was
+  // stored as an edit. MEASURED on the live Overworld: of the 40 largest stored chunks, 1,997 cells had a
+  // genuinely different material and 78,876 were recorded solely because of this — a ~40x storage bloat, and
+  // every one of them stored `hp 0` against a generated strength of 1-4.
+  // ⇒ Two consequences, and the second is the serious one. Increment 4d's promise ("what the server keeps is
+  // proportional to what players BUILT") was quietly false. And 4c's "pristine = the diff is empty" could never
+  // be true, so no chunk was ever thrown away — and every one came back from storage with its rock at ZERO hit
+  // points, i.e. one hit from destruction.
+  // ⚠️ THIS IS THE SAME MISTAKE `encodeLiquidDelta` MADE AND HAD FIXED ONE DAY EARLIER — an absent liquid page
+  // read as "every generated fluid cell is empty", storing a permanent "this lake does not exist". Absence of a
+  // page means UNMODIFIED in both cases; it is the generated value that stands, never zero.
+  const hpAt = (k) => hp ? hp[k] : _dScratchH[k];
   // One pass to count, so the arrays are allocated at exactly the right size rather than grown.
   let n = 0;
-  for (let k = 0; k < CHUNK_CELLS; k++) if (t[k] !== _dScratchT[k] || (hp ? hp[k] : 0) !== _dScratchH[k]) n++;
+  for (let k = 0; k < CHUNK_CELLS; k++) if (t[k] !== _dScratchT[k] || hpAt(k) !== _dScratchH[k]) n++;
   // ⚠️ Falls back to the whole-chunk encoding if the diff is somehow bigger. It cannot be at 4 bytes a cell
   // against an 18.5KB blob, but "the encoding that is smaller wins" is one comparison and removes the question.
   if (n * 4 >= CHUNK_CELLS * 2) return null;
   const idx = new Uint16Array(n), mat = new Uint8Array(n), dmg = new Uint8Array(n);
   let w = 0;
   for (let k = 0; k < CHUNK_CELLS; k++) {
-    const hv = hp ? hp[k] : 0;
+    const hv = hpAt(k);
     if (t[k] === _dScratchT[k] && hv === _dScratchH[k]) continue;
     idx[w] = k; mat[w] = t[k]; dmg[w] = hv; w++;
   }
