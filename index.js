@@ -4990,6 +4990,13 @@ const runLiquidTick = () => {
         // is the whole diagnosis: similar ⇒ the sim is working on what you can see and the COST is the problem;
         // far larger ⇒ containment is the problem and tuning the cost cannot fix it.
         actChunks: liqPerf.actChunks, actCols: liqPerf.actCols, pending: liqPerf.pending,
+        // ⭐⭐ WHAT IS ACCUMULATING? The user's argument, and it is a good one: *"if it can do it for several
+        // windows worth of movement… then it should just be able to continue doing that indefinitely. Therefore
+        // there must be some accumulated inefficiency or baggage."* A RATE problem and a GROWTH problem look
+        // identical in a short run and need completely different fixes, so the growth terms are now on the wire
+        // rather than being inferred: heap, the resident page count, and the per-chunk RECORDS — which are a
+        // `Map` entry per chunk ever touched and, unlike the pages they describe, are **never removed**.
+        ...worldGrowth(),
         // How old the reading above is, in ms. Zero every window in normal operation; non-zero means the scan
         // did not run (perfLog toggled mid-window), and the panel says "Ns old" rather than printing a zero.
         pendAgeMs: Math.max(0, (liquidTickCount - (liqPerf.pendAt || 0)) * Math.max(1, liquidCfg.tickMs | 0)) };
@@ -5492,6 +5499,25 @@ drainChunkQueue = function () {
   return performance.now() - t0;
 };
 // How much is waiting, for the readout. Cheap: the number of SOCKETS with work, not a walk of their sets.
+// ⭐ THE GROWTH TERMS, IN ONE PLACE. Everything here is a number that should REACH A CEILING while a player
+// travels steadily — a window's worth of pages resident, a bounded queue — except `chunkRecs`, which is a
+// record per chunk ever touched and grows without bound. Watching them against arrival latency is what
+// separates "the server is slow" from "the server is filling up".
+// ⚠️ Cheap enough to sit on a wire that emits every few seconds: two Map `.size` reads, one `eachPage` count
+// per content field, and `memoryUsage()`. It is NOT cheap enough for the tick, and is not called from one.
+function worldGrowth() {
+  let pages = 0, recs = 0, blobs = 0, evicted = 0;
+  for (const room of roomCells.keys()) {
+    const s = roomCells.get(room); if (!s) continue;
+    for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) pa.eachPage(() => { pages++; return false; }); }
+    const ch = s.chunks;
+    if (ch) { recs += ch.rec.size; for (const r of ch.rec.values()) { if (r.blob) blobs++; if (r.gen) evicted++; } }
+  }
+  const m = process.memoryUsage();
+  return { growPages: pages, growRecs: recs, growBlobs: blobs, growEvicted: evicted,
+    growHeapMB: +(m.heapUsed / 1048576).toFixed(1), growRssMB: +(m.rss / 1048576).toFixed(1),
+    growGenMemo: _genMemo.size };
+}
 function chunkQueueDepth() {
   let socks = 0, chunks = 0;
   for (const room in roomSubs) { const m = roomSubs[room]; if (!m) continue; for (const e of m.values()) if (e.pending.size) { socks++; chunks += e.pending.size; } }
