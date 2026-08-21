@@ -7254,19 +7254,68 @@ saveChunkBlob = function (room, p, blob) {
 // an entirely different path (`published_worlds`).
 let worldFlushes = 0, worldFlushWrites = 0;
 const WORLD_FLUSH_MS = 30000, WORLD_FLUSH_MAX = 48;
+// How many chunks one periodic flush may DIFF. The real bound on the flush's cost — see worldFlush, where a
+// world of pristine chunks made the write cap above unreachable. MEASURED at 64: "flush took 183ms — 64 chunks
+// diffed, 0 WRITTEN", i.e. ~2.5ms a diff and all of it wasted on pristine ground. 24 keeps the hitch under ~60ms.
+// ⚠️ THE TRADE IS SWEEP RATE, and it is worth stating: a chunk somebody EDITED is only persisted by the flush
+// that reaches it, so a lower cap means a longer worst-case wait for an edit made in a RESIDENT chunk. Eviction
+// still writes immediately, and once a pristine chunk has been examined its `savedHash` makes it free to skip
+// for ever after, so the expensive sweep is a one-time cost per chunk rather than a standing one.
+const WORLD_FLUSH_WORK = 24;
+// 🟥🟥 THE WRITE CAP DID NOT CAP THE WORK, AND A GENERATED WORLD DEFEATS IT COMPLETELY.
+// `wrote` only counts NON-PRISTINE deltas — but a freshly explored Overworld is almost entirely pristine, so
+// `wrote` stayed at 0, `wrote >= cap` never tripped, and this ran `chunkDelta` on EVERY resident page. A delta
+// is taken against what the generator would produce, i.e. it REGENERATES the chunk to diff it. So every 30
+// seconds the server re-generated everything the player had ever walked past, synchronously, on the main loop.
+// ⭐ AND IT GROWS WITH EXPLORATION, WHICH IS EXACTLY THE REPORTED SHAPE: *"it seems to get slower or have more
+// trouble keeping up as you pass more terrain… maybe it's getting 'full' or overloaded or not dumping things
+// fast enough."* Measured with `--long`: arrival held at ~88ms median for 80 steps, then one 6-second window
+// went to 657ms median / 1810ms p90 / 2032ms worst, then recovered — a periodic stall, not a slow decline, and
+// `chunkQMs` sat at 5-7ms of its 20ms allowance throughout, so the queue was idle while it happened.
+// ⇒ THE CAP NOW COUNTS WORK, NOT WRITES, and a per-room CURSOR resumes where the last flush stopped so nothing
+// is starved. Durability is unchanged in the only case that matters — a chunk somebody EDITED is non-pristine,
+// and those are rare and get written on the flush that reaches them (plus eviction still writes immediately).
+// ⚠️ `worldFlushAll` passes 1e9 and must still mean "everything, now" — it is the shutdown path. A cap that
+// large disables both the work bound and the cursor, which is what `full` below preserves.
+const _flushCursor = new Map();                       // room → where the last flush stopped scanning
+let worldFlushMaxMs = 0, worldFlushScanned = 0;
 function worldFlush(max) {
   const cap = max || WORLD_FLUSH_MAX;
-  let wrote = 0;
+  const full = cap >= 1e9;                            // shutdown: no bound, no cursor
+  const workCap = full ? Infinity : WORLD_FLUSH_WORK;
+  const _t0 = Date.now();
+  let wrote = 0, work = 0;
   for (const room of Array.from(roomCells.keys())) {
-    if (wrote >= cap) break;
+    if (wrote >= cap || work >= workCap) break;
     if (!_genRooms.has(room)) continue;
     const s = roomCells.get(room); if (!s || !s.terrain || (s.fineSub || 1) !== 1) continue;
-    const ch = chunksOf(room), cand = new Set();
-    for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) pa.eachPage((p) => { cand.add(p); return false; }); }
-    for (const p of cand) {
-      if (wrote >= cap) break;
+    const ch = chunksOf(room);
+    // 🟥 AND THE SECOND COST, WHICH CAPPING THE DIFFS DID NOT TOUCH. Walking every page of every content field
+    // to build the candidate set is O(RESIDENT PAGES) and runs on every flush — so it grows with exploration
+    // exactly like the diffing did. It showed up as the work cap not helping proportionally: 64 diffs took
+    // 183ms and 24 took 168ms, which is not a per-diff cost at all.
+    // ⇒ THE LIST IS BUILT ONCE PER SWEEP, not once per flush, and the cursor is what says when a sweep is over.
+    // A page that faults in mid-sweep waits for the next list; it is pristine ground nobody has touched, and
+    // eviction writes anything real immediately, so nothing is at risk from the delay.
+    let cur = full ? null : _flushCursor.get(room);
+    if (!cur || cur.at >= cur.list.length) {
+      const cand = new Set();
+      for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa) pa.eachPage((p) => { cand.add(p); return false; }); }
+      cur = { list: Array.from(cand), at: 0 };
+      if (!full) _flushCursor.set(room, cur);
+    }
+    const list = cur.list;
+    if (!list.length) continue;
+    let at = full ? 0 : cur.at;
+    let n = 0;
+    for (; n < list.length; n++) {
+      if (wrote >= cap || work >= workCap) break;
+      const p = list[full ? n : at + n];
       const h = chunkHash(room, p), rec = ch.peek(p);
       if (rec.savedHash === h) continue;                 // nothing has changed here since it was last written
+      // ⬇ EVERYTHING BELOW THIS LINE IS THE EXPENSIVE PART, so this is where the work is counted: `chunkDelta`
+      // regenerates the chunk to diff it against the ground the generator would make.
+      work++;
       const d = chunkDelta(room, p);
       ch.at(p).savedHash = h;
       // A pristine chunk stores nothing AND drops whatever it used to store (see saveChunkBlob). A null delta
@@ -7275,8 +7324,18 @@ function worldFlush(max) {
       saveChunkBlob(room, p, d.pristine ? null : d);
       if (!d.pristine) wrote++;
     }
+    // ⚠️ ADVANCE BY WHAT WAS ACTUALLY EXAMINED, INCLUDING THE CHEAP SKIPS. The first version advanced only on
+    // the chunks it diffed, which meant a sweep over ground already recorded (every `savedHash === h` skip)
+    // never moved the cursor at all and the flush restarted from the same place for ever.
+    if (!full) cur.at = at + n;
   }
-  worldFlushes++; worldFlushWrites += wrote;
+  worldFlushes++; worldFlushWrites += wrote; worldFlushScanned = work;
+  const _ms = Date.now() - _t0;
+  if (_ms > worldFlushMaxMs) worldFlushMaxMs = _ms;
+  // ⭐ A STALL THIS LONG IS NOT A DETAIL AND WAS COMPLETELY SILENT. It is on the main loop, so it is felt as
+  // terrain arriving late — which is indistinguishable, from a player's seat, from the chunk queue being slow.
+  if (_ms > 100) console.log(`[world] flush took ${_ms}ms — ${work} chunk(s) diffed, ${wrote} written`
+    + (full ? ' (full flush)' : ` (cap ${workCap})`));
   return wrote;
 }
 setInterval(() => { try { worldFlush(); } catch (e) { worldSaveErrors++; } }, WORLD_FLUSH_MS);
