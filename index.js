@@ -5218,7 +5218,11 @@ function sendChunkContent(sock, room, chunks) {
     for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++)
       for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++) {
         const i = (c0 + lc) * geom.rows + r0 + lr;
-        tc.push(i, s.terrain.g(i));
+        // ⚠️ ONE PAGED READ, NOT TWO. `s.terrain.g(i)` was called here and again inside the damage test below —
+        // 4,096 extra two-level page lookups per chunk, on the hottest loop in the send path, for a value that
+        // cannot have changed between the two lines.
+        const tv = s.terrain.g(i);
+        tc.push(i, tv);
         // ⭐⭐ AND THE DAMAGE, which was never sent at all. A cell part-way through being dug carries `hp` on the
         // server and nothing on the client — the client rebuilds its own `terrainHp` from scratch, and a
         // windowed client throws that away the moment the chunk leaves the window. So the two sides' idea of
@@ -5230,9 +5234,8 @@ function sendChunkContent(sock, room, chunks) {
         // every solid cell it makes, so "has hp" is true of nearly the whole world: the first version of this
         // put 85,025 entries on a single chunk send, roughly doubling it. Damaged means hp BELOW the material's
         // strength, which is a handful of cells wherever somebody has been swinging a pick.
-        if (s.terrainHp) {
-          const v = s.terrain.g(i);
-          if (v) { const h = s.terrainHp.g(i); if (h > 0 && h < matStrengthSrv(mats, v)) dmg.push(i, h); }
+        if (s.terrainHp && tv) {
+          const h = s.terrainHp.g(i); if (h > 0 && h < matStrengthSrv(mats, tv)) dmg.push(i, h);
         }
         if (s.fineTotal && s.fineTotal.g(i) > 0) fine.push(i);
       }
@@ -5300,7 +5303,26 @@ const interestCfg = {
   // SECOND — so 6ms per 40ms tick (150ms/s) carries several such players with room to spare, while costing at
   // most 6ms of the 12ms the profile showed genuinely idle. The redesign's 2.9–11.7ms/chunk is the case this
   // number exists for: it makes the queue take longer rather than making the tick take longer.
-  queueMs: 6,
+  // 🟥🟥 SIX WAS SIZED AGAINST A CHUNK COSTING 0.85ms, AND A CHUNK COSTS 20ms. That figure came from
+  // `probe_worldgen_cost.js`, which measures `server/worldgen.js` — the ROLLBACK generator. The live path is
+  // worldgen2 plus cells/minerals/flora/formations/voids/volcano, and `e2e_fall_latency.js` measured it on the
+  // running server at **20.0 ms/chunk**: 0.3 chunks per tick, ~8 chunks/s, against a falling player's demand of
+  // 41/s and a diagonal's 59/s. That is the whole of the reported *"I catch up with it and begin falling
+  // through nothing"* — five to seven times too slow, which no window size can cover.
+  // ⭐ AND THE SERVER WAS 42% IDLE WHILE IT HAPPENED (CPU profile taken during the fall), so this allowance was
+  // the binding constraint, not the CPU. Raised with the two costs above it halved: `probe_worldgen` B5a's
+  // rule is `queueMs + queueBatch × worstChunk ≤ tickMs`, and at a measured worst band of ~8ms that is
+  // 12 + 16 = 28 of 40ms, leaving the liquid sim its usual room on a tick with terrain pending.
+  // ⭐⭐ AND 12 WAS STILL THE BINDING CONSTRAINT — a second profile, after the two cost fixes above, showed the
+  // server **71% IDLE** while a falling player waited a second for ground. The drain was spending its whole
+  // allowance and then the tick sat empty for 28ms. So this is now sized to USE the tick rather than to be
+  // polite in it: liquid's budget at line ~4708 is `tickMs × simBudgetPct/100 − _chunkMs`, i.e. it already
+  // adapts to whatever chunks took, and chunks only take anything when a player is actually moving into new
+  // world. With `queueBatch` at 1 the worst overshoot is ONE chunk (~14ms measured), so 20 + 14 = 34 of a 40ms
+  // tick and liquid keeps ~8ms while streaming and its full 28ms the rest of the time.
+  // ⚠️ STILL A DIAL, and still the first thing to turn if terrain lags. `queueMs = 0` remains an exact revert
+  // to the synchronous path.
+  queueMs: 20,
   // Chunks per `sendChunkContent` call while draining. The clock is checked after every batch, so this trades
   // packet count against how far a single batch can overshoot the allowance. ⚠️ ONE CHUNK CANNOT BE
   // INTERRUPTED, so the true overshoot bound is `queueBatch × the cost of the most expensive chunk` — which is
@@ -5313,7 +5335,7 @@ const interestCfg = {
   // throughput is still 50 chunks/s against a measured demand of 28.4 — better on every axis, at the cost of
   // twice the packets. It is not worth changing before then: at today's ~1ms chunks both values deliver the
   // same 8 chunks per drain.
-  queueBatch: 2,
+  queueBatch: 1,
   // Hard ceiling on what one socket may have waiting. `chunk-want` takes a CLIENT-SUPPLIED list, so without
   // this a client could pin unbounded work in the queue. Dropped requests are not lost: the next beacon
   // re-derives what the socket is missing.

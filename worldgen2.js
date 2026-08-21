@@ -246,20 +246,47 @@ function makeGen2(cfg) {
   // address space), `page` optionally strided, `hpPage` optionally null. Copied in shape deliberately: the two
   // generators are read by the same `_alloc`/`fillPage` seam in index.js and must not differ about what page
   // `p` means.
-  const _colBuf = new Uint8Array(CHUNK_SIDE);
+  // ── 🟥🟥 EVERY CHUNK USED TO BE GENERATED TWICE, AND THIS CACHE IS WHY IT NO LONGER IS ──────────────────────
+  // `sendChunkContent` produces a chunk's terrain by faulting the page in (→ `fillPage`) and then, separately,
+  // calls `backingPage` for the uncarved rock behind it. But `fillColumn` fills BOTH outputs in ONE pass — so
+  // the second call was recomputing the entire column to keep the output the first call had declined to ask
+  // for, and throwing away the one it already had.
+  // MEASURED (`probe_gen_column_cost.js`, four depth bands, Overworld shape): asking for the backing as well
+  // costs **1.15×** the terrain-only call, while doing it as a second pass costs **1.87×**. A chunk's
+  // generation goes **9.67ms → 5.16ms**.
+  // ⚠️ IT IS A CACHE, NOT A MEMO OF ONE, and the structure of the caller is the reason. `sendChunkContent` is
+  // deliberately TWO passes — produce every chunk, drain the deferred liquid, then read it all out — so by the
+  // time `backingPage` is asked for the first chunk, `fillPage` has moved on to the last. A single-slot memo
+  // (the trick `_genMemo` uses for terrain-and-hp, which ARE produced together) would miss almost every time.
+  // ⚠️ AND IT PAYS OFF TWICE. `backingPage` runs on every chunk SENT, not just every chunk produced — so a
+  // client re-entering ground the server already holds was paying a full regeneration per chunk for terrain
+  // that never left memory. That is the window-churn case, i.e. the common one.
+  // ⚠️ Per GENERATOR (it lives in makeGen2's closure), because the page number means different rock in
+  // different rooms. Bounded by eviction to the oldest key; 4KB a page, so the cap is the memory budget.
+  const BACK_CACHE_MAX = 256;                      // ≈1MB per generator — two windows' worth of chunks
+  const _backCache = new Map();                    // page → Uint8Array(4096) of uncarved rock
+  function _backCacheSet(p, buf) {
+    if (_backCache.size >= BACK_CACHE_MAX) { const k = _backCache.keys().next().value; _backCache.delete(k); }
+    _backCache.set(p, buf);
+  }
+  const _colBuf = new Uint8Array(CHUNK_SIDE), _colBack = new Uint8Array(CHUNK_SIDE);
   function fillPage(page, hpPage, p, geom, T) {
     const stride = (T | 0) || 1;
     const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
     const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
     if (rN <= 0 || cN <= 0) return;
-    const col = _colBuf;
+    const col = _colBuf, bcol = _colBack;
+    const back = new Uint8Array(CHUNK_SIDE * CHUNK_SIDE);
     for (let lc = 0; lc < cN; lc++) {
-      fillColumn(originCol + c0 + lc, originRow + r0, rN, col);
+      bcol.fill(0);
+      fillColumn(originCol + c0 + lc, originRow + r0, rN, col, bcol);
       for (let lr = 0; lr < rN; lr++) {
-        const v = col[lr];
-        if (v) { const o = lr * CHUNK_SIDE + lc; page[o * stride] = v; if (hpPage) hpPage[o] = STRENGTH[v]; }
+        const v = col[lr], o = lr * CHUNK_SIDE + lc;
+        if (v) { page[o * stride] = v; if (hpPage) hpPage[o] = STRENGTH[v]; }
+        back[o] = bcol[lr];
       }
     }
+    _backCacheSet(p, back);
   }
 
   // ── ONE 64x64 PAGE OF THE **UNCARVED** WORLD ────────────────────────────────────────────────────────────────
@@ -275,6 +302,11 @@ function makeGen2(cfg) {
     const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
     const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
     if (rN <= 0 || cN <= 0) return false;
+    // ⭐ `fillPage` already computed this in the same pass it made the terrain — see the cache note above.
+    // The generate-it-again path below is kept, and is still correct: it is what answers for a chunk this
+    // generator has never produced (a page restored from disk, or one that fell out of the cache).
+    const hit = _backCache.get(p);
+    if (hit) { out.set(hit); return true; }
     for (let lc = 0; lc < cN; lc++) {
       _backBuf.fill(0); _backCol.fill(0);
       fillColumn(originCol + c0 + lc, originRow + r0, rN, _backCol, _backBuf);
