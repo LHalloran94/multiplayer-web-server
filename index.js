@@ -1614,6 +1614,25 @@ const overworldRooms = new Set();
 // ⚠️ Deliberately not a valid `avatarRoomKey` output: those are 'av:<url>:<level>' and a URL cannot be '@over'.
 // Nothing can collide with it by accident, and it is greppable.
 const OVERWORLD_ROOM = 'av:@over:1';
+// 🟥🟥 …EXCEPT FOR TEST TRAFFIC, AND THAT IS NOT TIDINESS — IT IS THE FIX FOR REAL DAMAGE.
+// The e2e harnesses join as `e2e-restart-<Date.now()>.test/`, which is a bare host, which `isDomainHome` calls
+// a front door, which used to land them in the room above — the one everybody plays in. `e2e_worldgen_restart`
+// and `e2e_worldgen_edit` both carve `{op:'carve', r:120, hard:true}` and then pour water into the hole, and
+// Overworld persistence keeps it for ever. 78 of those craters were found in the live world, each one a
+// bit-identical 709-cell disc of the server's own `rasterTerrainCircle`, sitting a short walk from the user's
+// own domain column because that is where the allocator puts a new site. Write-up: scratchpad/circular_voids.md.
+// ⭐ A SECOND ROOM KEY IS THE WHOLE FIX. Everything that decides what a world IS — `roomDims`, `worldGeom`,
+// `genCfgFor`, `gen2LayoutFor`, the seed at `_seed` — keys off the `overworldRooms` SET, not off this string,
+// so the test room is the same shape, the same generator, the same layout and the same storage path. Only the
+// room key differs, and the room key is what `world_chunks` and the residency sets are keyed by. So the tests
+// keep testing the Overworld; they just stop testing it inside the one people live in.
+// ⚠️ `.test` is reserved by RFC 6761 and can never be a real site, so this cannot capture anybody's traffic.
+// ⚠️ THE STRING LIVES HERE AND THE TEST DOES NOT. `isTestIdentity` calls the domains module's identity
+// normaliser, and this is inside the block the probe rigs slice into a bare `new Function`, where a module
+// require does not exist — the trap this file has now hit five times. It sits beside `isDomainHome` instead.
+// ⚠️ …and the guard that caught it SCANS THE SOURCE TEXT, so naming the module here in prose fails it too.
+// That is why this sentence talks around it. (Same shape as `probe_relay` I3, which a comment once broke.)
+const OVERWORLD_TEST_ROOM = 'av:@over-test:1';
 // The Overworld's terrain seed. FIXED, unlike a page world's (which is keyed on its URL so every page differs):
 // there is only one Overworld, and it has to look the same to everyone who walks into it.
 const OVERWORLD_SEED = 20260805;
@@ -2605,6 +2624,13 @@ let domainRowWrite = () => {}, domainRowDrop = () => {};
 const domains = DOMAINS.makeDomains({
   cols: OVERWORLD_DIMS.cols, rows: OVERWORLD_DIMS.rows, cell: TERRAIN_CELL, spacingPx: domainCfg.spacingPx,
   onPlace: (rec) => domainRowWrite(rec), onRelease: (rec) => domainRowDrop(rec),
+});
+// ⭐ AND ITS TWIN FOR `.test` HOSTS (see OVERWORLD_TEST_ROOM). Same geometry and the same ladder, so a harness
+// exercises the identical allocation code — but NO persistence hooks, deliberately: a test identity is used once
+// and never again, and the six dead `e2e-restart-*.test` rows that had accumulated in `domain_sites` were
+// holding columns beside the player's own site. A registry that forgets on restart is the right lifetime here.
+const domainsTest = DOMAINS.makeDomains({
+  cols: OVERWORLD_DIMS.cols, rows: OVERWORLD_DIMS.rows, cell: TERRAIN_CELL, spacingPx: domainCfg.spacingPx,
 });
 function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', worldGeom(room), room)); }
 function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', worldGeom(room), room)); }
@@ -7735,6 +7761,12 @@ function isDomainHome(roomKey) {
   if (override && p === override) return true;
   return p.indexOf('/') < 0 && HOME_PATHS.has(p);        // ONE segment, and it is a shell word
 }
+// Is this front door a HARNESS rather than a site? `.test` is reserved by RFC 6761, so nothing real can be one.
+// Its own Overworld — see OVERWORLD_TEST_ROOM for why, and scratchpad/circular_voids.md for what it cost.
+function isTestIdentity(roomKey) {
+  const id = DOMAINS.normalizeIdentity(roomKey);           // protocol, www., path, port all stripped → a bare host
+  return id === 'test' || id.endsWith('.test');
+}
 function overworldIdentity(avatarRoom) {
   const s = String(avatarRoom);
   const a = s.indexOf(':'), b = s.lastIndexOf(':');
@@ -9158,13 +9190,16 @@ io.on('connection', (socket) => {
     // ⇒ **which world you enter is a property of the URL, and of nothing else.** Rolling back is a one-line
     // edit here plus a restart, which is a deliberate act rather than a stray click in a debug menu.
     const _isOver = type === 'world' && !rinfo && isDomainHome(roomId);
-    const avRoom = _isOver ? OVERWORLD_ROOM : avatarRoomKey(roomId, levelIndex);
+    // ⚠️ A `.test` front door gets its OWN Overworld — same shape, same generator, separate room key and so
+    // separate storage. See OVERWORLD_TEST_ROOM: the e2e harnesses were carving craters into the shared world.
+    const _isTestOver = _isOver && isTestIdentity(roomId);
+    const avRoom = _isOver ? (_isTestOver ? OVERWORLD_TEST_ROOM : OVERWORLD_ROOM) : avatarRoomKey(roomId, levelIndex);
     if (_isOver) overworldRooms.add(avRoom);
     // Where in the Overworld THIS socket arrives: an allocation against the page's permanent identity, which is
     // the whole of `server/domains.js`. `place` (not `peek`) because arriving is what claims a column.
     // ⚠️ PER SOCKET, NOT PER ROOM. Everywhere else `spawn` is a property of the room; in a shared world every
     // player has their own, so it cannot be read back from the room later — it is resolved once, here.
-    const _overCol = _isOver ? domains.place(overworldIdentity(roomId)) : null;
+    const _overCol = _isOver ? (_isTestOver ? domainsTest : domains).place(overworldIdentity(roomId)) : null;
     // Duplicate-instance guard: if THIS identity is already live in this avatar World from another tab/window,
     // don't silently spawn a second blob. Ask the joiner to confirm a takeover (avt-dup); they re-send with
     // force:true, and we evict the other instance(s) here. (No-op at the common single-instance case.)
