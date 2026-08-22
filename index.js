@@ -4492,6 +4492,18 @@ let liqRoomCursor = 0;
 // luck (the budget's hard stop is timed, so a loaded machine changes the tick count on its own).
 let liqRateSkips = 0;
 let liqIdleSkips = 0;         // ticks skipped because nobody was in the room at all
+// ⭐⭐ THE FLOOR UNDER THE LIQUID BUDGET, and the counter that says it is doing something.
+// The budget is "what the chunk drain left" — and the drain can legitimately take all of it, at which point the
+// remainder is zero. Zero was then read as "no budget configured" by every downstream gate and the sim ran
+// UNBOUNDED (see the long note at the calculation). A quarter of nominal is the compromise: the tiers always
+// have something real to ration, and liquid never stops entirely just because somebody is exploring.
+// ⚠️ DECLARED HERE, INSIDE the block `probe_budget` slices to `==LIQUID_TICK_BLOCK_END==`. A constant used by
+// `runLiquidTick` but declared below that marker is a ReferenceError in the rigs and nowhere else — the
+// sliced-block boundary, which has now caught this project nine times.
+const BUDGET_FLOOR_FRAC = 0.25;
+// How many ticks the floor actually bit, i.e. the drain had eaten the whole nominal budget. A MECHANISM counter:
+// if terrain is late and this is climbing, chunk work and liquid are fighting and neither is winning.
+let liqBudgetFloored = 0;
 // ⭐ "IS ANYBODY ACTUALLY IN THIS WORLD?" — the seam, not the answer.
 // Measured (`e2e_containment` A2): ~45s after the last player left the Overworld, the server was still spending
 // ~5ms of every tick simulating it, and the room was still flickering on and off the roster. Chunk eviction does
@@ -4728,8 +4740,30 @@ const runLiquidTick = () => {
   // while liquid a few hundred ms behind is just slow water.
   // ⚠️ `_chunkMs` is 0 in every rig that slices this block (the F15 seam returns 0), so the budget arithmetic
   // there is byte-for-byte what it was and no existing `probe_budget` check changes meaning.
-  const _budgetMs = liquidCfg.simBudgetPct > 0 ? Math.max(0, liquidCfg.tickMs * liquidCfg.simBudgetPct / 100 - _chunkMs) : 0;
-  const _tickT0 = _budgetMs ? performance.now() : 0;
+  // 🟥🟥 AND ZERO USED TO MEAN "UNLIMITED", WHICH IS THE OPPOSITE OF WHAT IT SHOULD MEAN. This was
+  // `Math.max(0, …)` and every use downstream was gated on `if (_budgetMs)` — so the moment the chunk drain spent
+  // the whole nominal budget (28ms of a 40ms tick, which is exactly what it does while a player streams terrain),
+  // this came out as 0, the gate read it as falsy, and the ENTIRE admission block was skipped: no tier 3, no
+  // cheapest-first, no deferral. The liquid sim ran completely unbounded at the one moment it most needed
+  // bounding, and it fed back — an unbounded sim blows the tick, which keeps terrain late, which keeps the drain
+  // saturated, which keeps the budget at zero.
+  // MEASURED FROM PLAY (the user's Net tab, three states, and it is the whole diagnosis):
+  //     standing still     drain  0/24ms → budget 28ms → sim  0.03ms
+  //     moving, no water   drain 28/24ms → budget  0   → sim  0.03ms  (nothing active, so it never showed)
+  //     moving over water  drain 28/24ms → budget  0   → sim 93ms avg, 214ms max of a 40ms tick
+  // ⇒ the two conditions have to coincide before it is visible, which is why it survived every rig here: a clean
+  // test world has no liquid to simulate at the moment the drain is busy.
+  // ⭐ "ENABLED" AND "HOW MUCH IS LEFT" ARE NOW SEPARATE QUESTIONS. The gate is the boolean; the number is what
+  // the tiers get to spend, and it is FLOORED rather than allowed to reach zero — a true zero would defer every
+  // room, which freezes water for as long as anyone is exploring. A quarter of nominal keeps it progressing while
+  // still bounding it, which is the whole point of having a budget.
+  // ⚠️ `_chunkMs` is 0 in every rig that slices this block (the F15 seam returns 0), so the arithmetic there is
+  // byte-for-byte what it was, the floor never binds, and no existing `probe_budget` check changes meaning.
+  const _budgetOn = liquidCfg.simBudgetPct > 0;
+  const _budgetNominal = liquidCfg.tickMs * liquidCfg.simBudgetPct / 100;
+  const _budgetMs = _budgetOn ? Math.max(_budgetNominal * BUDGET_FLOOR_FRAC, _budgetNominal - _chunkMs) : 0;
+  if (_budgetOn && _budgetNominal - _chunkMs < _budgetNominal * BUDGET_FLOOR_FRAC) liqBudgetFloored++;
+  const _tickT0 = _budgetOn ? performance.now() : 0;
   // ⭐ ALWAYS A SET NOW, not only when the budget is on: an UNATTENDED room is deferred whatever the budget is
   // doing, and every downstream loop already tests `_deferred`, so this reaches sources, reactions, flow, powder
   // and soil in one place rather than five.
@@ -4746,7 +4780,7 @@ const runLiquidTick = () => {
   let _idle = 0;
   for (const r of cellRooms.fine) if (!roomOccupied(r)) { _deferred.add(r); liqIdleSkips++; _idle++; }
   if (liquidCfg.perfLog && _idle > liqPerf.idleRooms) liqPerf.idleRooms = _idle;
-  if (_budgetMs) {
+  if (_budgetOn) {
     const _keys = [];
     for (const r of cellRooms.fine) {
       if (_deferred.has(r)) continue;
@@ -4879,7 +4913,7 @@ const runLiquidTick = () => {
     if (_kUsed !== _kFull) { liquidCfg.fineLevelSteps = _kFull; liqK2Throttles++; }
     // EMA is kept NORMALISED TO FULL K, so a throttled room does not report a small cost, get its K
     // restored, blow the budget again and oscillate.
-    if (_budgetMs) { const _d = (performance.now() - _r0) * (_kFull / _kUsed); roomLiqCost[room] = roomLiqCost[room] ? roomLiqCost[room] * 0.7 + _d * 0.3 : _d; }
+    if (_budgetOn) { const _d = (performance.now() - _r0) * (_kFull / _kUsed); roomLiqCost[room] = roomLiqCost[room] ? roomLiqCost[room] * 0.7 + _d * 0.3 : _d; }
   }
   // ...and AGAIN after the flow. The pre-pass catches contacts that were already standing (the set still holds last
   // tick's movers); the post-pass catches contacts this tick's movement JUST created, in the same tick. Without it,
@@ -4996,7 +5030,7 @@ const runLiquidTick = () => {
         // much of the "liquid" figure is chemistry rather than flow. Reactions running long is the shape that
         // starves the flow loop's hard stop; `reactSkips` says the per-tick candidate cap is biting.
         reactAvgMs: +(liqPerf.reactMs / liqPerf.ticks).toFixed(2), reactMaxMs: +liqPerf.reactMsMax.toFixed(2),
-        reactSkips: liqReactSkips,
+        reactSkips: liqReactSkips, budgetFloored: liqBudgetFloored,
         // the funnel: candidates → deduped neighbourhood → cells that can actually react → what fired
         reactCand: liqReactCand, reactSeen: liqReactSeen, reactAnchors: liqReactAnchors, reactFired: liqReactFired,
         // the work-queue funnel: examined → actually did something → put back by a neighbour → put back by the cap
