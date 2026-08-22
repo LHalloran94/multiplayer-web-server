@@ -4670,6 +4670,26 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
     // one keeps full K, and no settle-time check can see it break (which is why E3 asserts the CPU directly).
     const fineCells = buckets[0].get(s);
     const est = roomLiqCost[key] || (liquidCfg.budgetSeed && fineCells ? fineCells.length * liquidCfg.cellCostUs / 1000 : 0);
+    // ⭐⭐ TIER 3, PER STRIP. This is the whole point of the change: a strip that cannot fit the budget even at
+    // K=1 runs on a fixed period instead of every tick, and NOTHING ELSE IN THE WORLD IS AFFECTED. The room-level
+    // version of this deferred every strip at once, so a lake being dumped in one place froze water everywhere.
+    // ⚠️ PHASED BY THE STRIP, not just by the room, so neighbouring strips take their skipped ticks on DIFFERENT
+    // ticks. Phasing them together would make a wide disturbance stutter in unison, which is the symptom this is
+    // fixing — it would just be a narrower version of the same bug.
+    // ⚠️ `est` is the strip's own EMA, which already exists and is already what tier 2 throttles K against.
+    // ⚠️ Its cells are pushed to `leftover` exactly as the out-of-time path above does, so nothing is lost and
+    // they are re-bucketed next tick. NOT `continue` before that, or a skipped strip's work is dropped.
+    if (budgetMs && liquidCfg.budgetRate && est > 0) {
+      const k1 = est / Math.max(1, liquidCfg.budgetKGain);
+      if (k1 > budgetMs) {
+        const per = Math.max(2, Math.min(liquidCfg.budgetRateMax | 0 || 8, Math.ceil(k1 / budgetMs)));
+        if ((liquidTickCount + roomPhase(room) + s * 7) % per !== 0) {
+          for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
+          liqRateSkips++;
+          continue;
+        }
+      }
+    }
     let kUsed = kFull;
     if (budgetMs && kFull > 1 && est > budgetMs) {
       kUsed = Math.max(1, Math.floor(kFull * budgetMs / est));
@@ -4801,6 +4821,21 @@ const runLiquidTick = () => {
   let _idle = 0;
   for (const r of cellRooms.fine) if (!roomOccupied(r)) { _deferred.add(r); liqIdleSkips++; _idle++; }
   if (liquidCfg.perfLog && _idle > liqPerf.idleRooms) liqPerf.idleRooms = _idle;
+  // ⭐⭐ SECTORS ARE PLANNED **BEFORE** THE ROSTER NOW, AND THAT MOVE IS THE WHOLE POINT OF THIS CHANGE.
+  // Tier 3 rate-limits a room by skipping it for whole ticks. With one shared Overworld that is every drop of
+  // water in the world stuttering together because somebody, somewhere, disturbed something — which is exactly
+  // what a shared world must never do, and what the sector split was built to stop. The tiers could not consult
+  // the plan while the plan was built after them, so a sectored room was rate-limited whole and its strips never
+  // got the chance to be throttled individually.
+  // ⚠️ It has to sit AFTER the unoccupied-room pass (whose deferrals are a property of the room, not the budget)
+  // and BEFORE the budget roster (whose deferrals are what this replaces). That ordering is the only reason the
+  // circularity resolves.
+  const _secPlans = new Map();
+  if (liquidCfg.secW > 0) for (const room of cellRooms.fine) {
+    if (_deferred.has(room)) continue;
+    const _p = planRoomSectors(room);
+    if (_p) _secPlans.set(room, _p);
+  }
   if (_budgetOn) {
     const _keys = [];
     for (const r of cellRooms.fine) {
@@ -4811,7 +4846,13 @@ const runLiquidTick = () => {
       // one of those loops tests `_deferred`. Doing it in the flow loop instead would tick a room's reactions
       // without its flow. It is also NOT starvation — the room runs on a fixed period, and it is deliberately
       // taken out of `_keys` so the "always admit one room" rule below cannot drag it back in on its off ticks.
-      if (liquidCfg.budgetRate) {
+      // 🟥 …BUT NEVER FOR A SECTORED ROOM. Deferring one of those defers the ENTIRE WORLD — every strip, every
+      // player, everywhere — because the Overworld is a single room. A sectored room carries its own rate
+      // limiting per strip inside `liqTickSectors`, against that strip's own measured cost, so a disturbance
+      // throttles the water near it and nothing else. Reported from play, and correctly: "we don't want any
+      // throttles to affect the entire world; it would be insane to have one person's actions on another part
+      // of the world cause lag for a player on the other side."
+      if (liquidCfg.budgetRate && !_secPlans.has(r)) {
         const _k1 = estRoomCost(r) / Math.max(1, liquidCfg.budgetKGain);
         if (_k1 > _budgetMs) {
           const _per = Math.max(2, Math.min(liquidCfg.budgetRateMax | 0 || 8, Math.ceil(_k1 / _budgetMs)));
@@ -4861,12 +4902,8 @@ const runLiquidTick = () => {
   // subset of in practice, and a room reached only through `src`/`powder` keeps the whole-room path unchanged.
   // ⚠️ `secW = 0` leaves this Map empty and every path below byte-identical to what it always was —
   // `probe_fine_identity` compares 500 ticks against a golden file to prove exactly that.
-  const _secPlans = new Map();
-  if (liquidCfg.secW > 0) for (const room of cellRooms.fine) {
-    if (_deferred.has(room)) continue;
-    const _p = planRoomSectors(room);
-    if (_p) _secPlans.set(room, _p);
-  }
+  // ⚠️ BUILT ABOVE, BEFORE THE BUDGET ROSTER — see the note there. It used to be built here, which is why tier 3
+  // could not consult it and rate-limited sectored rooms whole.
   const _secDoSoil = (liquidTickCount & 3) === 0;   // the soil gate, read ONCE so a strip's turn uses the same answer the whole-room loop does
   genSince('drain');
   for (const room of Array.from(cellRooms.src)) { if (!cellRooms.src.has(room)) continue; if (_deferred && _deferred.has(room)) continue; if (_secPlans.has(room)) continue; sourceTickRoom(room); }
