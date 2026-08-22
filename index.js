@@ -5125,6 +5125,11 @@ const runLiquidTick = () => {
       liqPerf = { simMs: 0, simMsMax: 0, ticks: 0, fineMs: 0, fineMsMax: 0, fineActive: 0, fineBytes: 0, fineChanged: 0, deferred: 0, idleRooms: 0, reactMs: 0, reactMsMax: 0,
         chunkMs: 0, chunkMsMax: 0, kMin: liquidCfg.fineLevelSteps,   // kMin is a MINIMUM, so it resets to the ceiling
         actChunks: liqPerf.actChunks, actCols: liqPerf.actCols, pending: liqPerf.pending, pendAt: liqPerf.pendAt };
+      // 🟥 …AND THESE TWO WERE NOT, WHICH MADE THEM UNREADABLE. Both were added 2026-08-22 as lifetime totals,
+      // so the Net tab showed `budget floored ×945` while the drain sat at 0/24ms and nothing was being floored
+      // — a number that only ever goes up cannot say whether the thing is happening NOW, which is the only
+      // question either of them exists to answer. Same rule as the block above: counters reset, gauges do not.
+      liqBudgetFloored = 0; chunkQOverruns = 0;
     }
   }
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
