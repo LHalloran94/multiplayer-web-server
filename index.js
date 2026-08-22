@@ -4500,7 +4500,19 @@ let liqIdleSkips = 0;         // ticks skipped because nobody was in the room at
 // ⚠️ DECLARED HERE, INSIDE the block `probe_budget` slices to `==LIQUID_TICK_BLOCK_END==`. A constant used by
 // `runLiquidTick` but declared below that marker is a ReferenceError in the rigs and nowhere else — the
 // sliced-block boundary, which has now caught this project nine times.
-const BUDGET_FLOOR_FRAC = 0.25;
+// 🟥 0.25 WAS TOO LOW AND THE SYMPTOM WAS "THE WATER FREEZES", not "the water is slow". The budget's tiers
+// degrade in two very different ways: tier 2 lowers K (the sub-step count), which is SMOOTH — water keeps
+// moving every tick, just less far. Tier 3 skips the room for whole ticks at a time, up to 1 in 8, which is
+// what a player sees as freeze-jump-freeze. Tier 3 only fires when the room's cost at K=1 exceeds the budget,
+// so a floor BELOW that cost hands every squeeze to tier 3; a floor above it hands the same squeeze to tier 2.
+// With one shared Overworld room that difference is the whole experience — tier 3 rate-limits the ONLY room,
+// so every drop of water in the world stutters together. (CLAUDE.md has warned that the tiers assume many
+// rooms; this is that warning arriving.)
+// ⇒ 0.6 of nominal ≈ 17ms against a measured K=1 cost of ~6-10ms, which keeps the squeeze in tier 2.
+// ⚠️ It does mean drain + liquid can exceed the tick when BOTH are saturated. That is deliberate and it is the
+// lesser evil: the two shares (24ms drain + 28ms liquid) never did fit in 40ms, and the old code "resolved"
+// that by silently disabling the budget entirely.
+const BUDGET_FLOOR_FRAC = 0.6;
 // How many ticks the floor actually bit, i.e. the drain had eaten the whole nominal budget. A MECHANISM counter:
 // if terrain is late and this is climbing, chunk work and liquid are fighting and neither is winning.
 let liqBudgetFloored = 0;
@@ -7794,7 +7806,25 @@ function applyStoredLiquid(room, p) {
     // An emptied cell (LIQ_REMOVED) carries no rank to test, and it is the case whose NEIGHBOURS may now have
     // somewhere to go — so it is still woken unconditionally. It is also the rare one.
     const rid = (rk === LIQ_REMOVED) ? 0 : LIQ_ID[rk];
-    if (!liquidCfg.storedWakeAll && rid && !liquidCanMove(s.terrain, i, geom, rid)) { worldLiquidWakeSkipped++; continue; }
+    // 🟥🟥 …BUT ONLY FOR CELLS WHOSE NEIGHBOURS ARE IN THIS PAGE, AND THIS IS THE BUG THE FIRST VERSION SHIPPED.
+    // `liquidCanMove` reads its neighbours with `peekCellAt`, which answers **-1 for a page nobody has produced
+    // yet** — and -1 fails every test in it, so the cell is judged "cannot move" and left asleep.
+    // For GENERATED liquid that is correct and deliberate: whatever produces the chunk below later runs the same
+    // seeding pass over ITS OWN cells, and the generator guarantees the result is at rest either way.
+    // For STORED liquid it is WRONG, because the pass that produces the chunk below runs over that chunk's
+    // stored cells, not over this one's — so nothing ever re-asks. A player's water sitting on the bottom row of
+    // a chunk, above ground that has not been produced yet, was left asleep FOR EVER.
+    // ⇒ reported from play immediately, as water frozen in mid-air in vertical columns, and that is exactly what
+    // it is: liquid whose support was "unknown" at the moment it was judged.
+    // ⭐ The fix is precise rather than a retreat. A cell strictly INSIDE the page has its below/left/right
+    // neighbours in the same page — the one we have just written — so the peek cannot answer -1 and the filter is
+    // sound. Only the three edges that `liquidCanMove` actually looks across can be wrong, so only those wake
+    // unconditionally: at most ~190 of a chunk's 4,096 cells, which keeps essentially all of the saving.
+    // ⚠️ A page is ROW-MAJOR within the chunk while the world index is column-major, so "below" leaves the page
+    // at `lr === 63` and "beside" at `lc === 0 || lc === 63`. Getting that pair the wrong way round would guard
+    // the wrong edges and look exactly like this bug again.
+    const _edge = (lr === CHUNK_SIDE - 1) || (lc === 0) || (lc === CHUNK_SIDE - 1);
+    if (!liquidCfg.storedWakeAll && !_edge && rid && !liquidCanMove(s.terrain, i, geom, rid)) { worldLiquidWakeSkipped++; continue; }
     if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
   }
   worldLiquidRestored += n;
