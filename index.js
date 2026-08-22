@@ -1748,6 +1748,10 @@ function geomRow(g, i) { return i % g.rows; }
 // ~3KB, and it divides the outer directory by the same factor: 425,984 pages become 1,664 outer slots per field.
 // Row-major, so a group is a horizontal strip of 256 chunks — which is how players spread out along a side-scroller.
 const PAGE_GRP_SH = 8, PAGE_GRP = 1 << PAGE_GRP_SH, PAGE_GRP_M = PAGE_GRP - 1;
+// How many page sky-answers `skyAt` may remember before dropping the lot. Every entry is immutable (see the
+// constructor), so clearing wholesale carries no correctness risk and the only reason for a bound is memory —
+// 65,536 entries is far more than any set of viewports touches and costs a few MB at worst.
+const SKY_MEMO_MAX = 65536;
 // `stride` = values per cell (1 for everything except fineAmt, which is LIQ_T per cell).
 // `seedFn` = how a freshly faulted page is initialised when its default is NOT zero (only fineLevelAcc, whose cells
 // carry a per-index hash so the invisible sub-unit levelling steps do not all align). A seeded array must fault its
@@ -1756,6 +1760,16 @@ function PagedArray(geom, Ctor, stride, seedFn, room) {
   this.geom = geom; this.Ctor = Ctor; this.T = (stride | 0) || 1; this.seedFn = seedFn || null;
   this.seedEmpty = null;                          // optional: (p) => true when the seeder is CERTAIN the page is all zeros
   this._emptyP = -1; this._emptyV = false;        // one-slot memo of the last seedEmpty answer — see _miss
+  // 🟥 …AND A REAL ONE BEHIND IT, because ONE SLOT IS NOT ENOUGH FOR THE SIM. The note on `skyAt` says "every
+  // hot reader walks a page at a time, so one slot is enough" — true of a scan, and false of the liquid tick,
+  // which walks the ACTIVE SET sorted by row and therefore hops between columns and pages on consecutive cells.
+  // The slot thrashed and `pageEmpty` ran again, and `pageEmpty` loops up to 64 columns of `topLimitAt`.
+  // MEASURED at **10.1% of the whole server** on a profile taken near the surface, where absent pages are sky.
+  // ⭐ The answer is IMMUTABLE — "would the generator put anything in this page" depends only on the layout,
+  // which is fixed for the life of the generator — so this needs no invalidation, only dropping when the
+  // generator itself is swapped (`setRoomGenerator`). Capped and cleared wholesale rather than evicted: a stale
+  // entry is impossible, so the only reason to bound it is memory.
+  this._skyMemo = new Map();
   // ⭐ EVICTION MUST BE TRANSPARENT TO ACCESS. An evicted chunk has no pages, so without this every read would hand
   // back the shared ZERO page and the chunk would look like EMPTY WORLD — which is exactly what it did: liquid at a
   // chunk seam saw air where solid ground was evicted and poured through it, one cell wide, and a write into an
@@ -1944,8 +1958,13 @@ PagedArray.prototype.pageVacant = function (p) { return this.pageAt(p) === null 
 PagedArray.prototype.skyAt = function (i) {
   if (!this.seedEmpty) return false;
   const p = this.pageOfCell(i);
-  if (p === this._emptyP) return this._emptyV;
-  const e = !!this.seedEmpty(p);
+  if (p === this._emptyP) return this._emptyV;      // the one-slot fast path still wins whenever a reader DOES run
+  let e = this._skyMemo.get(p);
+  if (e === undefined) {
+    e = !!this.seedEmpty(p);
+    if (this._skyMemo.size >= SKY_MEMO_MAX) this._skyMemo.clear();   // safe at any moment: every entry is immutable
+    this._skyMemo.set(p, e);
+  }
   this._emptyP = p; this._emptyV = e;
   return e;
 };
@@ -3612,7 +3631,15 @@ function fineLiquidTickRoom(room, SUB) {
   const LIQUID_FLOOR_ROW = Math.floor(roomFloorTop(room) / TERRAIN_CELL) * SUB;   // liquid may not descend into/below the bedrock row (scaled to fine rows)
   const SCAN = LIQUID_LEVEL_SCAN * SUB;                                  // levelling scan reach in CELLS → scaled so PHYSICAL reach is unchanged
   const TROWS = st.rows;
-  const coarseOf = (k) => { const fc = (k / FROWS) | 0, fr = k - fc * FROWS; return ((fc / SUB) | 0) * TROWS + ((fr / SUB) | 0); };
+  // 🟥🟥 AT SUB = 1 THIS IS THE IDENTITY FUNCTION, AND IT WAS 13.7% OF THE WHOLE LIQUID TICK — the single most
+  // expensive LINE in it, measured with V8's per-line ticks against the live Overworld under real load.
+  // FROWS = st.rows * SUB and TROWS = st.rows, so at SUB = 1 the body reduces to `fc * FROWS + fr`, which is `k`:
+  // two divisions, a multiply and a subtract per call, to compute k from k. `isSolid` and `isSinkF` are the most
+  // called functions in the server and every one of their calls went through it.
+  // ⚠️ SUB = 1 is the only ratio that ships (reactions are off at any other, `fineReactTickRoom` returns early),
+  // but the general form is kept and is byte-for-byte what it always was — this is a fast path, not a change.
+  const coarseOf = SUB === 1 ? (k) => k
+    : (k) => { const fc = (k / FROWS) | 0, fr = k - fc * FROWS; return ((fc / SUB) | 0) * TROWS + ((fr / SUB) | 0); };
   // 🟥🟥 THE SIM MUST NEVER BUILD WORLD. `.g()` PRODUCES the page it lands on, so `isSolid` — the single most
   // called function in the tick — generated a chunk (~0.9ms, synchronously) every time liquid looked at a cell
   // just outside the produced world. MEASURED: 2,239 of 3,395 chunks, 66% of ALL world generation, came from
@@ -3681,11 +3708,14 @@ function fineLiquidTickRoom(room, SUB) {
     if (!liquidCfg.densitySort) return false;
     if (r + 1 >= LIQUID_FLOOR_ROW) return false;                                      // canDown
     const hi = floorRank(i); if (hi < 0) return false;
-    for (const j of [i + 1, c > 0 ? i + 1 - FROWS : -1, c < COLS - 1 ? i + 1 + FROWS : -1]) {
-      if (j < 0 || j >= NCELL || tot.g(j) <= 0 || isSolid(j)) continue;
-      if (lavaBlk(i, j)) continue;
-      if (hi < ceilRank(j)) return true;     // the sim's own swap rule: floorRank(above) < ceilRank(below)
-    }
+    // 🟥 THIS WAS AN ARRAY LITERAL AND IT WAS 8.6% OF THE LIQUID TICK. `fineSortSteps` defaults to 1, so
+    // `!doSort` is true on eight of the nine sub-steps and this runs on EVERY active cell on all of them —
+    // allocating a three-element array and an iterator each time, purely to loop over three known values.
+    // Unrolled below; identical order, identical result, no allocation. (Measured with V8's per-line ticks.)
+    const j0 = i + 1, j1 = c > 0 ? i + 1 - FROWS : -1, j2 = c < COLS - 1 ? i + 1 + FROWS : -1;
+    if (j0 >= 0 && j0 < NCELL && tot.g(j0) > 0 && !isSolid(j0) && !lavaBlk(i, j0) && hi < ceilRank(j0)) return true;
+    if (j1 >= 0 && j1 < NCELL && tot.g(j1) > 0 && !isSolid(j1) && !lavaBlk(i, j1) && hi < ceilRank(j1)) return true;
+    if (j2 >= 0 && j2 < NCELL && tot.g(j2) > 0 && !isSolid(j2) && !lavaBlk(i, j2) && hi < ceilRank(j2)) return true;
     return false;
   };
   // PHYSICS SUB-STEPS (fineLevelSteps): run the WHOLE fine tick K times per tick, so ALL movement (fall/spill/level/sort)
@@ -3962,7 +3992,7 @@ function fineLiquidTickRoom(room, SUB) {
         if (amt.rp(i)[amt.o(i) + t] <= 0) continue;
         const Ci = cumAt(i, t);
         let dir = 0, best = Infinity;
-        for (const sdir of [-1, 1]) for (let d = 1; d <= PLSCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d * FROWS; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } }
+        for (let _si = 0; _si < 2; _si++) { const sdir = _si ? 1 : -1; for (let d = 1; d <= PLSCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d * FROWS; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } } }
         if (dir === 0) continue;
         const j = i + dir * FROWS; if (isSolid(j) || lavaBlk(i, j)) continue;
         // ⭐⭐ SYMMETRIC SORT GATE. `sortingHere` stops a cell that is still stratifying from levelling — but it only
@@ -4020,7 +4050,7 @@ function fineLiquidTickRoom(room, SUB) {
       // onward every time: the front advanced ~9 cells/tick and raced away from the body that was still separating.
       if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0 && step < FLATSTEPS) {
         let dir = 0, best = Infinity;
-        for (const sdir of [-1, 1]) for (let d = 1; d <= SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d * FROWS; if (isSolid(j)) break; const jl = tot.g(j); if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } }
+        for (let _si = 0; _si < 2; _si++) { const sdir = _si ? 1 : -1; for (let d = 1; d <= SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d * FROWS; if (isSolid(j)) break; const jl = tot.g(j); if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } } }
         if (dir !== 0 && shedCap >= 1) { const j = i + dir * FROWS; if (tot.g(j) < L && tot.g(j) < cap && !lavaBlk(i, j) && reduce(1) > 0) { lvlMove(i, j, 1); L -= 1; wakeN(i); } }
       }
     }
@@ -8053,6 +8083,9 @@ function setRoomGenerator(room, gen) {
     const pa = s[f]; if (!pa) continue;
     pa.seedFn = gen ? genSeedFn(f, room) : null;
     pa.seedEmpty = gen ? ((p) => gen.pageEmpty(p, pa.geom)) : null;
+    // ⚠️ THE ONE THING THAT INVALIDATES THE SKY MEMO. Its entries are answers about THIS generator's layout, so
+    // they survive every write, eviction and restore — and none of them survive the generator being replaced.
+    pa._skyMemo.clear(); pa._emptyP = -1;
   }
 }
 // ⭐ LIQUID IS SEEDED ON A DEFERRED PASS, AND THAT IS NOT TIDINESS. A page fault can happen from deep inside
