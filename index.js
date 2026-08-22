@@ -5347,9 +5347,17 @@ const interestCfg = {
   // adapts to whatever chunks took, and chunks only take anything when a player is actually moving into new
   // world. With `queueBatch` at 1 the worst overshoot is ONE chunk (~14ms measured), so 20 + 14 = 34 of a 40ms
   // tick and liquid keeps ~8ms while streaming and its full 28ms the rest of the time.
+  // ⭐ 26 SINCE 2026-08-22, and the number that forced it is the fastest travel in the game rather than the
+  // fastest FALL. Cursor mode pans at `PAN_SPEED / avZoom` = 28px/frame at the zoom floor, on both axes at once
+  // while diagonal — 79 chunks/s against a sustained ~86/s at 20ms, i.e. inside the noise of not keeping up, and
+  // measured doing exactly that (arrival climbing 573ms → 3,100ms over 250 steps and still rising). At 26 the
+  // ceiling is ~112/s. The client-side diagonal normalisation lands the same blow from the other side (79 → 56).
+  // ⚠️ 26 + queueBatch(2) × ~8ms worst chunk = 42 of a 40ms tick, so this is now AT the bound `probe_worldgen`
+  // B5a keeps rather than inside it. It is affordable because the overshoot is one batch and only on ticks with
+  // terrain pending — but it is the last free notch. Beyond this, make chunks cheaper or reduce demand.
   // ⚠️ STILL A DIAL, and still the first thing to turn if terrain lags. `queueMs = 0` remains an exact revert
   // to the synchronous path.
-  queueMs: 20,
+  queueMs: 26,
   // Chunks per `sendChunkContent` call while draining. The clock is checked after every batch, so this trades
   // packet count against how far a single batch can overshoot the allowance. ⚠️ ONE CHUNK CANNOT BE
   // INTERRUPTED, so the true overshoot bound is `queueBatch × the cost of the most expensive chunk` — which is
