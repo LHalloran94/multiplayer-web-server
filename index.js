@@ -2319,20 +2319,32 @@ function encodeChunkDelta(s, p, gen, geom) {
   // One pass to count, so the arrays are allocated at exactly the right size rather than grown.
   let n = 0;
   for (let k = 0; k < CHUNK_CELLS; k++) if (t[k] !== _dScratchT[k] || hpAt(k) !== _dScratchH[k]) n++;
-  // ⚠️ Falls back to the whole-chunk encoding if the diff is somehow bigger. It cannot be at 4 bytes a cell
-  // against an 18.5KB blob, but "the encoding that is smaller wins" is one comparison and removes the question.
-  if (n * 4 >= CHUNK_CELLS * 2) return null;
+  // 🟥🟥 THIS USED TO `return null`, AND null WAS READ BY `saveChunkBlob` AS "DELETE THE ROW". So a chunk the
+  // player had changed 2,048 cells of had its EXISTING SAVED ROW REMOVED on eviction, and came back from the
+  // seed — a clean, chunk-aligned hole in whatever they had built. REPRODUCED (scratchpad/e2e_chunk_threshold.js):
+  // a 1,920-cell block stores 1,920 cells, is on disk, and then 640 more cells in the same chunk take the row
+  // away entirely, while the identical block in the chunk next door keeps its row. The comment that used to sit
+  // here said the branch could not be reached ("it cannot be at 4 bytes a cell against an 18.5KB blob") — it was
+  // comparing against the in-MEMORY RLE blob, not against the 4-bytes-a-cell diff this actually writes, and a
+  // solid 64x40 stone floor reaches it easily.
+  // ⭐ THE FALLBACK IS NOW BUILT rather than promised. Past the crossover the chunk is stored WHOLE: every cell's
+  // material and hit points, 2 bytes a cell = 8KB flat, which is exactly where the diff stops being cheaper.
+  // ⚠️ It is the SAME in-memory shape — d/m/hp with every index listed — so `applyStoredEdit`, `decodeChunk`,
+  // `pristine` and the flush need no special case at all. Only the on-disk encoding differs, and the `kind`
+  // column that has always been written as 0 is what says which one a row holds.
+  const whole = (n * 4 >= CHUNK_CELLS * 2) ? 1 : 0;
+  if (whole) n = CHUNK_CELLS;
   const idx = new Uint16Array(n), mat = new Uint8Array(n), dmg = new Uint8Array(n);
   let w = 0;
   for (let k = 0; k < CHUNK_CELLS; k++) {
     const hv = hpAt(k);
-    if (t[k] === _dScratchT[k] && hv === _dScratchH[k]) continue;
+    if (!whole && t[k] === _dScratchT[k] && hv === _dScratchH[k]) continue;
     idx[w] = k; mat[w] = t[k]; dmg[w] = hv; w++;
   }
   // The generator version travels WITH the diff. A diff only means anything alongside the ground it was taken
   // against, so when the content redesign changes the generator, a stale diff must be detectable rather than
   // quietly applied to different rock. See WORLDGEN_VERSION in worldgen.js.
-  return { v: gen.version || WORLDGEN.WORLDGEN_VERSION, d: idx, m: mat, hp: dmg, a: null };
+  return { v: gen.version || WORLDGEN.WORLDGEN_VERSION, d: idx, m: mat, hp: dmg, a: null, whole };
 }
 // ⭐ SCALE COUNTER (see liqScanRows in the sim block for the reasoning). Key-deletes done pruning the work sets
 // when a chunk is evicted. It MUST stay independent of |fineActive|: the version that walked the whole set made
@@ -2391,7 +2403,10 @@ function evictChunk(room, p) {
   // ⚠️ CALLED EVEN WHEN THERE IS NOTHING TO SAVE. A chunk that has gone back to being pristine — somebody filled
   // their hole in — must DROP any row it used to have, or the next restart re-applies a diff describing a hole
   // that is no longer there. The hook decides; `null` is "store nothing, and forget whatever was stored".
-  saveChunkBlob(room, p, (!rec.gen && rec.blob) ? rec.blob : null);
+  // ⚠️ THE FOURTH ARGUMENT IS THE WHOLE POINT: only `_d.pristine` — the generate-and-compare finding nothing —
+  // may delete the stored row. `rec.blob` here can also be `encodeChunk`'s RLE (a room with no generator, or a
+  // chunk whose terrain page had already gone), which has no `.d` and used to reach the same deletion.
+  saveChunkBlob(room, p, (!rec.gen && rec.blob) ? rec.blob : null, rec.gen ? 1 : 0);
   rec.savedHash = rec.evHash;                // …and it is now written, so the periodic flush can skip it
   ch.evicted[p] = 1;
   for (const f of CHUNK_CONTENT) if (s[f]) s[f].dropPage(p);
@@ -2980,6 +2995,22 @@ const liquidCfg = {
   // room AT K=1 is estimated as its full-K EMA divided by this, not by K. Using K would under-estimate by
   // ~1.4× and fire tier 3 later than it should.
   budgetKGain: 6.5,
+  // ⭐⭐ TIER 2 CANNOT FIRE IN A SECTORED WORLD, AND THIS IS THE TOGGLE FOR THE FIX. Reported from play: *"K seems
+  // to just equal 9 all the time no matter what."* That is not a display bug. Tier 2 asks `est > budgetMs` where
+  // `est` is ONE STRIP's measured cost and `budgetMs` is the budget for the WHOLE tick — so a single strip has to
+  // be more expensive than everything the server is allowed to spend before K comes down at all. With `secW=256`
+  // the work spreads over several strips at a few ms each and the test simply never passes.
+  // ⭐ WHY IT MATTERS BEYOND A STUCK NUMBER: the two throttles degrade completely differently. Tier 2 lowers K,
+  // which is SMOOTH — water keeps moving every tick, just less far. Deferring a strip (the wall-clock stop above)
+  // is what a player sees as freeze-jump-freeze. The sector split moved scheduling to the strip level and left
+  // this comparison at the room level, so in the Overworld the SMOOTH path is dead and only the steppy one runs.
+  // That is the likeliest cause of the *"a bit staggered… like it was moving in discrete steps"* report.
+  // ⇒ ON = a strip is measured against a FAIR SHARE of what is left of the budget (remaining ms ÷ strips still to
+  // run) rather than against the whole of it. OFF = today's behaviour, unchanged.
+  // ⚠️ SHIPS OFF and stays a toggle. It makes tier 2 fire far more often, and the standing constraint is
+  // "throttling should be a rare EMERGENCY thing, not something that happens almost every time liquid is moving" —
+  // which is a judgement to be made by watching water, not by reading a number.
+  kFairShare: 0,
   // ══ SECTORS — SCHEDULE ONE ROOM IN COLUMN STRIPS INSTEAD OF ALL AT ONCE ═══════════════════════════════════
   // 🟥 THE PROBLEM, MEASURED ON THE LIVE SERVER 2026-08-08: the budget's only tools are "defer a whole room"
   // (tier 1) and "rate-limit a whole room" (tier 3), and the Overworld is ONE room. So a flood at one end of the
@@ -5031,9 +5062,18 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
         }
       }
     }
+    // ⭐ TIER 2, AND THE SHARE IT IS MEASURED AGAINST. See `kFairShare` in liquidCfg for why the whole-budget
+    // comparison can never fire once a room is split into strips.
+    // ⚠️ REMAINING budget over REMAINING strips, not budget/nStrips: a tick whose first strips came in cheap
+    // should leave the later ones running at full K, and a tick that is already most of the way through its
+    // allowance should throttle hard. It also lines up with the wall-clock deferral immediately above, which is
+    // measured against exactly the same clock.
     let kUsed = kFull;
-    if (budgetMs && kFull > 1 && est > budgetMs) {
-      kUsed = Math.max(1, Math.floor(kFull * budgetMs / est));
+    const share = (budgetMs && liquidCfg.kFairShare)
+      ? Math.max(0.5, (budgetMs - (performance.now() - tickT0)) / Math.max(1, _nSec - _sn))
+      : budgetMs;
+    if (budgetMs && kFull > 1 && est > share) {
+      kUsed = Math.max(1, Math.floor(kFull * share / est));
       liquidCfg.fineLevelSteps = kUsed;
     }
     if (kUsed < liqPerf.kMin) liqPerf.kMin = kUsed;
@@ -5433,6 +5473,11 @@ const runLiquidTick = () => {
         // both counters stay at 0 — so a non-zero reading is proof the mechanism fired, not an inference from
         // an outcome (the same reason liqRateSkips and liqK2Throttles exist).
         secW: liquidCfg.secW, secTicks: liqSecTicks, secDeferred: liqSecDeferred,
+        // ⭐ THE TWO THROTTLES, AS COUNTERS, BECAUSE THE PANEL SHOWED NEITHER. `secDeferred` (above) is the one
+        // that IS operating in a sectored world and it was console-only; `k2Throttles` is tier 2, whose stuck
+        // `K=9` is what prompted this — a zero here with water plainly moving is the whole diagnosis in one
+        // number. `rateSkips` is tier 3. Counters, so they reset per window and read as a rate.
+        k2Throttles: liqK2Throttles, rateSkips: liqRateSkips, kFairShare: liquidCfg.kFairShare ? 1 : 0,
         // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
         // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
         steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
@@ -6987,16 +7032,34 @@ if (process.env.MW_FRESH_WORLD === '1') {
 
 // A diff packs to (index u16, material u8, damage u8) per changed cell — the shape `encodeChunkDelta` already
 // produces, laid out as one buffer so SQLite stores it as a BLOB rather than as JSON (which would be ~4x).
+// The two on-disk encodings, and the `kind` column says which a row holds. KIND_DIFF has always been the only
+// one written; KIND_WHOLE is the fallback `encodeChunkDelta` used to defer to and nobody had built.
+// ⚠️ A row written before this existed has kind 0 and is a diff, which is what it has always been — no migration.
+const CHUNK_KIND_DIFF = 0, CHUNK_KIND_WHOLE = 1;
 function packDelta(d) {
+  // WHOLE: no indices, because every cell is present in order. Materials then hit points, 2 bytes a cell.
+  if (d.whole) {
+    const buf = Buffer.allocUnsafe(CHUNK_CELLS * 2);
+    for (let i = 0; i < CHUNK_CELLS; i++) { buf[i] = d.m[i]; buf[CHUNK_CELLS + i] = d.hp[i]; }
+    return buf;
+  }
   const n = d.d.length, buf = Buffer.allocUnsafe(n * 4);
   for (let i = 0; i < n; i++) { buf.writeUInt16LE(d.d[i], i * 4); buf[i * 4 + 2] = d.m[i]; buf[i * 4 + 3] = d.hp[i]; }
   return buf;
 }
-function unpackDelta(buf, ver) {
+function unpackDelta(buf, ver, kind) {
+  // ⚠️ A WHOLE row is expanded into the same d/m/hp shape a diff produces, listing every index. That is what
+  // keeps `applyStoredEdit` and `decodeChunk` free of a second code path — the difference is entirely on disk.
+  if (kind === CHUNK_KIND_WHOLE) {
+    if (buf.length !== CHUNK_CELLS * 2) return null;    // corrupt or truncated; treated as no row at all
+    const d = new Uint16Array(CHUNK_CELLS), m = new Uint8Array(CHUNK_CELLS), hp = new Uint8Array(CHUNK_CELLS);
+    for (let i = 0; i < CHUNK_CELLS; i++) { d[i] = i; m[i] = buf[i]; hp[i] = buf[CHUNK_CELLS + i]; }
+    return { v: ver, d, m, hp, a: null, whole: 1 };
+  }
   const n = (buf.length / 4) | 0;
   const d = new Uint16Array(n), m = new Uint8Array(n), hp = new Uint8Array(n);
   for (let i = 0; i < n; i++) { d[i] = buf.readUInt16LE(i * 4); m[i] = buf[i * 4 + 2]; hp[i] = buf[i * 4 + 3]; }
-  return { v: ver, d, m, hp, a: null };
+  return { v: ver, d, m, hp, a: null, whole: 0 };
 }
 // Diagnostics; a silent persistence layer is untestable. `worldApplied` is the one that matters to a test — a
 // row being READ proves nothing, a row being laid over real ground is the mechanism.
@@ -7005,9 +7068,9 @@ let worldSaved = 0, worldLoaded = 0, worldApplied = 0, worldSaveErrors = 0;
 // slice out and run in a bare `new Function`, where `_putChunkRow` does not exist. Declared as a no-op INSIDE
 // that block (search `saveChunkBlob = `) and reassigned to this, below the block, at load.
 function persistChunkBlob(room, p, blob, ver) {
-  if (!blob || !blob.d) return;                              // pristine, or the whole-chunk fallback (kind 1, later)
-  if (worldCfg.tracePersist) console.log(`[persist] write chunk ${p}: ${blob.d.length} terrain cell(s), ${blob.liq ? (blob.liq.length / 4) + ' liquid entr(ies)' : 'no liquid diff'}`);
-  try { _putChunkRow.run(room, p, ver, 0, packDelta(blob), blob.liq || null); worldSaved++; }
+  if (!blob || !blob.d) return;                              // pristine, or a room with no generator to diff against
+  if (worldCfg.tracePersist) console.log(`[persist] write chunk ${p}: ${blob.whole ? 'WHOLE (' + CHUNK_CELLS + ' cells, 8KB)' : blob.d.length + ' terrain cell(s)'}, ${blob.liq ? (blob.liq.length / 4) + ' liquid entr(ies)' : 'no liquid diff'}`);
+  try { _putChunkRow.run(room, p, ver, blob.whole ? CHUNK_KIND_WHOLE : CHUNK_KIND_DIFF, packDelta(blob), blob.liq || null); worldSaved++; }
   catch (e) { worldSaveErrors++; if (worldSaveErrors < 5) console.log('world_chunks save failed: ' + e.message); }
 }
 function loadChunkBlob(room, p, ver) {
@@ -7019,7 +7082,8 @@ function loadChunkBlob(room, p, ver) {
   // which is the correct loss, and the alternative is silent corruption.
   if (row.ver !== ver) { try { _delChunkRow.run(room, p); } catch (e) { /* best effort */ } return null; }
   worldLoaded++;
-  const b = unpackDelta(Buffer.from(row.terrain), row.ver);
+  const b = unpackDelta(Buffer.from(row.terrain), row.ver, row.kind | 0);
+  if (!b) return null;
   b.liq = row.liquid ? Buffer.from(row.liquid) : null;
   return b;
 }
@@ -7916,7 +7980,7 @@ function genSeedFn(field, room) {
 // Which chunks of a room have stored edits. Loaded ONCE per room, as indices only: the hot path (a page fault,
 // which can come from inside the liquid tick) must never touch the database, and the overwhelming majority of
 // chunks have no row at all. The blob itself is read only for a chunk actually in this set.
-const _listChunkRows = db.prepare('SELECT chunk, ver, terrain, liquid FROM world_chunks WHERE room = ?');
+const _listChunkRows = db.prepare('SELECT chunk, ver, kind, terrain, liquid FROM world_chunks WHERE room = ?');
 function storedFor(room) {
   let m = _storedChunks.get(room);
   if (!m) {
@@ -7929,7 +7993,8 @@ function storedFor(room) {
         // against, so applying one across a generator change would cut somebody's tunnel through different
         // rock. Losing the edit is the correct loss; silent corruption is not.
         if (r.ver !== want || !r.terrain) { stale++; continue; }
-        const b = unpackDelta(Buffer.from(r.terrain), r.ver);
+        const b = unpackDelta(Buffer.from(r.terrain), r.ver, r.kind | 0);
+        if (!b) { stale++; continue; }
         b.liq = r.liquid ? Buffer.from(r.liquid) : null;   // the liquid half rides the same row and the same version check
         m.set(r.chunk | 0, b);
         worldLoaded++;
@@ -7942,12 +8007,24 @@ function storedFor(room) {
   }
   return m;
 }
-saveChunkBlob = function (room, p, blob) {
-  // ⭐ NO DIFF ⇒ DELETE THE ROW, and that is not tidiness. A chunk can go back to being pristine — fill in the
-  // hole you dug and it is generated ground again — and leaving the old row behind means the next restart
-  // re-applies a diff describing a hole that no longer exists. "Nothing to store" has to be written down as
-  // nothing, exactly as a drained lake needs an explicit empty marker rather than an absent one.
+saveChunkBlob = function (room, p, blob, pristine) {
+  // ⭐ A CHUNK THAT IS BACK TO PRISTINE DROPS ITS ROW, and that is not tidiness. Fill in the hole you dug and it
+  // is generated ground again — leaving the old row behind means the next restart re-applies a diff describing a
+  // hole that no longer exists. "Nothing to store" has to be written down as nothing, exactly as a drained lake
+  // needs an explicit empty marker rather than an absent one.
+  // 🟥🟥 BUT THE TEST USED TO BE `!blob || !blob.d`, AND THAT ONE CONDITION MEANT THREE COMPLETELY DIFFERENT
+  // THINGS — all of which deleted somebody's work:
+  //     · the chunk really is pristine                                  ⇒ delete, correct
+  //     · the diff was too big to encode (>= 2,048 changed cells)       ⇒ DELETED THE PLAYER'S BUILD
+  //     · the terrain page was not resident so we could not even look   ⇒ DELETED IT ON NO EVIDENCE AT ALL
+  // Reproduced end to end in scratchpad/e2e_chunk_threshold.js. The 30-second flush beside this already got it
+  // right (`if (!d) continue;` — it declines to write and leaves the row alone), so the two callers of one save
+  // routine disagreed about what an absent diff meant, and that disagreement was the bug.
+  // ⇒ deletion is now an EXPLICIT decision by the caller, which is the only place that knows why the diff is
+  // missing. No blob and no `pristine` means "I could not encode this" and the stored row is left exactly as it
+  // is: a stale row loses the LATEST edits, which is bad, but it does not delete what is already safely on disk.
   if (!blob || !blob.d) {
+    if (!pristine) return;
     if (storedFor(room).delete(p | 0)) { try { _delChunkRow.run(room, p); } catch (e) { /* best effort */ } }
     return;
   }
@@ -8048,7 +8125,7 @@ function worldFlush(max) {
       // A pristine chunk stores nothing AND drops whatever it used to store (see saveChunkBlob). A null delta
       // means this room cannot be diffed at all, which is not a state to record a hash for.
       if (!d) continue;
-      saveChunkBlob(room, p, d.pristine ? null : d);
+      saveChunkBlob(room, p, d.pristine ? null : d, d.pristine ? 1 : 0);
       if (!d.pristine) wrote++;
     }
     // ⚠️ ADVANCE BY WHAT WAS ACTUALLY EXAMINED, INCLUDING THE CHEAP SKIPS. The first version advanced only on
