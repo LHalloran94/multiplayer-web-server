@@ -5400,13 +5400,16 @@ const interestCfg = {
   // `server/worldgen.js`, the ROLLBACK generator (0.86ms mean / 1.64ms worst) rather than the worldgen2 stack
   // that actually ships (~5.8ms in a batch, ~8ms worst, measured on the running server). On the real numbers
   // 26 + 2×8 = 42ms against a 40ms tick: the property was violated while the guard printed a healthy margin.
-  // ⇒ 22 + 2×8 = 38ms, inside the tick. Throughput at 22ms is still ~95 chunks/s against a measured worst-case
+  // ⇒ 24 + 2×8 = 40ms, exactly the tick — the most the bound allows at batch 2 and a ~8ms worst chunk. It went
+  // to 22 first and play reported the queue getting deeper for it (awaiting 16 → 24), which is the 15% of
+  // throughput that costs; 24 gives it back with the bound still satisfied. Throughput ~104 chunks/s against a
+  // measured worst-case
   // demand of 49/s (normalised cursor diagonal at the zoom floor), so nothing is given up.
   // ⚠️ FOURTH INSTANCE of a cost figure inherited from the rollback generator on this track alone. B5a now
   // carries a companion (B5a-live) evaluated against the measured live cost.
   // ⚠️ STILL A DIAL, and still the first thing to turn if terrain lags. `queueMs = 0` remains an exact revert
   // to the synchronous path.
-  queueMs: 22,
+  queueMs: 24,
   // Chunks per `sendChunkContent` call while draining. The clock is checked after every batch, so this trades
   // packet count against how far a single batch can overshoot the allowance. ⚠️ ONE CHUNK CANNOT BE
   // INTERRUPTED, so the true overshoot bound is `queueBatch × the cost of the most expensive chunk` — which is
