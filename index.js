@@ -2972,6 +2972,11 @@ const liquidCfg = {
   // "liquid works" and "liquid is frozen" in the Overworld is exactly this. Left as a live toggle because if
   // liquid ever appears to hang where it should flow, this is the first thing to flip.
   genWakeAll: 0,
+  // ⚠️ Restores the pre-2026-08-22 behaviour of `applyStoredLiquid`: wake EVERY stored cell on a chunk fault-in
+  // rather than only the ones `liquidCanMove` says can move. Kept as a live A/B because that unconditional wake
+  // was the cause of the sim running at 32ms of a 40ms tick while a player moved through ground they had built
+  // in, and an A/B against the Net tab is how it was found.
+  storedWakeAll: 0,
   // ⭐ THE ACTIVE-CELL HEAT WIRE. Off by default and costs literally nothing when off (one boolean on a path that
   // already runs once every 32 ticks). Turned on by the Inspect tab's "Active-cell heat" checkbox, which is the
   // only thing that reads it — a diagnostic nobody has switched on should not be on the wire.
@@ -4971,7 +4976,7 @@ const runLiquidTick = () => {
         // ⭐ WHAT A CHUNK IS COSTING RIGHT NOW, and how often the drain still ran past its allowance despite
         // predicting. `chunkQCost` rising is the signal that the world got more expensive to generate; a
         // non-zero `chunkQOverruns` means the prediction is wrong often enough to look at.
-        chunkQCost: +chunkCostMs.toFixed(2), chunkQCostHi: +chunkCostHi.toFixed(2), chunkQOverruns,
+        chunkQCost: +chunkCostMs.toFixed(2), chunkQCostHi: +chunkCostHi.toFixed(2), chunkQOverruns, liqWakeSkipped: worldLiquidWakeSkipped,
         chunkQWait: chunkQueueDepth(),
         // The K tier 2 actually USED this window (see kMin) — `steps` below is the configured maximum.
         stepsUsed: liqPerf.kMin,
@@ -7692,6 +7697,10 @@ chunkDelta = (room, p) => {
 // generator's own seeding for the chunk, so the stored state wins. Reverse that order and a drained lake refills
 // itself on every restart.
 let worldLiquidRestored = 0;
+// ⭐ How many stored-liquid cells were NOT woken because they had nowhere to go. A MECHANISM counter: if
+// terrain is arriving late and this is large, the filter is doing its job and the load is elsewhere; if it is
+// zero on a played-in world, the filter is not firing and something upstream changed.
+let worldLiquidWakeSkipped = 0;
 function applyStoredLiquid(room, p) {
   const blob = storedFor(room).get(p | 0);
   const buf = blob && blob.liq;
@@ -7719,16 +7728,40 @@ function applyStoredLiquid(room, p) {
     n++;
   }
   // ⚠️ WOKEN, not left to be discovered, and every listed cell — including the emptied ones, whose NEIGHBOURS may
-  // now have somewhere to go. This is liquid a PLAYER moved, so unlike generated liquid it has no claim to being
-  // at rest: it may have been mid-flow when the server went down. The list is short (changed cells only), so
-  // waking all of it costs nothing, and under-waking leaves water visibly hanging until something disturbs it.
+  // now have somewhere to go.
+  // 🟥🟥 …BUT ONLY THE ONES THAT CAN ACTUALLY MOVE, AND THE OLD REASONING FOR WAKING ALL OF THEM WAS MEASURED
+  // WRONG. It said: "This is liquid a PLAYER moved, so unlike generated liquid it has no claim to being at rest:
+  // it may have been mid-flow when the server went down. The list is short (changed cells only), so waking all
+  // of it costs nothing." Two things are wrong with that.
+  //  1. IT DOES NOT RUN ONCE AFTER A RESTART. It runs on EVERY chunk fault-in, for the life of the process. A
+  //     player moving through ground they have edited before re-wakes all of it, every time, and the water was
+  //     settled long ago.
+  //  2. "THE LIST IS SHORT" IS PER CHUNK. With ~8,800 stored chunks in a played-in world and a window faulting
+  //     several chunks a second, it is thousands of cells per tick.
+  // Reported from play and diagnosed from the user's own Net-tab readout, which is the only reason it was found:
+  // standing still the sim ran at **0.03ms with ZERO active cells**; moving, **16-32ms avg, 90ms max, of a 40ms
+  // tick, with 3,408 active** — so every bit of the load was created by movement rather than by the world having
+  // water in it. The chunk queue shares that tick, which is why terrain then arrived seconds late.
+  // 🟥 It could not be reproduced by any harness here, because a fresh test world has NO STORED EDITS: traversals
+  // at the surface AND deep underground both measured 0 active cells. The bug is proportional to how much a
+  // player has built, which is exactly the thing a clean rig does not have.
+  // ⭐ THE FILTER IS NOT A NEW RULE — it is `liquidCanMove`, the same one the generated-liquid seeder and
+  // `rewakeChunk` already use, and it does not lose the mid-flow case it was protecting: liquid that was caught
+  // mid-flow has somewhere to go, so `liquidCanMove` answers true and it wakes. What it drops is liquid with
+  // nowhere to go, which is at rest by definition.
+  // ⚠️ `storedWakeAll` restores the old behaviour live, for an A/B against exactly these numbers.
   // ⚠️ A page is laid out ROW-MAJOR WITHIN THE CHUNK (`lr * CHUNK_SIDE + lc`) while the world index is
   // column-major (increment 5) — hence the conversion rather than an offset.
   for (let q = 0; q + 3 < buf.length; q += 4) {
-    const c = buf[q] | (buf[q + 1] << 8);
+    const c = buf[q] | (buf[q + 1] << 8), rk = buf[q + 2];
     const lr = (c / CHUNK_SIDE) | 0, lc = c - lr * CHUNK_SIDE;
     if (pc0 + lc >= geom.cols || pr0 + lr >= geom.rows) continue;
-    if (act.size < LIQUID_MAX_ACTIVE) act.add((pc0 + lc) * geom.rows + (pr0 + lr));
+    const i = (pc0 + lc) * geom.rows + (pr0 + lr);
+    // An emptied cell (LIQ_REMOVED) carries no rank to test, and it is the case whose NEIGHBOURS may now have
+    // somewhere to go — so it is still woken unconditionally. It is also the rare one.
+    const rid = (rk === LIQ_REMOVED) ? 0 : LIQ_ID[rk];
+    if (!liquidCfg.storedWakeAll && rid && !liquidCanMove(s.terrain, i, geom, rid)) { worldLiquidWakeSkipped++; continue; }
+    if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
   }
   worldLiquidRestored += n;
   return n;
@@ -8820,7 +8853,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'storedWakeAll', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
