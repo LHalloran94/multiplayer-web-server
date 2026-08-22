@@ -4971,7 +4971,7 @@ const runLiquidTick = () => {
         // ⭐ WHAT A CHUNK IS COSTING RIGHT NOW, and how often the drain still ran past its allowance despite
         // predicting. `chunkQCost` rising is the signal that the world got more expensive to generate; a
         // non-zero `chunkQOverruns` means the prediction is wrong often enough to look at.
-        chunkQCost: +chunkCostMs.toFixed(2), chunkQOverruns,
+        chunkQCost: +chunkCostMs.toFixed(2), chunkQCostHi: +chunkCostHi.toFixed(2), chunkQOverruns,
         chunkQWait: chunkQueueDepth(),
         // The K tier 2 actually USED this window (see kMin) — `steps` below is the configured maximum.
         stepsUsed: liqPerf.kMin,
@@ -5431,7 +5431,15 @@ const interestCfg = {
   // batch 1 pays `drainGenLiquid`, the restore loop and two socket emits per chunk, so it is now the more
   // expensive setting as well as the slower one. At 2 the worst overshoot is ~16ms on top of the 20ms
   // allowance, i.e. 36 of a 40ms tick, which is the bound `probe_worldgen` B5a exists to keep.
-  queueBatch: 2,
+  // ⭐⭐ 2026-08-22: EVERY PARAGRAPH ABOVE IS NOW HISTORY, BECAUSE THIS IS NO LONGER THE OVERSHOOT MULTIPLIER.
+  // `drainChunkQueue` sizes each batch against the time the allowance has left (`fits`), so a batch cannot run
+  // past `budgetMs + one chunk` however large this is — the whole reason it was pinned small is gone. It is now
+  // a MAXIMUM, not a fixed cost: at the start of a drain a cheap sky chunk allows a dozen and an expensive deep
+  // one allows four, and at the end of the allowance both allow one.
+  // ⇒ raised, to buy back the throughput that bounding the overshoot cost. The per-chunk overheads the note
+  // above names — `drainGenLiquid`, the restore loop, two socket emits — are all per BATCH, so a bigger one is
+  // cheaper per chunk. Measured on the diagonal cadence, which is the hardest one in the game.
+  queueBatch: 6,
   // Hard ceiling on what one socket may have waiting. `chunk-want` takes a CLIENT-SUPPLIED list, so without
   // this a client could pin unbounded work in the queue. Dropped requests are not lost: the next beacon
   // re-derives what the socket is missing.
@@ -5460,7 +5468,21 @@ let chunkQStale = 0;
 // ⚠️ Seeded HIGH and moved by an EMA. A cold server that guessed low would admit a full batch on its first
 // drain — the one drain where nothing is JIT-warmed and chunks are at their most expensive.
 let chunkCostMs = 12;
-let chunkQOverruns = 0;         // drains that still ended past the allowance — the mechanism counter for this
+// ⭐⭐ …AND THE NUMBER THE BATCH IS ACTUALLY SIZED AGAINST, WHICH IS NOT THE MEAN. A mean is the wrong estimator
+// for a bound: chunks are cheap in the sky and dear underground, so a run of sky chunks pulls the average down
+// and the drain then admits a full batch just as the window reaches the ground — the one moment chunks are
+// most expensive. This is a DECAYING HIGH-WATER MARK: it jumps to any expensive reading immediately and leaks
+// back down slowly (~2.4s to fall from 13ms to 3ms), so it still adapts to a genuinely cheap region without
+// forgetting an expensive one between one drain and the next.
+// ⚠️ RESIDUAL, STATED RATHER THAN HIDDEN: this is still a PREDICTION, so a transition from cheap to expensive
+// ground inside a single batch can overshoot, and `chunkQOverruns` says it still happens about once per e2e
+// run (against about ten times per run when the batch was sized against the mean). The only way to make the
+// bound HARD rather than likely is to make `sendChunkContent`'s produce pass interruptible — it is two passes
+// today, produce-all then drain then read out, which is precisely why it cannot be stopped half way. Worth
+// doing if the counter ever climbs; not worth the contract change for ~1 in 250 drains.
+let chunkCostHi = 12;
+const CHUNK_COST_DECAY = 0.97;  // per drain
+let chunkQOverruns = 0;         // drains that ran past the TICK — the mechanism counter for the residual above
 const CHUNK_COST_ALPHA = 0.15;
 // The CELL-ADDRESSED wires, and how to walk one record. Anything not listed here is broadcast untouched.
 // ⚠️ `liquid-src` is deliberately NOT here. It is a low-rate MARKER toggle with no re-subscribe repair path, so
@@ -5584,23 +5606,45 @@ drainChunkQueue = function () {
   for (let guard = jobs.length * 256; guard > 0; guard--) {
     const elapsed = performance.now() - t0;
     if (elapsed >= budgetMs) break;
-    // ⭐⭐ WILL THE NEXT BATCH FIT? The clock was only ever checked BETWEEN batches, so the true overshoot was
-    // `queueBatch × the most expensive chunk` — 2 × 13.6ms against a 40ms tick, on top of a 24ms allowance.
-    // Now the drain predicts, from what chunks have actually been costing (`chunkCostMs`), and stops early
-    // rather than starting work it cannot finish inside its allowance.
-    // ⚠️ ALWAYS SERVE AT LEAST ONE. Without this, a chunk costing more than the whole allowance would never be
-    // served by any tick and the client would wait for ever — a deadlock that would look exactly like the
-    // "awaiting chunks" symptom this whole track exists to fix. With it, the worst overshoot is ONE chunk
-    // starting at elapsed≈0, i.e. the bound is `queueMs + worstChunk` and not `queueMs + batch × worstChunk`.
-    if (served > 0 && elapsed + chunkCostMs > budgetMs) break;
     let at = -1;
     for (let k = 0; k < jobs.length; k++) { const j = jobs[(i + k) % jobs.length]; if (j[2].pending.size) { at = (i + k) % jobs.length; break; } }
     if (at < 0) break;                                    // nothing left anywhere
     const room = jobs[at][0], sid = jobs[at][1], e = jobs[at][2];
     const sock = io.sockets.sockets.get(sid);
     if (!sock) { e.pending.clear(); i = at + 1; continue; }   // gone; the disconnect handler drops the entry
+    // ⭐⭐ SHRINK THE BATCH, DO NOT STOP THE DRAIN. The clock was only ever checked BETWEEN batches, so a batch
+    // once started ran to completion and the true overshoot was `queueBatch × the most expensive chunk` —
+    // 2 × 13.6ms on top of a 24ms allowance, i.e. 51ms of a 40ms tick.
+    // 🟥 THE FIRST FIX FOR THAT WAS WRONG AND MEASURABLY SO. It stopped the whole drain as soon as one more
+    // chunk would not fit INSIDE the allowance — which throws away the tail of every drain, and because
+    // `chunkCostMs` rises fast and falls slowly, ONE expensive chunk pinned it high and the drain then quit at
+    // under half its allowance for many ticks afterwards. Measured on the diagonal cadence (the hardest one in
+    // the game, and the one that reproduced the original report): arrival p90 **455ms → 1120ms**, while the
+    // generator itself had got 32% cheaper. A safety bound that costs 2.5× the latency it was protecting is not
+    // a safety bound, and nothing but the end-to-end harness would have said so.
+    // ⭐ The allowance is spent in full, exactly as before, and the OVERSHOOT is what is bounded: take only as
+    // many chunks as still fit inside `budgetMs + one chunk`. At elapsed ≈ 0 that is the full batch; at the end
+    // of the allowance it is one. So the bound is `queueMs + worstChunk` whatever `queueBatch` is, and the
+    // throughput is the same as the unbounded version's.
+    // ⚠️ ALWAYS AT LEAST ONE. A chunk costing more than the whole allowance must still be served by some tick,
+    // or the client waits for ever — a deadlock that would look exactly like the symptom this all exists to fix.
+    // ⭐⭐ SIZED AGAINST THE HIGH-WATER, NOT THE MEAN, AND THE MEAN WAS MEASURED — IT OVERRUNS THE TICK.
+    // A mean is the wrong estimator for a bound. Serving cached or sky chunks drives `chunkCostMs` down to
+    // ~1ms while real ground costs 8-15ms, so the drain would admit a full batch and then spend 6 x 8ms = 48ms
+    // of a 40ms tick. Measured, warm, batch 6, three runs a side:
+    //     sized against the mean:        diagonal p90 400/465/404ms · ~10 drains per run PAST THE TICK
+    //     sized against the high-water:  diagonal p90 495/405/400ms · ~1 drain per run past the tick
+    // ⇒ same latency, five to ten times fewer overruns. The high-water costs nothing because it decays: in a
+    // genuinely cheap region it leaks down within a couple of seconds and the batches grow again.
+    // 🟥 I FIRST RECORDED THE OPPOSITE — "the high-water is 2.6x worse" — FROM A SINGLE COLD RUN. A freshly
+    // restarted server holds nothing resident, so every chunk is generated and the harness measures a different
+    // system: cold runs of the SAME build scattered 429/686/1105ms while warm runs of it sat at 400-465. Any
+    // comparison of two builds here has to be warm-vs-warm, and this file's numbers now are.
+    const _cost = Math.max(0.05, chunkCostHi);
+    const fits = Math.max(1, Math.floor((budgetMs + _cost - elapsed) / _cost));
+    const takeN = Math.min(batch, fits);
     const take = [];
-    for (const p of e.pending) { take.push(p); if (take.length >= batch) break; }
+    for (const p of e.pending) { take.push(p); if (take.length >= takeN) break; }
     for (const p of take) e.pending.delete(p);
     // ⚠️ TIMED AROUND THE ACTUAL SEND, because that is what the prediction above has to be about: production,
     // the deferred liquid drain and the readout are all inside it, and a per-chunk figure taken from anything
@@ -5613,13 +5657,19 @@ drainChunkQueue = function () {
     // moment the player is most likely to notice a stalled tick. Cheap readings move it gently; an expensive
     // one is believed immediately.
     chunkCostMs = per > chunkCostMs ? per : chunkCostMs + (per - chunkCostMs) * CHUNK_COST_ALPHA;
+    if (per > chunkCostHi) chunkCostHi = per;           // ...the high-water rises at once; it decays below
     chunkQSent += take.length;
     served += take.length;
     i = at + 1;                                           // ...and move on, whether or not this socket has more
   }
   chunkQCursor = i;
   const spent = performance.now() - t0;
-  if (spent > budgetMs) chunkQOverruns++;
+  // ⚠️ AGAINST THE TICK, NOT THE ALLOWANCE. Running slightly past `queueMs` is by design — the last batch is
+  // allowed one chunk of overshoot — so counting that would report a number that is always large and means
+  // nothing. What must never happen is the drain eating the whole tick, and that is what this counts.
+  if (spent > liquidCfg.tickMs) chunkQOverruns++;
+  chunkCostHi *= CHUNK_COST_DECAY;                      // leak back down so a cheap region is eventually noticed
+  if (chunkCostHi < 0.05) chunkCostHi = 0.05;
   return spent;
 };
 // How much is waiting, for the readout. Cheap: the number of SOCKETS with work, not a walk of their sets.
