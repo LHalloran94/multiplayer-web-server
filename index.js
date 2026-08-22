@@ -3072,6 +3072,9 @@ const liquidCfg = {
   storedWakeRate: 512,
   // Diagnostic only, and free when off — see `storedAuditSeen`. Counts what fraction of RESTORED liquid could
   // actually move, which is what separates "it was saved mid-motion" from "the restore breaks it".
+  // Does this world contain DRAIN blocks (material 17)? Off = the sim never looks for them, which is ~3% of the
+  // liquid tick back in every world that has none. Armed automatically when one is painted; see `sinkOn`.
+  sinks: 0,
   storedWakeAudit: 0,
   // Cross-check the fast row scan against the loop it replaces — see `liqScanMismatch`. Diagnostic; roughly
   // doubles the scan cost while on, and must report 0.
@@ -3807,6 +3810,15 @@ function fineLiquidTickRoom(room, SUB) {
     return 0;
   };
   const sinkRate = Math.max(0, Math.min(cap, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
+  // ⭐⭐ DRAIN BLOCKS ARE A TEST TOOL, SO STOP LOOKING FOR THEM IN WORLDS THAT HAVE NONE.
+  // The block below asks all FOUR orthogonal neighbours "are you a drain?" for every liquid cell on every
+  // sub-step — four coarse-terrain reads per cell — and it measured ~3% of the liquid tick in a world that has
+  // never contained one. The user, asked: *"the drains only exist to help with testing, they won't actually
+  // exist in the full-game."*
+  // ⇒ off by default, and ARMED AUTOMATICALLY the moment anybody paints a drain (see LIQ_SINK_ID in the
+  // terrain-edit handler), so the tool still works by being used. The checkbox is the manual override for the
+  // one case the auto-arm cannot see: a drain restored from a database written before this existed.
+  const sinkOn = liquidCfg.sinks && sinkRate > 0;
   const changedSet = new Set(), airborneWire = new Set();   // accumulate across the physics sub-steps below; broadcast once
   // QUIESCENCE scratch (only when enabled): per-fine-cell counter of consecutive ticks the cell did NOT move. Reallocated if NCELL changed (sub switch).
   const quiesce = liquidCfg.fineQuiesce ? ((st.fineStill && st.fineStill.length === NCELL) ? st.fineStill : (st.fineStill = newPagedField('fineStill', chunkGeom(COLS, FROWS), room))) : null;
@@ -4065,7 +4077,7 @@ function fineLiquidTickRoom(room, SUB) {
     let L = tot.g(i); if (L <= 0) continue;
     processed++; liqQProcessed++;
     // ---- SINK (drain block id 17): a fine cell touching a coarse drain block loses liquid, heaviest first (ledgered).
-    if (sinkRate > 0 && ((r < FROWS - 1 && isSinkF(i + 1)) || (r > 0 && isSinkF(i - 1)) || (c > 0 && isSinkF(i - FROWS)) || (c < COLS - 1 && isSinkF(i + FROWS)))) {
+    if (sinkOn && ((r < FROWS - 1 && isSinkF(i + 1)) || (r > 0 && isSinkF(i - 1)) || (c > 0 && isSinkF(i - FROWS)) || (c < COLS - 1 && isSinkF(i + FROWS)))) {
       let need = sinkRate < L ? sinkRate : L; const sp = amt.wp(i), sb = amt.o(i);
       for (let rk = 0; rk < T && need > 0; rk++) { const a = sp[sb + rk]; if (a <= 0) continue; const mv = a < need ? a : need; sp[sb + rk] = a - mv; sinkLed[rk] += mv; need -= mv; }
       recomp(i); mark(i); wakeN(i); L = tot.g(i); if (L <= 0) continue;
@@ -9406,7 +9418,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'storedWakeAll', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace', 'sortColRun', 'storedWakeAudit', 'scanVerify', 'scanFast']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'storedWakeAll', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace', 'sortColRun', 'storedWakeAudit', 'scanVerify', 'scanFast', 'sinks']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
@@ -10833,6 +10845,11 @@ io.on('connection', (socket) => {
     const rr = Math.max(TERRAIN_CELL / 2, Math.min(160, r));   // floor = one fine tile's half-extent so the client's smallest (1-cell) brush isn't inflated server-side
     const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
     const sq = shape === 'square';
+    // ⭐ ARM THE DRAIN CHECK BY USING ONE. `liquidCfg.sinks` ships off because drain blocks are a test tool and
+    // looking for them costs ~3% of the liquid tick in every world that has none (see `sinkOn`). Painting one
+    // is the only way a drain can enter a world, so painting one is what switches the check on — the tool works
+    // without anybody having to know the switch exists. Broadcast so every open debug panel agrees.
+    if (op === 'paint' && (mat | 0) === LIQ_SINK_ID && !liquidCfg.sinks) { liquidCfg.sinks = 1; io.emit('liquid-cfg', cfgWire()); }
     const hd = op === 'carve' && !!hard;                 // editor Carve tool: hard delete (any block); gameplay slam stays soft
     const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
     // The sender already applied this op optimistically, so echo to OTHERS only — carve = hp decrement is
