@@ -2972,11 +2972,20 @@ const liquidCfg = {
   // "liquid works" and "liquid is frozen" in the Overworld is exactly this. Left as a live toggle because if
   // liquid ever appears to hang where it should flow, this is the first thing to flip.
   genWakeAll: 0,
-  // ⚠️ Restores the pre-2026-08-22 behaviour of `applyStoredLiquid`: wake EVERY stored cell on a chunk fault-in
-  // rather than only the ones `liquidCanMove` says can move. Kept as a live A/B because that unconditional wake
-  // was the cause of the sim running at 32ms of a 40ms tick while a player moved through ground they had built
-  // in, and an A/B against the Net tab is how it was found.
-  storedWakeAll: 0,
+  // 🟥🟥 BACK ON, AND THE FILTER IT DISABLES IS THE ONE THAT FROZE WATER IN MID-AIR. Waking every stored cell on
+  // a chunk fault-in is expensive — measured at 3,400 active cells and 32ms of a 40ms tick while a player moved
+  // through ground they had built in — and filtering it by `liquidCanMove` was worth almost all of that. But it
+  // left water visibly hanging in the air, TWICE: first for cells whose neighbours were in a page nobody had
+  // produced yet (a peek answers -1 there and -1 fails every branch), and then again after that was fixed by
+  // waking the page's three edges unconditionally. The second cause was never identified.
+  // ⇒ DEFAULT 1 = the old, correct, expensive behaviour. A wrong world is not a saving.
+  // ⭐ THE DECIDING EVIDENCE WAS THE USER'S, NOT A RIG'S: with this ON, leaving and re-entering unfreezes the
+  // water; with it OFF the water stays frozen. That says the skipped wake IS the mechanism without needing to
+  // know which cell the filter got wrong — and no harness here can see it, because a clean test world has no
+  // stored player edits at all (every traversal measured 0 active cells, at every depth and every cadence).
+  // ⏭️ The saving is still worth having. It needs a wake test that is correct at a page boundary rather than one
+  // that treats "I cannot see the neighbour" as "it cannot move" — see the note in `applyStoredLiquid`.
+  storedWakeAll: 1,
   // ⭐ THE ACTIVE-CELL HEAT WIRE. Off by default and costs literally nothing when off (one boolean on a path that
   // already runs once every 32 ticks). Turned on by the Inspect tab's "Active-cell heat" checkbox, which is the
   // only thing that reads it — a diagnostic nobody has switched on should not be on the wire.
