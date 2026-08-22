@@ -7467,6 +7467,15 @@ const WORLD_FLUSH_WORK = 24;
 // ⚠️ `worldFlushAll` passes 1e9 and must still mean "everything, now" — it is the shutdown path. A cap that
 // large disables both the work bound and the cursor, which is what `full` below preserves.
 const _flushCursor = new Map();                       // room → where the last flush stopped scanning
+// 🟥 …AND A CURSOR OVER THE ROOMS THEMSELVES. The work cap is shared across every room, and the room loop
+// always started at the same end of `roomCells`, so the FIRST room with changed chunks could spend the whole
+// budget on every flush and a room after it in insertion order would never be reached at all — its edits
+// persisted only by eviction or by shutdown. Same failure the per-room chunk cursor exists to prevent, one
+// level up, and it appeared the moment the cap started counting WORK instead of writes (a write cap was never
+// reached on a generated world, so the loop always ran to the end and no room was ever starved).
+// ⚠️ Rotated by ONE ROOM per flush rather than resumed mid-room: the per-room cursor already handles resuming,
+// so this only has to decide who goes first.
+let _flushRoomCursor = 0;
 let worldFlushMaxMs = 0, worldFlushScanned = 0;
 function worldFlush(max) {
   const cap = max || WORLD_FLUSH_MAX;
@@ -7474,7 +7483,12 @@ function worldFlush(max) {
   const workCap = full ? Infinity : WORLD_FLUSH_WORK;
   const _t0 = Date.now();
   let wrote = 0, work = 0;
-  for (const room of Array.from(roomCells.keys())) {
+  const _rooms = Array.from(roomCells.keys());
+  if (!full && _rooms.length > 1) {
+    const k = _flushRoomCursor++ % _rooms.length;
+    if (k) _rooms.push(..._rooms.splice(0, k));       // start one room further along than last time
+  }
+  for (const room of _rooms) {
     if (wrote >= cap || work >= workCap) break;
     if (!_genRooms.has(room)) continue;
     const s = roomCells.get(room); if (!s || !s.terrain || (s.fineSub || 1) !== 1) continue;
