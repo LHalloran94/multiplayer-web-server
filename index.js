@@ -2729,6 +2729,13 @@ let beginWireBatch = () => {}, endWireBatch = () => {};
 // ReferenceError on every scenario. Reassigned at load, next to the generator it belongs to.
 // ⚠️ The sliced sim therefore never produces chunks, which is correct: those probes build their scenes by hand.
 let drainGenLiquid = () => 0;
+// ⭐⭐ THE STORED-LIQUID WAKE, SPREAD OVER TICKS INSTEAD OF FILTERED. Same seam and same reason as the line
+// above (the tenth time this boundary has mattered). See the long note in `applyStoredLiquid`.
+let drainStoredWake = () => 0;
+// ⚠️ Its counters are declared HERE, inside the sliced block, and not next to the implementation where they
+// would read more naturally — the perf line reads them and the perf line is inside the slice. A counter on the
+// wrong side of a marker is a ReferenceError in the rigs and nowhere else.
+let worldLiquidWakeQueued = 0, worldLiquidWakeAdmitted = 0;
 // ---- SOURCE + SINK (test/scene tooling, but real world features) ------------------------------------------------
 // SINK = material id 17 ("Drain"): an ordinary SOLID block that DESTROYS liquid touching it, at liquidCfg.sinkRate
 // units per tick per touching cell. Put a row of them under a pool instead of clearing it by hand.
@@ -2986,6 +2993,15 @@ const liquidCfg = {
   // ⏭️ The saving is still worth having. It needs a wake test that is correct at a page boundary rather than one
   // that treats "I cannot see the neighbour" as "it cannot move" — see the note in `applyStoredLiquid`.
   storedWakeAll: 1,
+  // ⭐⭐ …AND THE HALF OF THAT SAVING THAT CANNOT BREAK ANYTHING: SPREAD THE WAKE INSTEAD OF FILTERING IT.
+  // The cost above is a SPIKE, not a rate — a chunk fault-in dumps its whole stored liquid list into the active
+  // set in one tick, and those cells are processed once and mostly drop straight back out. A spike is what makes
+  // the budget throttle. So the wake is queued and admitted at this many cells per tick, per room, and NOTHING
+  // IS EVER DROPPED: every stored cell still wakes, a tick or two later. Neither the known freeze cause nor the
+  // unknown one can strand anything, because the queue asks no question about whether a cell can move.
+  // 512/tick × 25Hz ≈ 12,800 cells/s, comfortably above the inflow of a player walking through built-in ground.
+  // 0 = admit everything the instant the chunk faults in (the old behaviour, for an A/B).
+  storedWakeRate: 512,
   // ⭐ THE ACTIVE-CELL HEAT WIRE. Off by default and costs literally nothing when off (one boolean on a path that
   // already runs once every 32 ticks). Turned on by the Inspect tab's "Active-cell heat" checkbox, which is the
   // only thing that reads it — a diagnostic nobody has switched on should not be on the wire.
@@ -4848,6 +4864,7 @@ const runLiquidTick = () => {
   // starts iterating an active-cell Set — a page fault can happen from deep inside the flow loop, and seeding
   // writes into the very Set that loop is walking. No-op (one `.size` test) unless on-demand generation is on.
   drainGenLiquid();          // BEFORE the guard: this is the seeding pass for pages already produced
+  drainStoredWake();         // …and admit a BOUNDED slice of what that seeding queued (liquidCfg.storedWakeRate)
   simNoGen(true);
   try {
   beginWireBatch();   // ⇓ everything this tick broadcasts is collected and sent as one packet per client (see the hook)
@@ -5154,6 +5171,11 @@ const runLiquidTick = () => {
         // predicting. `chunkQCost` rising is the signal that the world got more expensive to generate; a
         // non-zero `chunkQOverruns` means the prediction is wrong often enough to look at.
         chunkQCost: +chunkCostMs.toFixed(2), chunkQCostHi: +chunkCostHi.toFixed(2), chunkQOverruns, liqWakeSkipped: worldLiquidWakeSkipped,
+        // ⭐ THE STORED-LIQUID WAKE, as a rate and a gauge. `liqWakeAdmitted` is how many stored cells were let
+        // into the active set this window (a COUNTER, so it resets); `liqWakeQueued` is how many are still
+        // waiting right now (a GAUGE, so it does not). A queue that never falls means chunks are faulting in
+        // faster than `storedWakeRate` admits them and the rate wants raising.
+        liqWakeAdmitted: worldLiquidWakeAdmitted, liqWakeQueued: worldLiquidWakeQueued,
         chunkQWait: chunkQueueDepth(),
         // The K tier 2 actually USED this window (see kMin) — `steps` below is the configured maximum.
         stepsUsed: liqPerf.kMin,
@@ -5224,7 +5246,7 @@ const runLiquidTick = () => {
       // ⚠️ Safe for the rigs: this whole block only runs with `perfLog` ON, and `probe_budget` explicitly turns
       // it off (it reads the same counters through the sliced module, cumulatively, and still can).
       liqRateSkips = 0; liqK2Throttles = 0; liqSecTicks = 0; liqSecDeferred = 0; liqReactSkips = 0;
-      liqQProcessed = 0; liqQMoved = 0; liqQWoken = 0; liqQCapped = 0;
+      liqQProcessed = 0; liqQMoved = 0; liqQWoken = 0; liqQCapped = 0; worldLiquidWakeAdmitted = 0;
     }
   }
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
@@ -7971,11 +7993,57 @@ function applyStoredLiquid(room, p) {
     // the wrong edges and look exactly like this bug again.
     const _edge = (lr === CHUNK_SIDE - 1) || (lc === 0) || (lc === CHUNK_SIDE - 1);
     if (!liquidCfg.storedWakeAll && !_edge && rid && !liquidCanMove(s.terrain, i, geom, rid)) { worldLiquidWakeSkipped++; continue; }
+    // ⭐⭐ SPREAD, NOT DROPPED (liquidCfg.storedWakeRate). See the note below — this is the safe half of the
+    // saving, and it is the half that cannot freeze anything.
+    if (liquidCfg.storedWakeRate > 0) { let q = _storedWakeQ.get(room); if (q === undefined) _storedWakeQ.set(room, q = new Set()); if (q.size < LIQUID_MAX_ACTIVE) q.add(i); continue; }
     if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
   }
   worldLiquidRestored += n;
   return n;
 }
+// ⭐⭐ WHY THE WAKE IS RATE-LIMITED AND NOT FILTERED, AND THIS IS THE WHOLE POINT OF THE MECHANISM.
+// The filter above (`storedWakeAll = 0`) is worth almost all of the cost — and it FROZE WATER IN MID-AIR TWICE.
+// One cause was found (`peekCellAt` answers -1 for an unproduced page, and -1 fails every branch of
+// `liquidCanMove`, so the cell is judged immovable and sleeps for ever). The second was never identified, which
+// is exactly why the filter still ships OFF: a wake test that is wrong in the "cannot move" direction is not
+// slow, it is BROKEN, and the failure is silent and permanent.
+// ⭐ The cost, though, is not the waking. It is that a chunk fault-in dumps its entire stored liquid list into
+// `active` IN ONE TICK — measured at 3,400 cells and 32ms of a 40ms tick while moving through built-in ground.
+// Those cells are processed once and, if they cannot move, drop straight back out; the work is real but it is a
+// SPIKE, and a spike is what makes the budget throttle. So: queue them, and admit a bounded number per tick.
+// ⭐⭐ NOTHING IS EVER DROPPED, which is the entire difference from the filter. Every stored cell still wakes,
+// just a tick or two later, so neither the known cause nor the unknown one can strand anything: the queue is
+// drained unconditionally and asks no question about whether the cell can move.
+// ⚠️ A Set, so a chunk faulting in twice does not queue its cells twice. Entries for a chunk that was evicted
+// again are harmless — the flow loop's first act is `if (tot.g(i) <= 0) continue`.
+// ⚠️ Inflow is a few thousand cells a second at a walking pace against a 512/tick × 25Hz = ~12,800/s drain, so
+// in normal play the queue empties every tick and the only thing that changes is the peak.
+const _storedWakeQ = new Map();
+drainStoredWake = function () {
+  const rate = liquidCfg.storedWakeRate | 0;
+  if (rate <= 0 || !_storedWakeQ.size) return 0;
+  let admitted = 0;
+  for (const [room, q] of _storedWakeQ) {
+    if (!roomCells.has(room)) { _storedWakeQ.delete(room); continue; }
+    const act = fineSet(room);
+    let budget = rate;
+    for (const i of q) {
+      if (budget-- <= 0) break;
+      q.delete(i);
+      if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
+      admitted++;
+    }
+    // ⚠️ `fineSet` only registers the room on the tick it CREATES the set, and `dropFineActive` de-registers a
+    // room whose set has drained — so a room being re-woken from an empty set has to be put back by hand or its
+    // newly admitted cells are never ticked. (The unconditional wake above has the same shape and gets away with
+    // it because a chunk fault-in is always accompanied by other traffic; this path can be the only writer.)
+    if (act.size) cellRooms.fine.add(room);
+    if (!q.size) _storedWakeQ.delete(room);
+  }
+  worldLiquidWakeAdmitted += admitted;
+  worldLiquidWakeQueued = 0; for (const q of _storedWakeQ.values()) worldLiquidWakeQueued += q.size;
+  return admitted;
+};
 // Attach (or remove) the seeders for a room. Idempotent, and safe to call after the fields already exist —
 // which matters because `ensureTerrain` may have run long before anybody decided this room was generated.
 function setRoomGenerator(room, gen) {
@@ -9094,6 +9162,8 @@ io.on('connection', (socket) => {
     if ('budgetRate' in patch) liquidCfg.budgetRate = patch.budgetRate ? 1 : 0;
     if ('cellCostUs' in patch) liquidCfg.cellCostUs = Math.max(1, Math.min(500, +patch.cellCostUs || 23));
     if ('budgetRateMax' in patch) liquidCfg.budgetRateMax = Math.max(2, Math.min(64, patch.budgetRateMax | 0));
+    // 0 = the old unbounded wake; anything else is cells per tick per room. See `storedWakeRate`.
+    if ('storedWakeRate' in patch) liquidCfg.storedWakeRate = Math.max(0, Math.min(20000, patch.storedWakeRate | 0));
     if ('budgetCheapFirst' in patch) liquidCfg.budgetCheapFirst = patch.budgetCheapFirst ? 1 : 0;
     // ⭐ SECTORS. A/B-able live for the same reason the budget's tiers are: "is my water slow because someone
     // else flooded a cave, or because it is just a lot of water?" is otherwise unanswerable from inside the game.
