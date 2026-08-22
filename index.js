@@ -4633,6 +4633,9 @@ function roomPhase(room) { let h = 0; for (let i = 0; i < room.length; i++) h = 
 const SEC_SEP = '\u0000';
 const EMPTY_CELLS = [];        // shared stand-in for "this strip has no cells in that registry" — never written to
 let liqSecTicks = 0, liqSecDeferred = 0;
+// room → where this room's strip ring starts next tick. See the note at the loop in `liqTickSectors`: without
+// it the most expensive strip is cut by the wall-clock stop on every single tick, for ever.
+const roomSecCursor = {};
 // ⭐⭐ THE WORKING SET FOR ONE SECTOR'S TICK, AND IT REFUSES CELLS THAT ARE NOT ITS OWN.
 // 🟥 WITHOUT THIS THE SEAM IS MEASURABLY SPECIAL. A plain Set works and mass is still conserved — but a cell
 // woken ACROSS the boundary lands in the working set and is then advanced by all the REMAINING sub-steps of the
@@ -4715,7 +4718,22 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
   const saved = [], leftover = [];
   for (let n = 0; n < nReg; n++) { const s = st[SEC_REGS[n].f]; saved.push(s); leftover.push([]); if (s) s.clear(); }
   const savedSrc = st.src;
-  for (const s of order) {
+  // ⭐⭐ WHERE THIS TICK'S STRIPS START. Without it the busiest strip is starved FOR EVER, and it is the exact
+  // bug `liqRoomCursor` fixes for rooms and `roomFlowCursor` fixes for the cell queue — arrived a third time.
+  // `order` is cheapest-first (measured, load-bearing), and the wall-clock stop below cuts the tail off. So the
+  // most expensive strip is always last, always the one cut, and its cells go back on the pile — which makes it
+  // MORE expensive next tick, so it sorts even later. A positive feedback loop whose end state is "the water
+  // where something is actually happening never moves, while every quiet strip ticks at full rate".
+  // ⇒ still cheapest-first, but the ring starts wherever the last tick ran out, so the strip that was cut goes
+  // FIRST next time. Same shape as the roster's `_start = liqRoomCursor % _keys.length` immediately above.
+  // ⚠️ The cursor is an INDEX into a list that is re-sorted every tick, so it is a rotation and not a promise
+  // about a particular strip. That is exactly what the room-level cursor does, and it is enough: what has to be
+  // impossible is one strip being last every single tick, not one strip being served in a fixed order.
+  const _nSec = order.length;
+  const _secStart = _nSec ? (roomSecCursor[room] | 0) % _nSec : 0;
+  let _secRan = 0;
+  for (let _sn = 0; _sn < _nSec; _sn++) {
+    const s = order[(_secStart + _sn) % _nSec];
     if (budgetMs && performance.now() - tickT0 > budgetMs) {   // out of time: this strip waits for a later tick
       for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
       liqSecDeferred++;
@@ -4778,8 +4796,11 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
     st.src = savedSrc;                                  // restore before anything else can observe the swap
     if (kUsed !== kFull) { liquidCfg.fineLevelSteps = kFull; liqK2Throttles++; }
     if (budgetMs) { const d = (performance.now() - t0) * (kFull / kUsed); roomLiqCost[key] = roomLiqCost[key] ? roomLiqCost[key] * 0.7 + d * 0.3 : d; }
-    liqSecTicks++;
+    liqSecTicks++; _secRan++;
   }
+  // Advance past whoever actually got a turn, so a strip that was cut off is at the head of the ring next tick.
+  // `Math.max(1, …)` guarantees forward motion even on a tick where nothing ran at all.
+  if (_nSec) roomSecCursor[room] = (_secStart + Math.max(1, _secRan)) % _nSec;
   // ⚠️ drop*() (called from inside the strip turns) removes the room from the registry the CALLER is iterating.
   // Put each one back if there is still work, or drop it properly if there is not.
   for (let n = 0; n < nReg; n++) {
@@ -4939,7 +4960,14 @@ const runLiquidTick = () => {
       for (let n = 0; n < _keys.length; n++) {
         const room = _keys[(_start + n) % _keys.length];
         const est = estRoomCost(room);
-        if (_admitted > 0 && _acc + est > _budgetMs) { _deferred.add(room); continue; }
+        // 🟥 …AND NEVER DEFER A SECTORED ROOM WHOLE, for the same reason tier 3 never does (see above). This was
+        // the last throttle in the server that could switch off the ENTIRE WORLD at once: with a page room
+        // admitted ahead of it, one `_acc + est > _budgetMs` froze every strip of the Overworld for a tick —
+        // every player, everywhere — over work happening in one 256-column strip. A sectored room rations
+        // itself, strip by strip, against each strip's own measured cost, and its per-strip wall-clock stop is
+        // a harder bound than this estimate is. Its `est` still counts toward `_acc`, so the rooms behind it
+        // are held back exactly as before.
+        if (_admitted > 0 && _acc + est > _budgetMs && !_secPlans.has(room)) { _deferred.add(room); continue; }
         _acc += est; _admitted++;
       }
       liqRoomCursor = (_start + Math.max(1, _admitted)) % _keys.length;
@@ -5187,6 +5215,16 @@ const runLiquidTick = () => {
       // — a number that only ever goes up cannot say whether the thing is happening NOW, which is the only
       // question either of them exists to answer. Same rule as the block above: counters reset, gauges do not.
       liqBudgetFloored = 0; chunkQOverruns = 0;
+      // 🟥🟥 …AND NOR WERE THE THROTTLE COUNTERS, WHICH IS THE ONE QUESTION BEING ASKED OF THEM.
+      // "Throttling should be a rare EMERGENCY thing, not something that happens almost every time liquid
+      // moves" is a question about a RATE, and every number that could answer it was a lifetime total — so
+      // `tier3-skips=41291` was equally consistent with "it fired hard once an hour ago" and "it is firing on
+      // every tick right now". Per window, `secDeferred` against `secTicks` reads directly as "this fraction of
+      // strip-turns was thrown away", which is the number to judge the throttle by.
+      // ⚠️ Safe for the rigs: this whole block only runs with `perfLog` ON, and `probe_budget` explicitly turns
+      // it off (it reads the same counters through the sliced module, cumulatively, and still can).
+      liqRateSkips = 0; liqK2Throttles = 0; liqSecTicks = 0; liqSecDeferred = 0; liqReactSkips = 0;
+      liqQProcessed = 0; liqQMoved = 0; liqQWoken = 0; liqQCapped = 0;
     }
   }
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
