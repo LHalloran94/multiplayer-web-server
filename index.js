@@ -1783,6 +1783,7 @@ function PagedArray(geom, Ctor, stride, seedFn, room) {
   // generator itself is swapped (`setRoomGenerator`). Capped and cleared wholesale rather than evicted: a stale
   // entry is impossible, so the only reason to bound it is memory.
   this._skyMemo = new Map();
+  this._lastP = -1; this._lastA = null;           // one-slot page memo — see the note on `rp`
   // ⭐ EVICTION MUST BE TRANSPARENT TO ACCESS. An evicted chunk has no pages, so without this every read would hand
   // back the shared ZERO page and the chunk would look like EMPTY WORLD — which is exactly what it did: liquid at a
   // chunk seam saw air where solid ground was evicted and poured through it, one cell wide, and a write into an
@@ -1817,6 +1818,7 @@ PagedArray.prototype._alloc = function (p) {
   const a = new this.Ctor(CHUNK_CELLS * this.T);
   if (this.seedFn) this.seedFn(a, p, this.geom, this.T);
   (this.dir[p >> PAGE_GRP_SH] || this._grp(p))[p & PAGE_GRP_M] = a; this.live++;
+  this._lastP = -1;                               // a page pointer changed ⇒ the one-slot memo is void (see `rp`)
   // ⚠️ Ordering: the page is installed BEFORE the restore, and rehydrateChunk clears the evicted flag and takes the
   // blob before decoding — so the decode's own writes re-enter here and see a normal, un-evicted chunk.
   if (this.ev !== null && this.ev[p]) onChunkFault(this.room, p);
@@ -1833,7 +1835,24 @@ PagedArray.prototype._grp = function (p) {
 // 1.042x, i.e. 4.2% dearer, bit-identical, and the same wherever in the world you stand. The kickoff's suggested
 // Map measured 1.315x — a hash lookup does not belong here — and a plain holey array measured 1.009x but is NOT
 // SPARSE (Part C: 58.6MB for an empty room, worse than the dense array), which is why it is fast.
-PagedArray.prototype.rp = function (i) { const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cy + ((i >>> 6) & g.PGM)) : g.pageOf[i], d = this.dir[p >> PAGE_GRP_SH], a = d !== null && d[p & PAGE_GRP_M]; return a || this._miss(p); };
+// ⭐⭐ ONE-SLOT PAGE MEMO, AND IT IS THE SAME LESSON AS `skyAt` ONE LEVEL DOWN. `rp` + `pageAt` + `peekCellAt`'s
+// page lookup were ~23% of the liquid tick (per-LINE profile of the live server) — two DEPENDENT memory loads
+// (group, then page) on every single cell read, which is precisely the cost Phase 3 recorded as irreducible.
+// It is not irreducible, because of how the sim actually walks: a page is 64 columns × 64 rows, and both the
+// lateral levelling scan and the sink/neighbour tests step along a ROW, so 63 of every 64 consecutive lookups
+// ask for the page just asked for. Each field carries its own slot, so `tot`, `amt` and `grid` alternating
+// within one cell's work do not evict each other.
+// 🟥 ONLY A PAGE FOUND IN THE DIRECTORY IS REMEMBERED — never `_miss`'s shared zero page. Memoising that would
+// mean a read after a write returned zeros, which is Phase 3's evicted-chunks-read-as-ZEROS bug rebuilt by
+// hand. A remembered page is a real one, and the ONLY three places that can change a page pointer (`_alloc`,
+// `dropPage`, `fill` — `_grp` only ever creates an absent group) all clear the slot.
+PagedArray.prototype.rp = function (i) {
+  const g = this.geom, p = g.K >= 0 ? ((i >>> g.K6) * g.cy + ((i >>> 6) & g.PGM)) : g.pageOf[i];
+  if (p === this._lastP) return this._lastA;
+  const d = this.dir[p >> PAGE_GRP_SH], a = d !== null && d[p & PAGE_GRP_M];
+  if (a) { this._lastP = p; this._lastA = a; return a; }
+  return this._miss(p);
+};
 // The cold half of rp, kept out of line so the hot path is just "load the page and return it".
 // ⭐⭐ THE SIM MAY NOT BUILD WORLD. MEASURED, panning 4,800px above the water line in EMPTY SKY: 37,025 chunks
 // produced in 35 seconds — over a thousand a second — of which 35,379 came from inside `runLiquidTick`, ~31.8s
@@ -1893,6 +1912,7 @@ PagedArray.prototype.s = function (i, v) { const g = this.geom; this.wp(i)[(g.K 
 // and dropping is both faster and the point of the exercise.
 PagedArray.prototype.fill = function (v) {
   this.epoch++;                                   // one bump stands for "every chunk's revision changed" — see above
+  this._lastP = -1; this._lastA = null;           // every page pointer is about to change (see `rp`)
   if (v === 0 && !this.seedFn) { this.dir.fill(null); this.rdir.fill(null); this.live = 0; return this; }
   // ⚠️ The non-zero branch MATERIALISES THE WHOLE WORLD and is area-linear by nature — there is no sparse way to
   // say "every cell is 7". Nothing calls it: every `.fill()` in the server is `.fill(0)` (checked 2026-08-02), and
@@ -1904,6 +1924,7 @@ PagedArray.prototype.dropPage = function (p) {
   const gi = p >> PAGE_GRP_SH; if (this.dir[gi] === null) this._grp(p);
   this.rdir[gi][p & PAGE_GRP_M]++;
   if (this.dir[gi][p & PAGE_GRP_M] !== null) { this.dir[gi][p & PAGE_GRP_M] = null; this.live--; }
+  this._lastP = -1;                               // ...and so is a page that has just been evicted (see `rp`)
 };
 // ⭐ WHOLE-GRID SCANS GO THROUGH THIS. Iterates only the pages that EXIST, yielding (flat cell index, offset base in
 // the page, page). An unallocated page holds nothing but zeros, so skipping it is exact — and it is what keeps
@@ -1950,7 +1971,15 @@ PagedArray.prototype.bytes = function () { return this.live * CHUNK_CELLS * this
 // decision (Phase 6 increment 2 measured a Map and a two-level directory against the dense array behind exactly
 // this seam). The hot paths — rp/wp/g/s/o above — deliberately stay inlined and are the only sites that know.
 // `wpPage` is "wp, but you already have the page number": the get-or-fault-and-bump that chunk decoding does.
-PagedArray.prototype.pageAt = function (p) { const d = this.dir[p >> PAGE_GRP_SH]; return (d !== null && d[p & PAGE_GRP_M]) || null; };
+// ⚠️ Shares `rp`'s slot deliberately — same question ("which array holds page p"), same answer. A `null` result
+// is NOT remembered: an absent page can be allocated at any moment, and remembering "absent" is the direction
+// that goes wrong silently.
+PagedArray.prototype.pageAt = function (p) {
+  if (p === this._lastP) return this._lastA;
+  const d = this.dir[p >> PAGE_GRP_SH], a = (d !== null && d[p & PAGE_GRP_M]) || null;
+  if (a) { this._lastP = p; this._lastA = a; }
+  return a;
+};
 // Which page holds cell `i`, without touching it. The page NUMBER only — no allocation, no generator call, no
 // eviction restore. Kept here rather than recomputed at call sites so the two addressing modes (arithmetic and
 // table) stay the class's business, exactly as `eachPage` keeps the directory's layout its business.
@@ -2739,7 +2768,14 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard) {
 // Only "active" cells simulate (settled pools cost nothing). Per-liquid cadence = viscosity. Liquid never
 // descends past LIQUID_FLOOR_ROW → it rests on the world's bedrock floor instead of falling through it.
 const LIQUID_IDS = new Set([9, 10, 11, 12, 14, 15]);   // water, quicksand, lava, acid, brine, oil
-const isFluidId = (v) => LIQUID_IDS.has(v);
+// ⚠️ A 256-BYTE TABLE, NOT THE SET. `isFluidId` is called from inside `isSolid`, i.e. on essentially every cell
+// read the sim makes, and it measured 3.5% of the liquid tick as a `Set.has` — a hash lookup to answer a
+// question about a Uint8 with six true values. The set stays as the single declaration the table is built from,
+// so there is still one place to add a fluid.
+// ⚠️ Callers pass -1 for "unproduced page", and `Uint8Array[-1]` is `undefined` rather than a throw — the
+// explicit `v >= 0` keeps the read monomorphic and says so out loud.
+const LIQUID_LUT = (() => { const t = new Uint8Array(256); for (const v of LIQUID_IDS) t[v] = 1; return t; })();
+const isFluidId = (v) => v >= 0 && LIQUID_LUT[v] === 1;
 // ── INTEREST FAN-OUT HOOK (SHARED-WORLD.md §7, Phase 4) ──────────────────────────────────────────────────────────
 // Every CELL-ADDRESSED world diff leaves the sim through here instead of calling `io.to(room).emit` directly, so
 // interest-limiting is one reassignment outside this block rather than a change threaded through the sim.
