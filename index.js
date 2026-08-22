@@ -3070,6 +3070,14 @@ const liquidCfg = {
   // 512/tick × 25Hz ≈ 12,800 cells/s, comfortably above the inflow of a player walking through built-in ground.
   // 0 = admit everything the instant the chunk faults in (the old behaviour, for an A/B).
   storedWakeRate: 512,
+  // Diagnostic only, and free when off — see `storedAuditSeen`. Counts what fraction of RESTORED liquid could
+  // actually move, which is what separates "it was saved mid-motion" from "the restore breaks it".
+  storedWakeAudit: 0,
+  // Cross-check the fast row scan against the loop it replaces — see `liqScanMismatch`. Diagnostic; roughly
+  // doubles the scan cost while on, and must report 0.
+  scanVerify: 0,
+  // The contiguous row walk itself. 1 = on (see `scanLevel`); 0 = the original loop, for an A/B.
+  scanFast: 1,
   // ⭐ THE ACTIVE-CELL HEAT WIRE. Off by default and costs literally nothing when off (one boolean on a path that
   // already runs once every 32 ticks). Turned on by the Inspect tab's "Active-cell heat" checkbox, which is the
   // only thing that reads it — a diagnostic nobody has switched on should not be on the wire.
@@ -3713,6 +3721,76 @@ function fineLiquidTickRoom(room, SUB) {
                return !grid.skyAt(ci); }                                                    // unbuilt ⇒ solid; sky ⇒ air
     : (k) => { if (k < 0 || k >= NCELL) return true; const v = grid.g(coarseOf(k)); return v !== 0 && !isFluidId(v); };
   const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; const v = genRoom ? peekCellAt(grid, coarseOf(k)) : grid.g(coarseOf(k)); return v >= 0 && isSinkId(v); };   // a fine cell whose coarse cell is a DRAIN block
+  // ⭐⭐ A ROW SCAN IS A CONTIGUOUS TYPED-ARRAY WALK, AND THE PAGE LAYOUT HAS ALWAYS ALLOWED IT.
+  // The two levelling scans (1d below and 2c) look up to LIQUID_LEVEL_SCAN = 28 cells along the row in EACH
+  // direction, per cell, per sub-step. MEASURED on the live server: **17 of a possible 28 steps per run**, about
+  // 273,000 steps a TICK between them — ~18% of the liquid tick on the per-line profile, and mostly finding
+  // nothing, because a flat pool only stops the walk when it runs out of reach.
+  // ⭐ `o(i)` puts the ROW in the high six bits of the page offset and the COLUMN in the low six, so consecutive
+  // columns of one row are ADJACENT IN THE PAGE and the page only changes at a 64-column boundary. A 28-cell
+  // scan is therefore at most two straight runs per direction instead of 28 trips through the page directory.
+  // ⚠️ SUB = 1 ONLY. The walk indexes the coarse terrain with the fine index, which is what `coarseOf` reduces
+  // to at 1:1 and nothing like it at any other ratio. Every other ratio keeps the original loop, which is also
+  // what keeps `probe_fine_identity`'s SUB=3 scenes byte-for-byte.
+  // ⚠️ An ABSENT terrain page falls back to the ordinary `isSolid` for that step, which is where the
+  // unbuilt-⇒-solid and sky-⇒-air rules live. Rare (it means unproduced world beside moving liquid) and it must
+  // stay rare rather than being reimplemented here — one copy of that rule, not two.
+  // `liquidCfg.scanFast` = 0 restores the original per-cell loop, for an A/B. SUB != 1 always takes it.
+  const ROWFAST = SUB === 1 && !!liquidCfg.scanFast;
+  // The nearest column, within `reach` and in direction `sdir`, holding at least 2 less liquid than `L`.
+  // Returns its DISTANCE (1..reach), or 0 for none — stopping at the world edge, at solid ground, or at anything
+  // higher than `L`, exactly as the loop it replaces did.
+  const scanLevel = (i, c, L, sdir, reach) => {
+    let d = 1;
+    while (d <= reach) {
+      const cc = c + sdir * d;
+      if (cc < 0 || cc >= COLS) return 0;
+      const j = i + sdir * d * FROWS, lane = cc & 63;
+      let n = sdir > 0 ? 64 - lane : lane + 1;                 // steps left inside this page
+      const edge = sdir > 0 ? COLS - cc : cc + 1;
+      if (n > edge) n = edge;
+      if (n > reach - d + 1) n = reach - d + 1;
+      const pT = tot.rp(j), oT = tot.o(j);
+      const gp = grid.pageAt(grid.pageOfCell(j)), oG = gp ? grid.o(j) : 0;
+      for (let k = 0; k < n; k++) {
+        liqLvlSteps++;
+        const v = gp ? gp[oG + sdir * k] : -1;
+        if (v >= 0 ? (v !== 0 && !isFluidId(v)) : isSolid(j + sdir * k * FROWS)) return 0;
+        const jl = pT[oT + sdir * k];
+        if (jl > L) return 0;
+        if (jl <= L - 2) return d + k;
+      }
+      d += n;
+    }
+    return 0;
+  };
+  // The same walk for 2c, whose comparison is the CUMULATIVE amount of ranks 0..t rather than the total.
+  // `amt` holds T values per cell, so one column step is T elements rather than one.
+  const scanPerLiq = (i, c, Ci, t, sdir, reach) => {
+    let d = 1;
+    while (d <= reach) {
+      const cc = c + sdir * d;
+      if (cc < 0 || cc >= COLS) return 0;
+      const j = i + sdir * d * FROWS, lane = cc & 63;
+      let n = sdir > 0 ? 64 - lane : lane + 1;
+      const edge = sdir > 0 ? COLS - cc : cc + 1;
+      if (n > edge) n = edge;
+      if (n > reach - d + 1) n = reach - d + 1;
+      const pA = amt.rp(j), oA = amt.o(j);
+      const gp = grid.pageAt(grid.pageOfCell(j)), oG = gp ? grid.o(j) : 0;
+      for (let k = 0; k < n; k++) {
+        liqPlSteps++;
+        const v = gp ? gp[oG + sdir * k] : -1;
+        if (v >= 0 ? (v !== 0 && !isFluidId(v)) : isSolid(j + sdir * k * FROWS)) return 0;
+        const b = oA + sdir * k * T;
+        let Cj = 0; for (let q = 0; q <= t; q++) Cj += pA[b + q];
+        if (Cj > Ci) return 0;
+        if (Cj <= Ci - 2) return d + k;
+      }
+      d += n;
+    }
+    return 0;
+  };
   const sinkRate = Math.max(0, Math.min(cap, liquidCfg.sinkRate | 0)), sinkLed = sinkLedger(room);
   const changedSet = new Set(), airborneWire = new Set();   // accumulate across the physics sub-steps below; broadcast once
   // QUIESCENCE scratch (only when enabled): per-fine-cell counter of consecutive ticks the cell did NOT move. Reallocated if NCELL changed (sub switch).
@@ -4041,7 +4119,17 @@ function fineLiquidTickRoom(room, SUB) {
         if (amt.rp(i)[amt.o(i) + t] <= 0) continue;
         const Ci = cumAt(i, t);
         let dir = 0, best = Infinity;
-        for (let _si = 0; _si < 2; _si++) { const sdir = _si ? 1 : -1; for (let d = 1; d <= PLSCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d * FROWS; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { if (d < best) { best = d; dir = sdir; } break; } } }
+        for (let _si = 0; _si < 2; _si++) {
+          const sdir = _si ? 1 : -1; liqPlRuns++;
+          let hit = 0;
+          if (ROWFAST) hit = scanPerLiq(i, c, Ci, t, sdir, PLSCAN);
+          if (!ROWFAST || liquidCfg.scanVerify) {
+            let slow = 0;
+            for (let d = 1; d <= PLSCAN; d++) { if (!ROWFAST) liqPlSteps++; const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d * FROWS; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { slow = d; break; } }
+            if (!ROWFAST) hit = slow; else if (slow !== hit) liqScanMismatch++;
+          }
+          if (hit && hit < best) { best = hit; dir = sdir; }
+        }
         if (dir === 0) continue;
         const j = i + dir * FROWS; if (isSolid(j) || lavaBlk(i, j)) continue;
         // ⭐⭐ SYMMETRIC SORT GATE. `sortingHere` stops a cell that is still stratifying from levelling — but it only
@@ -4099,7 +4187,17 @@ function fineLiquidTickRoom(room, SUB) {
       // onward every time: the front advanced ~9 cells/tick and raced away from the body that was still separating.
       if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0 && step < FLATSTEPS) {
         let dir = 0, best = Infinity;
-        for (let _si = 0; _si < 2; _si++) { const sdir = _si ? 1 : -1; for (let d = 1; d <= SCAN; d++) { const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d * FROWS; if (isSolid(j)) break; const jl = tot.g(j); if (jl > L) break; if (jl <= L - 2) { if (d < best) { best = d; dir = sdir; } break; } } }
+        for (let _si = 0; _si < 2; _si++) {
+          const sdir = _si ? 1 : -1; liqLvlRuns++;
+          let hit = 0;
+          if (ROWFAST) hit = scanLevel(i, c, L, sdir, SCAN);
+          if (!ROWFAST || liquidCfg.scanVerify) {
+            let slow = 0;
+            for (let d = 1; d <= SCAN; d++) { if (!ROWFAST) liqLvlSteps++; const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d * FROWS; if (isSolid(j)) break; const jl = tot.g(j); if (jl > L) break; if (jl <= L - 2) { slow = d; break; } }
+            if (!ROWFAST) hit = slow; else if (slow !== hit) liqScanMismatch++;
+          }
+          if (hit && hit < best) { best = hit; dir = sdir; }
+        }
         if (dir !== 0 && shedCap >= 1) { const j = i + dir * FROWS; if (tot.g(j) < L && tot.g(j) < cap && !lavaBlk(i, j) && reduce(1) > 0) { lvlMove(i, j, 1); L -= 1; wakeN(i); } }
       }
     }
@@ -4296,6 +4394,21 @@ let liqReactCand = 0, liqReactSeen = 0;
 // If `woken` dominates, the sim is re-examining a huge halo around every moving cell every tick, and the fix is
 // the wake rule — not the flow, not the budget, and not anything measured so far.
 let liqQProcessed = 0, liqQMoved = 0, liqQWoken = 0, liqQCapped = 0;
+// ⭐⭐ HOW FAR THE SIDEWAYS SCANS ACTUALLY WALK. The two levelling scans (1c/1d and 2c) look up to
+// LIQUID_LEVEL_SCAN = 28 cells along the row in EACH direction, per cell, per sub-step, and the per-line
+// profile puts them at ~18% of the liquid tick between them. Whether that is worth attacking depends entirely
+// on the average, which nobody has ever measured: 3 steps means the reach is irrelevant and the cost is the
+// loop's overhead, while 28 means it is walking the full window and finding nothing — which is what a FLAT
+// pool would do, since the scan only stops early on a wall, a higher cell, or a target.
+// `runs` counts one per direction attempted, so steps/runs is the mean walk length out of `reach`.
+let liqLvlSteps = 0, liqLvlRuns = 0, liqPlSteps = 0, liqPlRuns = 0;
+// ⭐⭐ THE FAST ROW WALK CHECKED AGAINST THE LOOP IT REPLACES (`liquidCfg.scanVerify`, off by default).
+// The two guards that would normally cover a change here — `probe_fine_identity` and `probe_addressing` Part B —
+// both build their scenes BY HAND, so both rooms are non-generated and NEITHER exercises the `genRoom` branch
+// of `isSolid`, which is the one the Overworld ships. A bug in the fast walk's terrain half would pass both.
+// So the verification is the direct one: run both, compare the answers, count disagreements. Turn it on in the
+// live Overworld, pour water, and read this. It must be exactly 0.
+let liqScanMismatch = 0;
 // 🟥 CHUNKS GENERATED FROM INSIDE THE LIQUID TICK. A profile of aggressive panning put worldgen.js at 33.4% of
 // all server CPU — more than the entire liquid sim — and the sim is one of the things that triggers it: any read
 // into a chunk that has never been produced runs the generator (`rp` → `_miss` → `_alloc`), synchronously, at
@@ -5279,6 +5392,8 @@ const runLiquidTick = () => {
         reactCand: liqReactCand, reactSeen: liqReactSeen, reactAnchors: liqReactAnchors, reactFired: liqReactFired,
         // the work-queue funnel: examined → actually did something → put back by a neighbour → put back by the cap
         qProcessed: liqQProcessed, qMoved: liqQMoved, qWoken: liqQWoken, qCapped: liqQCapped,
+        // the two sideways levelling scans: mean walk length out of LIQUID_LEVEL_SCAN (see liqLvlSteps)
+        lvlSteps: liqLvlSteps, lvlRuns: liqLvlRuns, plSteps: liqPlSteps, plRuns: liqPlRuns, scanMismatch: liqScanMismatch,
         tickGenPages: liqTickGenPages, genPages: genPagesProduced, genBy: liqGenBy,
         // WHERE the active liquid is. `actChunks` against the ~150 chunks one player's viewport subscribes to
         // is the whole diagnosis: similar ⇒ the sim is working on what you can see and the COST is the problem;
@@ -5326,6 +5441,7 @@ const runLiquidTick = () => {
       // it off (it reads the same counters through the sliced module, cumulatively, and still can).
       liqRateSkips = 0; liqK2Throttles = 0; liqSecTicks = 0; liqSecDeferred = 0; liqReactSkips = 0;
       liqQProcessed = 0; liqQMoved = 0; liqQWoken = 0; liqQCapped = 0; worldLiquidWakeAdmitted = 0;
+      liqLvlSteps = 0; liqLvlRuns = 0; liqPlSteps = 0; liqPlRuns = 0;
     }
   }
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
@@ -6386,7 +6502,9 @@ function cfgWire() {
     // regenerated a cave in the same place; the load counter is what tells the two apart. Same reasoning as
     // `liqRateSkips` and `liqK2Throttles`, which this track needed for the same reason.
     worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, powderSeeded: genPowderSeeded, powderRewoken: genPowderRewoken, faceWoken: genFaceWoken, dropped: genChunksDropped, deltad: genChunksDeltad,
-      saved: worldSaved, loaded: worldLoaded, applied: worldApplied, liqRestored: worldLiquidRestored, flushes: worldFlushes, flushed: worldFlushWrites, saveErrors: worldSaveErrors },
+      saved: worldSaved, loaded: worldLoaded, applied: worldApplied, liqRestored: worldLiquidRestored, flushes: worldFlushes, flushed: worldFlushWrites, saveErrors: worldSaveErrors,
+      // `liquidCfg.storedWakeAudit` only — see the note beside these. movable/seen is the whole diagnosis.
+      auditSeen: storedAuditSeen, auditMovable: storedAuditMovable, auditChunks: storedAuditChunks },
   });
 }
 
@@ -7990,6 +8108,21 @@ chunkDelta = (room, p) => {
 // generator's own seeding for the chunk, so the stored state wins. Reverse that order and a drained lake refills
 // itself on every restart.
 let worldLiquidRestored = 0;
+// ⭐⭐ THE STORED-LIQUID AUDIT (`liquidCfg.storedWakeAudit`, OFF by default and free when off).
+// The question it settles: *"why does saved water come back MOVING?"* — measured, arriving on a chunk a player
+// has built in costs 900–1,900 active cells for ~45 seconds, while an untouched generated world costs 0.
+// There are two completely different explanations and they need opposite fixes:
+//   (a) THE STORED STATE IS ITSELF OUT OF EQUILIBRIUM — it was written to disk mid-motion (eviction happens 10s
+//       after you leave residency; settling takes ~45s, so leaving promptly freezes the moving state onto disk
+//       and it is restored, and re-saved, moving, every time anybody passes). Fix = do not store mid-motion.
+//   (b) THE STORED STATE IS AT REST AND THE RESTORE BREAKS IT — generated liquid is seeded first and the stored
+//       diff laid over it, and persistence is PER CHUNK while a body of water is not, so a slice saved ten
+//       minutes ago can come back beside a slice saved just now. Fix = something else entirely.
+// ⇒ count, over the cells `applyStoredLiquid` has just written, how many `liquidCanMove` says could move. Near
+// zero with the sim still busy for 45s means (b); a large fraction means (a).
+// ⚠️ This is the SAME test as the wake filter that froze water twice, used here only to COUNT. It is not being
+// trusted to decide anything, which is the whole reason it is safe to use it.
+let storedAuditSeen = 0, storedAuditMovable = 0, storedAuditChunks = 0;
 // ⭐ How many stored-liquid cells were NOT woken because they had nowhere to go. A MECHANISM counter: if
 // terrain is arriving late and this is large, the filter is doing its job and the load is elsewhere; if it is
 // zero on a played-in world, the filter is not firing and something upstream changed.
@@ -8074,9 +8207,11 @@ function applyStoredLiquid(room, p) {
     if (!liquidCfg.storedWakeAll && !_edge && rid && !liquidCanMove(s.terrain, i, geom, rid)) { worldLiquidWakeSkipped++; continue; }
     // ⭐⭐ SPREAD, NOT DROPPED (liquidCfg.storedWakeRate). See the note below — this is the safe half of the
     // saving, and it is the half that cannot freeze anything.
+    if (liquidCfg.storedWakeAudit && rid) { storedAuditSeen++; if (liquidCanMove(s.terrain, i, geom, rid)) storedAuditMovable++; }
     if (liquidCfg.storedWakeRate > 0) { let q = _storedWakeQ.get(room); if (q === undefined) _storedWakeQ.set(room, q = new Set()); if (q.size < LIQUID_MAX_ACTIVE) q.add(i); continue; }
     if (act.size < LIQUID_MAX_ACTIVE) act.add(i);
   }
+  if (liquidCfg.storedWakeAudit) storedAuditChunks++;
   worldLiquidRestored += n;
   return n;
 }
@@ -9225,7 +9360,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'storedWakeAll', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace', 'sortColRun']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'storedWakeAll', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace', 'sortColRun', 'storedWakeAudit', 'scanVerify', 'scanFast']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
