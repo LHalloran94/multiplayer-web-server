@@ -392,30 +392,43 @@ app.post('/auth/discord', async (req, res) => {
 // server is reachable over a public Funnel URL. Costs nothing when not profiling — the inspector session is
 // created on demand and disconnected afterwards.
 let _cpuProf = null;
-app.get('/debug/cpu-profile', (req, res) => {
-  const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
-  if (ip !== '127.0.0.1' && ip !== '::1') return res.status(403).json({ error: 'localhost only' });
-  if (_cpuProf) return res.status(409).json({ error: 'a profile is already running' });
-  const ms = Math.max(1000, Math.min(120000, +req.query.ms || 20000));
+// ⭐⭐ ONE IMPLEMENTATION, TWO WAYS IN. This used to be reachable only as a URL, and the user's answer to being
+// asked to fetch one was the right one: *"I don't know how to hit the cpu-profile thing; it is better to put
+// such things into the debug panel if you want me to do them."* A diagnostic that needs a terminal is a
+// diagnostic that does not get taken at the moment the problem is on screen — which is the only moment it is
+// worth anything. The Perf tab now has a button, and it calls exactly this.
+// `done(err, file)` fires when the profile has been WRITTEN, not when it starts.
+function startCpuProfile(ms, done) {
+  if (_cpuProf) return done('a profile is already running', null);
   let inspector, fs2, path2;
   try { inspector = require('node:inspector'); fs2 = require('node:fs'); path2 = require('node:path'); }
-  catch (e) { return res.status(500).json({ error: String(e) }); }
+  catch (e) { return done(String(e), null); }
   const session = new inspector.Session();
-  try { session.connect(); } catch (e) { return res.status(500).json({ error: 'connect: ' + e.message }); }
+  try { session.connect(); } catch (e) { return done('connect: ' + e.message, null); }
   _cpuProf = session;
   session.post('Profiler.enable', () => session.post('Profiler.start', () => {
     setTimeout(() => session.post('Profiler.stop', (err, out) => {
       _cpuProf = null;
+      let file = null, error = err ? String(err) : null;
       try {
         const dir = path2.join(__dirname, 'prof');
         if (!fs2.existsSync(dir)) fs2.mkdirSync(dir, { recursive: true });
         const f = path2.join(dir, 'server-' + Date.now() + '.cpuprofile');
-        if (!err) fs2.writeFileSync(f, JSON.stringify(out.profile));
+        if (!err) { fs2.writeFileSync(f, JSON.stringify(out.profile)); file = 'server/prof/' + path2.basename(f); }
         console.log('[prof] wrote ' + f);
-      } catch (e) { console.log('[prof] write failed: ' + e.message); }
+      } catch (e) { error = e.message; console.log('[prof] write failed: ' + e.message); }
       try { session.disconnect(); } catch (e) {}
+      done(error, file);
     }), ms);
   }));
+  return null;
+}
+app.get('/debug/cpu-profile', (req, res) => {
+  const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+  if (ip !== '127.0.0.1' && ip !== '::1') return res.status(403).json({ error: 'localhost only' });
+  const ms = Math.max(1000, Math.min(120000, +req.query.ms || 20000));
+  if (_cpuProf) return res.status(409).json({ error: 'a profile is already running' });
+  startCpuProfile(ms, () => {});
   res.json({ profiling: true, ms, dir: 'server/prof' });
 });
 
@@ -9050,6 +9063,18 @@ io.on('connection', (socket) => {
   // ---- Liquid Debug config (GLOBAL, live-tunable sim switches driven by the client's Liquid Debug menu) ----
   socket.emit('liquid-cfg', cfgWire());                     // send current state so a joining client's menu reflects it
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', cfgWire()));
+  // ⭐ THE PERF TAB'S "PROFILE THE SERVER" BUTTON. Same implementation as the URL (see `startCpuProfile`); the
+  // point is that it can be pressed at the moment the problem is happening, by somebody who is playing rather
+  // than holding a terminal. The reply carries the FILENAME, which is what makes the result findable
+  // afterwards — `node scratchpad/read_cpuprofile.js <file>` ranks it.
+  // ⚠️ No auth beyond being connected, exactly like every other control on that panel. It writes a file on the
+  // machine the server is on and nothing else; the HTTP route keeps its localhost-only check because a URL can
+  // be fetched by a page the user did not open.
+  socket.on('cpu-profile', (p) => {
+    const ms = Math.max(1000, Math.min(120000, (p && +p.ms) || 30000));
+    socket.emit('cpu-profile-state', { running: true, ms });
+    startCpuProfile(ms, (err, file) => socket.emit('cpu-profile-state', { running: false, error: err, file }));
+  });
   // DEBUG single-step: advance the frozen sim by a few ticks. Only meaningful while paused; ignored otherwise, so a
   // stray press can never make the sim run fast.
   // DEBUG resync: re-send this socket the FULL liquid state for the room it is in. The client compares it against its
