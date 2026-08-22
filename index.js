@@ -5352,12 +5352,18 @@ const interestCfg = {
   // while diagonal — 79 chunks/s against a sustained ~86/s at 20ms, i.e. inside the noise of not keeping up, and
   // measured doing exactly that (arrival climbing 573ms → 3,100ms over 250 steps and still rising). At 26 the
   // ceiling is ~112/s. The client-side diagonal normalisation lands the same blow from the other side (79 → 56).
-  // ⚠️ 26 + queueBatch(2) × ~8ms worst chunk = 42 of a 40ms tick, so this is now AT the bound `probe_worldgen`
-  // B5a keeps rather than inside it. It is affordable because the overshoot is one batch and only on ticks with
-  // terrain pending — but it is the last free notch. Beyond this, make chunks cheaper or reduce demand.
+  // 🟥 IT WENT TO 26 AND THAT WAS OVER THE BOUND — corrected to 22 the same day. `probe_worldgen` B5a requires
+  // `queueMs + queueBatch × worstChunk ≤ tickMs`, and it was passing with a 4.3× margin because it times
+  // `server/worldgen.js`, the ROLLBACK generator (0.86ms mean / 1.64ms worst) rather than the worldgen2 stack
+  // that actually ships (~5.8ms in a batch, ~8ms worst, measured on the running server). On the real numbers
+  // 26 + 2×8 = 42ms against a 40ms tick: the property was violated while the guard printed a healthy margin.
+  // ⇒ 22 + 2×8 = 38ms, inside the tick. Throughput at 22ms is still ~95 chunks/s against a measured worst-case
+  // demand of 49/s (normalised cursor diagonal at the zoom floor), so nothing is given up.
+  // ⚠️ FOURTH INSTANCE of a cost figure inherited from the rollback generator on this track alone. B5a now
+  // carries a companion (B5a-live) evaluated against the measured live cost.
   // ⚠️ STILL A DIAL, and still the first thing to turn if terrain lags. `queueMs = 0` remains an exact revert
   // to the synchronous path.
-  queueMs: 26,
+  queueMs: 22,
   // Chunks per `sendChunkContent` call while draining. The clock is checked after every batch, so this trades
   // packet count against how far a single batch can overshoot the allowance. ⚠️ ONE CHUNK CANNOT BE
   // INTERRUPTED, so the true overshoot bound is `queueBatch × the cost of the most expensive chunk` — which is
