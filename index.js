@@ -2207,6 +2207,13 @@ let liquidCanMove = () => true;
 // "No generator ⇒ no diff ⇒ store the whole chunk", which is exactly right for the sliced rigs and for every
 // hand-built room.
 let chunkDelta = () => null;
+// 🟥 AND THE SAME SEAM FOR THE TRACE FLAG, WHICH IS THE 9th TIME THIS BOUNDARY HAS BEEN CROSSED BY ACCIDENT.
+// Three `worldCfg.trace` tests were added to this block for the persistence work, and `worldCfg` is declared
+// outside it — so `probe_chunking` has been dying with `ReferenceError: worldCfg is not defined` ever since,
+// i.e. a whole guard silently not running. Nothing else notices, because the live server has `worldCfg`.
+// ⚠️ DEFAULTS TO FALSE, so a sliced rig simply prints nothing — the same "the default is the right answer for
+// the rigs" reasoning as `liquidCanMove` above and `chunkDelta` beside it.
+let worldTrace = () => false;
 // ⭐⭐ INCREMENT 4d — STORE ONLY THE CELLS THAT DIFFER FROM WHAT THE GENERATOR WOULD PRODUCE.
 // 4c throws away a chunk nobody has changed. This is the other half: a chunk somebody HAS changed no longer
 // stores all 4,096 cells, only the ones that differ. The rest is recomputed from the seed on the way back in.
@@ -2310,7 +2317,7 @@ function evictChunk(room, p) {
   // This is the OTHER way a dug hole comes back, and it is invisible from the outside: the diff comes out
   // empty, the chunk is thrown away rather than stored, and the next visit rebuilds it from the seed. If a
   // chunk somebody just dug in reports `pristine`, that is the bug, stated in one line.
-  if (worldCfg.trace) console.log(`[trace] evict chunk ${p}: ${_d ? (_d.pristine ? 'PRISTINE — thrown away, will regenerate from the seed'
+  if (worldTrace()) console.log(`[trace] evict chunk ${p}: ${_d ? (_d.pristine ? 'PRISTINE — thrown away, will regenerate from the seed'
     : (_d.d ? _d.d.length : 0) + ' changed cell(s) stored') : 'no diff (not a generated room) — stored whole'}`);
   rec.gen = (_d && _d.pristine) ? 1 : 0;
   rec.blob = rec.gen ? null : (_d || encodeChunk(s, p));
@@ -2444,7 +2451,7 @@ function onChunkFault(room, p) {
   if (rec.blob) return rehydrateChunk(room, p);
   if (rec.gen) {
     // …and the moment it actually happens: this chunk is coming back from the SEED, not from anything stored.
-    if (worldCfg.trace) console.log(`[trace] chunk ${p} faulted back in FROM THE SEED (it was thrown away as unchanged)`);
+    if (worldTrace()) console.log(`[trace] chunk ${p} faulted back in FROM THE SEED (it was thrown away as unchanged)`);
     chunksOf(room).evicted[p] = 0; rec.gen = 0; queuePowderReseed(room, p); return true;
   }
   return false;
@@ -2475,7 +2482,7 @@ function restoreChunk(room, p) {
   const _held = !!(_s0 && CHUNK_CONTENT.some(f => _s0[f] && _s0[f].pageAt(p)));
   if (!rec.blob && !_held) {
     const fromDisk = loadChunkBlobFor(room, p);
-    if (worldCfg.trace) console.log(`[trace] restore chunk ${p}: nothing held, disk ${fromDisk ? 'HIT' : 'miss'}, gen=${rec.gen}, evicted=${chunksOf(room).evicted[p]}`);
+    if (worldTrace()) console.log(`[trace] restore chunk ${p}: nothing held, disk ${fromDisk ? 'HIT' : 'miss'}, gen=${rec.gen}, evicted=${chunksOf(room).evicted[p]}`);
     // ⚠️ A DISK BLOB IS NOT AN EVICTION BLOB. It holds a terrain DIFF and a liquid DIFF, over ground that is about
     // to be generated fresh — so unlike a restore from memory it needs the generator's own liquid seeding to run
     // first, with the stored diff applied over the top on the deferred pass. See queueGenLiquid.
@@ -2500,7 +2507,7 @@ function restoreChunk(room, p) {
 function rehydrateChunk(room, p) {
   const s = roomCells.get(room); if (!s) return false;
   const ch = chunksOf(room), rec = ch.peek(p), blob = rec.blob;
-  if (worldCfg.trace) console.log(`[trace] rehydrate chunk ${p}: ${blob ? 'applying stored blob (' + (blob.d ? blob.d.length + ' diff cells' : 'whole') + ')' : 'NO BLOB — nothing to apply'}`);
+  if (worldTrace()) console.log(`[trace] rehydrate chunk ${p}: ${blob ? 'applying stored blob (' + (blob.d ? blob.d.length + ' diff cells' : 'whole') + ')' : 'NO BLOB — nothing to apply'}`);
   if (!blob) return false;                   // (a blob implies a record, so `rec` here is never the shared empty)
   rec.blob = null; ch.evicted[p] = 0;
   // 🟥 `restoring` EXISTS BECAUSE OF A REAL BUG, and the flag ordering above is what caused it. Decoding
@@ -7506,6 +7513,9 @@ function encodeLiquidDelta(s, p, genT) {
   }
   return out.length ? Buffer.from(out) : null;
 }
+// The trace hook declared inside the sliced cell-store block (see the note there). Reassigned here, where
+// `worldCfg` actually exists, so the live server traces exactly as before and a sliced rig prints nothing.
+worldTrace = () => !!worldCfg.trace;
 chunkDelta = (room, p) => {
   const gen = _genRooms.get(room); if (!gen || !worldCfg.dropPristine) return null;
   const st = roomCells.get(room); if (!st || !st.terrain) return null;
