@@ -4960,7 +4960,7 @@ const runLiquidTick = () => {
         // `chunkQMs` against `interestCfg.queueMs` says whether the allowance is the binding constraint; a
         // `chunkQWait` that never falls says the world is arriving more slowly than players are asking for it.
         chunkQMs: +(liqPerf.chunkMs / liqPerf.ticks).toFixed(2), chunkQMaxMs: +liqPerf.chunkMsMax.toFixed(2),
-        chunkQSent, chunkQDrains, chunkQDropped, chunkQBudgetMs: interestCfg.queueMs, chunkQOn: interestCfg.queue ? 1 : 0,
+        chunkQSent, chunkQDrains, chunkQDropped, chunkQStale, chunkQBudgetMs: interestCfg.queueMs, chunkQOn: interestCfg.queue ? 1 : 0,
         chunkQWait: chunkQueueDepth(),
         // The K tier 2 actually USED this window (see kMin) — `steps` below is the configured maximum.
         stepsUsed: liqPerf.kMin,
@@ -5385,6 +5385,10 @@ const interestCfg = {
 // than inferring it from an outcome. Same reasoning as `liqRateSkips` and `liqK2Throttles`: this track has been
 // bitten repeatedly by a check that measured a result instead of a mechanism.
 let chunkQSent = 0, chunkQDrains = 0, chunkQDropped = 0, chunkQCursor = 0;
+// ⭐ How many queued chunks were abandoned because the client moved on before they were served. A MECHANISM
+// counter, not an outcome one (the same reason liqRateSkips and liqK2Throttles exist): if this is large while
+// terrain is arriving late, the queue was doing work nobody wanted any more.
+let chunkQStale = 0;
 // The CELL-ADDRESSED wires, and how to walk one record. Anything not listed here is broadcast untouched.
 // ⚠️ `liquid-src` is deliberately NOT here. It is a low-rate MARKER toggle with no re-subscribe repair path, so
 // filtering it would leave a client permanently wrong about which cells are sources — cost nothing, break something.
@@ -5440,6 +5444,21 @@ function updateSubs(room, sid, v) {
   //   · and `chunkHash` is no longer called on every chunk in the world every time a socket appears.
   for (const p of want) if (!e.subs.has(p)) e.pending.add(p);   // came back (or arrived): you do not have it, here it is
   e.subs = want;
+  // 🟥🟥 …AND FORGET WHAT THE CLIENT HAS ALREADY WALKED AWAY FROM. `pending` was APPEND-ONLY: a chunk asked for
+  // and then left behind stayed queued for ever, and because a Set drains in INSERTION order the queue served
+  // the OLDEST — i.e. the most stale — requests first, while the ground under the player's feet waited at the
+  // back. During fast travel most of the budget went on producing chunks the client had already discarded,
+  // whose content `twSetW` then dropped on the floor (`twFromWire` returns -1 for a cell outside the window).
+  // Reported from play, from the Net tab this increment added: *"awaiting 269 chunks, oldest 16.9s"* while
+  // moving diagonally, rising to 413 — and the user's own reading of it was exactly right: *"if the chunks we
+  // are waiting for are no longer onscreen then we probably don't want to be trying to load it."*
+  // ⭐ THE BEACON IS THE AUTHORITATIVE STATEMENT OF WHAT THE CLIENT HOLDS, so `subs` is the right filter and
+  // this costs one pass over a set that is only large when it is wrong. Deleting from a Set while iterating it
+  // is well defined.
+  // ⚠️ NOT A THROTTLE AND NOT LOSSY: a chunk dropped here is one the client is no longer subscribed to, and if
+  // it comes back the `!e.subs.has(p)` line above re-adds it. Increment 3d already made re-entry unconditional
+  // for exactly this reason.
+  if (e.pending.size) for (const p of e.pending) if (!want.has(p)) { e.pending.delete(p); chunkQStale++; }
   // ⭐ WITH THE QUEUE ON, THE BEACON DOES NOT PRODUCE ANYTHING — it only records what this socket is owed, and
   // the tick delivers it within a budget. `e.pending` was always the queue; all that changes is who drains it.
   if (e.pending.size && !interestCfg.queue) flushPending(room, sid, e);
