@@ -3253,6 +3253,21 @@ const LIQUID_MS = 60;                                 // legacy default (the liv
 // (LIQUID_FLOOR_ROW is derived inside liquidTickRoom because FLOOR_TOP is declared later in the file.)
 const LIQUID_MAX_ACTIVE = 80000;                      // safety cap on tracked active cells per room
 const LIQUID_MAX_PER_TICK = 9000;                     // process at most this many cells/room/tick (rest carry over)
+// ⭐⭐ THE PACKED SORT KEY (see the sort in `fineLiquidTickRoom`). Three fields in one double, ordered so that a
+// plain ascending numeric sort reproduces the old comparator exactly: row DESCENDING · total ASCENDING · the
+// cell index (flipped on alternate ticks, the lateral symmetry-breaker). The index is unique, so the key is
+// unique and there are no ties left to resolve — the permutation is identical, not merely equivalent.
+// 4,095 · 2^39 + 255 · 2^31 + 2^31 ≈ 2.25e15, comfortably inside 2^53, so every key is an exact integer.
+// ⚠️ Every bound is CHECKED at the call site, not assumed. `_MAX` values are what the packing can hold; a room
+// outside them takes the original comparator.
+const SORT_IDX_MAX = 0x7fffffff;                      // the flat index cap the Overworld's width was chosen for
+const SORT_TOT_MUL = 0x80000000;                      // 2^31 — one place value above the index
+const SORT_TOT_MAX = 256;                             // `cap` is clamped to 255 on the liquid-cfg wire
+const SORT_ROW_MUL = SORT_TOT_MUL * SORT_TOT_MAX;     // 2^39 — one place value above the total
+const SORT_ROW_MAX = 4096;                            // OVERWORLD_DIMS.rows, the tallest world there is
+// Reused across sub-steps and ticks: this used to be `Array.from(active)` nine times a tick, which for a busy
+// room is a 20,000-element allocation per sub-step.
+let _sortBuf = new Float64Array(1024);
 // (roomLiquidActive / roomLiquidAmt / roomLiquidTotal — the COARSE liquid state — were deleted with liquidTickRoom
 //  on 2026-07-29. The roomFine* arrays are the liquid now.)
 // ── THE WHOLE STREAM-RECONSTRUCTION APPARATUS IS GONE (slices 2a/3/4, 2026-07-29). Three per-cell annotations lived
@@ -3881,8 +3896,38 @@ function fineLiquidTickRoom(room, SUB) {
     const doSortDiag = step < DIAGSTEPS; // ...and the DIAGONAL half (2b) is capped tighter still, to bound sideways travel
     const doPerLiq = step < PLSTEPS;    // (2c) per-liquid levelling — capped separately: this IS its sideways spread speed in cells/tick
     stepMoves = 0;
-    const list = Array.from(active); active.clear();
-    list.sort((a, b) => { const ra = a % FROWS, rb = b % FROWS; if (ra !== rb) return rb - ra; const la = tot.g(a), lb = tot.g(b); if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
+    // ⭐⭐ ONE PACKED NUMBER PER CELL, SORTED AS A TYPED ARRAY. This was `Array.from(active)` followed by
+    // `.sort()` with a JS comparator, and the two together measured **~5% of the whole liquid tick** — a sort
+    // of every active cell, on every one of the nine sub-steps, with a comparator that took a PAGED READ
+    // (`tot.g`) on every row-tie. `Array.prototype.sort` calls back into JS per comparison;
+    // `Float64Array.prototype.sort` is numeric and never leaves the engine.
+    // ⭐ The three keys fit one double exactly: row DESCENDING in the top bits, total ASCENDING next, and the
+    // cell index last (flipped on alternate ticks, which is what the old comparator's `(tick & 1)` did — the
+    // lateral symmetry-breaker). 4,095 · 2^39 + 255 · 2^31 + 2^31 is comfortably under 2^53, so every key is an
+    // exact integer and equality/ordering are exact. The index makes every key unique, so there are no ties to
+    // resolve differently from before: the permutation is identical, not merely equivalent.
+    // ⚠️ The buffers are reused across sub-steps and ticks — allocating a 20,000-element array nine times a tick
+    // was part of what this line cost.
+    // ⚠️ THE PACKING HAS BOUNDS AND THEY ARE CHECKED, not assumed. They hold for every shape that ships (`cap`
+    // is clamped to 255 on the wire, the tallest world is 4,096 rows, and the flat index is under 2^31 by the
+    // cap increment 6 measured) — but a room that broke one would silently sort into the wrong order, which is
+    // the worst kind of failure. Out of bounds falls back to the original comparator, written into the same
+    // buffer so the loop below has ONE shape either way.
+    const _n0 = active.size;
+    if (_sortBuf.length < _n0) _sortBuf = new Float64Array(1 << (32 - Math.clz32(_n0 | 1)));
+    const list = _sortBuf;
+    let _flip = !(tick & 1);
+    if (FROWS <= SORT_ROW_MAX && cap < SORT_TOT_MAX && NCELL <= SORT_IDX_MAX) {
+      let n = 0;
+      for (const i of active) { const r = i % FROWS; list[n++] = (FROWS - 1 - r) * SORT_ROW_MUL + tot.g(i) * SORT_TOT_MUL + (_flip ? SORT_IDX_MAX - i : i); }
+      active.clear();
+      list.subarray(0, _n0).sort();
+    } else {
+      const arr = Array.from(active); active.clear();
+      arr.sort((a, b) => { const ra = a % FROWS, rb = b % FROWS; if (ra !== rb) return rb - ra; const la = tot.g(a), lb = tot.g(b); if (la !== lb) return la - lb; return (tick & 1) ? a - b : b - a; });
+      for (let k = 0; k < _n0; k++) list[k] = arr[k];
+      _flip = false;                                   // already in final order; the low bits are the index itself
+    }
     const fell = new Set(), fellDown = new Set();
     // ⭐⭐ ONE CELL PER PASS (fineSortOnePerPass). `list` is sorted BOTTOM-UP, which is right for falling — a column
     // cascades in a single pass — but for the density sort it means each successively HIGHER cell pulls the same light
@@ -4007,12 +4052,13 @@ function fineLiquidTickRoom(room, SUB) {
     // ⚠️ Only engages when the set is actually over the cap, so any room that fits — every page world — keeps
     // start = 0 and is byte-for-byte unchanged, which is what keeps the golden replay identical.
     let processed = 0;
-    const _n = list.length;
+    const _n = _n0;                                    // the buffer is reused and longer than the run — never `list.length`
     let _start = 0;
     if (_n > LIQUID_MAX_PER_TICK) { _start = (roomFlowCursor[room] | 0) % _n; roomFlowCursor[room] = (_start + LIQUID_MAX_PER_TICK) % _n; }
     else roomFlowCursor[room] = 0;
   for (let _k = 0; _k < _n; _k++) {
-    const i = list[_start + _k < _n ? _start + _k : _start + _k - _n];
+    const _key = list[_start + _k < _n ? _start + _k : _start + _k - _n];
+    const _low = _key % SORT_TOT_MUL, i = _flip ? SORT_IDX_MAX - _low : _low;
     if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); liqQCapped++; continue; }
     if (isSolid(i)) continue;
     const c = (i / FROWS) | 0, r = i - c * FROWS, canDown = r + 1 < LIQUID_FLOOR_ROW;
