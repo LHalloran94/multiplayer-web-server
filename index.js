@@ -3125,6 +3125,14 @@ const liquidCfg = {
   // fineSortOnePerPass, and without that a sliver teleported to the surface, where it already counted as settled, so
   // this gate had nothing left to block. The two changes only work together.
   finePerLiquidSortGate: true,
+  // ⭐⭐ …AND THE GATE ABOVE ASKS ITS QUESTION OF THE LIQUID BODY, NOT THE WHOLE COLUMN.
+  // "Is my neighbour still stratifying" used to be answered over the column's ENTIRE DEPTH. In a page room that
+  // is 405 rows of mild waste; in the Overworld it is 4,096, so one drop of falling water paid to scan every
+  // live 64-row segment beneath itself, nine sub-steps a tick, and a pool in a cave far below could veto an
+  // exchange at the surface. Measured at 17% of the entire server. An inversion is two ADJACENT liquid cells,
+  // so only the contiguous run the cell sits in can matter — that run is what is walked now.
+  // OFF restores the whole-column scan exactly (kept for A/B and for the golden replay).
+  sortColRun: true,
   // ⭐⭐ ONE CELL PER SORT PASS. `list` is scanned BOTTOM-UP (right for falling), which let each higher cell pull the
   // same light liquid up one more cell within a single pass — so a sliver rode the whole height of a pool in one
   // sub-step and was then filmed across it by 2c, while the bulk rose at the expected rate. This makes a parcel
@@ -3742,7 +3750,56 @@ function fineLiquidTickRoom(room, SUB) {
     // anything writes into that page the revision moves and it is rescanned. Exact, not heuristic: the cache can
     // only ever be consulted for a page whose contents have not changed since it was read.
     const CY = tot.geom.cy, emptySeg = fineEmptySegs(room);
-    const colStillSorting = (cc) => {
+    // ⭐⭐ BOUNDED TO THE LIQUID BODY, NOT THE COLUMN (liquidCfg.sortColRun, default ON).
+    // The question this answers is "may the cell at (cc, rr) take part in a sideways exchange, or is the liquid
+    // around it still stratifying". The old answer was taken over the column's ENTIRE DEPTH — 4,096 rows in the
+    // Overworld — so a puddle in a cave 3,000 rows below could veto a levelling exchange at the surface, and a
+    // single drop of falling water paid to scan every live 64-row segment beneath itself, nine times a tick.
+    // That is the "one person's actions must never cost a player somewhere else" rule broken on the vertical
+    // axis, and it was 17% of the whole server (`GET /debug/cpu-profile`, 2026-08-22).
+    // ⭐ The physically meaningful region is the CONTIGUOUS run of liquid the cell belongs to: an inversion is two
+    // ADJACENT liquid cells, so nothing outside the run the cell sits in can ever pair with it. Walking that run
+    // is cheap where the old scan was dear — a falling parcel's run is 1-3 cells — and never worse: the run is a
+    // subset of the liquid rows the old scan visited, and the segment loop disappears with it.
+    // ⚠️ Not identical, deliberately: a cell whose own row holds NO liquid now answers "not sorting" (there is no
+    // body there to be stratifying) where the old test would still say "yes" if anything anywhere in the column
+    // was inverted. That relaxation is the point.
+    // ⚠️ A run of AIR is cached too, and with its full extent, so the void above a pool is one walk not many.
+    const COLRUN = !!liquidCfg.sortColRun;
+    // column -> { t, b, v }: the run [t..b] that was last examined in this column this sub-step, and its answer.
+    // Any row inside [t..b] reuses it; a row outside walks its own run. One entry per column is enough because a
+    // column's active cells are nearly always in one body.
+    const colRun = new Map();
+    // "part of a liquid body": holds liquid AND is not solid — exactly the pair test's own precondition, so the
+    // run is precisely the set of rows that could ever take part in an inversion here.
+    const wetAt = (k) => tot.g(k) > 0 && !isSolid(k);
+    // ⚠️ THE VOID WALK IS BOUNDED AND THE BODY WALK IS NOT, ON PURPOSE. A body is genuinely as tall as it is and
+    // the old code paid for those rows too. A VOID is not: the partner column at a pool's edge is open air, and
+    // walking it to the top of a 4,096-row world would be worse than what this replaces. 32 rows either way is
+    // enough to make the cache earn its keep and costs a fixed, tiny amount.
+    const VOIDRUN = 32;
+    const colStillSorting = COLRUN ? (cc, rr) => {
+      const e = colRun.get(cc);
+      if (e !== undefined && rr >= e.t && rr <= e.b) return e.v;
+      if (rr < 0 || rr >= FROWS) return false;
+      const colBase = cc * FROWS;
+      let t = rr, b = rr, v = false;
+      if (!wetAt(colBase + rr)) {                     // a void run: no body here, so nothing is stratifying
+        const lo = rr > VOIDRUN ? rr - VOIDRUN : 0, hi = Math.min(FROWS - 1, rr + VOIDRUN);
+        while (t > lo && !wetAt(colBase + t - 1)) t--;
+        while (b < hi && !wetAt(colBase + b + 1)) b++;
+      } else {
+        while (t > 0 && wetAt(colBase + t - 1)) t--;
+        while (b + 1 < FROWS && wetAt(colBase + b + 1)) b++;
+        for (let r2 = t; r2 < b; r2++) {
+          const a2 = colBase + r2;
+          const f = floorRank(a2); if (f >= 0 && f < ceilRank(a2 + 1)) { v = true; break; }
+        }
+      }
+      liqScanRows += b - t + 1;
+      if (e !== undefined) { e.t = t; e.b = b; e.v = v; } else colRun.set(cc, { t, b, v });
+      return v;
+    } : (cc) => {
       let v = colSorting.get(cc);
       if (v !== undefined) return v;
       v = false;
@@ -3857,7 +3914,7 @@ function fineLiquidTickRoom(room, SUB) {
     // What actually takes 10+ ticks is the BODY rearranging (heavy migrating to the bottom), during which any given
     // pair is momentarily in order. So: while this column holds ANY vertical inversion it is still separating, and
     // none of its cells may spread sideways yet.
-    const sortingHere = liquidCfg.sortBeforeLevel && (sortedHere || (liquidCfg.densitySort && colStillSorting(c)));
+    const sortingHere = liquidCfg.sortBeforeLevel && (sortedHere || (liquidCfg.densitySort && colStillSorting(c, r)));
     const roomAt = (j) => !isSolid(j) && tot.g(j) < cap;
     const canFall = canDown && (roomAt(i + 1) || fell.has(i + 1) || (c > 0 && roomAt(i + 1 - FROWS)) || (c < COLS - 1 && roomAt(i + 1 + FROWS)));
     if (canFall) fell.add(i);
@@ -3903,7 +3960,7 @@ function fineLiquidTickRoom(room, SUB) {
         // per-CELL rule; tying them together made it impossible to use this INSTEAD of the blanket rule, which is
         // exactly the combination worth having (the blanket rule freezes a still-sorting column out of levelling
         // entirely, which leaves unnatural terraced mounds standing until it finishes).
-        if (liquidCfg.finePerLiquidSortGate && liquidCfg.densitySort && colStillSorting(c + dir)) continue;
+        if (liquidCfg.finePerLiquidSortGate && liquidCfg.densitySort && colStillSorting(c + dir, r)) continue;
         const Cj = cumAt(j, t);
         if (Cj >= Ci) continue;
         const pi = amt.wp(i), bi = amt.o(i), pj = amt.wp(j), bj = amt.o(j);
@@ -8968,7 +9025,7 @@ io.on('connection', (socket) => {
   });
   socket.on('liquid-cfg', (patch) => {
     if (!patch || typeof patch !== 'object') return;
-    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'storedWakeAll', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace']) if (k in patch) liquidCfg[k] = !!patch[k];
+    for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'storedWakeAll', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace', 'sortColRun']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
