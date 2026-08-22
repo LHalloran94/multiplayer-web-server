@@ -689,10 +689,15 @@ function fillColumn(W, C, c, r0, rN, out, outBack) {
   // 900 rows tall — a seam you could see from across the picture. A geological contact is a SURFACE: it dips,
   // it wanders, and it is rough. Jittering the lookup in BOTH axes turns the wall into a dipping, ragged
   // contact, which is what the same trick does for biome boundaries on the surface.
+  // ⚠️ THE HORIZONTAL HALF OF THE JITTER IS PURE IN THE COLUMN — the same number for every row — and it was
+  // evaluated once per row (measured 419 identical 3-octave fb1 calls per column). Hoisted out of the closure.
+  // The VERTICAL half stays inside: it is the row term, and it is what turns a straight contact into a dipping
+  // one, which is the whole point of the note below.
+  const lithJitC = (fb1(seed, 491, c * nd(26).q, 3, nd(26).p) - 0.5) * 2.2;
   const lithAtRow = (r) => {
     const t = c / W.dx;
     // ⚠️ x wrapped, y NOT: the second term is the ROW, and depth has two real ends.
-    const j = (fb1(seed, 491, c * nd(26).q, 3, nd(26).p) - 0.5) * 2.2 + (fb1(seed, 493, r / 140, 2) - 0.5) * 2.6;
+    const j = lithJitC + (fb1(seed, 493, r / 140, 2) - 0.5) * 2.6;
     const gj = wsamp(W, Math.round(t + j));
     return W.lith[gj];
   };

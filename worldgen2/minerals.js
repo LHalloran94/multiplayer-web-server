@@ -975,27 +975,49 @@ function fb2Above(seed, salt, x, y, oct, thr, per, pery) {
 // function of the mineral's own `dip`, so it is cached per record rather than through the shared Map.
 const veinX = () => nd(11);
 const veinShear = (m) => (m._vsh || (m._vsh = shearQ(m.dip / 26)));
+// ⚠️⚠️ `MIN` MUST BE A `mineralsNear` SHORTLIST, NOT THE WHOLE CATALOGUE. Five of the seven gates this loop used
+// to run at every cell — volcanic / crater / arid / hot / placer — are decided by the COLUMN's `ctx` and cannot
+// change from one cell to the next, and `mineralsNear` already applies them, with the same predicates against
+// the same `ctx` object. So they were five property loads and five branches per mineral per cell that could
+// never fire: measured at ~11% of the whole generator's self time in this one loop. They are gone.
+// ⭐ The contract is enforceable rather than hoped for: there is exactly ONE call site (`cells.js`, in the cell
+// loop) and it passes `RCmin`, which is a `mineralsNear` result built from the same `ci.oreCtx` that would be
+// passed here. `probe_gen2_cost` asserts that statically, so adding a second caller with an unfiltered list
+// fails a check instead of quietly re-associating every mineral in the world.
+// ⚠️ The two gates that REMAIN are the two that genuinely vary within a column: `depth` (per row) and the host
+// lithology (per row, because `lithAtRow` jitters the contact vertically — `mineralsNear`'s own note says the
+// same thing from the other side).
 function mineralAt(MIN, ctx, c, r, d, elev, lith, seed) {
   if (ORE_COUNT) oreStats.cells++;
   for (const m of MIN) {
     if (d < m.depth[0] || d > m.depth[1]) continue;
     const hm = hostMask(m);
     if (hm && !hm[lith]) continue;
-    if (m.volcanic && !ctx.nearVolcano) continue;
-    if (m.crater && !ctx.crater) continue;
-    if (m.arid && ctx.moist > 0.32) continue;
-    if (m.hot && !(ctx.moist > 0.6 && ctx.temp > 0.6)) continue;
-    if (m.shape === 'placer' && !ctx.nearRiver) continue;
     if (ORE_COUNT) { oreStats.gated++; if (m.shape === 'vein' || m.shape === 'pocket' || m.shape === 'massive') { oreStats.noise++; oreOctFull += m.shape === 'massive' ? 3 : 2; } }
 
     switch (m.shape) {
       case 'seam': {
         // a bed: near-horizontal, thin, and it goes on for miles. ⚠️ the wobble is what stops it being a ruled
         // line across the whole world, and it is the same wobble the mesa terraces use so the two agree.
-        const wob = n1(seed, m.salt, c * nd(420).q, nd(420).p) * 60;
+        // ⚠️ BOTH THE WOBBLE AND THE ARCH ARE PURE IN THE COLUMN and were evaluated at EVERY CELL of it —
+        // together the second-largest source of repeated noise reads in the generator (measured 733 identical
+        // field calls per column, for two distinct values). Cached against the column they were taken at, the
+        // same idiom `veinShear` already uses for the quantised shear.
+        // ⚠️ THE SEED IS PART OF THE KEY. Mineral records are per-generator today, but two generators (the
+        // page world and the Overworld) are live in one process, and a cache keyed on the column alone would
+        // hand one world's number to the other if they ever came to share a record. One extra compare.
+        // ⚠️ The arch is now resolved BEFORE the rarity gate rather than after it. That is more work on a cell
+        // the gate rejects and far less over the column, and it cannot change the answer: it is the same pure
+        // function of the same column either way.
+        if (m._wobC !== c || m._wobS !== seed) {
+          m._wobC = c; m._wobS = seed;
+          m._wob = n1(seed, m.salt, c * nd(420).q, nd(420).p) * 60;
+          m._arch = m.arch ? n1(seed, m.salt + 2, c * nd(520).q, nd(520).p) : 0;
+        }
+        const wob = m._wob;
         const k = Math.round((elev + wob) / m.period);
         if (hh(seed, m.salt + 1, k, 0) > m.rarity) continue;      // k is a ROW band — no wrap, depth has two ends
-        if (m.arch && n1(seed, m.salt + 2, c * nd(520).q, nd(520).p) < 0.60) continue;
+        if (m.arch && m._arch < 0.60) continue;
         if (Math.abs(elev + wob - k * m.period) < m.thick) return m.mat;
         continue;
       }

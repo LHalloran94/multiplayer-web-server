@@ -4968,6 +4968,10 @@ const runLiquidTick = () => {
         // `chunkQWait` that never falls says the world is arriving more slowly than players are asking for it.
         chunkQMs: +(liqPerf.chunkMs / liqPerf.ticks).toFixed(2), chunkQMaxMs: +liqPerf.chunkMsMax.toFixed(2),
         chunkQSent, chunkQDrains, chunkQDropped, chunkQStale, chunkQBudgetMs: interestCfg.queueMs, chunkQOn: interestCfg.queue ? 1 : 0,
+        // ⭐ WHAT A CHUNK IS COSTING RIGHT NOW, and how often the drain still ran past its allowance despite
+        // predicting. `chunkQCost` rising is the signal that the world got more expensive to generate; a
+        // non-zero `chunkQOverruns` means the prediction is wrong often enough to look at.
+        chunkQCost: +chunkCostMs.toFixed(2), chunkQOverruns,
         chunkQWait: chunkQueueDepth(),
         // The K tier 2 actually USED this window (see kMin) — `steps` below is the configured maximum.
         stepsUsed: liqPerf.kMin,
@@ -5441,6 +5445,23 @@ let chunkQSent = 0, chunkQDrains = 0, chunkQDropped = 0, chunkQCursor = 0;
 // counter, not an outcome one (the same reason liqRateSkips and liqK2Throttles exist): if this is large while
 // terrain is arriving late, the queue was doing work nobody wanted any more.
 let chunkQStale = 0;
+// ⭐⭐ WHAT ONE CHUNK ACTUALLY COSTS, MEASURED WHILE SERVING THEM — the number the drain admits batches against.
+// 🟥 THE OLD BOUND WAS A CONSTANT NOBODY RE-MEASURED, AND IT WAS MEASURED ON THE ROLLBACK GENERATOR. `queueMs`
+// was set to 24 on the strength of `queueMs + queueBatch × worstChunk ≤ tickMs` with a worst chunk of "~8ms",
+// which came from trace lines against `server/worldgen.js` — while `worldCfg.gen2` has been the default since
+// 2026-08-10. Measured against the generator that ships, the worst chunk was **13.6ms**, so the shipped setting
+// was `24 + 2×13.6 = 51ms of a 40ms tick`: on a tick with terrain pending, the liquid sim was being starved.
+// `probe_worldgen2` D2 had been reporting exactly this and failing.
+// ⭐ THE FIX IS NOT A SMALLER CONSTANT. A constant has to be sized for the worst chunk in the world, so it
+// wastes the allowance on the ordinary ones (the median is a third of the worst). Instead the drain now ASKS
+// whether the next batch fits in the time it has left, using what serving chunks has actually been costing.
+// That makes the bound `queueMs + ONE chunk` instead of `queueMs + queueBatch × worstChunk`, which is both
+// safer and lets the whole allowance be spent.
+// ⚠️ Seeded HIGH and moved by an EMA. A cold server that guessed low would admit a full batch on its first
+// drain — the one drain where nothing is JIT-warmed and chunks are at their most expensive.
+let chunkCostMs = 12;
+let chunkQOverruns = 0;         // drains that still ended past the allowance — the mechanism counter for this
+const CHUNK_COST_ALPHA = 0.15;
 // The CELL-ADDRESSED wires, and how to walk one record. Anything not listed here is broadcast untouched.
 // ⚠️ `liquid-src` is deliberately NOT here. It is a low-rate MARKER toggle with no re-subscribe repair path, so
 // filtering it would leave a client permanently wrong about which cells are sources — cost nothing, break something.
@@ -5559,8 +5580,19 @@ drainChunkQueue = function () {
   const batch = Math.max(1, interestCfg.queueBatch | 0);
   let i = chunkQCursor % jobs.length;
   // `jobs.length * 256` is a runaway guard, not a policy — the loop's real exit is the clock or an empty queue.
+  let served = 0;
   for (let guard = jobs.length * 256; guard > 0; guard--) {
-    if (performance.now() - t0 >= budgetMs) break;
+    const elapsed = performance.now() - t0;
+    if (elapsed >= budgetMs) break;
+    // ⭐⭐ WILL THE NEXT BATCH FIT? The clock was only ever checked BETWEEN batches, so the true overshoot was
+    // `queueBatch × the most expensive chunk` — 2 × 13.6ms against a 40ms tick, on top of a 24ms allowance.
+    // Now the drain predicts, from what chunks have actually been costing (`chunkCostMs`), and stops early
+    // rather than starting work it cannot finish inside its allowance.
+    // ⚠️ ALWAYS SERVE AT LEAST ONE. Without this, a chunk costing more than the whole allowance would never be
+    // served by any tick and the client would wait for ever — a deadlock that would look exactly like the
+    // "awaiting chunks" symptom this whole track exists to fix. With it, the worst overshoot is ONE chunk
+    // starting at elapsed≈0, i.e. the bound is `queueMs + worstChunk` and not `queueMs + batch × worstChunk`.
+    if (served > 0 && elapsed + chunkCostMs > budgetMs) break;
     let at = -1;
     for (let k = 0; k < jobs.length; k++) { const j = jobs[(i + k) % jobs.length]; if (j[2].pending.size) { at = (i + k) % jobs.length; break; } }
     if (at < 0) break;                                    // nothing left anywhere
@@ -5570,12 +5602,25 @@ drainChunkQueue = function () {
     const take = [];
     for (const p of e.pending) { take.push(p); if (take.length >= batch) break; }
     for (const p of take) e.pending.delete(p);
+    // ⚠️ TIMED AROUND THE ACTUAL SEND, because that is what the prediction above has to be about: production,
+    // the deferred liquid drain and the readout are all inside it, and a per-chunk figure taken from anything
+    // narrower would under-predict exactly on the expensive chunks.
+    const b0 = performance.now();
     sendChunkContent(sock, room, take);
+    const per = (performance.now() - b0) / take.length;
+    // ⭐ RISE FAST, FALL SLOW. An estimate that decays quickly through a run of cheap sky chunks would admit a
+    // full batch just as the window reaches the ground — which is the moment chunks are most expensive and the
+    // moment the player is most likely to notice a stalled tick. Cheap readings move it gently; an expensive
+    // one is believed immediately.
+    chunkCostMs = per > chunkCostMs ? per : chunkCostMs + (per - chunkCostMs) * CHUNK_COST_ALPHA;
     chunkQSent += take.length;
+    served += take.length;
     i = at + 1;                                           // ...and move on, whether or not this socket has more
   }
   chunkQCursor = i;
-  return performance.now() - t0;
+  const spent = performance.now() - t0;
+  if (spent > budgetMs) chunkQOverruns++;
+  return spent;
 };
 // How much is waiting, for the readout. Cheap: the number of SOCKETS with work, not a walk of their sets.
 // ⭐ THE GROWTH TERMS, IN ONE PLACE. Everything here is a number that should REACH A CEILING while a player

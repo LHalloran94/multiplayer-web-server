@@ -114,8 +114,17 @@ function depositAt(U, W, M, ci, c, r, d, seed) {
 
   // COAL: a bedded seam in sedimentary rock — thin, flat, and it goes on for miles. Follow it.
   if ((lith === L.SHALE || lith === L.SANDSTONE) && d > 60) {
-    const seam = Math.round((elev + n1(seed, 701, c * nd(400).q, nd(400).p) * 60) / 145);
-    const at = seam * 145 - n1(seed, 701, c * nd(400).q, nd(400).p) * 60;
+    // ⚠️ PURE IN THE COLUMN, AND IT WAS EVALUATED TWICE PER CELL — the same call, character for character, on
+    // two adjacent lines, for every cell of the column that reached this branch. Measured at 716 field calls
+    // per column for ONE distinct value: the single largest source of repeated noise reads in the generator.
+    // Cached on `ci`, which `columnInfo` memoises per column, so a column now pays for it once.
+    // ⚠️ Safe to hang off `ci` precisely because it depends on nothing but (seed, c): the trap this file
+    // records against caching on `ci` is about values that read MUTABLE `C.*` state mid-`prepare`, and a noise
+    // field reads none. `seed` is fixed for the generator that owns this `C`.
+    let wob = ci._coalWob;
+    if (wob === undefined) wob = ci._coalWob = n1(seed, 701, c * nd(400).q, nd(400).p) * 60;
+    const seam = Math.round((elev + wob) / 145);
+    const at = seam * 145 - wob;
     if (Math.abs(elev - at) < 2.2 && hh(seed, 703, seam, 0) < 0.45) return M.coal;
   }
   // OIL: a porous bed sealed under an impermeable shale cap, which is what a trap IS. Only in the anticlines —
