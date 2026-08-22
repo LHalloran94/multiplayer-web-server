@@ -5063,6 +5063,14 @@ restartLiquidLoop();
 let quiesceChunkH = () => false, rewakeChunkH = () => false;
 const chunkCfg = {
   evict: true,         // master switch (see above); `chunkEvict` on the liquid-cfg wire toggles it live
+  // Above this many per-chunk records in a room, the sweep starts dropping the ones that carry no information
+  // (see the note where it does). Below it the walk is not worth doing — the whole point is that the map stays
+  // small, so the prune should cost nothing in the state it exists to maintain.
+  // ⚠️ ON `chunkCfg` RATHER THAN A MODULE CONSTANT, and not for tidiness: the sweep is inside the block
+  // probe_chunking slices into a `new Function`, so a constant declared further down the file is a
+  // ReferenceError in the rigs and nowhere else. That is the trap the `worldTrace` hook was added for one commit
+  // ago — this config object is already inside the slice, so putting it here is the fix rather than a new seam.
+  recPruneAt: 2048,
   margin: 2,           // chunks kept resident BEYOND the edge of what a player can see (2 ⇒ 1024px of headroom)
   // ⭐ 30,000 → 10,000 (2026-08-06). The 30s was a guess and it was made when residency still saved wire traffic.
   // It does not any more: increment 3d made re-entry re-send unconditionally, and the measurement is flat —
@@ -5126,7 +5134,7 @@ function noteWhere(avRoom, sid, v) {
 function chunkResidencySweep() {
   if (!chunkCfg.evict) return;
   const _t0 = Date.now();
-  let _ev = 0, _qu = 0, _cand = 0;
+  let _ev = 0, _qu = 0, _cand = 0, _pr = 0;
   const now = Date.now(), M = Math.max(0, chunkCfg.margin | 0);
   for (const room of Array.from(roomCells.keys())) {
     const s = roomCells.get(room); if (!s || !s.terrain || (s.fineSub || 1) !== 1) continue;
@@ -5163,13 +5171,41 @@ function chunkResidencySweep() {
       // on the first sweep after a chunk leaves everyone's view, i.e. within `sweepMs`.
       if (chunkCfg.quiesce && age > chunkCfg.quiesceMs) { quiesceChunkH(room, p); _qu++; }
     }
+    // ⭐⭐ AND DROP THE RECORDS THAT CARRY NO INFORMATION. `rec` is a Map entry per chunk EVER TOUCHED and was
+    // never removed — the one term on this whole track with no ceiling (measured 3,938 → 14,624 over a 500-step
+    // traversal, and 6,724 → 7,923 in one session of real play).
+    // ⭐ THE PROOF IS ALREADY IN THE FILE: `peek` answers `NO_CHUNK_REC` — a frozen default ChunkRec — for a
+    // chunk with no record at all. So a record whose every field is still at its default is BY CONSTRUCTION
+    // indistinguishable from having none, and deleting it cannot change a single answer.
+    // 🟥 EXCEPT `lastNear`, WHICH IS WHY A NAIVE "all fields default" PRUNE FINDS NOTHING. `mark()` above stamps
+    // it on every chunk in view — including the page-free ones (sky costs no pages, `seedEmpty` sees to that) —
+    // so every chunk anybody has looked at holds a record for ever on the strength of one timestamp. Those are
+    // the bulk of them: the user's session had ~334 chunks with pages against 7,923 records.
+    // ⇒ `lastNear` alone is droppable PROVIDED the chunk has no pages, because the only thing that reads it is
+    // the eviction test above, and that only ever considers chunks that HAVE pages. The next `mark()` recreates
+    // the record with a fresh timestamp, which is the same answer.
+    // ⚠️ AN EVICTED CHUNK IS NEVER TOUCHED HERE, and that is the load-bearing exclusion. `gen`, `blob` and
+    // `evHash` are how a chunk with no pages comes BACK — drop them and `_miss` reads a default record, decides
+    // "evicted, no blob", and restores the chunk as EMPTY. That is Phase 3's worst bug, and it is worth the
+    // explicit `ch.evicted[p]` test rather than relying on `gen`/`blob` being set.
+    if (ch.rec.size > (chunkCfg.recPruneAt || 2048)) {
+      for (const [p, r] of ch.rec) {
+        if (ch.evicted[p] || r.blob || r.gen || r.restoring || r.quiet) continue;
+        if (r.hash !== 0 || r.stamp !== -1 || r.evHash !== 0 || r.savedHash !== -1) continue;
+        let live = false;
+        for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa && pa.pageAt(p)) { live = true; break; } }
+        if (live) continue;                     // still resident: `lastNear` is deciding its eviction
+        ch.rec.delete(p); _pr++;
+      }
+    }
   }
   // ⭐ SAME REASONING AS THE WORLD FLUSH'S LOG. This runs on the main loop, so a long sweep is felt as terrain
   // arriving late and is indistinguishable from the chunk queue being slow — which is exactly how the flush
   // hid for as long as it did. After a long traversal a whole exploration's worth of chunks falls out of grace
   // at once, so the burst is proportional to how far the player has been.
   const _ms = Date.now() - _t0;
-  if (_ms > 60) console.log(`[world] residency sweep took ${_ms}ms — ${_cand} resident, ${_ev} evicted, ${_qu} quiesced`);
+  if (_ms > 60 || _pr) console.log(`[world] residency sweep took ${_ms}ms — ${_cand} resident, ${_ev} evicted, ${_qu} quiesced`
+    + (_pr ? `, ${_pr} empty chunk record(s) pruned` : ""));
 }
 // ==CHUNK_RESIDENCY_BLOCK_END==
 quiesceChunkH = quiesceChunk; rewakeChunkH = rewakeChunk;   // see the seam note at the block start
