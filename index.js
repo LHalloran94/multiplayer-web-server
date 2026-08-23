@@ -9524,6 +9524,13 @@ io.on('connection', (socket) => {
     // otherwise unanswerable from inside the game.
     if ('budgetSeed' in patch) liquidCfg.budgetSeed = patch.budgetSeed ? 1 : 0;
     if ('budgetRate' in patch) liquidCfg.budgetRate = patch.budgetRate ? 1 : 0;
+    // 🟥 THIS LINE IS WHY THE CHECKBOX "TURNED ITSELF OFF AGAIN". This handler is an explicit ALLOWLIST — a key
+    // it does not name is silently dropped — so adding `kFairShare` to `liquidCfg` and to the panel was not
+    // enough: the click emitted, the server ignored it, and the panel's next sync from `cfgWire()` read the
+    // unchanged 0 and put the box back. It looks exactly like a UI bug and is entirely server-side.
+    // ⚠️ THE GENERAL SHAPE: a new dial needs THREE edits, not two — the default, the control, and this line.
+    // `cfgWire()` reporting a value back is what makes the omission self-correcting and therefore invisible.
+    if ('kFairShare' in patch) liquidCfg.kFairShare = patch.kFairShare ? 1 : 0;
     if ('cellCostUs' in patch) liquidCfg.cellCostUs = Math.max(1, Math.min(500, +patch.cellCostUs || 23));
     if ('budgetRateMax' in patch) liquidCfg.budgetRateMax = Math.max(2, Math.min(64, patch.budgetRateMax | 0));
     // 0 = the old unbounded wake; anything else is cells per tick per room. See `storedWakeRate`.
