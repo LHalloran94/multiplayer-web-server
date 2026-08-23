@@ -2995,22 +2995,20 @@ const liquidCfg = {
   // room AT K=1 is estimated as its full-K EMA divided by this, not by K. Using K would under-estimate by
   // ~1.4× and fire tier 3 later than it should.
   budgetKGain: 6.5,
-  // ⭐⭐ TIER 2 CANNOT FIRE IN A SECTORED WORLD, AND THIS IS THE TOGGLE FOR THE FIX. Reported from play: *"K seems
-  // to just equal 9 all the time no matter what."* That is not a display bug. Tier 2 asks `est > budgetMs` where
-  // `est` is ONE STRIP's measured cost and `budgetMs` is the budget for the WHOLE tick — so a single strip has to
-  // be more expensive than everything the server is allowed to spend before K comes down at all. With `secW=256`
-  // the work spreads over several strips at a few ms each and the test simply never passes.
-  // ⭐ WHY IT MATTERS BEYOND A STUCK NUMBER: the two throttles degrade completely differently. Tier 2 lowers K,
-  // which is SMOOTH — water keeps moving every tick, just less far. Deferring a strip (the wall-clock stop above)
-  // is what a player sees as freeze-jump-freeze. The sector split moved scheduling to the strip level and left
-  // this comparison at the room level, so in the Overworld the SMOOTH path is dead and only the steppy one runs.
-  // That is the likeliest cause of the *"a bit staggered… like it was moving in discrete steps"* report.
-  // ⇒ ON = a strip is measured against a FAIR SHARE of what is left of the budget (remaining ms ÷ strips still to
-  // run) rather than against the whole of it. OFF = today's behaviour, unchanged.
-  // ⚠️ SHIPS OFF and stays a toggle. It makes tier 2 fire far more often, and the standing constraint is
-  // "throttling should be a rare EMERGENCY thing, not something that happens almost every time liquid is moving" —
-  // which is a judgement to be made by watching water, not by reading a number.
-  kFairShare: 0,
+  // 🟥🟥 "TIER 2 CANNOT FIRE IN A SECTORED WORLD" WAS WRONG, AND A `kFairShare` TOGGLE BUILT ON IT LIVED HERE
+  // BRIEFLY (2026-08-23) AND IS DELETED. The reasoning looked sound on the page: tier 2 asks `est > budgetMs`
+  // where `est` is ONE STRIP's cost and `budgetMs` is the budget for the WHOLE tick, so a strip would have to be
+  // dearer than everything the server may spend. MEASURED ON THE RUNNING SERVER it fires constantly — 25 times
+  // in a 25-tick window in the mildest reading, and on 100% of the strip-turns that ran under load.
+  // ⭐ THE THING NEITHER READING NOTICED: the EMA below is normalised to FULL-K cost
+  // (`d = elapsed * (kFull / kUsed)`), so a strip already throttled to K=1 records ~9x what it actually spent
+  // and clears the whole-tick budget easily, and keeps clearing it. The comparison is impossible on paper and
+  // routine in practice.
+  // ⇒ and because K bottoms out at 1 — which every loaded reading showed it pinned to — making tier 2 keener
+  // buys nothing: measured 28% -> 30% of strip-turns deferred with the toggle on, i.e. no change where it
+  // mattered. The staggering is the budget genuinely running out with the smooth throttle already exhausted,
+  // not the smooth throttle failing to engage. Second read-only diagnosis on this track to be refuted by
+  // running it; see scratchpad/kickoff_chunk_deletion.md.
   // ══ SECTORS — SCHEDULE ONE ROOM IN COLUMN STRIPS INSTEAD OF ALL AT ONCE ═══════════════════════════════════
   // 🟥 THE PROBLEM, MEASURED ON THE LIVE SERVER 2026-08-08: the budget's only tools are "defer a whole room"
   // (tier 1) and "rate-limit a whole room" (tier 3), and the Overworld is ONE room. So a flood at one end of the
@@ -5062,18 +5060,11 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
         }
       }
     }
-    // ⭐ TIER 2, AND THE SHARE IT IS MEASURED AGAINST. See `kFairShare` in liquidCfg for why the whole-budget
-    // comparison can never fire once a room is split into strips.
-    // ⚠️ REMAINING budget over REMAINING strips, not budget/nStrips: a tick whose first strips came in cheap
-    // should leave the later ones running at full K, and a tick that is already most of the way through its
-    // allowance should throttle hard. It also lines up with the wall-clock deferral immediately above, which is
-    // measured against exactly the same clock.
+    // ⭐ TIER 2. `est` is this STRIP's own EMA and it is normalised to FULL-K cost a few lines below, which is
+    // why it clears a whole-tick budget so readily — see the deleted-toggle note beside `budgetKGain`.
     let kUsed = kFull;
-    const share = (budgetMs && liquidCfg.kFairShare)
-      ? Math.max(0.5, (budgetMs - (performance.now() - tickT0)) / Math.max(1, _nSec - _sn))
-      : budgetMs;
-    if (budgetMs && kFull > 1 && est > share) {
-      kUsed = Math.max(1, Math.floor(kFull * share / est));
+    if (budgetMs && kFull > 1 && est > budgetMs) {
+      kUsed = Math.max(1, Math.floor(kFull * budgetMs / est));
       liquidCfg.fineLevelSteps = kUsed;
     }
     if (kUsed < liqPerf.kMin) liqPerf.kMin = kUsed;
@@ -5477,7 +5468,7 @@ const runLiquidTick = () => {
         // that IS operating in a sectored world and it was console-only; `k2Throttles` is tier 2, whose stuck
         // `K=9` is what prompted this — a zero here with water plainly moving is the whole diagnosis in one
         // number. `rateSkips` is tier 3. Counters, so they reset per window and read as a rate.
-        k2Throttles: liqK2Throttles, rateSkips: liqRateSkips, kFairShare: liquidCfg.kFairShare ? 1 : 0,
+        k2Throttles: liqK2Throttles, rateSkips: liqRateSkips,
         // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
         // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
         steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
@@ -9494,6 +9485,13 @@ io.on('connection', (socket) => {
              sortSteps: liquidCfg.fineSortSteps, reactions: liquidCfg.reactions, minUnit: liquidCfg.fineMinUnit } });
   });
   socket.on('liquid-cfg', (patch) => {
+    // 🟥 THIS IS AN ALLOWLIST AND A KEY IT DOES NOT NAME IS SILENTLY DROPPED — so a NEW DIAL NEEDS THREE EDITS,
+    // NOT TWO: the default in `liquidCfg`, the control in the panel, and a line here. Miss this one and the
+    // symptom is a checkbox that "turns itself off again the instant you click it": the click emits, nothing
+    // accepts it, and the panel's next sync from `cfgWire()` reads the unchanged value and puts the box back.
+    // It reads as a UI bug and is entirely server-side. Cost a round trip on 2026-08-23.
+    // ⚠️ `cfgWire()` reporting every value back is exactly what makes the omission self-correcting, and so
+    // invisible. To check the whole set at once, cross-reference the keys the panel emits against this list.
     if (!patch || typeof patch !== 'object') return;
     for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'storedWakeAll', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace', 'sortColRun', 'storedWakeAudit', 'scanVerify', 'scanFast', 'sinks']) if (k in patch) liquidCfg[k] = !!patch[k];
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
@@ -9524,13 +9522,6 @@ io.on('connection', (socket) => {
     // otherwise unanswerable from inside the game.
     if ('budgetSeed' in patch) liquidCfg.budgetSeed = patch.budgetSeed ? 1 : 0;
     if ('budgetRate' in patch) liquidCfg.budgetRate = patch.budgetRate ? 1 : 0;
-    // 🟥 THIS LINE IS WHY THE CHECKBOX "TURNED ITSELF OFF AGAIN". This handler is an explicit ALLOWLIST — a key
-    // it does not name is silently dropped — so adding `kFairShare` to `liquidCfg` and to the panel was not
-    // enough: the click emitted, the server ignored it, and the panel's next sync from `cfgWire()` read the
-    // unchanged 0 and put the box back. It looks exactly like a UI bug and is entirely server-side.
-    // ⚠️ THE GENERAL SHAPE: a new dial needs THREE edits, not two — the default, the control, and this line.
-    // `cfgWire()` reporting a value back is what makes the omission self-correcting and therefore invisible.
-    if ('kFairShare' in patch) liquidCfg.kFairShare = patch.kFairShare ? 1 : 0;
     if ('cellCostUs' in patch) liquidCfg.cellCostUs = Math.max(1, Math.min(500, +patch.cellCostUs || 23));
     if ('budgetRateMax' in patch) liquidCfg.budgetRateMax = Math.max(2, Math.min(64, patch.budgetRateMax | 0));
     // 0 = the old unbounded wake; anything else is cells per tick per room. See `storedWakeRate`.
