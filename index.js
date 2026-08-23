@@ -3286,7 +3286,20 @@ const liquidCfg = {
   // made interfaces jagged). 🟥 I first measured this as near-inert and was wrong: that run predated
   // fineSortOnePerPass, and without that a sliver teleported to the surface, where it already counted as settled, so
   // this gate had nothing left to block. The two changes only work together.
-  finePerLiquidSortGate: true,
+  // ⭐ DEFAULT true → false on 2026-08-24, on the USER'S call and a re-measurement. Re-derived with the rebuilt
+  // `probe_sort_spread` (a 3×3 oil blob buried in a 58-wide water pool):
+  //     ON  — 13 columns after one tick, settled at t13
+  //     OFF — 39 columns after one tick, settled at t5
+  // 🟥 AND THE END STATE IS THE SAME EITHER WAY: 58 columns, the full pool. Of course it is — oil on water IS a
+  // surface layer. So this gate never prevented the spread, it only slowed the TRANSIENT, and it was charging
+  // 2.6× the settling time and ~1.25× the whole liquid tick to do it. The user: *"the performance savings and
+  // levelling speed up is preferable to the visual benefit of not having it disperse horizontally so quickly."*
+  // ⭐⭐ AND IT PAYS A SECOND TIME: `plSkip`'s one wrinkle was that skipping the branch also skipped THIS call,
+  // whose answer is memoised per column and never refreshed within a sub-step. With the gate off there is no
+  // such call to skip, so that optimisation becomes exactly behaviour-preserving.
+  // ⚠️ If slivers-scattered-across-the-pool ever comes back, this is the first switch to try, and the reach and
+  // passes dials for per-liquid levelling are the ones that bound the EXTENT rather than the rate.
+  finePerLiquidSortGate: false,
   // ⭐⭐ …AND THE GATE ABOVE ASKS ITS QUESTION OF THE LIQUID BODY, NOT THE WHOLE COLUMN.
   // "Is my neighbour still stratifying" used to be answered over the column's ENTIRE DEPTH. In a page room that
   // is 405 rows of mild waste; in the Overworld it is 4,096, so one drop of falling water paid to scan every
@@ -3299,7 +3312,14 @@ const liquidCfg = {
   // same light liquid up one more cell within a single pass — so a sliver rode the whole height of a pool in one
   // sub-step and was then filmed across it by 2c, while the bulk rose at the expected rate. This makes a parcel
   // advance exactly one cell per sort pass, which is what "density-sort passes/tick" is supposed to mean.
-  fineSortOnePerPass: true,
+  // ⭐ DEFAULT true → false on 2026-08-24, on the user's eye: *"it seems to look better when off… probably
+  // something that looked better before the metaball was implemented."* Which is the same reason `fineFlatSteps`
+  // moved 3 → 8 — the RENDERER changed underneath a dial that was tuned before it.
+  // Re-measured on the same scene: 17 columns after one tick against 13, and it costs ~1.18× of the tick.
+  // ⚠️ What it did was stop a sliver riding the whole height of a pool in ONE pass (the list is walked bottom-up,
+  // so each higher cell pulled the same light liquid up one more). With it off the parcel reaches the surface on
+  // tick 0 instead of tick 1. That is the thing to watch if instant stratification ever looks wrong.
+  fineSortOnePerPass: false,
   // CELL CAPACITY = the number of vertical fill "slices" a cell holds (LIQUID_MAX). Higher = smoother/finer vertical fill;
   // must stay ≤255 (Uint8). Changing it RESCALES all existing liquid (a full cell stays full) + re-broadcasts. Global
   // (coarse + fine); at 64 the coarse system is unchanged. Stratification (sortRate units/tick) is proportionally slower higher.
