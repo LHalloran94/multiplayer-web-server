@@ -2920,6 +2920,13 @@ const liquidCfg = {
   // ⚠️ The reach table is per CELL, not per scan: both directions are always scanned and the NEARER hit wins,
   // so a shorter reach only changes an outcome when the WINNING distance exceeds it.
   fineFlatScan: 0,
+  // ⭐⭐ ASK "CAN ANYTHING RECEIVE?" BEFORE SCANNING FOR SOMEWHERE TO SEND IT. Both sideways levelling branches
+  // only ever move liquid into an IMMEDIATE neighbour; the row scan decides which SIDE, not where it lands. So
+  // if neither neighbour can take anything, no scan result can produce a move, and the scan is dead work.
+  // Exact — same outcome, not an approximation. See the block comments at (1d) and (2c).
+  flatSkip: 1,     // (1d) surface flat-settle — where the waste is: 99.5% of its decisions move nothing
+  plSkip: 0,       // (2c) per-liquid levelling — weaker, 45% of its scans genuinely find a target
+
   // ⚠️ DEFAULT OFF since 2026-07-29. This is the BLANKET rule: a cell in a column that still holds ANY inversion may
   // not level at all. It freezes the whole column — including its free surface — until the column has finished
   // sorting, which leaves a liquid heap standing as a terraced mound (measured: the heap held its shape until t176
@@ -4322,6 +4329,16 @@ function fineLiquidTickRoom(room, SUB) {
       if (liquidCfg.perLiquidLevel && doPerLiq) for (let t = 0; t < T - 1; t++) {
         if (amt.rp(i)[bI2 + t] <= 0) continue;
         const Ci = cumAt(i, t);
+        // ⭐ THE SAME NECESSARY CONDITION AS (1d). This exchange also only ever moves into an IMMEDIATE
+        // neighbour, and only when that neighbour's cumulative depth of THIS liquid is lower (`Cj >= Ci` bails
+        // below). Two cumulative sums against up to 56 scanned columns.
+        // ⚠️ Weaker here than for (1d): 45% of 2c's scans genuinely find a target, so this fires less often and
+        // costs 2×(t+1) reads when it does not. Measured separately from `flatSkip` for exactly that reason.
+        if (liquidCfg.plSkip) {
+          const okL = jLh >= 0 && !solidL && cumAt(jLh, t) < Ci;
+          const okR = jRh >= 0 && !solidR && cumAt(jRh, t) < Ci;
+          if (!okL && !okR) continue;
+        }
         let dir = 0, best = Infinity;
         for (let _si = 0; _si < 2; _si++) {
           const sdir = _si ? 1 : -1; liqPlRuns++;
@@ -4389,7 +4406,27 @@ function fineLiquidTickRoom(room, SUB) {
       // (1d) surface flat-settle — capped to FLATSTEPS of the K sub-steps (see the budget above). Uncapped it runs
       // every sub-step, and because an EMPTY neighbour always counts as "lower", the leading edge of a puddle sheds
       // onward every time: the front advanced ~9 cells/tick and raced away from the body that was still separating.
-      if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0 && step < FLATSTEPS) {
+      // ⭐⭐ THE SCAN CANNOT PRODUCE A MOVE UNLESS AN IMMEDIATE NEIGHBOUR CAN TAKE THE UNIT — so ask that FIRST.
+      // Look at the move at the foot of this block: whatever the scan finds, up to 28 cells away, the unit only
+      // ever goes into `i ± FROWS`, and only if THAT cell is both lower than this one and not already full. The
+      // distance is used ONLY to choose which side. So "is either immediate neighbour lower than me and not
+      // full?" is a NECESSARY condition for the entire block — and when it fails, today's code walks up to 56
+      // cells and then declines to move anyway. Same outcome, two reads instead of fifty-six.
+      // ⭐ WHY IT IS WORTH IT (probe_scan_shape): 99.5% of this branch's decisions move nothing, and 92.5% of
+      // its scans walk the FULL reach and find nothing — 96.4% of all its steps. The reason is now obvious: a
+      // saturated pool's interior cells all sit at `cap`, so no neighbour can ever receive, and every one of
+      // them re-proved that on eight of the nine sub-steps.
+      // ⚠️ EXACT, not an approximation — but it does skip the READS the scan would have made, and on a
+      // generated room a read can fault an evicted page back in. Nothing about the water changes; what the
+      // server keeps resident might. That is why it is a toggle.
+      // ⚠️ A SOLID neighbour holds tot 0, which would read as "can receive"; the hoisted `solidL`/`solidR` say
+      // so for free. Getting that wrong would only ever cost a scan the old code also ran, never a wrong move.
+      let flatOn = liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0 && step < FLATSTEPS;
+      if (flatOn && liquidCfg.flatSkip) {
+        const vL = (jLh >= 0 && !solidL) ? tot.g(jLh) : cap, vR = (jRh >= 0 && !solidR) ? tot.g(jRh) : cap;
+        if (!((vL < L && vL < cap) || (vR < L && vR < cap))) flatOn = false;
+      }
+      if (flatOn) {
         let dir = 0, best = Infinity;
         for (let _si = 0; _si < 2; _si++) {
           const sdir = _si ? 1 : -1; liqLvlRuns++;
@@ -9631,6 +9668,8 @@ io.on('connection', (socket) => {
     if ('finePerLiquidScan' in patch) liquidCfg.finePerLiquidScan = Math.max(0, Math.min(32, patch.finePerLiquidScan | 0));
     if ('fineFlatSteps' in patch) liquidCfg.fineFlatSteps = Math.max(0, Math.min(16, patch.fineFlatSteps | 0));
     if ('fineFlatScan' in patch) liquidCfg.fineFlatScan = Math.max(0, Math.min(32, patch.fineFlatScan | 0));
+    if ('flatSkip' in patch) liquidCfg.flatSkip = patch.flatSkip ? 1 : 0;
+    if ('plSkip' in patch) liquidCfg.plSkip = patch.plSkip ? 1 : 0;
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(1, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
       for (const room of cellRooms.fineArr) { const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); }
