@@ -2906,6 +2906,20 @@ const liquidCfg = {
   // passing unmodified rather than being loosened to accommodate a new default.
   // ⇒ 8 takes ~90% of the available speed-up (151 → 137 against 127 uncapped) at no correctness cost.
   fineFlatSteps: 8,
+  // (1d) SURFACE FLAT-SETTLE REACH, in cells. How far 1d looks along the row for a spot at least 2 units lower
+  // before nudging 1 unit toward it. 0 = LIQUID_LEVEL_SCAN (28), which is what has always shipped.
+  // 🟥 28 HAS NO RECORDED DERIVATION. `git log -S` reaches its introduction (ee6f4ba, 2026-07-17) with no
+  // reasoning, and it predates the fine grid — `SCAN = LIQUID_LEVEL_SCAN * SUB` exists only to hold the PHYSICAL
+  // reach fixed, which at SUB=1 (the only shipping ratio) is 28 cells = 224px. Same position `tickMs` was in.
+  // ⭐⭐ AND 1d IS ALMOST ENTIRELY WASTED WORK — measured, `scratchpad/probe_scan_shape.js`: 187.8M scan steps to
+  // make ~17,500 moves. **99.5% of its decisions move nothing**, 92.5% of its scans walk all 28 cells and find
+  // nothing (96.4% of all its steps), because 1d has no surface test and every BURIED cell in a body pays to
+  // confirm it is surrounded by cells exactly like itself, on eight of the nine sub-steps.
+  // ⚠️ Lowering this is a BEHAVIOUR change, not a free win — it is how far a puddle looks for a lower spot.
+  // Measured share of levelling moves KEPT: reach 8 → 85.3%, 12 → 91.0%, 16 → 95.0%, 28 → 100%.
+  // ⚠️ The reach table is per CELL, not per scan: both directions are always scanned and the NEARER hit wins,
+  // so a shorter reach only changes an outcome when the WINNING distance exceeds it.
+  fineFlatScan: 0,
   // ⚠️ DEFAULT OFF since 2026-07-29. This is the BLANKET rule: a cell in a column that still holds ANY inversion may
   // not level at all. It freezes the whole column — including its free surface — until the column has finished
   // sorting, which leaves a liquid heap standing as a terraced mound (measured: the heap held its shape until t176
@@ -3990,6 +4004,9 @@ function fineLiquidTickRoom(room, SUB) {
   // vertical levelling, not the horizontal reach. Deriving the budget from capacity made front speed scale WITH
   // capacity and broke the very invariant it was meant to protect.
   const FLATSTEPS = liquidCfg.fineFlatSteps > 0 ? Math.min(FSTEPS, liquidCfg.fineFlatSteps | 0) : FSTEPS;
+  // (1d) reach, scaled by SUB exactly as SCAN and PLSCAN are, so the dial means the same PHYSICAL distance at
+  // any resolution. 0 = SCAN, i.e. byte-for-byte what shipped before this dial existed.
+  const FLATSCAN = liquidCfg.fineFlatScan > 0 ? Math.min(SCAN, (liquidCfg.fineFlatScan | 0) * SUB) : SCAN;
   // ⭐⭐ THESE TWO WERE DECLARED INSIDE THE PER-CELL LOOP, so a fresh closure object was allocated for every
   // active cell on every sub-step — order 180,000 allocations a tick, and the profile put the `roomAt`
   // declaration line alone at 4.2% of the tick body (a line that does no work at all: it is the allocation).
@@ -4377,10 +4394,12 @@ function fineLiquidTickRoom(room, SUB) {
         for (let _si = 0; _si < 2; _si++) {
           const sdir = _si ? 1 : -1; liqLvlRuns++;
           let hit = 0;
-          if (ROWFAST) hit = scanLevel(i, c, L, sdir, SCAN);
+          if (ROWFAST) hit = scanLevel(i, c, L, sdir, FLATSCAN);
           if (!ROWFAST || liquidCfg.scanVerify) {
             let slow = 0;
-            for (let d = 1; d <= SCAN; d++) { if (!ROWFAST) liqLvlSteps++; const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d * FROWS; if (isSolid(j)) break; const jl = tot.g(j); if (jl > L) break; if (jl <= L - 2) { slow = d; break; } }
+            // ⚠️ The verify loop takes FLATSCAN too, or `scanVerify` would report a disagreement on every
+            // shortened scan and stop being able to see a real one.
+            for (let d = 1; d <= FLATSCAN; d++) { if (!ROWFAST) liqLvlSteps++; const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d * FROWS; if (isSolid(j)) break; const jl = tot.g(j); if (jl > L) break; if (jl <= L - 2) { slow = d; break; } }
             if (!ROWFAST) hit = slow; else if (slow !== hit) liqScanMismatch++;
           }
           if (hit && hit < best) { best = hit; dir = sdir; }
@@ -9611,6 +9630,7 @@ io.on('connection', (socket) => {
     if ('finePerLiquidSteps' in patch) liquidCfg.finePerLiquidSteps = Math.max(0, Math.min(16, patch.finePerLiquidSteps | 0));
     if ('finePerLiquidScan' in patch) liquidCfg.finePerLiquidScan = Math.max(0, Math.min(32, patch.finePerLiquidScan | 0));
     if ('fineFlatSteps' in patch) liquidCfg.fineFlatSteps = Math.max(0, Math.min(16, patch.fineFlatSteps | 0));
+    if ('fineFlatScan' in patch) liquidCfg.fineFlatScan = Math.max(0, Math.min(32, patch.fineFlatScan | 0));
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(1, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
       for (const room of cellRooms.fineArr) { const fi = buildFineInit(room); if (fi) io.to(room).emit('liquid-fine-init', fi); }
