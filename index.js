@@ -3924,6 +3924,15 @@ function fineLiquidTickRoom(room, SUB) {
     if (!la && !lb) return false;
     return (la && tot.g(B) - lavaB > 0) || (lb && tot.g(A) - lavaA > 0);
   };
+  // The same rule with the A side already read — `wouldSort` asks it three times for one cell. Hoisted rather
+  // than closed over per cell: a closure declared inside the cell loop is an allocation per cell per sub-step,
+  // which is the cost this increment is removing elsewhere.
+  const lavaBlkFrom = (laA, restA, B) => {
+    if (!liquidCfg.reactions) return false;
+    const lavaB = amt.rp(B)[amt.o(B)], lb = lavaB > 0;
+    if (!laA && !lb) return false;
+    return (laA && tot.g(B) - lavaB > 0) || (lb && restA > 0);
+  };
   // ⭐⭐ WOULD THE DENSITY SORT FIRE FOR THIS CELL RIGHT NOW? Mirrors (2) and (2b) below exactly, minus the per-sub-step
   // budget — used to keep a still-inverted cell in the ACTIVE SET when that budget has turned the sort off. Keep the
   // three in step: if a gate is added to (2)/(2b), add it here too, or a pair it blocks will spin in `active` forever.
@@ -3943,20 +3952,14 @@ function fineLiquidTickRoom(room, SUB) {
     let hi = -1; for (let rk = 0; rk < T; rk++) if (pI[bI + rk] > 0) { hi = rk; break; }
     if (hi < 0) return false;
     const lavaA = pI[bI], laA = lavaA > 0, restA = tot.g(i) - lavaA;
-    const lavaBlkB = (B) => {
-      if (!liquidCfg.reactions) return false;
-      const lavaB = amt.rp(B)[amt.o(B)], lb = lavaB > 0;
-      if (!laA && !lb) return false;
-      return (laA && tot.g(B) - lavaB > 0) || (lb && restA > 0);
-    };
     // 🟥 THIS WAS AN ARRAY LITERAL AND IT WAS 8.6% OF THE LIQUID TICK. `fineSortSteps` defaults to 1, so
     // `!doSort` is true on eight of the nine sub-steps and this runs on EVERY active cell on all of them —
     // allocating a three-element array and an iterator each time, purely to loop over three known values.
     // Unrolled below; identical order, identical result, no allocation. (Measured with V8's per-line ticks.)
     const j0 = i + 1, j1 = c > 0 ? i + 1 - FROWS : -1, j2 = c < COLS - 1 ? i + 1 + FROWS : -1;
-    if (j0 >= 0 && j0 < NCELL && tot.g(j0) > 0 && !solidBelow && !lavaBlkB(j0) && hi < ceilRank(j0)) return true;
-    if (j1 >= 0 && j1 < NCELL && tot.g(j1) > 0 && !isSolid(j1) && !lavaBlkB(j1) && hi < ceilRank(j1)) return true;
-    if (j2 >= 0 && j2 < NCELL && tot.g(j2) > 0 && !isSolid(j2) && !lavaBlkB(j2) && hi < ceilRank(j2)) return true;
+    if (j0 >= 0 && j0 < NCELL && tot.g(j0) > 0 && !solidBelow && !lavaBlkFrom(laA, restA, j0) && hi < ceilRank(j0)) return true;
+    if (j1 >= 0 && j1 < NCELL && tot.g(j1) > 0 && !isSolid(j1) && !lavaBlkFrom(laA, restA, j1) && hi < ceilRank(j1)) return true;
+    if (j2 >= 0 && j2 < NCELL && tot.g(j2) > 0 && !isSolid(j2) && !lavaBlkFrom(laA, restA, j2) && hi < ceilRank(j2)) return true;
     return false;
   };
   // PHYSICS SUB-STEPS (fineLevelSteps): run the WHOLE fine tick K times per tick, so ALL movement (fall/spill/level/sort)
@@ -3987,6 +3990,13 @@ function fineLiquidTickRoom(room, SUB) {
   // vertical levelling, not the horizontal reach. Deriving the budget from capacity made front speed scale WITH
   // capacity and broke the very invariant it was meant to protect.
   const FLATSTEPS = liquidCfg.fineFlatSteps > 0 ? Math.min(FSTEPS, liquidCfg.fineFlatSteps | 0) : FSTEPS;
+  // ⭐⭐ THESE TWO WERE DECLARED INSIDE THE PER-CELL LOOP, so a fresh closure object was allocated for every
+  // active cell on every sub-step — order 180,000 allocations a tick, and the profile put the `roomAt`
+  // declaration line alone at 4.2% of the tick body (a line that does no work at all: it is the allocation).
+  // Both capture only tick-invariant state (`isSolid`, `tot`, `amt`, `cap`), so hoisting is a pure move.
+  // ⚠️ `reduce` CANNOT come with them — it captures the cell's own `lf` and writes the cell's `pend`.
+  const roomAt = (j) => !isSolid(j) && tot.g(j) < cap;
+  const cumAt = (jj, tt) => { const pp = amt.rp(jj), bb = amt.o(jj); let s = 0; for (let k = 0; k <= tt; k++) s += pp[bb + k]; return s; };
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
     const doFall = step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
@@ -4108,9 +4118,22 @@ function fineLiquidTickRoom(room, SUB) {
       } else {
         while (t > 0 && wetAt(colBase + t - 1)) t--;
         while (b + 1 < FROWS && wetAt(colBase + b + 1)) b++;
+        // ⭐ ONE PAGED LOOKUP PER ROW, NOT TWO. The walk asked `floorRank(a2)` and then `ceilRank(a2 + 1)` — and
+        // the very next row asks `floorRank` of the cell whose `ceilRank` was just taken, so every cell in the
+        // run had its page resolved twice. Both ranks come out of ONE pass over the same six slots, and the
+        // floor is carried down to the next row.
+        // ⚠️ The `curF < 0` branch exists to keep the SET OF PAGES READ identical: the original only reached
+        // `ceilRank(a2 + 1)` when the floor below was real, so a run with an empty cell in it must not prefetch.
+        // On a generated room a read is what produces a chunk, so that is a correctness property, not a detail.
+        let curF = floorRank(colBase + t);
         for (let r2 = t; r2 < b; r2++) {
-          const a2 = colBase + r2;
-          const f = floorRank(a2); if (f >= 0 && f < ceilRank(a2 + 1)) { v = true; break; }
+          const nxt = colBase + r2 + 1;
+          if (curF < 0) { curF = floorRank(nxt); continue; }
+          const p2 = amt.rp(nxt), b2 = amt.o(nxt);
+          let nf = -1, nc = -1;
+          for (let rk = 0; rk < T; rk++) if (p2[b2 + rk] > 0) { if (nf < 0) nf = rk; nc = rk; }
+          if (curF < nc) { v = true; break; }
+          curF = nf;
         }
       }
       liqScanRows += b - t + 1;
@@ -4240,7 +4263,6 @@ function fineLiquidTickRoom(room, SUB) {
     // pair is momentarily in order. So: while this column holds ANY vertical inversion it is still separating, and
     // none of its cells may spread sideways yet.
     const sortingHere = liquidCfg.sortBeforeLevel && (sortedHere || (liquidCfg.densitySort && colStillSorting(c, r)));
-    const roomAt = (j) => !isSolid(j) && tot.g(j) < cap;
     // ⭐ `roomAt(i + 1)` ONCE. It was asked three times here (canFall, airborne, isStream below) and its terrain
     // half a fourth time by `belowRoom` — and nothing between these lines moves any liquid, so all four readings
     // were guaranteed equal. `tot` is still read here rather than hoisted further up, because it DOES change:
@@ -4267,7 +4289,6 @@ function fineLiquidTickRoom(room, SUB) {
                    : airborne;
     const shedCap = L;
     if (doLevel && !isStream && !sortingHere) {
-      const cumAt = (jj, tt) => { const pp = amt.rp(jj), bb = amt.o(jj); let s = 0; for (let k = 0; k <= tt; k++) s += pp[bb + k]; return s; };
       // ⭐ …and the same for the two SIDEWAYS neighbours, which (2c) and (1c) each ask about independently — read
       // once here rather than up with `solidBelow`, because a cell that never reaches this block (a stream, a
       // column still stratifying) must not pay for reads it will not use.
