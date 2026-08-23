@@ -3851,8 +3851,13 @@ function fineLiquidTickRoom(room, SUB) {
       if (gp) {
         for (let k = 0, kg = oG, b = oA; k < n; k++, kg += sdir, b += stepA) {
           if (SOLID_LUT[gp[kg]]) { liqPlSteps += k + 1; return 0; }
-          let Cj = 0; for (let q = 0; q <= t; q++) Cj += pA[b + q];
-          if (Cj > Ci) { liqPlSteps += k + 1; return 0; }
+          // ⭐ THE PREFIX SUM IS MONOTONE — amounts are never negative — so once it has passed `Ci` the answer
+          // is already "stop", and the remaining ranks cannot bring it back down. Exactly the same verdict, up
+          // to T-1 fewer reads at an interface. The full sum is still needed for the `<= Ci-2` test, which is
+          // why the break is only taken on the over case.
+          let Cj = 0, over = false;
+          for (let q = 0; q <= t; q++) { Cj += pA[b + q]; if (Cj > Ci) { over = true; break; } }
+          if (over) { liqPlSteps += k + 1; return 0; }
           if (Cj <= Ci2) { liqPlSteps += k + 1; return d + k; }
         }
         liqPlSteps += n;
@@ -3927,15 +3932,31 @@ function fineLiquidTickRoom(room, SUB) {
   const wouldSort = (i, r, c, solidBelow) => {
     if (!liquidCfg.densitySort) return false;
     if (r + 1 >= LIQUID_FLOOR_ROW) return false;                                      // canDown
-    const hi = floorRank(i); if (hi < 0) return false;
+    // ⭐ THE `i` SIDE IS READ ONCE. `floorRank(i)` pages in this cell's rank slots, and then `lavaBlk(i, ·)`
+    // re-read the same page, the same offset and the same total for EACH of the three cells below — on every
+    // active cell, on eight of the nine sub-steps, because `fineSortSteps` defaults to 1. Nothing between those
+    // reads writes anything, so every one of them was guaranteed to return what the first did.
+    // ⚠️ Reading `tot.g(i)` and `amt.rp(i)` unconditionally here is safe ONLY because both have already
+    // happened — the caller took `L = tot.g(i)`, and `floorRank` took the page. On a generated room a read is
+    // what PRODUCES a chunk, so "this cannot fault anything new" is the property being preserved, not speed.
+    const pI = amt.rp(i), bI = amt.o(i);
+    let hi = -1; for (let rk = 0; rk < T; rk++) if (pI[bI + rk] > 0) { hi = rk; break; }
+    if (hi < 0) return false;
+    const lavaA = pI[bI], laA = lavaA > 0, restA = tot.g(i) - lavaA;
+    const lavaBlkB = (B) => {
+      if (!liquidCfg.reactions) return false;
+      const lavaB = amt.rp(B)[amt.o(B)], lb = lavaB > 0;
+      if (!laA && !lb) return false;
+      return (laA && tot.g(B) - lavaB > 0) || (lb && restA > 0);
+    };
     // 🟥 THIS WAS AN ARRAY LITERAL AND IT WAS 8.6% OF THE LIQUID TICK. `fineSortSteps` defaults to 1, so
     // `!doSort` is true on eight of the nine sub-steps and this runs on EVERY active cell on all of them —
     // allocating a three-element array and an iterator each time, purely to loop over three known values.
     // Unrolled below; identical order, identical result, no allocation. (Measured with V8's per-line ticks.)
     const j0 = i + 1, j1 = c > 0 ? i + 1 - FROWS : -1, j2 = c < COLS - 1 ? i + 1 + FROWS : -1;
-    if (j0 >= 0 && j0 < NCELL && tot.g(j0) > 0 && !solidBelow && !lavaBlk(i, j0) && hi < ceilRank(j0)) return true;
-    if (j1 >= 0 && j1 < NCELL && tot.g(j1) > 0 && !isSolid(j1) && !lavaBlk(i, j1) && hi < ceilRank(j1)) return true;
-    if (j2 >= 0 && j2 < NCELL && tot.g(j2) > 0 && !isSolid(j2) && !lavaBlk(i, j2) && hi < ceilRank(j2)) return true;
+    if (j0 >= 0 && j0 < NCELL && tot.g(j0) > 0 && !solidBelow && !lavaBlkB(j0) && hi < ceilRank(j0)) return true;
+    if (j1 >= 0 && j1 < NCELL && tot.g(j1) > 0 && !isSolid(j1) && !lavaBlkB(j1) && hi < ceilRank(j1)) return true;
+    if (j2 >= 0 && j2 < NCELL && tot.g(j2) > 0 && !isSolid(j2) && !lavaBlkB(j2) && hi < ceilRank(j2)) return true;
     return false;
   };
   // PHYSICS SUB-STEPS (fineLevelSteps): run the WHOLE fine tick K times per tick, so ALL movement (fall/spill/level/sort)
@@ -4257,8 +4278,11 @@ function fineLiquidTickRoom(room, SUB) {
       // every sub-step and looks SCAN cells along the row, so a 3-column blob films across a whole pool in one tick.
       // PLSTEPS caps how many sub-steps it may run in (= its spread speed) and PLSCAN how far it looks; both default
       // to the original values, so this is unchanged until the dials are turned down.
+      // ⚠️ `amt.o(i)` is pure arithmetic on the index, so it is hoisted; `amt.rp(i)` is NOT, because `amt.wp(i)`
+      // inside the loop can fault a page in and leave a cached read page stale. One of the two is safe to lift.
+      const bI2 = amt.o(i);
       if (liquidCfg.perLiquidLevel && doPerLiq) for (let t = 0; t < T - 1; t++) {
-        if (amt.rp(i)[amt.o(i) + t] <= 0) continue;
+        if (amt.rp(i)[bI2 + t] <= 0) continue;
         const Ci = cumAt(i, t);
         let dir = 0, best = Infinity;
         for (let _si = 0; _si < 2; _si++) {
@@ -5000,11 +5024,16 @@ class SectorSet extends Set {
   constructor(cells, lo, hi, frows, spill) {
     super();
     this.lo = lo; this.hi = hi; this.frows = frows; this.spill = spill;
+    // ⭐ THE STRIP'S BOUNDS IN CELL INDICES, NOT COLUMNS. `add` runs on every wake and every mark — the profile
+    // put it at 3.8% of the liquid tick — and it was opening with a FLOAT DIVIDE (`(i / frows) | 0`) purely to
+    // recover a column it then compared against two constants. Column-major addressing makes the same test two
+    // integer comparisons: `c < lo ⟺ i < lo*frows` and `c > hi ⟺ i >= (hi+1)*frows`, exactly, for any i ≥ 0
+    // (and negative i spills under both forms).
+    this.loI = lo * frows; this.hiI = (hi + 1) * frows;
     for (const i of cells) super.add(i);
   }
   add(i) {
-    const c = (i / this.frows) | 0;
-    if (c < this.lo || c > this.hi) { this.spill.push(i); return this; }   // not ours — hand it back to the room
+    if (i < this.loI || i >= this.hiI) { this.spill.push(i); return this; }   // not ours — hand it back to the room
     return super.add(i);
   }
 }
