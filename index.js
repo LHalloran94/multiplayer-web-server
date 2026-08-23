@@ -2925,7 +2925,7 @@ const liquidCfg = {
   // if neither neighbour can take anything, no scan result can produce a move, and the scan is dead work.
   // Exact — same outcome, not an approximation. See the block comments at (1d) and (2c).
   flatSkip: 1,     // (1d) surface flat-settle — where the waste is: 99.5% of its decisions move nothing
-  plSkip: 0,       // (2c) per-liquid levelling — weaker, 45% of its scans genuinely find a target
+  plSkip: 1,       // (2c) per-liquid levelling — weaker, 45% of its scans genuinely find a target
 
   // ⚠️ DEFAULT OFF since 2026-07-29. This is the BLANKET rule: a cell in a column that still holds ANY inversion may
   // not level at all. It freezes the whole column — including its free surface — until the column has finished
@@ -3236,7 +3236,18 @@ const liquidCfg = {
   // fast enough that the sinking/rising interface reads as instant (no visible bubbling). This caps the sort to the FIRST
   // N sub-steps/tick so it can be SLOWED independently of levelling: 1 = one sort pass/tick (slow, visible), while
   // levelling still runs the full K. 0 = follow K (sort every sub-step, current). Pairs with sortRate (units per swap).
-  fineSortSteps: 1,   // DEFAULT 1 (user's choice): one slow, visible density-sort pass per tick while levelling keeps the full K
+  // ⭐ DEFAULT MOVED 1 → 0 on 2026-08-23, by the same person who chose 1. It was set to 1 so separation would be
+  // slow and VISIBLE; asked again with a profile in hand they said 0 "seems to look relatively fine", so it goes
+  // back to following K.
+  // ⭐⭐ AND IT IS NOT ONLY A LOOKS SETTING — it is what keeps `wouldSort` alive. At 1, the sort runs in the first
+  // sub-step only, so `!doSort` is true on the other eight and `wouldSort` runs on EVERY active cell on all of
+  // them purely to keep still-inverted cells awake: measured at **7.7% of the liquid tick**. At 0 the sort runs
+  // every sub-step, `!doSort` is never true, and that whole branch is never entered.
+  // ⚠️ The 7.7% is only there when K is HIGH. Under budget pressure K falls to 1, there is one sub-step, the
+  // sort runs in it, and `wouldSort` already costs nothing — so this does not help a struggling tick directly.
+  // What it does is make the unthrottled cell cheaper, which is what lets tier 2 hold K HIGHER before it starts
+  // cutting (`memory/feedback_the_budget_hides_cpu_wins.md`).
+  fineSortSteps: 0,
   // ── (2b) DIAGONAL DENSITY SORT — how far a rising/sinking parcel travels SIDEWAYS while it separates.
   // The vertical sort (2) and the diagonal (2b) both ran on every sub-step, and 2b runs UNCONDITIONALLY with an
   // alternating direction, so at K=9 a parcel could be displaced sideways up to 9 cells in a single tick. A blob of
@@ -4326,7 +4337,28 @@ function fineLiquidTickRoom(room, SUB) {
       // ⚠️ `amt.o(i)` is pure arithmetic on the index, so it is hoisted; `amt.rp(i)` is NOT, because `amt.wp(i)`
       // inside the loop can fault a page in and leave a cached read page stale. One of the two is safe to lift.
       const bI2 = amt.o(i);
-      if (liquidCfg.perLiquidLevel && doPerLiq) for (let t = 0; t < T - 1; t++) {
+      // ⭐⭐ IS THERE A DIFFERENT LIQUID NEXT DOOR AT ALL? IF NOT, THIS WHOLE BRANCH IS DEAD.
+      // The user's observation, and it is stronger than "wasteful" — in a body holding ONE liquid this branch
+      // does not merely fail to find anything, it CANNOT act. The exchange takes rank `t` out of the neighbour
+      // and pulls something LIGHTER back; with nothing lighter next door `avail` is 0 and it bails — after
+      // scanning up to 56 columns and summing ranks at every one of them. Every cell. Every sub-step.
+      // ⇒ `ceilRank(neighbour) > floorRank(here)` — "does either side hold anything lighter than my heaviest?"
+      // — is a NECESSARY condition for every `t`, because the cheapest `t` this loop can use is my own floor
+      // rank and `avail` only shrinks as `t` rises. Three short rank scans instead of the whole branch.
+      // ⭐ THE CHUNK-LEVEL VERSION IS NOT NEEDED. The question "is another liquid nearby?" is answered exactly,
+      // with no bookkeeping and nothing to go stale, by the two cells either side — a chunk flag would be both
+      // coarser and something to keep in sync.
+      // ⚠️ Shares the `plSkip` switch with the per-`t` test below, and inherits its one wrinkle: skipping means
+      // not calling `colStillSorting`, whose answer is memoised per column and never refreshed within a
+      // sub-step, so skipping changes WHEN that memo is filled. Bit-identical at SUB=1 over 500 ticks; SUB=3
+      // settles 2 ticks later. That is why the switch exists.
+      let plOn = liquidCfg.perLiquidLevel && doPerLiq;
+      if (plOn && liquidCfg.plSkip) {
+        const hiI = floorRank(i);
+        const cL = (jLh >= 0 && !solidL) ? ceilRank(jLh) : -1, cR = (jRh >= 0 && !solidR) ? ceilRank(jRh) : -1;
+        if (!(cL > hiI || cR > hiI)) plOn = false;
+      }
+      if (plOn) for (let t = 0; t < T - 1; t++) {
         if (amt.rp(i)[bI2 + t] <= 0) continue;
         const Ci = cumAt(i, t);
         // ⭐ THE SAME NECESSARY CONDITION AS (1d). This exchange also only ever moves into an IMMEDIATE
