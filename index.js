@@ -2924,6 +2924,11 @@ const liquidCfg = {
   // only ever move liquid into an IMMEDIATE neighbour; the row scan decides which SIDE, not where it lands. So
   // if neither neighbour can take anything, no scan result can produce a move, and the scan is dead work.
   // Exact — same outcome, not an approximation. See the block comments at (1d) and (2c).
+  // ⭐⭐ A STRIP THAT RUNS OUT OF BUDGET STILL GETS ITS DESCENT, instead of getting no tick at all. Falling is
+  // the cheap part of the tick and the visually glaring one — liquid stopped in MID-AIR is obviously broken,
+  // liquid that levels slowly is not — and 11–30% of strip-turns were being skipped entirely under a heavy
+  // pour. See the branch in liqTickSectors and FALLONLY in fineLiquidTickRoom.
+  fallFirst: 1,
   flatSkip: 1,     // (1d) surface flat-settle — where the waste is: 99.5% of its decisions move nothing
   plSkip: 1,       // (2c) per-liquid levelling — weaker, 45% of its scans genuinely find a target
 
@@ -4023,7 +4028,17 @@ function fineLiquidTickRoom(room, SUB) {
   // higher K speeds levelling/sort WITHOUT speeding descent. OFF ⇒ FALLSTEPS = FSTEPS ⇒ doFall = doLevel every step ⇒
   // byte-identical to the original single-loop behaviour.
   const FALLSTEPS = liquidCfg.fineConstFall ? Math.max(1, Math.min(16, liquidCfg.fineFallSteps | 0)) : FSTEPS;
-  const NSTEPS = Math.max(FSTEPS, FALLSTEPS), ADAPT_PCT = Math.max(1, Math.min(50, liquidCfg.fineAdaptPct | 0));
+  // ⭐⭐ A FALL-ONLY TURN. When a strip runs out of the tick's budget it currently gets NO tick at all, so
+  // anything DESCENDING in it stops dead in mid-air until its turn comes round — the user's report, and
+  // measured at 11–30% of strip-turns under a heavy pour. Falling is the cheap part of the tick and the
+  // visually glaring one: water stopped in mid-air is obviously broken, water that levels slowly is not.
+  // ⇒ this mode runs the DESCENT and nothing else, so a starved strip still looks alive.
+  // 🟥 EVERY PROCESSED CELL GOES BACK IN THE ACTIVE SET. This is the trap the file already documents three
+  // times — a budget switches a branch off and the cell has nothing left to keep it alive, so `active` drains
+  // and the room is dropped with the work undone, FOR EVER. Here the levelling has not happened, it has been
+  // postponed, so nothing may be allowed to fall out of the set.
+  const FALLONLY = !!liquidCfg._fallOnly;
+  const NSTEPS = FALLONLY ? 1 : Math.max(FSTEPS, FALLSTEPS), ADAPT_PCT = Math.max(1, Math.min(50, liquidCfg.fineAdaptPct | 0));
   const MINU = Math.max(1, Math.min(cap, liquidCfg.fineMinUnit | 0));   // quantise the down-fall so falling slices are chunkier (1 = off)
   const SORTSTEPS = liquidCfg.fineSortSteps > 0 ? Math.min(FSTEPS, liquidCfg.fineSortSteps | 0) : FSTEPS;
   // (2b) DIAGONAL sort budget — capped SEPARATELY from the vertical sort, so sideways travel while separating can be
@@ -4054,11 +4069,11 @@ function fineLiquidTickRoom(room, SUB) {
   const cumAt = (jj, tt) => { const pp = amt.rp(jj), bb = amt.o(jj); let s = 0; for (let k = 0; k <= tt; k++) s += pp[bb + k]; return s; };
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
-    const doFall = step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
-    const doLevel = step < FSTEPS;      // this sub-step runs lateral levelling (1c/1d/2c)
-    const doSort = step < SORTSTEPS;    // this sub-step runs the DENSITY SORT (2/2b) — capped separately so sorting can be slowed independently of levelling
-    const doSortDiag = step < DIAGSTEPS; // ...and the DIAGONAL half (2b) is capped tighter still, to bound sideways travel
-    const doPerLiq = step < PLSTEPS;    // (2c) per-liquid levelling — capped separately: this IS its sideways spread speed in cells/tick
+    const doFall = FALLONLY || step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
+    const doLevel = !FALLONLY && step < FSTEPS;      // this sub-step runs lateral levelling (1c/1d/2c)
+    const doSort = !FALLONLY && step < SORTSTEPS;    // this sub-step runs the DENSITY SORT (2/2b) — capped separately so sorting can be slowed independently of levelling
+    const doSortDiag = !FALLONLY && step < DIAGSTEPS; // ...and the DIAGONAL half (2b) is capped tighter still, to bound sideways travel
+    const doPerLiq = !FALLONLY && step < PLSTEPS;    // (2c) per-liquid levelling — capped separately: this IS its sideways spread speed in cells/tick
     stepMoves = 0;
     // ⭐⭐ ONE PACKED NUMBER PER CELL, SORTED AS A TYPED ARRAY. This was `Array.from(active)` followed by
     // `.sort()` with a JS comparator, and the two together measured **~5% of the whole liquid tick** — a sort
@@ -4293,7 +4308,7 @@ function fineLiquidTickRoom(room, SUB) {
     // left to keep it alive. Whenever a new budget dial is added, ask what keeps its cells active when it is spent.
     // MEASURED: 21 stuck pairs across 500 randomised scenes at fineSortSteps 1–2, and none at the default 0 — which is
     // why this hid through 1320 earlier runs. Self-limiting: wouldSort goes false the moment the pair resolves.
-    if (!doSort && wouldSort(i, r, c, solidBelow)) active.add(i);
+    if (!FALLONLY && !doSort && wouldSort(i, r, c, solidBelow)) active.add(i);   // a fall-only turn re-adds everything anyway
     // (1a) straight down. Gated on doFall so the fall rate can be held constant regardless of the levelling sub-step
     // count (fineConstFall).
     if (doFall && canDown) { const j = i + 1; const room2 = cap - tot.g(j); if (!solidBelow && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
@@ -4498,6 +4513,9 @@ function fineLiquidTickRoom(room, SUB) {
     }
     if (pend) active.add(i);
     if (changedSet.has(i)) wakeN(i);
+    // 🟥 THE POSTPONED WORK MUST NOT BE LOST. See FALLONLY above: this cell's levelling did not happen, so it
+    // has to come back next tick or it freezes exactly where it is, permanently.
+    if (FALLONLY) active.add(i);
   }
   // ═══ FLUX LEVELLING (liquidCfg.fluxLevel) at fine res — "global target, LOCAL transport" (ported from the coarse sim).
   // Off by default (1c/1d handle levelling); on = per-body equilibrium waterline + prefix-sum interface fluxes moved at a
@@ -5136,6 +5154,7 @@ function roomPhase(room) { let h = 0; for (let i = 0; i < room.length; i++) h = 
 const SEC_SEP = '\u0000';
 const EMPTY_CELLS = [];        // shared stand-in for "this strip has no cells in that registry" — never written to
 let liqSecTicks = 0, liqSecDeferred = 0;
+let liqSecFallOnly = 0;   // of the deferred strips, how many still got their DESCENT (liquidCfg.fallFirst)
 // room → where this room's strip ring starts next tick. See the note at the loop in `liqTickSectors`: without
 // it the most expensive strip is cut by the wall-clock stop on every single tick, for ever.
 const roomSecCursor = {};
@@ -5243,7 +5262,29 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
   for (let _sn = 0; _sn < _nSec; _sn++) {
     const s = order[(_secStart + _sn) % _nSec];
     if (budgetMs && performance.now() - tickT0 > budgetMs) {   // out of time: this strip waits for a later tick
-      for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
+      // ⭐⭐ …OR IT STILL GETS ITS DESCENT. A strip that gets no tick at all stops anything FALLING in it dead in
+      // mid-air, which is what the user reported and what 11–30% of strip-turns were doing under a heavy pour.
+      // Falling is the cheap part and the visually glaring one, so a starved strip runs that and postpones the
+      // levelling and the sorting rather than postponing everything.
+      // ⚠️ ONLY the flow pass, and only its descent — sources, chemistry, powder and soil are still skipped, or
+      // this would not be a saving at all. Their cells go back untouched, exactly as before.
+      // ⚠️ `fineLiquidTickRoom` puts every cell it processes back in the active set in this mode, so the
+      // postponed levelling is postponed rather than lost. That is the invariant to check if liquid ever
+      // freezes with this on.
+      const _fc = buckets[0].get(s);
+      if (liquidCfg.fallFirst && _fc && _fc.length) {
+        const d0 = SEC_REGS[0], lo0 = s * W, hi0 = s * W + W - 1;
+        const saved0 = st[d0.f];
+        st[d0.f] = new SectorSet(_fc, lo0, hi0, FROWS, leftover[0]);
+        liquidCfg._fallOnly = 1;
+        try { fineLiquidTickRoom(room, SUB); } finally { liquidCfg._fallOnly = 0; }
+        const after0 = st[d0.f]; if (after0) for (const i of after0) leftover[0].push(i);
+        st[d0.f] = saved0;
+        for (let n = 1; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
+        liqSecFallOnly++;
+      } else {
+        for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
+      }
       liqSecDeferred++;
       continue;
     }
@@ -5676,7 +5717,7 @@ const runLiquidTick = () => {
         // SECTORS: how many sector-ticks ran and how many were deferred for want of budget. `secW` 0 = off, and
         // both counters stay at 0 — so a non-zero reading is proof the mechanism fired, not an inference from
         // an outcome (the same reason liqRateSkips and liqK2Throttles exist).
-        secW: liquidCfg.secW, secTicks: liqSecTicks, secDeferred: liqSecDeferred,
+        secW: liquidCfg.secW, secTicks: liqSecTicks, secDeferred: liqSecDeferred, secFallOnly: liqSecFallOnly,
         // ⭐ THE TWO THROTTLES, AS COUNTERS, BECAUSE THE PANEL SHOWED NEITHER. `secDeferred` (above) is the one
         // that IS operating in a sectored world and it was console-only; `k2Throttles` is tier 2, whose stuck
         // `K=9` is what prompted this — a zero here with water plainly moving is the whole diagnosis in one
@@ -5746,7 +5787,7 @@ const runLiquidTick = () => {
       // strip-turns was thrown away", which is the number to judge the throttle by.
       // ⚠️ Safe for the rigs: this whole block only runs with `perfLog` ON, and `probe_budget` explicitly turns
       // it off (it reads the same counters through the sliced module, cumulatively, and still can).
-      liqRateSkips = 0; liqK2Throttles = 0; liqSecTicks = 0; liqSecDeferred = 0; liqReactSkips = 0;
+      liqRateSkips = 0; liqK2Throttles = 0; liqSecTicks = 0; liqSecDeferred = 0; liqSecFallOnly = 0; liqReactSkips = 0;
       liqQProcessed = 0; liqQMoved = 0; liqQWoken = 0; liqQCapped = 0; worldLiquidWakeAdmitted = 0;
       liqLvlSteps = 0; liqLvlRuns = 0; liqPlSteps = 0; liqPlRuns = 0;
     }
@@ -6785,7 +6826,7 @@ function cfgWire() {
   return Object.assign({}, liquidCfg, {
     relayOn: !!relayCfg.on, relayHz: relayCfg.hz, relayCap: relayCfg.cap,
     relayFarHz: relayCfg.farHz, relayFarCap: relayCfg.farCap,
-    secTicks: liqSecTicks, secDeferred: liqSecDeferred,
+    secTicks: liqSecTicks, secDeferred: liqSecDeferred, secFallOnly: liqSecFallOnly,
     chunkQueue: !!interestCfg.queue, chunkQueueMs: interestCfg.queueMs, chunkQueueBatch: interestCfg.queueBatch,
     chunkQStats: { sent: chunkQSent, drains: chunkQDrains, dropped: chunkQDropped },
     worldChunked: !!worldCfg.chunked, worldOnDemand: !!worldCfg.onDemand, worldOverworld: !!worldCfg.overworld,
@@ -9721,6 +9762,7 @@ io.on('connection', (socket) => {
     if ('fineFlatSteps' in patch) liquidCfg.fineFlatSteps = Math.max(0, Math.min(16, patch.fineFlatSteps | 0));
     if ('fineFlatScan' in patch) liquidCfg.fineFlatScan = Math.max(0, Math.min(32, patch.fineFlatScan | 0));
     if ('flatSkip' in patch) liquidCfg.flatSkip = patch.flatSkip ? 1 : 0;
+    if ('fallFirst' in patch) liquidCfg.fallFirst = patch.fallFirst ? 1 : 0;
     if ('plSkip' in patch) liquidCfg.plSkip = patch.plSkip ? 1 : 0;
     // CELL CAPACITY (vertical slices). Rescale existing liquid, then re-broadcast so client mirrors match the new scale.
     if ('cellCap' in patch) { const nv = Math.max(1, Math.min(255, patch.cellCap | 0)); if (nv !== LIQUID_MAX) { rescaleAllLiquid(nv); LIQUID_MAX = nv; liquidCfg.cellCap = nv;
