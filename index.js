@@ -4755,6 +4755,18 @@ const liqGenBy = { drain: 0, src: 0, react: 0, flow: 0, powder: 0, soil: 0 };
 let _genMark = 0;
 const genMark = () => { _genMark = genPagesProduced; };
 const genSince = (k) => { liqGenBy[k] += genPagesProduced - _genMark; _genMark = genPagesProduced; };
+// ⭐⭐ …AND THE SAME BRACKETING FOR TIME, WHICH IS THE QUESTION ACTUALLY BEING ASKED. The tick reported one
+// number for itself and one for chemistry, and everything else — sources, the flow, falling grains, soil — was a
+// single undifferentiated remainder. "The liquid tick is 25ms" is the question restated, not an answer, and it
+// is the same mistake the profiling note upstairs records: *a total cannot say who spent it*.
+// ⚠️ SAME KEYS AND THE SAME CALL SITES as `genSince`, deliberately — two accountings of one sequence of passes
+// that disagreed about where the boundaries were would be worse than having only one.
+// ⚠️ A SECTORED room does its six passes inside `liqTickSectors`, i.e. before the top-level `msSince('flow')` is
+// reached, so it brackets them there too. Without that every strip's chemistry would be charged to the flow.
+const liqMsBy = { drain: 0, src: 0, react: 0, flow: 0, powder: 0, soil: 0 };
+let _msMark = 0;
+const msMark = () => { _msMark = performance.now(); };
+const msSince = (k) => { const n = performance.now(); liqMsBy[k] += n - _msMark; _msMark = n; };
 const liqReactFired = {};     // reaction FX code → how many times it has fired
 // A reaction can only START when something changes, and anything that moved is already in roomFineActive — which the tick
 // uses as its candidate list. What that misses is a change to a SETTLED pair (painting water beside a settled lava pool,
@@ -4898,15 +4910,23 @@ function fineReactTickRoom(room, SUB) {
   // chain, against a pass that otherwise does not run at all.
   const filt = !!liquidCfg.reactAnchorFilter;
   const reactive = (i) => { const p = amt.rp(i), b = amt.o(i); return p[b] > 0 || p[b + 3] > 0 || p[b + 4] > 0; };
+  // 🟥 THIS ALLOCATED A FIVE-ELEMENT ARRAY PER CANDIDATE, and the candidate list runs to `reactMaxCand` = 20,000
+  // per room per tick. Twenty thousand short-lived arrays a tick, twenty-five ticks a second, is both real CPU
+  // and real garbage — the same shape as the two closures per cell per sub-step the flow loop was rewritten to
+  // drop. The five offsets are now taken one at a time by an unrolled helper; nothing about the order or the
+  // dedupe changes, so the anchor list is the same list.
   const seen = new Set(), anchors = [];
+  const offer = (i) => {
+    if (i < 0 || i >= N || seen.has(i)) return;
+    seen.add(i); if (filt && !reactive(i)) return;
+    anchors.push(i);
+  };
   for (const ci of cand) {
     if (ci < 0 || ci >= N) continue;
     const cr = ci % ROWS;
-    for (const i of [ci, ci - ROWS, ci + ROWS, cr > 0 ? ci - 1 : -1, cr < ROWS - 1 ? ci + 1 : -1]) {
-      if (i < 0 || i >= N || seen.has(i)) continue;
-      seen.add(i); if (filt && !reactive(i)) continue;
-      anchors.push(i);
-    }
+    offer(ci); offer(ci - ROWS); offer(ci + ROWS);
+    if (cr > 0) offer(ci - 1);
+    if (cr < ROWS - 1) offer(ci + 1);
   }
   liqReactCand += cand.length; liqReactSeen += seen.size; liqReactAnchors += anchors.length;
   // ⭐ TWO PHASES, so the result cannot depend on Set iteration order. EVERY lava contact is resolved first, then the
@@ -5019,9 +5039,16 @@ function fineReactTickRoom(room, SUB) {
   for (const i of anchors) {
     const pa = amt.rp(i), b = amt.o(i);
     if (pa[b] > 0 || pa[b + 4] <= 0) continue;
-    const r = i % ROWS, NB = [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS];
+    // 🟥 THIS IS THE PASS THAT RUNS FOR EVERY MOVING WATER CELL, and it allocated a four-element array and then
+    // took FOUR PAGED TERRAIN READS for each one, looking for a shoreline. On a heavy pour that is tens of
+    // thousands of cells a tick and the great majority of them are open water with no shore anywhere near.
+    // The array is gone; the four reads are still here, and they are the next thing to look at — see the
+    // reaction counters on the Perf tab, which now say how many cells were examined against how many reactions
+    // actually fired. Do not guess at that ratio: read it.
+    const r = i % ROWS;
     let snowJ = -1, saltJ = -1, ss = null;
-    for (const j of NB) {
+    for (let n = 0; n < 4; n++) {
+      const j = n === 0 ? (r < ROWS - 1 ? i + 1 : -1) : n === 1 ? (r > 0 ? i - 1 : -1) : n === 2 ? i - ROWS : i + ROWS;
       if (j < 0 || j >= N) continue;
       const g = grid.g(j);
       if (g === 8 && snowJ < 0) snowJ = j;
@@ -5448,12 +5475,23 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
     // wakes contacts the post-reaction pass then has to see. It also keeps `sourceTickRoom` unreached when a
     // strip has no sources, which matters beyond speed: `sourceTickRoomFine` lives OUTSIDE the block the probe
     // rigs slice, so calling it there would be a ReferenceError (the sliced-block boundary, eighth time).
+    // ⚠️ BRACKETED HERE TOO. A sectored room does all six of its passes inside this loop, which sits BEFORE the
+    // top-level `msSince('flow')` — so without this every strip's chemistry, falling sand and soil would be
+    // charged to the flow, and the breakdown would say the flow is everything in exactly the case where the
+    // scheduler is busiest. Same keys as the whole-room path, so the two are one accounting.
+    msSince('flow');
     if (st.src && st.src.size) sourceTickRoom(room);
+    msSince('src');
     if (doReact && ((st.fineActive && st.fineActive.size) || (st.fineReact && st.fineReact.size) || (st.fineFire && st.fineFire.size))) fineReactTickRoom(room, SUB);
+    msSince('react');
     if (st.fineActive && st.fineActive.size) fineLiquidTickRoom(room, SUB);
+    msSince('flow');
     if (doReact && ((st.fineActive && st.fineActive.size) || (st.fineReact && st.fineReact.size) || (st.fineFire && st.fineFire.size))) fineReactTickRoom(room, SUB);
+    msSince('react');
     if (st.powderActive && st.powderActive.size) powderTickRoom(room);
+    msSince('powder');
     if (doSoil && st.soilActive && st.soilActive.size) soilTickRoom(room);
+    msSince('soil');
     // Whatever is STILL moving comes back — including cells this strip woke in a NEIGHBOUR, which is why liquid
     // crossing a boundary needs no special handling. They are bucketed to their own strip next tick.
     // ⚠️ A tick function may have called drop*(), which NULLS the field; null means empty here.
@@ -5505,7 +5543,7 @@ const runLiquidTick = () => {
   // lifted or a step is requested, so what you are looking at is exactly what the sim last produced.
   if (liquidCfg.paused) { if (liquidStepsPending <= 0) return; liquidStepsPending--; }
   const _t0 = liquidCfg.perfLog ? performance.now() : 0;
-  const _genAtTickStart = genPagesProduced; genMark();      // see liqTickGenPages: how much WORLD this tick built
+  const _genAtTickStart = genPagesProduced; genMark(); msMark();      // see liqTickGenPages: how much WORLD this tick built
   liquidTickCount++;
   // ⚠️ BUMPED HERE, NOT AT THE POWDER LOOP WHERE IT USED TO LIVE. A sectored room runs its powder inside the
   // flow loop, i.e. BEFORE that loop is reached, and `powderTickRoom` reads this counter for its symmetry
@@ -5659,9 +5697,9 @@ const runLiquidTick = () => {
   // ⚠️ BUILT ABOVE, BEFORE THE BUDGET ROSTER — see the note there. It used to be built here, which is why tier 3
   // could not consult it and rate-limited sectored rooms whole.
   const _secDoSoil = (liquidTickCount & 3) === 0;   // the soil gate, read ONCE so a strip's turn uses the same answer the whole-room loop does
-  genSince('drain');
+  genSince('drain'); msSince('drain');
   for (const room of Array.from(cellRooms.src)) { if (!cellRooms.src.has(room)) continue; if (_deferred && _deferred.has(room)) continue; if (_secPlans.has(room)) continue; sourceTickRoom(room); }
-  genSince('src');   // sources top up first, so their liquid is ordinary pooled liquid to everything below
+  genSince('src'); msSince('src');   // sources top up first, so their liquid is ordinary pooled liquid to everything below
   // FINE-CELL liquid (experimental) — a parallel sim in its own arrays, ticked only when liquidCfg.fine.
   // Timed SEPARATELY from the coarse sim so the Perf tab can isolate the fine cost at various fineLevelSteps (K).
   const _fine0 = liquidCfg.perfLog ? performance.now() : 0; let _fineActive = 0;
@@ -5677,6 +5715,10 @@ const runLiquidTick = () => {
   const _react = () => {
     const _rt0 = liquidCfg.perfLog ? performance.now() : 0;
     const _gm = genPagesProduced; _reactInner(); liqGenBy.react += genPagesProduced - _gm; _genMark = genPagesProduced;
+    // ⚠️ The chemistry runs TWICE per tick (before the flow on last tick's movers, and after it on the contacts
+    // the flow just made), so this accumulates rather than replacing — and the `_msMark` is pushed forward so
+    // the flow either side of it is not charged for it.
+    msSince('react');
     if (liquidCfg.perfLog) { const _rd = performance.now() - _rt0; liqPerf.reactMs += _rd; if (_rd > liqPerf.reactMsMax) liqPerf.reactMsMax = _rd; }
   };
   const _reactInner = () => {
@@ -5796,12 +5838,12 @@ const runLiquidTick = () => {
     liqPerf.pending = _pend;
     liqPerf.pendAt = liquidTickCount;  // …and the reading is STAMPED, so a stale one can say so instead of reading 0
   }
-  genSince('flow');
+  genSince('flow'); msSince('flow');
   for (const room of Array.from(cellRooms.powder)) { if (!cellRooms.powder.has(room)) continue; if (_deferred && _deferred.has(room)) continue; if (_secPlans.has(room)) continue; powderTickRoom(room); }   // powder runs in lockstep with liquid → consistent gravity
-  genSince('powder');
+  genSince('powder'); msSince('powder');
   if (_secDoSoil) for (const room of Array.from(cellRooms.soil)) { if (!cellRooms.soil.has(room)) continue; if (_deferred && _deferred.has(room)) continue; if (_secPlans.has(room)) continue; soilTickRoom(room); }
   if (liquidCfg.perfLog && _deferred) liqPerf.deferred += _deferred.size;
-  genSince('soil');
+  genSince('soil'); msSince('soil');
   liqTickGenPages += genPagesProduced - _genAtTickStart;
   if (liquidCfg.perfLog) {
     const _dt = performance.now() - _t0; liqPerf.simMs += _dt; if (_dt > liqPerf.simMsMax) liqPerf.simMsMax = _dt;
@@ -5864,6 +5906,10 @@ const runLiquidTick = () => {
         reactSkips: liqReactSkips, budgetFloored: liqBudgetFloored,
         // the funnel: candidates → deduped neighbourhood → cells that can actually react → what fired
         reactCand: liqReactCand, reactSeen: liqReactSeen, reactAnchors: liqReactAnchors, reactFired: liqReactFired,
+        // ⭐⭐ WHERE THE TICK ACTUALLY WENT, as ms per tick per pass. Sent as a plain object so a pass added later
+        // appears without touching the wire. See `liqMsBy` — it is bracketed at exactly the same points as the
+        // world-generation accounting, in both the whole-room and the strip-scheduled path.
+        msBy: (() => { const o = {}; for (const k in liqMsBy) o[k] = +(liqMsBy[k] / liqPerf.ticks).toFixed(2); return o; })(),
         // the work-queue funnel: examined → actually did something → put back by a neighbour → put back by the cap
         qProcessed: liqQProcessed, qMoved: liqQMoved, qWoken: liqQWoken, qCapped: liqQCapped,
         // the two sideways levelling scans: mean walk length out of LIQUID_LEVEL_SCAN (see liqLvlSteps)
@@ -5914,6 +5960,15 @@ const runLiquidTick = () => {
       // ⚠️ Safe for the rigs: this whole block only runs with `perfLog` ON, and `probe_budget` explicitly turns
       // it off (it reads the same counters through the sliced module, cumulatively, and still can).
       liqRateSkips = 0; liqK2Throttles = 0; liqSecTicks = 0; liqSecDeferred = 0; liqSecFallOnly = 0; liqReactSkips = 0;
+      // Same rule: the per-pass ms are a SUM over the window just reported, so they start again at zero. A
+      // lifetime total here would answer "has the chemistry ever been expensive", which nobody is asking.
+      for (const k in liqMsBy) liqMsBy[k] = 0;
+      // 🟥 …AND SO ARE THE REACTION COUNTERS, WHICH WERE LIFETIME TOTALS ON THE WIRE. `reactCand`/`reactSeen`/
+      // `reactAnchors` are what say whether the chemistry is examining a hundred thousand cells to fire nothing,
+      // and as running totals since boot they could not: every one of them reads "enormous" after ten minutes
+      // of play whatever is happening right now. Third time this file has had to fix exactly this.
+      liqReactCand = 0; liqReactSeen = 0; liqReactAnchors = 0;
+      for (const k in liqReactFired) delete liqReactFired[k];
       liqQProcessed = 0; liqQMoved = 0; liqQWoken = 0; liqQCapped = 0; worldLiquidWakeAdmitted = 0;
       liqLvlSteps = 0; liqLvlRuns = 0; liqPlSteps = 0; liqPlRuns = 0;
     }
