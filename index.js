@@ -3103,6 +3103,11 @@ const liquidCfg = {
   //     lava and water would starve the flow again and we would be back here.
   reactAnchorFilter: 1,  // 0 = old behaviour (anchor every candidate + neighbours, decide inside the phases)
   reactMaxCand: 20000,   // 0 = unlimited (old behaviour). Per room per tick, from a rotating cursor.
+  // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
+  // not additionally from every cell that might still move. See the note at the candidate list in
+  // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
+  // nothing. 0 = the old double source.
+  reactMovedOnly: 1,
   // ⭐ 1 = the OLD behaviour: every generated liquid cell is woken on production, all ~58,000 per window, of
   // which measurement says 0.5% can move. Ships 0 (wake only what is loose) because the difference between
   // "liquid works" and "liquid is frozen" in the Overworld is exactly this. Left as a live toggle because if
@@ -4827,7 +4832,11 @@ function fineReactTickRoom(room, SUB) {
   const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal;
   if (!grid || !hp || !amt || !tot) return;
   const active = st.fineActive, seeded = st.fineReact, burning = st.fineFire;
-  if ((!active || !active.size) && (!seeded || !seeded.size) && (!burning || !burning.size)) { if (seeded) dropFineReact(room); return; }
+  // ⚠️ `active` only keeps this pass alive when it is actually a candidate source — see reactMovedOnly below.
+  // Leaving it in the test regardless would run the whole pass on an empty candidate list every tick a pool is
+  // still settling, which is most of them.
+  const _movedOnly = !!liquidCfg.reactMovedOnly;
+  if ((_movedOnly || !active || !active.size) && (!seeded || !seeded.size) && (!burning || !burning.size)) { if (seeded) dropFineReact(room); return; }
   const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, ROWS = st.rows, N = grid.length;
   const tick = liquidTickCount, FLOOR_ROW = Math.floor(roomFloorTop(room) / TERRAIN_CELL);   // acid may not eat the bedrock row
   const act = fineSet(room), liqChanged = new Set(), terrCells = [], fx = [];
@@ -4886,7 +4895,21 @@ function fineReactTickRoom(room, SUB) {
   // reaction test — a handful, and each one is a thing a player just did. Rationing those would make building
   // feel broken in a way rationing settled liquid does not.
   const cand = [];
-  if (active && active.size) {
+  // ⭐⭐ CANDIDATES COME FROM WHAT CHANGED, NOT FROM WHAT MIGHT MOVE (liquidCfg.reactMovedOnly, ON).
+  // 🟥 THE FLOW ALREADY SEEDS EVERY CHANGED CELL INTO `seeded`, and the note where it does so states the
+  // principle in as many words: *"REACTION CANDIDATES COME FROM changedSet, NOT FROM active. These are different
+  // things and conflating them is why reactions only fired while liquid was still MOVING."* This pass did both —
+  // it drained `seeded` AND separately took up to `reactMaxCand` cells off `active` — so the correct source was
+  // already there and the expensive one was piled on top of it.
+  // 🟥 MEASURED ON THE RUNNING SERVER, six scenes: chemistry examined 106,000–565,000 cells a second and fired
+  // ZERO reactions in five of them, for 2.4–9ms of every tick — a big pour, an oil pour mid-stratification, and
+  // a scene with extra materials added. Only a scene built deliberately to react fired anything at all.
+  // ⭐ `active` means "may still move"; a cell in it whose contents did not change cannot have made a new
+  // contact, and if its NEIGHBOUR changed then the neighbour is in `seeded` and the ±4 expansion below reaches
+  // back to it. So this is not an approximation — it is the same set of contacts, found once instead of twice.
+  // ⚠️ OFF restores the old double source exactly. The check is the `fired` count on the Perf tab beside
+  // `examined`: if any scene fires FEWER reactions with this on, the reasoning above is wrong somewhere.
+  if (active && active.size && !_movedOnly) {
     const capN = Math.max(0, liquidCfg.reactMaxCand | 0);
     if (!capN || active.size <= capN) { for (const i of active) cand.push(i); roomReactCursor[room] = 0; }
     else {
@@ -5726,6 +5749,9 @@ const runLiquidTick = () => {
     for (const reg of [cellRooms.fine, cellRooms.react, cellRooms.fire])   // a room may be quiet but still have a seeded contact or a burning slick
       for (const room of Array.from(reg)) { if (!reg.has(room) || seenRooms.has(room) || (_deferred && _deferred.has(room)) || _secPlans.has(room)) continue; seenRooms.add(room); fineReactTickRoom(room, cellsOf(room).fineSub || 1); }
   };
+  // …and the same closing before the FIRST pass, so the budget roster and the strip planning between the sources
+  // and here are charged to the flow they are scheduling rather than to the chemistry that happens to run next.
+  msSince('flow');
   if (liquidCfg.reactions) _react();
   for (const room of Array.from(cellRooms.fine)) {
     if (!cellRooms.fine.has(room)) continue;
@@ -5773,6 +5799,13 @@ const runLiquidTick = () => {
   // tick's movers); the post-pass catches contacts this tick's movement JUST created, in the same tick. Without it,
   // lava that lands on a partially-filled cell — which lavaBlk stops it entering — would visibly HOVER over the gap
   // for a tick before crusting. The pass is O(active) and does nothing unless lava is actually touching something.
+  // 🟥🟥 `msSince('flow')` MUST CLOSE THE FLOW HERE, BEFORE THE SECOND CHEMISTRY PASS. Without it the mark was
+  // still sitting where the FIRST chemistry pass left it, so `_react`'s own `msSince('react')` swallowed the
+  // entire flow loop and charged it to chemistry: the breakdown read "chemistry 23.43ms (96%) · water 0.05ms
+  // (0%)" while the independently-bracketed REACT line on the same panel read 9ms, 38%. Two numbers for one
+  // quantity, disagreeing by 14ms, in the readout's first outing — caught because the old measurement was still
+  // there to contradict it. A breakdown that cannot be cross-checked against something is worth very little.
+  msSince('flow');
   if (liquidCfg.reactions) _react();
   if (liquidCfg.perfLog) { const _fdt = performance.now() - _fine0; liqPerf.fineMs += _fdt; if (_fdt > liqPerf.fineMsMax) liqPerf.fineMsMax = _fdt; if (_fineActive > liqPerf.fineActive) liqPerf.fineActive = _fineActive; }
   // ⭐ HOW MUCH LIQUID IS PENDING, AND WHERE — COUNTED FOR EVERY ROOM, DEFERRED OR NOT.
@@ -9974,6 +10007,7 @@ io.on('connection', (socket) => {
     // the flow or because reactions ate the tick ahead of it" is otherwise unanswerable from inside the game,
     // and that is precisely the question that cost this track a session.
     if ('reactAnchorFilter' in patch) liquidCfg.reactAnchorFilter = patch.reactAnchorFilter ? 1 : 0;
+    if ('reactMovedOnly' in patch) liquidCfg.reactMovedOnly = patch.reactMovedOnly ? 1 : 0;
     if ('reactMaxCand' in patch) liquidCfg.reactMaxCand = Math.max(0, Math.min(2000000, patch.reactMaxCand | 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
