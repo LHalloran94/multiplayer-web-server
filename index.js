@@ -3308,13 +3308,14 @@ const liquidCfg = {
   // such call to skip, so that optimisation becomes exactly behaviour-preserving.
   // ⚠️ If slivers-scattered-across-the-pool ever comes back, this is the first switch to try, and the reach and
   // passes dials for per-liquid levelling are the ones that bound the EXTENT rather than the rate.
-  // 🟥 BACK ON 2026-08-24. The measurement above that argued for turning it off was taken in the WRONG REGIME:
-  // `probe_sort_spread` runs with the per-tick budget OFF, so K = 9 and the scene settles in 5–13 ticks — which
-  // is what makes "the end state is the same 58 columns either way" true. Under a real heavy pour K is pinned at
-  // 1 and 11–30% of strip-turns are deferred, so the liquid NEVER REACHES THE END STATE and the transient IS the
-  // permanent state. The user's screenshot of long horizontal streaks at the bottom of a pour is precisely the
-  // shape this gate exists to prevent. ⇒ never quote a settling-time argument taken with the budget off.
-  finePerLiquidSortGate: true,
+  // 🟥 TURNED BACK ON FOR ONE INCREMENT ON 2026-08-24 AND REVERTED THE SAME DAY. The argument for turning it on
+  // again was that the measurement behind switching it off ran with the budget OFF (K=9, settles in 5–13 ticks),
+  // so "the end state is the same either way" cannot be quoted about a pour that never reaches its end state.
+  // That reasoning still stands as far as it goes — and it is beside the point. The user's ruling: both of these
+  // gates COST measured performance and NEITHER is a fix for the artefact being chased. The horizontal streaks
+  // are separated PACKETS of falling liquid — liquid frozen in mid-air by the strip scheduler and released in
+  // bursts — not a parcel filmed sideways. ⇒ fix the freeze; do not pay for a smear that is not happening.
+  finePerLiquidSortGate: false,
   // ⭐⭐ …AND THE GATE ABOVE ASKS ITS QUESTION OF THE LIQUID BODY, NOT THE WHOLE COLUMN.
   // "Is my neighbour still stratifying" used to be answered over the column's ENTIRE DEPTH. In a page room that
   // is 405 rows of mild waste; in the Overworld it is 4,096, so one drop of falling water paid to scan every
@@ -3334,11 +3335,9 @@ const liquidCfg = {
   // ⚠️ What it did was stop a sliver riding the whole height of a pool in ONE pass (the list is walked bottom-up,
   // so each higher cell pulled the same light liquid up one more). With it off the parcel reaches the surface on
   // tick 0 instead of tick 1. That is the thing to watch if instant stratification ever looks wrong.
-  // 🟥 BACK ON 2026-08-24, same reason as the gate above — see that note. ⚠️ THIS ONE ALSO HAD AN EYEBALL
-  // BEHIND IT ("it seems to look better when off"), taken on a settled scene, NOT under a heavy pour. If the
-  // streaks go away with both of these on but instant stratification now looks wrong on a quiet pool, this is
-  // the one to put back to off — the gate above is the one carrying the sideways-spread argument.
-  fineSortOnePerPass: true,
+  // 🟥 ON for one increment on 2026-08-24 and reverted the same day — see the note on `finePerLiquidSortGate`
+  // above, which is the full account. This one had the user's own eyeball behind switching it off as well.
+  fineSortOnePerPass: false,
   // CELL CAPACITY = the number of vertical fill "slices" a cell holds (LIQUID_MAX). Higher = smoother/finer vertical fill;
   // must stay ≤255 (Uint8). Changing it RESCALES all existing liquid (a full cell stays full) + re-broadcasts. Global
   // (coarse + fine); at 64 the coarse system is unchanged. Stratification (sortRate units/tick) is proportionally slower higher.
@@ -5172,13 +5171,18 @@ let liqSecFallOnly = 0;   // of the deferred strips, how many still got their DE
 // ⭐⭐ WHICH STRIP, NOT HOW MANY. The three counters above are TOTALS, and a total cannot answer the question
 // actually being asked: *"the vertical straight edge in the liquid — is it a strip boundary, with the water on
 // one side being ticked and the water on the other being starved?"* That is a question about a LOCATION, so the
-// tally has to carry one. room → Map(sector → [ticked, starved, ofThoseStillFell]), reset every report window
-// and drawn as an overlay by the client. Costs nothing at all unless the overlay is switched on.
+// tally has to carry one. room → Map(sector → [ticked, outOfTime, rateLimited, ofThoseStillFell]), reset every
+// report window and drawn as an overlay by the client. Costs nothing at all unless the overlay is switched on.
+// ⭐⭐ THE TWO THROTTLES ARE COUNTED SEPARATELY AND THAT SEPARATION IS THE WHOLE VALUE OF THIS THING. Lumping
+// them as "starved" is what let the missing descent on the tier-3 path hide: the readout said the strip was
+// being turned away and the fix for being turned away was demonstrably on, so the two facts sat next to each
+// other looking consistent. They were being turned away at a DIFFERENT DOOR. A counter that cannot tell two
+// mechanisms apart cannot tell you which one to fix.
 const secStatus = new Map();
 const secNote = (room, s, k) => {
   if (!liquidCfg.strips) return;
   let m = secStatus.get(room); if (m === undefined) secStatus.set(room, m = new Map());
-  let a = m.get(s); if (a === undefined) m.set(s, a = [0, 0, 0]);
+  let a = m.get(s); if (a === undefined) m.set(s, a = [0, 0, 0, 0]);
   a[k]++;
 };
 // room → where this room's strip ring starts next tick. See the note at the loop in `liqTickSectors`: without
@@ -5285,35 +5289,55 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
   const _nSec = order.length;
   const _secStart = _nSec ? (roomSecCursor[room] | 0) % _nSec : 0;
   let _secRan = 0;
+  // ⭐⭐ A STRIP THAT IS TURNED AWAY STILL GETS ITS DESCENT. A strip that gets no turn at all stops anything
+  // FALLING in it dead in mid-air, and — because the freeze is released in a burst when its turn finally comes
+  // round — that is also where the horizontal bands of separated falling packets come from. Falling is the cheap
+  // part of a turn and the visually glaring one: water stopped in mid-air is obviously broken, water that levels
+  // slowly is not.
+  // 🟥🟥 THERE ARE TWO DOORS A STRIP CAN BE TURNED AWAY AT AND THIS GUARDED ONLY ONE. The wall-clock stop is
+  // one; TIER 3 (a strip too expensive to fit the budget even at K=1, so it runs one tick in N) is the other,
+  // and it was a bare `continue`. That is why "a starved strip still FALLS" looked like it did nothing: it was
+  // working, on the door the water was not being turned away at. The strip overlay is what showed it — a strip
+  // reading "took 8 · starved 17" with NOT ONE of the 17 having fallen, over a window in which the tick
+  // evidently was not running out of time, since the wall-clock door was never reached at all.
+  // ⇒ one function, used by both, so a third throttle cannot quietly reintroduce the same gap.
+  // ⚠️ ONLY the flow pass, and only its descent — sources, chemistry, powder and soil are still skipped, or this
+  // would not be a saving at all. Their cells go back untouched, exactly as before.
+  // ⚠️ `fineLiquidTickRoom` puts every cell it processes back in the active set in this mode, so the postponed
+  // levelling is postponed rather than lost. That is the invariant to check if liquid ever freezes with it on.
+  // ⚠️ Declared OUT of the strip loop: one closure per room per tick rather than one per strip per tick, which
+  // is why `s` is a parameter and not a capture.
+  // 🟥 …AND THE DESCENT ITSELF HAS A CEILING, because a fall-only pass is cheap and not FREE. Granting one on
+  // every turned-away strip is unbounded work: the wall-clock stop turns a strip away and then hands it a pass
+  // anyway, so a tick already over its allowance can run one pass per remaining strip and go further over,
+  // turning more strips away, each of which is handed a pass. Tier 3 makes that worse by adding a second door.
+  // ⇒ the descent is granted only while the tick is inside TWICE its allowance; past that a strip is postponed
+  // outright, exactly as it was before. The normal case is unaffected — a tier-3 skip happens long before the
+  // wall clock is anywhere near — and the pathological case degrades to the old behaviour instead of spiralling.
+  const _fallCeil = budgetMs ? budgetMs * 2 : 0;
+  const _starve = (s, why) => {
+    const _fc = buckets[0].get(s);
+    if (liquidCfg.fallFirst && _fc && _fc.length && (!_fallCeil || performance.now() - tickT0 < _fallCeil)) {
+      const d0 = SEC_REGS[0], lo0 = s * W, hi0 = s * W + W - 1;
+      const saved0 = st[d0.f];
+      st[d0.f] = new SectorSet(_fc, lo0, hi0, FROWS, leftover[0]);
+      liquidCfg._fallOnly = 1;
+      try { fineLiquidTickRoom(room, SUB); } finally { liquidCfg._fallOnly = 0; }
+      const after0 = st[d0.f]; if (after0) for (const i of after0) leftover[0].push(i);
+      st[d0.f] = saved0;
+      for (let n = 1; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
+      liqSecFallOnly++;
+      secNote(room, s, 3);
+    } else {
+      for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
+    }
+    secNote(room, s, why);
+  };
   for (let _sn = 0; _sn < _nSec; _sn++) {
     const s = order[(_secStart + _sn) % _nSec];
     if (budgetMs && performance.now() - tickT0 > budgetMs) {   // out of time: this strip waits for a later tick
-      // ⭐⭐ …OR IT STILL GETS ITS DESCENT. A strip that gets no tick at all stops anything FALLING in it dead in
-      // mid-air, which is what the user reported and what 11–30% of strip-turns were doing under a heavy pour.
-      // Falling is the cheap part and the visually glaring one, so a starved strip runs that and postpones the
-      // levelling and the sorting rather than postponing everything.
-      // ⚠️ ONLY the flow pass, and only its descent — sources, chemistry, powder and soil are still skipped, or
-      // this would not be a saving at all. Their cells go back untouched, exactly as before.
-      // ⚠️ `fineLiquidTickRoom` puts every cell it processes back in the active set in this mode, so the
-      // postponed levelling is postponed rather than lost. That is the invariant to check if liquid ever
-      // freezes with this on.
-      const _fc = buckets[0].get(s);
-      if (liquidCfg.fallFirst && _fc && _fc.length) {
-        const d0 = SEC_REGS[0], lo0 = s * W, hi0 = s * W + W - 1;
-        const saved0 = st[d0.f];
-        st[d0.f] = new SectorSet(_fc, lo0, hi0, FROWS, leftover[0]);
-        liquidCfg._fallOnly = 1;
-        try { fineLiquidTickRoom(room, SUB); } finally { liquidCfg._fallOnly = 0; }
-        const after0 = st[d0.f]; if (after0) for (const i of after0) leftover[0].push(i);
-        st[d0.f] = saved0;
-        for (let n = 1; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
-        liqSecFallOnly++;
-        secNote(room, s, 2);
-      } else {
-        for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
-      }
+      _starve(s, 1);
       liqSecDeferred++;
-      secNote(room, s, 1);
       continue;
     }
     const key = room + SEC_SEP + s, lo = s * W, hi = s * W + W - 1;
@@ -5336,9 +5360,13 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
       if (k1 > budgetMs) {
         const per = Math.max(2, Math.min(liquidCfg.budgetRateMax | 0 || 8, Math.ceil(k1 / budgetMs)));
         if ((liquidTickCount + roomPhase(room) + s * 7) % per !== 0) {
-          for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
+          // 🟥 THIS WAS A BARE `continue` AND THAT IS THE BUG. Tier 3 is the throttle that actually bites under a
+          // sustained pour — the wall-clock stop only fires on the tail of a tick, but a strip whose cost is 3×
+          // the budget at K=1 is turned away here two ticks in every three, for as long as the pour lasts. Its
+          // water therefore stopped, including anything mid-air, and was released in a burst on the third tick:
+          // exactly the "separated packets of falling liquid" reported.
+          _starve(s, 2);
           liqRateSkips++;
-          secNote(room, s, 1);   // a rate-limited strip did not run either; from the water's point of view it is the same
           continue;
         }
       }
@@ -5693,12 +5721,12 @@ const runLiquidTick = () => {
         const _flat = []; for (const [p, n] of _top) _flat.push(p, n);
         io.to(room).emit('liquid-heat', { chunks: _flat, side: CHUNK_SIDE, cy: _g.cy, total: _st.fineActive.size });
       }
-      // ⭐ THE STRIP SCHEDULE, AS A PICTURE. Flat [sector, ticked, starved, ofThoseFell, …] over the window just
-      // ended, plus the width and sub-division needed to turn a sector number into a column. Self-contained on
-      // purpose: the client must be able to draw this without the perf log also being on.
+      // ⭐ THE STRIP SCHEDULE, AS A PICTURE. Flat [sector, took, outOfTime, rateLimited, fell, …] over the window
+      // just ended, plus the width and sub-division needed to turn a sector number into a column. Self-contained
+      // on purpose: the client must be able to draw this without the perf log also being on.
       if (liquidCfg.strips) {
         const _m = secStatus.get(room), _sf = [];
-        if (_m) for (const [s, a] of _m) _sf.push(s, a[0], a[1], a[2]);
+        if (_m) for (const [s, a] of _m) _sf.push(s, a[0], a[1], a[2], a[3]);
         io.to(room).emit('liquid-strips', { w: liquidCfg.secW, sub: _st.fineSub || 1, secs: _sf });
       }
     }
