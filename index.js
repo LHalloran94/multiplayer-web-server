@@ -3146,6 +3146,10 @@ const liquidCfg = {
   // already runs once every 32 ticks). Turned on by the Inspect tab's "Active-cell heat" checkbox, which is the
   // only thing that reads it — a diagnostic nobody has switched on should not be on the wire.
   heat: 0,
+  // ⭐ THE STRIP-SCHEDULE WIRE, same shape and same rule as `heat` above: off by default, one boolean on a path
+  // that already runs once a second, and nothing is tallied at all unless it is on (see `secNote`). Turned on by
+  // the Inspect tab's "Simulation strips" checkbox.
+  strips: 0,
   // ⭐ Admit the CHEAPEST rooms first (see the note at the sort in runLiquidTick). Ships ON: it is strictly
   // fairer than pure rotation wherever more than one room is busy, the rotation is kept on top of it so nothing
   // starves, and `probe_budget`'s liveness checks are what watch that. Live toggle `budgetCheapFirst`.
@@ -3304,7 +3308,13 @@ const liquidCfg = {
   // such call to skip, so that optimisation becomes exactly behaviour-preserving.
   // ⚠️ If slivers-scattered-across-the-pool ever comes back, this is the first switch to try, and the reach and
   // passes dials for per-liquid levelling are the ones that bound the EXTENT rather than the rate.
-  finePerLiquidSortGate: false,
+  // 🟥 BACK ON 2026-08-24. The measurement above that argued for turning it off was taken in the WRONG REGIME:
+  // `probe_sort_spread` runs with the per-tick budget OFF, so K = 9 and the scene settles in 5–13 ticks — which
+  // is what makes "the end state is the same 58 columns either way" true. Under a real heavy pour K is pinned at
+  // 1 and 11–30% of strip-turns are deferred, so the liquid NEVER REACHES THE END STATE and the transient IS the
+  // permanent state. The user's screenshot of long horizontal streaks at the bottom of a pour is precisely the
+  // shape this gate exists to prevent. ⇒ never quote a settling-time argument taken with the budget off.
+  finePerLiquidSortGate: true,
   // ⭐⭐ …AND THE GATE ABOVE ASKS ITS QUESTION OF THE LIQUID BODY, NOT THE WHOLE COLUMN.
   // "Is my neighbour still stratifying" used to be answered over the column's ENTIRE DEPTH. In a page room that
   // is 405 rows of mild waste; in the Overworld it is 4,096, so one drop of falling water paid to scan every
@@ -3324,7 +3334,11 @@ const liquidCfg = {
   // ⚠️ What it did was stop a sliver riding the whole height of a pool in ONE pass (the list is walked bottom-up,
   // so each higher cell pulled the same light liquid up one more). With it off the parcel reaches the surface on
   // tick 0 instead of tick 1. That is the thing to watch if instant stratification ever looks wrong.
-  fineSortOnePerPass: false,
+  // 🟥 BACK ON 2026-08-24, same reason as the gate above — see that note. ⚠️ THIS ONE ALSO HAD AN EYEBALL
+  // BEHIND IT ("it seems to look better when off"), taken on a settled scene, NOT under a heavy pour. If the
+  // streaks go away with both of these on but instant stratification now looks wrong on a quiet pool, this is
+  // the one to put back to off — the gate above is the one carrying the sideways-spread argument.
+  fineSortOnePerPass: true,
   // CELL CAPACITY = the number of vertical fill "slices" a cell holds (LIQUID_MAX). Higher = smoother/finer vertical fill;
   // must stay ≤255 (Uint8). Changing it RESCALES all existing liquid (a full cell stays full) + re-broadcasts. Global
   // (coarse + fine); at 64 the coarse system is unchanged. Stratification (sortRate units/tick) is proportionally slower higher.
@@ -5155,6 +5169,18 @@ const SEC_SEP = '\u0000';
 const EMPTY_CELLS = [];        // shared stand-in for "this strip has no cells in that registry" — never written to
 let liqSecTicks = 0, liqSecDeferred = 0;
 let liqSecFallOnly = 0;   // of the deferred strips, how many still got their DESCENT (liquidCfg.fallFirst)
+// ⭐⭐ WHICH STRIP, NOT HOW MANY. The three counters above are TOTALS, and a total cannot answer the question
+// actually being asked: *"the vertical straight edge in the liquid — is it a strip boundary, with the water on
+// one side being ticked and the water on the other being starved?"* That is a question about a LOCATION, so the
+// tally has to carry one. room → Map(sector → [ticked, starved, ofThoseStillFell]), reset every report window
+// and drawn as an overlay by the client. Costs nothing at all unless the overlay is switched on.
+const secStatus = new Map();
+const secNote = (room, s, k) => {
+  if (!liquidCfg.strips) return;
+  let m = secStatus.get(room); if (m === undefined) secStatus.set(room, m = new Map());
+  let a = m.get(s); if (a === undefined) m.set(s, a = [0, 0, 0]);
+  a[k]++;
+};
 // room → where this room's strip ring starts next tick. See the note at the loop in `liqTickSectors`: without
 // it the most expensive strip is cut by the wall-clock stop on every single tick, for ever.
 const roomSecCursor = {};
@@ -5282,10 +5308,12 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
         st[d0.f] = saved0;
         for (let n = 1; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
         liqSecFallOnly++;
+        secNote(room, s, 2);
       } else {
         for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
       }
       liqSecDeferred++;
+      secNote(room, s, 1);
       continue;
     }
     const key = room + SEC_SEP + s, lo = s * W, hi = s * W + W - 1;
@@ -5310,6 +5338,7 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
         if ((liquidTickCount + roomPhase(room) + s * 7) % per !== 0) {
           for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
           liqRateSkips++;
+          secNote(room, s, 1);   // a rate-limited strip did not run either; from the water's point of view it is the same
           continue;
         }
       }
@@ -5347,7 +5376,7 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
     st.src = savedSrc;                                  // restore before anything else can observe the swap
     if (kUsed !== kFull) { liquidCfg.fineLevelSteps = kFull; liqK2Throttles++; }
     if (budgetMs) { const d = (performance.now() - t0) * (kFull / kUsed); roomLiqCost[key] = roomLiqCost[key] ? roomLiqCost[key] * 0.7 + d * 0.3 : d; }
-    liqSecTicks++; _secRan++;
+    liqSecTicks++; _secRan++; secNote(room, s, 0);
   }
   // Advance past whoever actually got a turn, so a strip that was cut off is at the head of the ring next tick.
   // `Math.max(1, …)` guarantees forward motion even on a tick where nothing ran at all.
@@ -5631,7 +5660,7 @@ const runLiquidTick = () => {
   // window", and the two are opposites.
   // ⇒ the sample period IS the report window, so every printed line carries exactly one fresh sample…
   const _perfWin = Math.max(1, Math.round(1000 / Math.max(1, liquidCfg.tickMs | 0)));
-  if ((liquidCfg.perfLog || liquidCfg.heat) && (liquidTickCount % _perfWin) === 0) {
+  if ((liquidCfg.perfLog || liquidCfg.heat || liquidCfg.strips) && (liquidTickCount % _perfWin) === 0) {
     let _pend = 0, _nch = 0; const _cols = new Set();
     for (const room of cellRooms.fine) {
       const _st = peekCells(room); if (!_st.fineActive) continue;
@@ -5664,7 +5693,16 @@ const runLiquidTick = () => {
         const _flat = []; for (const [p, n] of _top) _flat.push(p, n);
         io.to(room).emit('liquid-heat', { chunks: _flat, side: CHUNK_SIDE, cy: _g.cy, total: _st.fineActive.size });
       }
+      // ⭐ THE STRIP SCHEDULE, AS A PICTURE. Flat [sector, ticked, starved, ofThoseFell, …] over the window just
+      // ended, plus the width and sub-division needed to turn a sector number into a column. Self-contained on
+      // purpose: the client must be able to draw this without the perf log also being on.
+      if (liquidCfg.strips) {
+        const _m = secStatus.get(room), _sf = [];
+        if (_m) for (const [s, a] of _m) _sf.push(s, a[0], a[1], a[2]);
+        io.to(room).emit('liquid-strips', { w: liquidCfg.secW, sub: _st.fineSub || 1, secs: _sf });
+      }
     }
+    secStatus.clear();   // counters, so the window starts again at zero (see the note beside liqPerf's reset)
     liqPerf.actChunks = _nch;
     liqPerf.actCols = _cols.size;      // DISTINCT columns holding active liquid — an area, comparable to a viewport
     liqPerf.pending = _pend;
@@ -9796,6 +9834,7 @@ io.on('connection', (socket) => {
     if ('reactMaxCand' in patch) liquidCfg.reactMaxCand = Math.max(0, Math.min(2000000, patch.reactMaxCand | 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
+    if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
     if ('avSlow' in patch) liquidCfg.avSlow = Math.max(1, Math.min(16, patch.avSlow | 0));   // universal avatar slow-motion (debug)
     // CHUNK RESIDENCY (Phase 3) rides the same patch wire so eviction can be A/B'd live from the console without a
     // restart — which is the whole point while it is being eyeballed. Turning it OFF materialises every room, so a
