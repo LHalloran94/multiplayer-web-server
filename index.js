@@ -3150,6 +3150,11 @@ const liquidCfg = {
   // that already runs once a second, and nothing is tallied at all unless it is on (see `secNote`). Turned on by
   // the Inspect tab's "Simulation strips" checkbox.
   strips: 0,
+  // ⭐⭐ NEVER SPLIT ONE BODY OF MOVING WATER ACROSS TWO SCHEDULING STRIPS — see planRoomSectors for the whole
+  // argument. ON: strips joined by moving liquid at their shared edge take their turn together, so the only
+  // place a rate difference could be SEEN is always in lockstep with itself. OFF restores the old per-strip
+  // schedule exactly, for an A/B on the trade (a merged disturbance stutters in unison instead of tearing).
+  secJoin: 1,
   // ⭐ Admit the CHEAPEST rooms first (see the note at the sort in runLiquidTick). Ships ON: it is strictly
   // fairer than pure rotation wherever more than one room is busy, the rotation is kept on top of it so nothing
   // starves, and `probe_budget`'s liveness checks are what watch that. Live toggle `budgetCheapFirst`.
@@ -5179,11 +5184,15 @@ let liqSecFallOnly = 0;   // of the deferred strips, how many still got their DE
 // other looking consistent. They were being turned away at a DIFFERENT DOOR. A counter that cannot tell two
 // mechanisms apart cannot tell you which one to fix.
 const secStatus = new Map();
-const secNote = (room, s, k) => {
+// ⚠️ `s` IS A SCHEDULING UNIT, NOT NECESSARILY ONE STRIP — strips joined by moving liquid take their turn as
+// one (see planRoomSectors), so the column SPAN is recorded alongside the tally. Without it the overlay draws a
+// merged group's tally against its lowest strip and paints the rest as idle, which is the opposite of the truth
+// and would make the merge look like a bug.
+const secNote = (room, s, k, lo, hi) => {
   if (!liquidCfg.strips) return;
   let m = secStatus.get(room); if (m === undefined) secStatus.set(room, m = new Map());
-  let a = m.get(s); if (a === undefined) m.set(s, a = [0, 0, 0, 0]);
-  a[k]++;
+  let a = m.get(s); if (a === undefined) m.set(s, a = [0, 0, 0, 0, lo, hi]);
+  a[k]++; a[4] = lo; a[5] = hi;
 };
 // room → where this room's strip ring starts next tick. See the note at the loop in `liqTickSectors`: without
 // it the most expensive strip is cut by the wall-clock stop on every single tick, for ever.
@@ -5244,21 +5253,68 @@ function planRoomSectors(room) {
   // ONE pass per registry per tick. Column-major (increment 5), so a cell's column is `i / stride`.
   const secOf = (i) => (((i / FROWS) | 0) / W) | 0;
   const secs = new Set(), buckets = [];
-  for (const d of SEC_REGS) {
-    const s = st[d.f], m = new Map();
-    if (s) for (const i of s) { const k = secOf(i); let a = m.get(k); if (a === undefined) { m.set(k, a = []); secs.add(k); } a.push(i); }
+  // ⭐⭐ WHICH STRIPS HAVE MOVING LIQUID TOUCHING THEIR EDGE COLUMNS. Collected in the bucketing pass that was
+  // already computing the column, so it costs no extra walk over the active set — which matters, the set runs
+  // to tens of thousands of cells under a pour.
+  const edgeLo = new Set(), edgeHi = new Set();
+  for (let di = 0; di < SEC_REGS.length; di++) {
+    const d = SEC_REGS[di], s = st[d.f], m = new Map();
+    if (s) for (const i of s) {
+      const col = (i / FROWS) | 0, k = (col / W) | 0;
+      let a = m.get(k); if (a === undefined) { m.set(k, a = []); secs.add(k); } a.push(i);
+      if (di === 0) { const off = col - k * W; if (off === 0) edgeLo.add(k); else if (off === W - 1) edgeHi.add(k); }
+    }
     buckets.push(m);
   }
   const srcBySec = new Map();
   if (st.src) for (const i of st.src.keys()) { const k = secOf(i); let a = srcBySec.get(k); if (a === undefined) { srcBySec.set(k, a = []); secs.add(k); } a.push(i); }
-  // ⚠️ ONE BUSY SECTOR IS JUST THE ROOM. Splitting it buys nothing and costs a Set rebuild, and — more
-  // importantly — the whole-room path carries tier 3 (whole-room rate limiting), which a single sector still
+  // ⭐⭐ NEVER SPLIT ONE BODY OF MOVING WATER — THIS IS WHAT KILLS THE VERTICAL SEAM.
+  // A strip boundary is a scheduling line, and a scheduling line is only VISIBLE where water crosses it: two
+  // parcels of the same pool advancing at different rates is a straight vertical edge, which is exactly what was
+  // reported. Water that does not cross a boundary cannot show one, however hard the strips on either side are
+  // throttled. ⇒ strips joined by moving liquid at their shared edge are scheduled as ONE unit, so anything that
+  // can show a seam is always in lockstep with itself, and the unit of scheduling becomes the DISTURBANCE rather
+  // than the geometry.
+  // ⚠️ THE TEST IS ON *ACTIVE* CELLS, AND THAT IS THE CORRECT CRITERION RATHER THAN A CHEAP APPROXIMATION OF A
+  // BETTER ONE. A settled pool spanning a boundary has no active cells there, and a rate difference between two
+  // things that are both stationary cannot be seen. Only moving water can show the artefact, so only moving
+  // water forces a merge — which also keeps the merges as small as the picture allows.
+  // ⚠️ Liquid only (registry 0). Powder and soil do not level sideways, so they have no rate-difference edge to
+  // show; making them force merges would cost fairness for an artefact that cannot occur.
+  // ⇒ the price is that a big connected disturbance is throttled as one, so it stutters in unison instead of
+  // tearing. That is the trade, and it is deliberate: uniform slow water reads as slow water, torn water reads
+  // as broken. `liquidCfg.secJoin` turns it off for an A/B.
+  const gidOf = new Map();                       // sector → the id of the group it belongs to (its lowest sector)
+  const gRange = new Map();                      // group id → [lowest sector, highest sector]
+  const _sorted = [...secs].sort((a, b) => a - b);
+  for (let n = 0; n < _sorted.length; n++) {
+    const s = _sorted[n], prev = n ? _sorted[n - 1] : -2;
+    const joined = liquidCfg.secJoin && s === prev + 1 && edgeHi.has(prev) && edgeLo.has(s);
+    if (joined) { const g = gidOf.get(prev); gidOf.set(s, g); gRange.get(g)[1] = s; }
+    else { gidOf.set(s, s); gRange.set(s, [s, s]); }
+  }
+  // ⚠️ ONE BUSY GROUP IS JUST THE ROOM. Splitting it buys nothing and costs a Set rebuild, and — more
+  // importantly — the whole-room path carries tier 3 (whole-room rate limiting), which a single group still
   // needs. Returning null keeps that behaviour rather than reimplementing it here.
-  if (secs.size < 2) return null;
+  // ⚠️ Counted on GROUPS, not sectors, now: two strips that have been merged are one unit of work, and running
+  // the split path over a single group would be the same room with extra bookkeeping.
+  if (gRange.size < 2) return null;
+  // Re-key every registry onto the group. Small — one entry per busy strip — and it keeps the executor below
+  // ignorant of the merge entirely: it iterates whatever `order` holds and asks `gRange` for the column span.
+  if (gidOf.size !== gRange.size) {
+    for (let n = 0; n < buckets.length; n++) {
+      const m = buckets[n], out = new Map();
+      for (const [s, a] of m) { const g = gidOf.get(s); const cur = out.get(g); if (cur === undefined) out.set(g, a); else for (const i of a) cur.push(i); }
+      buckets[n] = out;
+    }
+    const outSrc = new Map();
+    for (const [s, a] of srcBySec) { const g = gidOf.get(s); const cur = outSrc.get(g); if (cur === undefined) outSrc.set(g, a); else for (const i of a) cur.push(i); }
+    srcBySec.clear(); for (const [g, a] of outSrc) srcBySec.set(g, a);
+  }
   // CHEAPEST FIRST. Measured as the load-bearing half: rotation alone admits a sector too big for the budget,
   // which consumes all of it and defers everyone behind it (probe_sectors C1/D1).
   const cost = (k) => { let n = 0; for (const m of buckets) { const a = m.get(k); if (a) n += a.length; } return n; };
-  return { W, SUB, FROWS, buckets, srcBySec, order: [...secs].sort((a, b) => cost(a) - cost(b)) };
+  return { W, SUB, FROWS, buckets, srcBySec, gRange, order: [...gRange.keys()].sort((a, b) => cost(a) - cost(b)) };
 }
 // ⭐ THE PARTITION IS A SET SWAP, NOT A PER-CELL TEST. Each registry is replaced, for the duration of one
 // strip's turn, by a set holding only that strip's cells; every tick function runs exactly as it always has and
@@ -5270,7 +5326,11 @@ function planRoomSectors(room) {
 // rather than of two schedules agreeing.
 function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
   const st = cellsOf(room);
-  const { W, SUB, FROWS, buckets, srcBySec, order } = plan;
+  const { W, SUB, FROWS, buckets, srcBySec, gRange, order } = plan;
+  // A unit of scheduling spans one strip, or several if moving liquid joins them (see planRoomSectors). Its
+  // column range comes from the plan rather than from `s * W`, which was only ever right for a single strip.
+  const _lo = (s) => gRange.get(s)[0] * W;
+  const _hi = (s) => gRange.get(s)[1] * W + W - 1;
   const nReg = SEC_REGS.length;
   const saved = [], leftover = [];
   for (let n = 0; n < nReg; n++) { const s = st[SEC_REGS[n].f]; saved.push(s); leftover.push([]); if (s) s.clear(); }
@@ -5318,7 +5378,7 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
   const _starve = (s, why) => {
     const _fc = buckets[0].get(s);
     if (liquidCfg.fallFirst && _fc && _fc.length && (!_fallCeil || performance.now() - tickT0 < _fallCeil)) {
-      const d0 = SEC_REGS[0], lo0 = s * W, hi0 = s * W + W - 1;
+      const d0 = SEC_REGS[0], lo0 = _lo(s), hi0 = _hi(s);
       const saved0 = st[d0.f];
       st[d0.f] = new SectorSet(_fc, lo0, hi0, FROWS, leftover[0]);
       liquidCfg._fallOnly = 1;
@@ -5327,11 +5387,11 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
       st[d0.f] = saved0;
       for (let n = 1; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
       liqSecFallOnly++;
-      secNote(room, s, 3);
+      secNote(room, s, 3, lo0, hi0);
     } else {
       for (let n = 0; n < nReg; n++) { const a = buckets[n].get(s); if (a) for (const i of a) leftover[n].push(i); }
     }
-    secNote(room, s, why);
+    secNote(room, s, why, _lo(s), _hi(s));
   };
   for (let _sn = 0; _sn < _nSec; _sn++) {
     const s = order[(_secStart + _sn) % _nSec];
@@ -5340,7 +5400,7 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
       liqSecDeferred++;
       continue;
     }
-    const key = room + SEC_SEP + s, lo = s * W, hi = s * W + W - 1;
+    const key = room + SEC_SEP + s, lo = _lo(s), hi = _hi(s);
     // ⭐⭐ THE PER-SECTOR EMA IS THE MECHANISM. Mutation-tested (probe_sectors part E, M3): using the ROOM's cost
     // here instead doubles the CPU — it is what lets tier 2 throttle K on the expensive strip while the cheap
     // one keeps full K, and no settle-time check can see it break (which is why E3 asserts the CPU directly).
@@ -5404,7 +5464,7 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
     st.src = savedSrc;                                  // restore before anything else can observe the swap
     if (kUsed !== kFull) { liquidCfg.fineLevelSteps = kFull; liqK2Throttles++; }
     if (budgetMs) { const d = (performance.now() - t0) * (kFull / kUsed); roomLiqCost[key] = roomLiqCost[key] ? roomLiqCost[key] * 0.7 + d * 0.3 : d; }
-    liqSecTicks++; _secRan++; secNote(room, s, 0);
+    liqSecTicks++; _secRan++; secNote(room, s, 0, lo, hi);
   }
   // Advance past whoever actually got a turn, so a strip that was cut off is at the head of the ring next tick.
   // `Math.max(1, …)` guarantees forward motion even on a tick where nothing ran at all.
@@ -5721,12 +5781,12 @@ const runLiquidTick = () => {
         const _flat = []; for (const [p, n] of _top) _flat.push(p, n);
         io.to(room).emit('liquid-heat', { chunks: _flat, side: CHUNK_SIDE, cy: _g.cy, total: _st.fineActive.size });
       }
-      // ⭐ THE STRIP SCHEDULE, AS A PICTURE. Flat [sector, took, outOfTime, rateLimited, fell, …] over the window
-      // just ended, plus the width and sub-division needed to turn a sector number into a column. Self-contained
-      // on purpose: the client must be able to draw this without the perf log also being on.
+      // ⭐ THE STRIP SCHEDULE, AS A PICTURE. Flat [id, took, outOfTime, rateLimited, fell, firstCol, lastCol, …]
+      // over the window just ended, plus the width and sub-division needed to draw the strip grid itself.
+      // Self-contained on purpose: the client must be able to draw this without the perf log also being on.
       if (liquidCfg.strips) {
         const _m = secStatus.get(room), _sf = [];
-        if (_m) for (const [s, a] of _m) _sf.push(s, a[0], a[1], a[2], a[3]);
+        if (_m) for (const [s, a] of _m) _sf.push(s, a[0], a[1], a[2], a[3], a[4], a[5]);
         io.to(room).emit('liquid-strips', { w: liquidCfg.secW, sub: _st.fineSub || 1, secs: _sf });
       }
     }
@@ -9863,6 +9923,7 @@ io.on('connection', (socket) => {
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
+    if ('secJoin' in patch) liquidCfg.secJoin = patch.secJoin ? 1 : 0;
     if ('avSlow' in patch) liquidCfg.avSlow = Math.max(1, Math.min(16, patch.avSlow | 0));   // universal avatar slow-motion (debug)
     // CHUNK RESIDENCY (Phase 3) rides the same patch wire so eviction can be A/B'd live from the console without a
     // restart — which is the whole point while it is being eyeballed. Turning it OFF materialises every room, so a
