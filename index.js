@@ -14,6 +14,7 @@ const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('node:crypto');  // content-addressing for the face-picture store (see "Face pictures")
 const MWSim = require('./avatar-sim'); // shared authoritative avatar simulation
 const WORLDGEN = require('./worldgen');
 const WORLDGEN2 = require('./worldgen2'); // the PORTED world redesign (port inc 3-6). Ships OFF: worldCfg.gen2 // Phase 6 inc 4: chunk-on-demand world generation (the Overworld's generator)
@@ -1164,6 +1165,88 @@ app.delete('/animations/:id', (req, res) => {
     if (!a) return res.status(404).json({ error: 'Not found' });
     if (a.author_id !== user.sub) return res.status(403).json({ error: 'Not author' });
     db.prepare('DELETE FROM shared_animations WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ---- Face pictures ----
+// ⭐⭐ AN APPEARANCE IS A BROADCAST, WHICH IS THE WHOLE REASON THIS TABLE EXISTS. A face is sent to every peer
+// in the room whenever it changes and again every two seconds, so bytes carried inside it are bytes paid for
+// over and over. Every other image in this project is fetched ON DEMAND — a custom emote when somebody presses
+// the key, a shared animation when somebody browses the library — and a picture worn as a face feature is the
+// same shape of thing. So the feature carries a short id, about twenty bytes, and the bytes live here.
+// ⭐ CONTENT-ADDRESSED: the id IS the hash of the bytes, so the same eye pasted by twelve people is one row,
+// re-pasting something already here costs no row at all, and a stored picture can be cached for ever by id
+// because that id can never come to describe different bytes.
+// ⚠️ THE CLIENT SHRINKS THE PICTURE BEFORE IT GETS HERE (a face feature is drawn a few dozen pixels across, so
+// it is re-encoded into a small box first). This cap is the backstop for a client that did not, not the budget
+// a well-behaved one aims at.
+const FACE_IMG_MAX_BYTES = 64_000;   // length of the data: URL text. A 128px WebP is 4-8KB; this is generous.
+const FACE_IMG_PER_USER  = 60;       // how many distinct pictures one signed-in user may store
+const FACE_IMG_TOTAL_MAX = 20_000;   // …and a whole-table backstop, which is what guards the anonymous path
+// ⚠️ FALSE BECAUSE THIS SERVER IS LOCAL. Uploading is allowed without signing in, because requiring a Discord
+// login to paste an eye onto your own face would make the feature unusable on a machine nobody has logged in
+// on. Flip this to true if this server is ever put on the public internet: an upload with no author has no
+// handle for a takedown, which is the reason every other user-content route here demands a token.
+const FACE_IMG_REQUIRE_AUTH = false;
+
+db.exec(`CREATE TABLE IF NOT EXISTS face_images (
+  id TEXT PRIMARY KEY,
+  author_id TEXT,
+  data TEXT NOT NULL,
+  bytes INTEGER,
+  created_at INTEGER DEFAULT (unixepoch())
+)`);
+
+// Store one picture and return the id to wear. Idempotent by construction — the same bytes give the same id.
+app.post('/face-images', (req, res) => {
+  const user = verifyToken(req);
+  if (!user && FACE_IMG_REQUIRE_AUTH) return res.status(401).json({ error: 'Unauthorized' });
+  const data = (req.body && req.body.data) || '';
+  // ⚠️ THE PREFIX IS CHECKED, NOT JUST THE LENGTH. This string is handed straight back to other people's
+  // browsers and assigned to an <img>, so "it is an image data URL" has to be true of it, not merely likely.
+  if (typeof data !== 'string' || !/^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(data)) {
+    return res.status(400).json({ error: 'Not an image' });
+  }
+  if (data.length > FACE_IMG_MAX_BYTES) return res.status(413).json({ error: 'Picture too large' });
+  try {
+    const id = crypto.createHash('sha256').update(data).digest('hex').slice(0, 16);
+    if (db.prepare('SELECT id FROM face_images WHERE id = ?').get(id)) return res.json({ id, deduped: true });
+    if (db.prepare('SELECT COUNT(*) AS c FROM face_images').get().c >= FACE_IMG_TOTAL_MAX) {
+      return res.status(507).json({ error: 'Picture store full' });
+    }
+    if (user) {
+      const mine = db.prepare('SELECT COUNT(*) AS c FROM face_images WHERE author_id = ?').get(user.sub).c;
+      if (mine >= FACE_IMG_PER_USER) return res.status(409).json({ error: 'Picture limit reached (' + FACE_IMG_PER_USER + ')' });
+    }
+    db.prepare('INSERT INTO face_images (id, author_id, data, bytes) VALUES (?,?,?,?)')
+      .run(id, user ? user.sub : null, data, data.length);
+    res.json({ id });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Fetch one, by the id a peer is wearing. Public: you have to be able to see the faces of people you meet.
+// ⚠️ TEXT, NOT BINARY, and that is forced rather than chosen — the extension cannot reach this server from the
+// page, so every response comes back through the background broker, which relays a body as TEXT. A data URL is
+// a picture that survives that trip.
+app.get('/face-images/:id', (req, res) => {
+  try {
+    const row = db.prepare('SELECT id, data FROM face_images WHERE id = ?').get(String(req.params.id || '').slice(0, 32));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');   // the id is the hash, so this can never go stale
+    res.json({ id: row.id, data: row.data });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Remove one of the caller's own pictures. Anyone wearing it stops seeing it, which is the point of a takedown.
+app.delete('/face-images/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const row = db.prepare('SELECT author_id FROM face_images WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    if (row.author_id !== user.sub) return res.status(403).json({ error: 'Not author' });
+    db.prepare('DELETE FROM face_images WHERE id = ?').run(req.params.id);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
