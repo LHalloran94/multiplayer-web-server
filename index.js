@@ -8108,7 +8108,32 @@ registerLibrary({
     const descr = (body.desc || '').toString().trim().slice(0, 300);
     let c;
     try { c = typeof body.content === 'string' ? JSON.parse(body.content) : body.content; } catch (e) { return null; }
-    if (!c || typeof c !== 'object' || !Array.isArray(c.feats)) return null;
+    if (!c || typeof c !== 'object') return null;
+    // ⭐⭐ AN EXPRESSION IS A THIRD KIND OF THING IN THIS SAME LIBRARY, not a library of its own. A face, one
+    // feature and a pose are all "something somebody made that you can wear", they all want the same browse,
+    // the same search, the same take-it-down button and the same per-user quota — and the facet column already
+    // exists to tell them apart. A second table would have been a second copy of all of that.
+    // ⚠️ IT IS THE SMALLEST THING THIS SERVER HOSTS: seven numbers and at most two short style names, about
+    // sixty bytes. The cap is not about space, it is about the shape being what it claims to be.
+    if (c.pose && !c.feats) {
+      const p = c.pose;
+      if (typeof p !== 'object') return null;
+      const out = {};
+      for (const k of ['e', 'b', 'a', 'f', 'm', 'c', 'w', 'gx', 'gy']) {
+        if (p[k] === undefined) continue;
+        if (typeof p[k] !== 'number' || !isFinite(p[k])) return null;
+        out[k] = Math.max(-1, Math.min(1, p[k]));
+      }
+      for (const k of ['ms', 'bs']) {
+        if (p[k] === undefined) continue;
+        if (typeof p[k] !== 'string' || !p[k] || p[k].length > 16) return null;
+        out[k] = p[k];
+      }
+      if (!Object.keys(out).length) return null;
+      const content = JSON.stringify({ pose: out });
+      return { title, descr, content, facets: '|pose|', feat_count: 0, size_bytes: content.length };
+    }
+    if (!Array.isArray(c.feats)) return null;
     if (!c.feats.length || c.feats.length > FACE_LIB_FEAT_CAP) return null;
     for (const f of c.feats) {
       if (!f || typeof f !== 'object' || typeof f.k !== 'string' || f.k.length > 16) return null;
