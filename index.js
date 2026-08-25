@@ -1181,9 +1181,16 @@ app.delete('/animations/:id', (req, res) => {
 // ⚠️ THE CLIENT SHRINKS THE PICTURE BEFORE IT GETS HERE (a face feature is drawn a few dozen pixels across, so
 // it is re-encoded into a small box first). This cap is the backstop for a client that did not, not the budget
 // a well-behaved one aims at.
-const FACE_IMG_MAX_BYTES = 64_000;   // length of the data: URL text. A 128px WebP is 4-8KB; this is generous.
+// ⭐⭐ THE BUDGET IS IN BYTES, NOT ROWS, BECAUSE BYTES ARE WHAT RUNS OUT. A row cap sounds like a limit and is
+// not one: 20,000 rows at 64KB each is 1.3GB, and nothing about "20,000" says that. One number, in megabytes,
+// is the thing that can actually be reasoned about — and it is the number to raise if this ever fills up.
+// ⚠️ THIS IS THE ONLY PLACE THIS PROJECT HOSTS USER BYTES AT ALL. Emoji and sound libraries store links; the
+// shared face library below stores drawings, which are our own format and tiny. Pictures are here because a
+// PASTED image has no address to link to — there is no other way to offer paste — so the cost is bounded here
+// instead, by shrinking every picture in the client first, by de-duplicating on content, and by this cap.
+const FACE_IMG_BUDGET   = 64 * 1024 * 1024;   // 64MB for every face picture on this server, all users together
+const FACE_IMG_MAX_BYTES = 40_000;   // length of one data: URL. A 256px WebP is well under; this is the backstop.
 const FACE_IMG_PER_USER  = 60;       // how many distinct pictures one signed-in user may store
-const FACE_IMG_TOTAL_MAX = 20_000;   // …and a whole-table backstop, which is what guards the anonymous path
 // ⚠️ FALSE BECAUSE THIS SERVER IS LOCAL. Uploading is allowed without signing in, because requiring a Discord
 // login to paste an eye onto your own face would make the feature unusable on a machine nobody has logged in
 // on. Flip this to true if this server is ever put on the public internet: an upload with no author has no
@@ -1212,9 +1219,8 @@ app.post('/face-images', (req, res) => {
   try {
     const id = crypto.createHash('sha256').update(data).digest('hex').slice(0, 16);
     if (db.prepare('SELECT id FROM face_images WHERE id = ?').get(id)) return res.json({ id, deduped: true });
-    if (db.prepare('SELECT COUNT(*) AS c FROM face_images').get().c >= FACE_IMG_TOTAL_MAX) {
-      return res.status(507).json({ error: 'Picture store full' });
-    }
+    const used = db.prepare('SELECT COALESCE(SUM(bytes), 0) AS b FROM face_images').get().b;
+    if (used + data.length > FACE_IMG_BUDGET) return res.status(507).json({ error: 'Picture store full' });
     if (user) {
       const mine = db.prepare('SELECT COUNT(*) AS c FROM face_images WHERE author_id = ?').get(user.sub).c;
       if (mine >= FACE_IMG_PER_USER) return res.status(409).json({ error: 'Picture limit reached (' + FACE_IMG_PER_USER + ')' });
@@ -8081,6 +8087,51 @@ registerLibrary({
   },
   mapRow(r, me) {
     return { id: r.id, name: r.name, desc: r.descr || '', facets: r.facets || '', author: r.author_name, mine: r.author_id === me, content: r.content, likes: r.likes || 0, downloads: r.downloads, created_at: r.created_at };
+  },
+});
+
+// ---- Shared FACES: one feature, or a whole face, that somebody else can wear ----
+// ⭐⭐ THIS LIBRARY HOSTS NO BYTES AT ALL, and that is the point of sharing FEATURES rather than pictures. A
+// feature is a style id, a position, a size, a rotation and some colours — or, for a drawing, a list of points.
+// It is our own format, it is a couple of kilobytes, it scales to any zoom, and it is the same data an
+// appearance already puts on the wire. A picture feature carries its REFERENCE, never its bytes, exactly as it
+// does everywhere else, so sharing a face someone made out of a pasted eye costs this table twenty characters
+// and the picture store one already-existing row.
+const FACE_LIB_MAX_BYTES = 40_000;   // a whole face including drawn features; a plain one is a few hundred bytes
+const FACE_LIB_FEAT_CAP  = 24;       // the same cap the client's own face has (FACE_MAX)
+registerLibrary({
+  path: 'face-lib', table: 'shared_faces', perUser: 60, searchCol: 'title', descCol: 'descr', facetCol: 'facets',
+  cols: [{ name: 'title', type: 'TEXT' }, { name: 'descr', type: 'TEXT' }, { name: 'content', type: 'TEXT' },
+         { name: 'facets', type: 'TEXT' }, { name: 'feat_count', type: 'INTEGER' }, { name: 'size_bytes', type: 'INTEGER' }],
+  validate(body) {
+    const title = (body.title || '').toString().trim().slice(0, 40) || 'Face';
+    const descr = (body.desc || '').toString().trim().slice(0, 300);
+    let c;
+    try { c = typeof body.content === 'string' ? JSON.parse(body.content) : body.content; } catch (e) { return null; }
+    if (!c || typeof c !== 'object' || !Array.isArray(c.feats)) return null;
+    if (!c.feats.length || c.feats.length > FACE_LIB_FEAT_CAP) return null;
+    for (const f of c.feats) {
+      if (!f || typeof f !== 'object' || typeof f.k !== 'string' || f.k.length > 16) return null;
+      // ⭐⭐ THE ONE RULE THAT KEEPS THIS TABLE SMALL: a picture is a reference, never bytes. Without this a
+      // shared face is a place to put a megabyte of base64 and call it a feature — the exact door the picture
+      // store's own size cap would not be covering, because this is a different endpoint.
+      if (f.src != null) {
+        if (typeof f.src !== 'string' || f.src.length > 400) return null;
+        if (!/^(https?:\/\/\S|i:[0-9a-f]{4,32}$)/i.test(f.src)) return null;
+      }
+    }
+    // The client sanitises what it wears, so this does not have to understand styles — only that the blob is
+    // the right shape and small. Anything it does not recognise is dropped where it lands, not here.
+    const content = JSON.stringify({ feats: c.feats, paint: Array.isArray(c.paint) ? c.paint : null });
+    if (content.length > FACE_LIB_MAX_BYTES) return null;
+    // One face or one feature: worth knowing before you download it, and it is the obvious way to browse.
+    const facets = '|' + (c.feats.length === 1 ? 'one' : 'face') + '|';
+    return { title, descr, content, facets, feat_count: c.feats.length, size_bytes: content.length };
+  },
+  mapRow(r, me) {
+    return { id: r.id, title: r.title, desc: r.descr || '', facets: r.facets || '', author: r.author_name,
+      mine: r.author_id === me, content: r.content, feat_count: r.feat_count,
+      likes: r.likes || 0, downloads: r.downloads, created_at: r.created_at };
   },
 });
 
