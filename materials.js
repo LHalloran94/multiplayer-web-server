@@ -211,10 +211,26 @@
   // worldgen2 v10, layout seed 1234. Smaller samples are fine for a sanity check but CANNOT price the rare
   // gems — at 3,000 columns Diamond read 35 on 90 hits against its true 20.)
   //
-  // worth = (frequency of the commonest mineral / this material's frequency) ^ 0.5, rounded, floor 1.
-  // ⚠️ THE EXPONENT IS A GAME DECISION, NOT A MEASUREMENT. At 1.0 worth exactly compensates rarity and the
-  // rarest mineral is 4,107x the commonest — one lucky find then dwarfs an evening of honest digging, which is
-  // a lottery rather than an economy. At 0.5 it is 64x: a vein is still worth far more than the rock around it.
+  // worth = 10 × (frequency of the commonest mineral / this material's frequency) ^ 1.0, rounded.
+  //
+  // ⭐⭐ THE EXPONENT DECIDES WHETHER PRIMA COMES FROM GRINDING OR FROM FINDING, and the probe's PART D
+  // measures it rather than arguing about it. A material's share of a random digger's income is
+  // `frequency × worth` = `frequency^(1-e)`, so:
+  //     e < 1   common rock dominates; the rarest material is a rounding error on your earnings
+  //     e = 1   EVERY MATERIAL CONTRIBUTES EQUALLY — rarity controls the variance, not the rate
+  //     e > 1   rare finds dominate; prospecting is the game and luck starts outweighing time
+  // 🟥 THIS TABLE FIRST SHIPPED AT e=0.5 ON MY RECOMMENDATION AND THAT WAS BACKWARDS. At 0.5 the five rarest
+  // minerals in the world contribute **1.3%** of a miner's income against the five commonest at **31%** — you
+  // would earn more from the quartz you dug THROUGH to reach a meteorite than from the meteorite. I called 0.5
+  // the safe middle when it is a heavy thumb on the scale toward grinding. The user caught it by asking why
+  // the ceiling was only 64x when the rarest mineral is 4,104x rarer than the commonest. Measured shares at
+  // e = 0.4 / 0.5 / 0.65 / 0.8 / 1.0 / 1.25 / 1.5 are in the probe's PART D output.
+  //
+  // ⭐ THE BASE IS 10, NOT 1, AND THE UNIT IS ARBITRARY. At base 1 the five commonest minerals all rounded to
+  // the same number — they are within 2.2x of each other in the rock, so there are no integers between them.
+  // That was a RESOLUTION problem masquerading as a curve problem; nothing needs the cheapest thing to cost 1.
+  // ⚠️ And no exponent separates those five, because they really are equally common. Differentiating coal from
+  // quartz has to come from what they are FOR — utility — not from what they refine into.
   //
   // 🟥 ONLY MINERALS ARE PRICED, and that is the whole design, not an omission. Rarity measures value only for
   // things distributed THROUGH ROCK. The probe's first run priced everything by rarity and made LICHEN the most
@@ -227,55 +243,55 @@
   // ⚠️ Named like EMIT rather than filed as a column in ROWS: 72 rows would gain a `0` to reach it and only 44
   // have anything to say. NAMES is the same table's own index, so a typo here is a silent no-op.
   const WORTH = {
-    Meteorite:      64,   // 84 — 3.97 per million, hardness 5. ⚠️ impact craters only, so it is CLUSTERED
-    Platinum:       30,   // 73 — 18 per million, hardness 3
-    Obsidian:       28,   // 43 — 20 per million, hardness 3
-    Orpiment:       28,   // 88 — 21 per million, hardness 1
-    Cinnabar:       23,   // 58 — 32 per million, hardness 2
-    Realgar:        23,   // 87 — 30 per million, hardness 1
-    Garnet:         22,   // 70 — 33 per million, hardness 4
-    Diamond:        20,   // 62 — 39 per million, hardness 6. ⚠️ >90% DEEP — scarcer in practice than the count
-    Opal:           15,   // 63 — 70 per million, hardness 3
-    Sulphur:        15,   // 59 — 72 per million, hardness 1
-    Jade:           12,   // 67 — 105 per million, hardness 4
-    Sapphire:       12,   // 66 — 109 per million, hardness 5
-    Emerald:        10,   // 61 — 177 per million, hardness 5
-    Lapis:          10,   // 71 — 166 per million, hardness 3
-    Ruby:            9,   // 65 — 188 per million, hardness 5
-    Uranium:         9,   // 74 — 191 per million, hardness 3
-    Amethyst:        8,   // 60 — 276 per million, hardness 4
-    Topaz:           8,   // 69 — 228 per million, hardness 4
-    Turquoise:       8,   // 68 — 281 per million, hardness 2
-    Agate:           7,   // 72 — 301 per million, hardness 4
-    Amber:           7,   // 75 — 369 per million, hardness 1
-    Flint:           6,   // 76 — 409 per million, hardness 4
-    Gold:            5,   // 51 — 602 per million, hardness 3. ⚠️ low for its cultural weight — see the note below
-    Gypsum:          5,   // 85 — 616 per million, hardness 1
-    Malachite:       4,   // 57 — 949 per million, hardness 3
-    Bauxite:         3,   // 64 — 1346 per million, hardness 2
-    Conglomerate:    3,   // 89 — 1955 per million, hardness 3
-    Gneiss:          3,   // 81 — 2583 per million, hardness 4
-    Pyrite:          3,   // 55 — 1634 per million, hardness 4
-    Silver:          3,   // 52 — 1984 per million, hardness 3
-    Tin:             3,   // 54 — 1933 per million, hardness 3
-    Crystal:         2,   // 36 — 5331 per million, hardness 3
-    Fluorite:        2,   // 86 — 3012 per million, hardness 3
-    Hematite:        2,   // 56 — 6559 per million, hardness 4
-    Marble:          2,   // 77 — 3907 per million, hardness 3
-    'Oil shale':     2,   // 33 — 6002 per million, hardness 2
-    Quartzite:       2,   // 80 — 3866 per million, hardness 5
-    Salt:            2,   // 27 — 5496 per million, hardness 2
-    Slate:           2,   // 79 — 6256 per million, hardness 3
-    Coal:            1,   // 41 — 8420 per million, hardness 2
-    Copper:          1,   // 35 — 7412 per million, hardness 3
-    Galena:          1,   // 53 — 8182 per million, hardness 3
-    Iron:            1,   // 34 — 12255 per million, hardness 4
-    Quartz:          1,   // 42 — 16297 per million, hardness 4
+    Meteorite:      41073,   // 84 — 3.97 per million, hardness 5. ⚠️ impact craters only, so it is CLUSTERED
+    Platinum:        9256,   // 73 — 18 per million, hardness 3
+    Obsidian:        8055,   // 43 — 20 per million, hardness 3
+    Orpiment:        7739,   // 88 — 21 per million, hardness 1
+    Realgar:         5472,   // 87 — 30 per million, hardness 1
+    Cinnabar:        5099,   // 58 — 32 per million, hardness 2
+    Garnet:          4967,   // 70 — 33 per million, hardness 4
+    Diamond:         4131,   // 62 — 39 per million, hardness 6. ⚠️ >90% DEEP — scarcer in practice than the count
+    Opal:            2324,   // 63 — 70 per million, hardness 3
+    Sulphur:         2273,   // 59 — 72 per million, hardness 1
+    Jade:            1546,   // 67 — 105 per million, hardness 4
+    Sapphire:        1499,   // 66 — 109 per million, hardness 5
+    Lapis:            982,   // 71 — 166 per million, hardness 3
+    Emerald:          923,   // 61 — 177 per million, hardness 5
+    Ruby:             868,   // 65 — 188 per million, hardness 5
+    Uranium:          854,   // 74 — 191 per million, hardness 3
+    Topaz:            713,   // 69 — 228 per million, hardness 4
+    Amethyst:         591,   // 60 — 276 per million, hardness 4
+    Turquoise:        580,   // 68 — 281 per million, hardness 2
+    Agate:            541,   // 72 — 301 per million, hardness 4
+    Amber:            442,   // 75 — 369 per million, hardness 1
+    Flint:            398,   // 76 — 409 per million, hardness 4
+    Gold:             271,   // 51 — 602 per million, hardness 3
+    Gypsum:           264,   // 85 — 616 per million, hardness 1
+    Malachite:        172,   // 57 — 949 per million, hardness 3
+    Bauxite:          121,   // 64 — 1346 per million, hardness 2
+    Pyrite:           100,   // 55 — 1634 per million, hardness 4
+    Tin:               84,   // 54 — 1933 per million, hardness 3
+    Conglomerate:      83,   // 89 — 1955 per million, hardness 3
+    Silver:            82,   // 52 — 1984 per million, hardness 3
+    Gneiss:            63,   // 81 — 2583 per million, hardness 4
+    Fluorite:          54,   // 86 — 3012 per million, hardness 3
+    Marble:            42,   // 77 — 3907 per million, hardness 3
+    Quartzite:         42,   // 80 — 3866 per million, hardness 5
+    Crystal:           31,   // 36 — 5331 per million, hardness 3
+    Salt:              30,   // 27 — 5496 per million, hardness 2
+    'Oil shale':       27,   // 33 — 6002 per million, hardness 2
+    Slate:             26,   // 79 — 6256 per million, hardness 3
+    Hematite:          25,   // 56 — 6559 per million, hardness 4
+    Copper:            22,   // 35 — 7412 per million, hardness 3
+    Galena:            20,   // 53 — 8182 per million, hardness 3
+    Coal:              19,   // 41 — 8420 per million, hardness 2
+    Iron:              13,   // 34 — 12255 per million, hardness 4
+    Quartz:            10,   // 42 — 16297 per million, hardness 4
   };
-  // ⚠️ GOLD IS WORTH 5 AND THAT IS AN OPEN QUESTION, not an oversight: the generator places it fairly freely
-  // (602 per million, plus stream placers), so the measurement says what it says. Making gold FEEL like gold is
-  // a change to `worldgen2/minerals.js`'s rarity for it, after which this table is re-derived — it is not a
-  // number to nudge by hand, or the table stops meaning anything.
+  // ⭐ GOLD AT 271 IS A CLOSED QUESTION, and it closed without touching the generator. It read 5 under the old
+  // exponent and looked far too low for what gold means; the cause was the curve squashing the whole range,
+  // not gold being placed too freely. The lesson generalises: a value that looks wrong is a reason to check the
+  // FUNCTION before adjusting the INPUT, or the table stops meaning anything.
   const PRIMA_WORTH = {};
   Object.keys(WORTH).forEach((n) => {
     const id = NAMES[n];
@@ -284,8 +300,9 @@
   // The refine threshold as a dial (kickoff_prima.md §3): a material dissolves into Prima only at or above this,
   // and — 🟥 SYMMETRY IS COMPULSORY — can only be conjured back out of Prima on the same test. Anything you can
   // conjure but not dissolve is a one-way street that creates matter from nothing, in a world whose whole
-  // economy is that matter is conserved. At 1 every priced mineral refines and nothing else does.
-  const PRIMA_REFINE_MIN = 1;
+  // economy is that matter is conserved. At 10 — the base unit, i.e. the commonest mineral — every priced
+  // mineral refines and nothing else does.
+  const PRIMA_REFINE_MIN = 10;
   const primaWorthOf = (id) => PRIMA_WORTH[id] || 0;
   const primaRefinable = (id) => primaWorthOf(id) >= PRIMA_REFINE_MIN;
 
