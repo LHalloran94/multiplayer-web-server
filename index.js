@@ -1660,6 +1660,17 @@ const roomAvatars = {}; // legacy (old position-broadcast model; kept for back-c
 const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel mesh (Stage 6 pivot)
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
+// ⭐⭐ …AND THE SAME MAP SEEN BY CHUNK, IN THE OVERWORLD ONLY. `roomObjects` alone is the shape CLAUDE.md has
+// named as a blocker for years: one per-room Map, broadcast whole on every add and replayed entirely on join.
+// That is survivable in a page room (small, bounded by MAX_OBJECTS_PER_ROOM, and its objects belong to a LEVEL —
+// they are switched, published and hydrated as a unit) and fatal in a world with no edges.
+// ⚠️ SO THIS IS DELIBERATELY A SECOND PATH RATHER THAN A REPLACEMENT, gated on `objChunked(room)`. A Level's
+// objects are not per-chunk entities; they are the Level's content. Two paths through one map is a smell, but
+// the alternative is teaching the publish/hydrate/levelIndex machinery about chunk residency, which is a much
+// larger change for a room type that has no use for it.
+const roomObjectChunk = {};         // room → Map<chunkId, Set<objId>>  (STREAMING index: every chunk it overlaps)
+const _objsLoaded = new Set();      // rooms whose stored props have been read back from disk (once per room)
+const _objsDirty = new Map();       // room → Set<chunk index> whose prop row differs from what is on disk
 // ---- Dropped material (dig → item on the ground → inventory) ----
 // One drop per dig swing, not one per cell: a 7×7 bite is a single entity carrying its composition, which is
 // what keeps this affordable at Overworld scale. The server owns the LIST (so two players cannot both collect
@@ -6627,6 +6638,20 @@ function sendChunkContent(sock, room, chunks) {
       for (const p of chunks) { const s = bby.get(p); if (s) for (const id of s) { const b = bm.get(id); if (b) { crucibleCatchUp(room, b); list.push(crucibleWire(b)); } } }
       if (list.length) sock.emit('builds-chunk', { builds: list, chunks: chunks.slice() });
     }
+    // …and the PROPS standing in them. Same seam again, and the whole point of it: the Overworld's props arrive
+    // with their ground instead of as one whole-room list at join.
+    // ⚠️ A prop is gathered from the OVERLAP index and de-duplicated by id, because one prop can be in several of
+    // the chunks being sent — sending it twice is only waste, but leaving the dedupe out of a batch of 32 chunks
+    // is a long stroke sent 24 times.
+    if (objChunked(room)) {
+      ensureObjectsLoaded(room);
+      const oby = roomObjectChunk[room], om = roomObjects[room];
+      if (oby && om) {
+        const list = [], seen = new Set();
+        for (const p of chunks) { const s = oby.get(p); if (s) for (const id of s) { if (seen.has(id)) continue; seen.add(id); const o = om.get(id); if (o) list.push(o); } }
+        if (list.length) sock.emit('objects-chunk', { objects: list, chunks: chunks.slice() });
+      }
+    }
   }
   if (TRACE_SUBS) console.log('[subs] ...emitted in ' + (Date.now() - _T0) + 'ms total');
 }
@@ -7799,6 +7824,24 @@ const _putBuildRow = db.prepare(`INSERT INTO world_builds (room, chunk, items, u
 const _delBuildRow = db.prepare('DELETE FROM world_builds WHERE room = ? AND chunk = ?');
 const _listBuildRows = db.prepare('SELECT chunk, items FROM world_builds WHERE room = ?');
 const _countBuildRows = db.prepare('SELECT COUNT(*) AS n FROM world_builds');
+// …and the same shape again for PROPS placed in the Overworld. Third table rather than a `kind` column for the
+// third time and the same reason: a pile is collected, a structure is used, a prop is stood on. They decode
+// differently, they are validated differently (`buildWorldObject` is a hundred lines of per-type clamping), and
+// the one thing this project has repeatedly paid for is a single structure meaning several things.
+// ⚠️ A ROW HOLDS ONLY THE PROPS ANCHORED IN ITS CHUNK, never the ones merely overlapping it — see `objChunksOf`.
+db.exec(`CREATE TABLE IF NOT EXISTS world_objects (
+  room    TEXT    NOT NULL,
+  chunk   INTEGER NOT NULL,
+  items   TEXT    NOT NULL,
+  updated INTEGER NOT NULL,
+  PRIMARY KEY (room, chunk)
+)`);
+const _putObjRow = db.prepare(`INSERT INTO world_objects (room, chunk, items, updated)
+  VALUES (?, ?, ?, unixepoch())
+  ON CONFLICT(room, chunk) DO UPDATE SET items=excluded.items, updated=excluded.updated`);
+const _delObjRow = db.prepare('DELETE FROM world_objects WHERE room = ? AND chunk = ?');
+const _listObjRows = db.prepare('SELECT chunk, items FROM world_objects WHERE room = ?');
+const _countObjRows = db.prepare('SELECT COUNT(*) AS n FROM world_objects');
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //  🟥🟥 WHERE EACH SITE LIVES, ON DISK. THE ONE THING ABOVE IS MEANINGLESS WITHOUT.
@@ -7889,13 +7932,19 @@ function wipeSavedWorlds() {
   _buildsLoaded.clear(); _buildsDirty.clear();
   for (const k of Object.keys(roomBuilds)) delete roomBuilds[k];
   for (const k of Object.keys(roomBuildChunk)) delete roomBuildChunk[k];
-  before.drops = beforeDrops.n; before.dropBytes = beforeDrops.b; before.builds = beforeBuilds.n;
+  const beforeObjs = _countObjRows.get();
+  db.exec('DELETE FROM world_objects');
+  _objsLoaded.clear(); _objsDirty.clear();
+  // ⚠️ Only the CHUNKED rooms' props are cleared here — a page room's objects are its Level's content and are
+  // not in this table at all, so wiping the stored world must not empty them.
+  for (const k of Object.keys(roomObjectChunk)) { delete roomObjectChunk[k]; if (roomObjects[k]) roomObjects[k].clear(); }
+  before.drops = beforeDrops.n; before.dropBytes = beforeDrops.b; before.builds = beforeBuilds.n; before.objs = beforeObjs.n;
   return before;
 }
 if (process.env.MW_FRESH_WORLD === '1') {
   const _before = wipeSavedWorlds();
   console.log(`MW_FRESH_WORLD=1 — wiped ${_before.n} stored chunk(s), ${(_before.b / 1024).toFixed(1)}KB of edits`
-    + `, ${_before.drops} chunk(s) of piles and ${_before.builds} of structures`);
+    + `, ${_before.drops} chunk(s) of piles, ${_before.builds} of structures and ${_before.objs} of props`);
 }
 
 // A diff packs to (index u16, material u8, damage u8) per changed cell — the shape `encodeChunkDelta` already
@@ -10034,8 +10083,13 @@ function emitSnapshotToFollower(followeeId, followeeUsername, socketId) {
 // handler AND server-side published-World hydration (7b), so both apply identical clamps/validation.
 // Returns the obj (anchor clamped to world bounds) or null if invalid. The CALLER handles id-dedup,
 // band-clamp, spawn-clear, the object cap, and broadcast.
-function buildWorldObject(type, data, id, ownerId, ownerName) {
-  const WW = MWSim.C.WORLD_W, WH = MWSim.C.WORLD_H;
+// 🟥 THE CLAMP TAKES THE ROOM'S OWN SHAPE, AND IT USED TO TAKE A CONSTANT. `MWSim.C.WORLD_W` is 15,360px — the
+// PAGE room's width — so every prop placed in the Overworld past that was silently dragged back to x = 15360, a
+// long way from wherever the player was standing. Props did not "not work well" out there; they teleported.
+// This is `feedback_inconclusive_is_not_a_pass`'s rule one more time: take the room shape from the room.
+function buildWorldObject(type, data, id, ownerId, ownerName, room) {
+  const _rd = roomDims(room);
+  const WW = _rd.cols * TERRAIN_CELL, WH = _rd.rows * TERRAIN_CELL;
   let obj;
   if (type === 'stroke') {
     if (!Array.isArray(data.pts)) return null;
@@ -10155,7 +10209,7 @@ function hydrateRoomFromBlob(avRoom, blob) {
     if (placed >= MAX_OBJECTS_PER_ROOM) break;
     if (!src || !OBJ_TYPES.has(src.type)) continue;
     const id = 'pub-' + (++objSeq);
-    const obj = buildWorldObject(src.type, src, id, id, 'world');   // server-owned (ownerId = its own id → not user-evictable)
+    const obj = buildWorldObject(src.type, src, id, id, 'world', avRoom);   // server-owned (ownerId = its own id → not user-evictable)
     if (obj) { map.set(id, obj); placed++; }
   }
 }
@@ -10597,6 +10651,160 @@ function buildsNear(room, x, y, r, type) {
     }
   }
   return out;
+}
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  PROPS AS PER-CHUNK WORLD ENTITIES — the debt CLAUDE.md has carried since Phase 6 increment 4b ("objects are
+//  not generated here, and that is a real gap rather than an oversight… needs an object-streaming design that
+//  does not exist yet"). It exists now, because cairns and crucibles built it: a thing that lives in a chunk,
+//  streams with that chunk under interest filtering, and saves in a row keyed by it.
+//
+//  ⭐ WHAT MAKES A PROP DIFFERENT FROM A PILE OR A CRUCIBLE IS THAT IT HAS SIZE. A cairn is a point; a stroke can
+//  be two hundred points long and a platform can patrol a path across half a screen. So a prop is indexed into
+//  EVERY chunk its bounding box touches, and anchored in exactly one:
+//    · `o.ch`  — the anchor, from the same `dropChunkOf` everything else uses. It decides which ROW stores it and
+//                which chunk's refresh is allowed to FORGET it on the client.
+//    · `o.chs` — every chunk it overlaps. It decides who is SENT it.
+//  Those two must not be collapsed. Sending from overlap only, and forgetting from the anchor only, is what
+//  makes "this message is authoritative for the chunks it names" survive an entity that is in several of them:
+//  a client refreshing an overlapped chunk keeps the prop (its anchor is elsewhere), and a client refreshing the
+//  anchor chunk is handed the whole truth about it in the same message.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+const OBJ_FLUSH_MS = 5000;
+const OBJ_MAX_CHUNKS = 24;            // how many chunks one prop may stream from — a bound on a hostile stroke
+const MAX_OBJECTS_PER_CHUNK = 48;     // ⭐ the per-Level cap's replacement: an infinite world cannot have a global one
+let objsSaved = 0, objsLoadedRows = 0, objsSaveErrors = 0;
+// ⭐ ONE PREDICATE, ONE PLACE. Everything that has to know which of the two object models a room is using asks
+// this, so the two paths cannot drift into disagreeing about a room.
+function objChunked(room) { return !!room && overworldRooms.has(room); }
+function objsTouch(room, ch) {
+  if (!room || !(ch >= 0)) return;
+  let s = _objsDirty.get(room); if (!s) _objsDirty.set(room, s = new Set());
+  s.add(ch);
+}
+// The world-space box a prop occupies, generously. Generous is the right error here: it is a streaming hint, so
+// too big costs a prop being sent to somebody who cannot quite see it, and too small is a prop that pops out of
+// existence while it is on screen.
+function objBBox(o) {
+  let x0 = o.x, y0 = o.y, x1 = o.x, y1 = o.y;
+  const pt = (px, py) => { if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py; };
+  if (Array.isArray(o.pts)) for (const p of o.pts) pt(p.x, p.y);
+  if (o.path && Array.isArray(o.path.pts)) for (const p of o.path.pts) pt(p.x, p.y);
+  // ⚠️ HALF THE DIAGONAL, NOT HALF THE WIDTH. `angle`, `spin` and `osc` all turn a platform, and a 400×16 plank
+  // stood on its end reaches 200px vertically from an anchor whose declared half-height is 8. A stroke has a
+  // thickness rather than a box, and its extent is already in `pts`.
+  const pad = Math.max(24, (o.w && o.h) ? Math.hypot(o.w, o.h) : Math.max(o.w || 0, o.h || 0)) / 2;
+  return { x0: x0 - pad, y0: y0 - pad, x1: x1 + pad, y1: y1 + pad };
+}
+function objChunksOf(room, o) {
+  const geom = worldGeom(room), span = CHUNK_SIDE * TERRAIN_CELL, b = objBBox(o);
+  const gx0 = Math.max(0, Math.min(geom.cx - 1, Math.floor(b.x0 / span)));
+  const gx1 = Math.max(0, Math.min(geom.cx - 1, Math.floor(b.x1 / span)));
+  const gy0 = Math.max(0, Math.min(geom.cy - 1, Math.floor(b.y0 / span)));
+  const gy1 = Math.max(0, Math.min(geom.cy - 1, Math.floor(b.y1 / span)));
+  const out = [];
+  for (let gx = gx0; gx <= gx1 && out.length < OBJ_MAX_CHUNKS; gx++)
+    for (let gy = gy0; gy <= gy1 && out.length < OBJ_MAX_CHUNKS; gy++) out.push(gx * geom.cy + gy);
+  if (!out.length) out.push(dropChunkOf(room, o));
+  return out;
+}
+function objIndex(room, o) {
+  const map = roomObjects[room] || (roomObjects[room] = new Map());
+  map.set(o.id, o);
+  if (!objChunked(room)) return;
+  o.ch = dropChunkOf(room, o);                      // ⭐ rides the wire — the client must not recompute an addressing rule
+  o.chs = objChunksOf(room, o);
+  const by = roomObjectChunk[room] || (roomObjectChunk[room] = new Map());
+  for (const ch of o.chs) { let s = by.get(ch); if (!s) by.set(ch, s = new Set()); s.add(o.id); }
+  objsTouch(room, o.ch);
+}
+function objUnindex(room, o) {
+  const map = roomObjects[room]; if (map) map.delete(o.id);
+  if (!objChunked(room)) return;
+  objsTouch(room, o.ch);
+  const by = roomObjectChunk[room];
+  if (by) for (const ch of (o.chs || [o.ch])) { const s = by.get(ch); if (s) { s.delete(o.id); if (!s.size) by.delete(ch); } }
+}
+// How many props are ANCHORED in a chunk. The overlap index would count a neighbour's long stroke against you,
+// which would let somebody fill your build site from a chunk away.
+function objCountInChunk(room, ch) {
+  const by = roomObjectChunk[room], map = roomObjects[room];
+  const s = by && by.get(ch); if (!s || !map) return 0;
+  let n = 0; for (const id of s) { const o = map.get(id); if (o && o.ch === ch) n++; }
+  return n;
+}
+function ensureObjectsLoaded(room) {
+  if (!objChunked(room) || _objsLoaded.has(room)) return;
+  _objsLoaded.add(room);                               // set FIRST: a failed read must not retry on every access
+  let rows = [];
+  try { rows = _listObjRows.all(room); } catch (e) { console.log('world_objects load failed: ' + e.message); return; }
+  if (!rows.length) return;
+  let n = 0;
+  for (const r of rows) {
+    let list = null;
+    try { list = JSON.parse(r.items); } catch (e) { continue; }
+    if (!Array.isArray(list)) continue;
+    for (const p of list) {
+      // 🟥 RE-VALIDATED THROUGH `buildWorldObject`, NOT TRUSTED AS STORED. A row on disk is the one input to this
+      // server that a schema change or a hand-edited database can make nonsense of, and the whole point of that
+      // function is that every field a prop carries has been clamped by it. Re-running it costs nothing here and
+      // means there is exactly one definition of what a valid prop is.
+      if (!p || !p.id || !OBJ_TYPES.has(p.type)) continue;
+      const o = buildWorldObject(p.type, p, p.id, p.ownerId || '', p.owner || '', room);
+      if (!o) continue;
+      if (typeof p.hp === 'number' || p.hp === null) o.hp = p.hp;   // damage survives a restart; the ground it stands on does
+      objIndex(room, o);
+      n++;
+    }
+  }
+  objsLoadedRows += n;
+  _objsDirty.delete(room);                             // loading is not a change
+  console.log(`prop persistence: ${n} prop(s) in ${rows.length} chunk(s) restored for ${room}`);
+}
+function objectFlush(max) {
+  const cap = max || 64;
+  let wrote = 0;
+  for (const [room, set] of _objsDirty) {
+    if (wrote >= cap) break;
+    const by = roomObjectChunk[room], map = roomObjects[room];
+    for (const ch of Array.from(set)) {
+      if (wrote >= cap) break;
+      set.delete(ch);
+      const ids = by && by.get(ch);
+      const list = [];
+      // ⚠️ ANCHORED HERE ONLY. Without the `o.ch === ch` test a stroke lying across four chunks would be written
+      // into four rows and come back from disk as four strokes — matter created by a save, which is the exact
+      // class of bug the whole economy track exists to stop.
+      if (ids && map) for (const id of ids) {
+        const o = map.get(id);
+        if (o && o.ch === ch) { const c = Object.assign({}, o); delete c.chs; list.push(c); }
+      }
+      try {
+        if (list.length) { _putObjRow.run(room, ch, JSON.stringify(list)); objsSaved++; }
+        else _delObjRow.run(room, ch);
+        wrote++;
+      } catch (e) { objsSaveErrors++; if (objsSaveErrors < 5) console.log('world_objects save failed: ' + e.message); }
+    }
+    if (!set.size) _objsDirty.delete(room);
+  }
+  return wrote;
+}
+setInterval(() => { try { objectFlush(); } catch (e) { objsSaveErrors++; } }, OBJ_FLUSH_MS);
+// Add or remove a prop for exactly the sockets that can see it — or the whole room, when the room is not chunked.
+// ⚠️ `emitToChunk` on ONE chunk is not enough for a thing with size: a client subscribed only to the far end of a
+// long stroke would never be told it had gone.
+function emitObjToChunks(room, o, ev, payload) {
+  if (!objChunked(room)) { io.to(room).emit(ev, payload); return; }
+  const seen = new Set();
+  for (const ch of (o.chs || [o.ch])) {
+    if (!interestCfg.chunks) { io.to(room).emit(ev, payload); return; }
+    const m = roomSubs[room]; if (!m) return;
+    for (const [sid, e] of m) {
+      if (seen.has(sid) || !e.subs.has(ch)) continue;
+      seen.add(sid);
+      const sock = io.sockets.sockets.get(sid);
+      if (sock) sock.emit(ev, payload);
+    }
+  }
 }
 function dropChunkOf(room, d) {
   const geom = worldGeom(room), span = CHUNK_SIDE * TERRAIN_CELL;
@@ -11841,7 +12049,11 @@ io.on('connection', (socket) => {
     }
     // Replay the current world objects to the new joiner (late-joiner sync). `levelIndex` lets the client
     // drop a replay that arrives AFTER it has switched Levels again (rapid switching → stale cross-Level bleed).
-    socket.emit('avatar-objects-init', { levelIndex, objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
+    // 🟥 AND IN THE OVERWORLD IT IS AN EMPTY LIST, for exactly the reason `drops-init` below is. Replaying every
+    // prop in a world with no edges is the whole-world join replay that hung this server, one entity type later.
+    // ⚠️ Still SENT, empty: it is what makes the client forget the previous room's props, and a Level switch does
+    // not run `exitAvatarMode`. Props arrive per chunk, in `sendChunkContent`.
+    socket.emit('avatar-objects-init', { levelIndex, objects: (roomObjects[avRoom] && !objChunked(avRoom)) ? [...roomObjects[avRoom].values()] : [] });
     // 🟥 THE WHOLE-LIST JOIN REPLAY IS GONE. It sent every pile in the room to every joiner — fine while a TTL
     // and a 300 cap kept the list small, and the same shape as the whole-world terrain replay that hung this
     // server once piles stopped expiring. Piles now arrive WITH THEIR CHUNK, in `sendChunkContent`, so a joiner
@@ -12304,10 +12516,11 @@ io.on('connection', (socket) => {
     // placer's optimistic object is overwritten in place rather than duplicated.
     let id = data.id;
     if (typeof id !== 'string' || !id.startsWith(socket.id + '-')) id = socket.id + '-s' + (++objSeq);
+    ensureObjectsLoaded(currentAvatarRoom);                 // ⚠️ one of the three doors into the prop maps
     if (!roomObjects[currentAvatarRoom]) roomObjects[currentAvatarRoom] = new Map();
     const map = roomObjects[currentAvatarRoom];
     if (map.has(id)) return;                                // ignore duplicate spawn for an existing id
-    const obj = buildWorldObject(type, data, id, socket.id, currentUsername || socket.id);   // shared with 7b hydration
+    const obj = buildWorldObject(type, data, id, socket.id, currentUsername || socket.id, currentAvatarRoom);   // shared with 7b hydration
     if (!obj) return;
     // Phase 6: clamp placement into the playable band (no-op at 'large'). Anti-cheat belt+suspenders — the
     // client is already confined by camera/walls; this keeps a crafted packet from landing objects in the
@@ -12333,6 +12546,23 @@ io.on('connection', (socket) => {
     // Phase 6: cap counts USER-placed objects only (generated 'world-' scatter is exempt — matches the
     // client's userObjectCount). REJECT at the cap rather than FIFO-evicting, so an over-cap placement fails
     // cleanly (the client already blocks + shows the hint) instead of silently deleting the oldest object.
+    // ⭐ IN A CHUNKED ROOM THE CAP IS PER CHUNK, and that is not a relaxation — it is the only kind of cap an
+    // infinite world can have. A flat 150 per room is a limit on the WHOLE OVERWORLD; the second base anybody
+    // built would be told the world was full. Per chunk it is a local clutter bound instead, and it is enforced
+    // where the props are, so one player cannot exhaust another's build site from the far side of the map.
+    if (objChunked(currentAvatarRoom)) {
+      if (objCountInChunk(currentAvatarRoom, dropChunkOf(currentAvatarRoom, obj)) >= MAX_OBJECTS_PER_CHUNK) {
+        socket.emit('build-refused', { why: 'Too much built here already — spread out a little.' });
+        return;
+      }
+      objIndex(currentAvatarRoom, obj);
+      // ⚠️ AND TO THE PLACER EXPLICITLY. `emitObjToChunks` reaches subscribers, and the socket that placed it may
+      // not be subscribed to the chunk it landed in (a prop dropped at the edge of the view). Without this the
+      // placer's own optimistic copy is never confirmed, and never corrected either. Same seam `build-add` needed.
+      emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-add', obj);
+      socket.emit('avatar-object-add', obj);
+      return;
+    }
     let userObjs = 0;
     for (const k of map.keys()) if (!(typeof k === 'string' && k.startsWith('world-'))) userObjs++;
     if (userObjs >= MAX_OBJECTS_PER_ROOM) return;
@@ -12346,15 +12576,23 @@ io.on('connection', (socket) => {
     if (!canBuild()) return;                                // Phase 3: L2 build permission (erase is a build op)
     const obj = roomObjects[currentAvatarRoom].get(id);
     // Owner by stable username (survives reconnect/new socket.id) OR the live socket.id.
+    // ⚠️ THE USERNAME IS THE ONE THAT MATTERS AFTER A RESTART: a restored prop's `ownerId` is a socket id from a
+    // process that no longer exists, so ownership of anything persisted is carried entirely by the name.
     if (!obj || !(obj.ownerId === socket.id || (obj.owner && obj.owner === currentUsername))) return;
-    roomObjects[currentAvatarRoom].delete(id);
-    io.to(currentAvatarRoom).emit('avatar-object-removed', { id });
+    objUnindex(currentAvatarRoom, obj);
+    emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-removed', { id });
+    if (objChunked(currentAvatarRoom)) socket.emit('avatar-object-removed', { id });   // …the eraser may not be subscribed there
   });
   // Bulk-remove all of MY own objects (the Erase tool's "Remove all mine" button). Owner-scoped,
   // like the single mouse-eraser, but in one round-trip.
   socket.on('avatar-objects-remove-mine', () => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     if (!canBuild()) return;                                // Phase 3: also wipes terrain → a build op
+    // 🟥 REFUSED IN THE OVERWORLD, and the objects are the smaller half of why. The line at the bottom of this
+    // handler does `terrain.fill(0)` — on a page room that is a 7.8M-cell wipe of a world you own, and on the
+    // shared Overworld it is a 2.15-BILLION-cell erasure of everybody's ground, from a button labelled "remove
+    // all mine". The same trap `terrain-init` and the rebuild button were each caught by.
+    if (objChunked(currentAvatarRoom)) { socket.emit('build-refused', { why: 'Not in the shared world — this erases terrain, and out here it is not yours.' }); return; }
     const map = roomObjects[currentAvatarRoom], ids = [];
     for (const [id, o] of map) if (o.ownerId === socket.id || (o.owner && o.owner === currentUsername)) ids.push(id);
     for (const id of ids) map.delete(id);
@@ -12366,6 +12604,7 @@ io.on('connection', (socket) => {
   socket.on('avatar-objects-clear-all', () => {
     if (!currentAvatarRoom) return;
     if (!canBuild()) return;                                // Phase 3: full wipe → a build op
+    if (objChunked(currentAvatarRoom)) { socket.emit('build-refused', { why: 'Not in the shared world — there is no "clear everything" out here.' }); return; }   // see remove-mine
     if (roomObjects[currentAvatarRoom]) {
       const map = roomObjects[currentAvatarRoom], ids = [...map.keys()];
       map.clear();
@@ -12807,8 +13046,8 @@ io.on('connection', (socket) => {
     const obj = roomObjects[currentAvatarRoom].get(id);
     if (!obj || typeof obj.hp !== 'number') return;
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
-    if (obj.hp <= 0) { roomObjects[currentAvatarRoom].delete(id); io.to(currentAvatarRoom).emit('avatar-object-removed', { id }); }
-    else io.to(currentAvatarRoom).emit('avatar-object-update', { id, hp: obj.hp });
+    if (obj.hp <= 0) { objUnindex(currentAvatarRoom, obj); emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-removed', { id }); }
+    else { objsTouch(currentAvatarRoom, obj.ch); emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-update', { id, hp: obj.hp }); }
   });
 
   // Phase 3: the host manages L2 build permissions live (owner-only). `mode` is the role default and
@@ -13394,6 +13633,8 @@ function worldFlushAll(why) {
   catch (e) { console.log('pile flush on ' + why + ' failed: ' + e.message); }
   try { const n = buildFlush(1e9); if (n) console.log(`build persistence: flushed ${n} chunk(s) on ${why}`); }
   catch (e) { console.log('build flush on ' + why + ' failed: ' + e.message); }
+  try { const n = objectFlush(1e9); if (n) console.log(`prop persistence: flushed ${n} chunk(s) on ${why}`); }
+  catch (e) { console.log('prop flush on ' + why + ' failed: ' + e.message); }
 }
 process.on('SIGTERM', () => {
   worldFlushAll('SIGTERM');
