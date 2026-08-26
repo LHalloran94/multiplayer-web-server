@@ -380,6 +380,35 @@ app.post('/auth/discord', async (req, res) => {
   }
 });
 
+// ---- DEV LOGIN (the dev page has no Discord path) --------------------------------------------------------
+// ⭐ WHY THIS EXISTS: `extension/dev/serve.js` is the fast loop for anything visual, but Discord OAuth runs
+// through `chrome.identity.launchWebAuthFlow` in the extension's service worker — a surface the dev shim
+// explicitly cannot replace. So the dev page was permanently logged out, which since the Prima ledger means it
+// could not keep anything it collected, which makes it useless for testing the economy.
+//
+// 🟥 THIS IS AN AUTHENTICATION BYPASS AND IS FENCED THREE WAYS.
+//   1. `MW_DEV_LOGIN=1` must be set. Absent, the route 404s exactly like any unknown path.
+//   2. The request must arrive on the LOOPBACK interface.
+//   3. ⭐ The identity it mints is NAMESPACED `dev:<name>` and can never collide with a Discord snowflake, which
+//      are decimal digits only. So even if 1 and 2 were both defeated — say by a tunnel, which makes remote
+//      traffic look local — the worst available outcome is "a stranger made themselves a throwaway account",
+//      never "a stranger took over a real one". That third fence is the one that actually bounds the damage,
+//      and it is why this is acceptable at all.
+// ⚠️ It is NOT enabled by the restart scripts. Turn it on deliberately for a session that needs it.
+if (process.env.MW_DEV_LOGIN === '1') {
+  const LOOPBACK = /^(::1|::ffff:127\.|127\.)/;
+  app.get('/dev/login', (req, res) => {
+    const ip = String(req.socket.remoteAddress || '');
+    if (!LOOPBACK.test(ip)) return res.status(404).end();
+    const name = String(req.query.name || 'dev').slice(0, 24).replace(/[^A-Za-z0-9_-]/g, '') || 'dev';
+    const sub = 'dev:' + name;
+    db.prepare('INSERT OR REPLACE INTO users (discord_id, username, avatar, updated_at) VALUES (?, ?, ?, unixepoch())').run(sub, name, null);
+    const token = jwt.sign({ sub, username: name, avatar: null }, JWT_SECRET, { expiresIn: '30d' });
+    res.json({ jwt: token, username: name, avatar: null });
+  });
+  console.log('⚠ MW_DEV_LOGIN is ON — GET /dev/login?name=x mints a dev:x identity for loopback callers');
+}
+
 // ---- CPU PROFILE ON DEMAND (debug) ----------------------------------------------------------------------
 // ⭐ "Isn't there some way you can look at the actual computational behaviour and see what exactly is holding
 // everything up?" — yes, and this is it. `GET /debug/cpu-profile?ms=20000` samples the server for that long and
@@ -6232,6 +6261,12 @@ function noteWhere(avRoom, sid, v) {
     cx1: Math.floor((x + w) / span), cy1: Math.floor((y + h) / span),
     ax: isFinite(+v.ax) ? Math.floor(+v.ax / span) : -1,
     ay: isFinite(+v.ay) ? Math.floor(+v.ay / span) : -1,
+    // ⭐ …AND THE SAME POSITION IN PIXELS. `ax`/`ay` above are CHUNK coordinates, which is all interest and
+    // residency ever needed, but "drop what you were carrying where you left" needs to land within a stride of
+    // your feet rather than somewhere inside a 512px chunk. Client-asserted like the rest of the beacon, and
+    // that is fine here: the worst a liar can do is drop their OWN belongings somewhere else.
+    apx: isFinite(+v.ax) ? Math.max(0, Math.min(_g.cols * TERRAIN_CELL, +v.ax)) : -1,
+    apy: isFinite(+v.ay) ? Math.max(0, Math.min(_g.rows * TERRAIN_CELL, +v.ay)) : -1,
   };
   m.set(sid, rect);
   return rect;   // Phase 4 reuses the same parsed rect for interest, so the clamp above applies to both
@@ -9989,14 +10024,43 @@ function dropRestY(room, x, y) {
   for (; r <= lim; r++) if (isSolidCell(grid.g(c * rows + r))) return (r - 0.5) * TERRAIN_CELL;   // rest ON TOP of the solid cell
   return (lim + 0.5) * TERRAIN_CELL;
 }
-function spawnDrop(room, x, y, mats) {
+function spawnDrop(room, x, y, mats, prima) {
   const map = roomDrops[room] || (roomDrops[room] = new Map());
   if (map.size >= MAX_DROPS_PER_ROOM) { const oldest = map.keys().next().value; if (oldest !== undefined) { map.delete(oldest); io.to(room).emit('drop-removed', { id: oldest }); } }
   let n = 0; for (const [, k] of mats) n += k;
   const d = { id: 'd' + (++dropSeq), x, y, gy: dropRestY(room, x, y), t0: Date.now(), mats, n };
+  // ⭐ A PILE CAN CARRY PRIMA AS WELL AS MATERIAL. Nothing spawns one yet except a player releasing what they
+  // were holding, but dispersal-on-death needs exactly this shape, and adding the field now means that
+  // increment does not have to change the wire, the client decoder and the collect path all over again.
+  if (prima > 0) d.prima = prima | 0;
   map.set(d.id, d);
   io.to(room).emit('drop-add', d);
   return d;
+}
+// ⭐⭐ EVERYTHING A PLAYER IS CARRYING, PUT BACK INTO THE WORLD. ONE primitive with three eventual callers:
+// leaving with an ephemeral balance (below), DISPERSAL ON DEATH, and the dormancy rule for an absent player.
+// They differ only in when they fire and how widely they scatter, so building it here makes the other two
+// small — which is most of the reason it exists now rather than later.
+// 🟥 IT MUST NOT DESTROY ANYTHING. `takeAll` empties the ledger and hands the contents back; if this function
+// returns without spawning them, that is matter annihilated, in an economy whose entire premise is that matter
+// is conserved. Hence the guard: nothing is taken until there is somewhere to put it.
+function releaseHoldings(room, key, x, y) {
+  if (!room || !isFinite(x) || !isFinite(y)) return null;
+  const peek = ledger.snapshot(key);
+  if (!peek.mats.length && !peek.prima) return null;
+  const held = ledger.takeAll(key);
+  const d = spawnDrop(room, x, y, held.mats, held.prima);
+  console.log(`ledger: released ${held.mats.reduce((a, m) => a + m[1], 0)} cell(s) + ${held.prima} prima at ${x | 0},${y | 0} as ${d.id}`);
+  return d;
+}
+// Where a socket's body was, in pixels, as of its last beacon. ⚠️ Falls back to nothing rather than to the
+// world origin: dropping a haul at (0,0) because the position was unknown is worse than not dropping it, and
+// the caller can then decide (today: keep it in the ledger rather than lose it).
+function lastBodyPos(room, sid) {
+  const m = roomWhere[room];
+  const r = m && m.get(sid);
+  if (!r || !(r.apx >= 0) || !(r.apy >= 0)) return null;
+  return { x: r.apx, y: r.apy };
 }
 // Expire un-collected drops. One sweep over every room's list — the lists are capped, so this is bounded by
 // (rooms × 300) and runs once a second, not per tick.
@@ -11568,6 +11632,32 @@ io.on('connection', (socket) => {
   });
   // Collect a pile. The taker already holds its contents (from drop-add / drops-init), so the reply carries only
   // the id + who won it — everyone removes it, and the winner adds its own copy's materials to their inventory.
+  // ⭐ PUT SOMETHING DOWN ON PURPOSE. The counterpart to picking up, and the primitive the whole "carry it home
+  // and hand it to your group" half of the design rests on — you cannot give anything to anybody until you can
+  // put it down. `mat` 0 means Prima; anything else is that material.
+  // ⚠️ SERVER-AUTHORITATIVE LIKE EVERY OTHER LEDGER MOVE: the client asks, the server decides how much it
+  // actually had, and the pile carries what was really taken. A client asking to drop a thousand diamonds it
+  // does not hold spawns nothing.
+  socket.on('inv-drop', ({ mat, n }) => {
+    if (!currentAvatarRoom) return;
+    const key = playerKeyFor(socket.id);
+    const p = lastBodyPos(currentAvatarRoom, socket.id);
+    if (!p) return;                                       // no idea where they are ⇒ nowhere to put it
+    const id = mat | 0, want = Math.max(0, Math.min(1e9, n | 0));
+    if (!want) return;
+    if (id === 0) {
+      const have = ledger.prima(key);
+      const take = Math.min(have, want);
+      if (!take) return;
+      ledger.grantPrima(key, -take);
+      spawnDrop(currentAvatarRoom, p.x, p.y - 12, [], take);
+    } else {
+      const took = ledger.spend(key, id, want);
+      if (!took) return;
+      spawnDrop(currentAvatarRoom, p.x, p.y - 12, [[id, took]], 0);
+    }
+    sendInvSync(socket, currentAvatarRoom);
+  });
   socket.on('drop-take', ({ id }) => {
     const map = currentAvatarRoom && roomDrops[currentAvatarRoom];
     if (!map || !map.has(id)) return;             // already gone — someone else got there first
@@ -11577,8 +11667,10 @@ io.on('connection', (socket) => {
     // the result; it is never asked.
     const d = map.get(id);
     map.delete(id);
-    if (d && d.mats && d.mats.length) {
-      ledger.credit(playerKeyFor(socket.id), d.mats);
+    if (d && ((d.mats && d.mats.length) || d.prima > 0)) {
+      const key = playerKeyFor(socket.id);
+      if (d.mats && d.mats.length) ledger.credit(key, d.mats);
+      if (d.prima > 0) ledger.grantPrima(key, d.prima);
       sendInvSync(socket, currentAvatarRoom);
     }
     io.to(currentAvatarRoom).emit('drop-removed', { id, by: socket.id });
@@ -12223,6 +12315,21 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    // 🟥 AN EPHEMERAL BALANCE IS PUT BACK INTO THE WORLD, NOT DELETED. Until this existed, a logged-out player
+    // leaving with a full pouch simply annihilated it — a conservation leak (kickoff_prima.md §8 row 4) and,
+    // much more immediately, the worst possible way to learn that you were not logged in.
+    // ⚠️ ONLY for `s:` keys, and the distinction matters: a logged-in player's connection blips constantly (every
+    // page navigation is a new socket), and dumping their haul on the ground each time would be a disaster. They
+    // keep theirs; the dormancy rule is what eventually releases an absent player's.
+    // ⚠️ If we do not know where they were, KEEP it rather than dropping it at the world origin. The holdings
+    // then die with the socket as before — no worse than the old behaviour, and never wrong in a visible place.
+    {
+      const _key = playerKeyFor(socket.id);
+      if (_key.startsWith('s:') && currentAvatarRoom) {
+        const p = lastBodyPos(currentAvatarRoom, socket.id);
+        if (p) try { releaseHoldings(currentAvatarRoom, _key, p.x, p.y); } catch (e) { console.log('ledger: release on leave failed: ' + e.message); }
+      }
+    }
     // ⚠️ ONLY THE ANONYMOUS RECORD IS DROPPED. A logged-in player's holdings stay in memory: a page navigation
     // is a new socket every single time, and re-reading from disk on each one would make the common case the
     // slow one. `forgetEphemeral` is a no-op for a `d:` key by design.
