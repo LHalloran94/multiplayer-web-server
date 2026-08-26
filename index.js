@@ -2906,20 +2906,18 @@ function sendInvSync(socket, room) {
     // up client-side: the client has a copy of that table, but a progress bar drawn against a different number
     // from the one the digest is counting to is a bar that never reaches its end.
     refine: snap.refine, refPaid: snap.paid, refWorth: snap.headWorth,
-    // ⚠️ THE RATE REPORTED IS THE RATE IN EFFECT, boost included — the panel's "✦ N / sec" and its "how long
-    // for this one" line have to agree with what the digest is actually doing, or standing at a crucible looks
-    // like nothing happened for ten times as long as it should.
-    refRate: refineCfg.rate * refineMultFor(room, socket.id), refMult: refineMultFor(room, socket.id),
-    crucCost: CRUCIBLE_COST, crucR: CRUCIBLE_R,
+    // ⚠️ THE PERSONAL HOPPER IS ALWAYS THE PLAIN RATE NOW. It used to be multiplied while you stood at a
+    // crucible, which made sense when the crucible had no hopper of its own — now that it does, "the pot beside
+    // you speeds up the one in your pocket" is a second mechanic saying the same thing, and it would give one
+    // player at one crucible two parallel streams. The trickle is what you carry; the pot is the fast one.
+    refRate: refineCfg.rate,
+    crucCost: CRUCIBLE_COST, crucR: CRUCIBLE_R, crucRate: refineCfg.rate * Math.max(1, refineCfg.crucible | 0),
+    // ⚠️ WHO THIS SOCKET IS, in the ledger's own terms. The crucible's queue is public and every batch carries
+    // the key that loaded it, so the panel cannot tell "yours" from "theirs" without being told which key is
+    // yours. It is not a secret — it is `d:<discordId>` or `s:<socketId>`, both of which the client already
+    // knows about itself — but it must not be GUESSED, because a logged-in player's key is not their socket id.
+    me: playerKeyFor(socket.id),
   });
-}
-// Is this socket standing at a crucible? ⭐ ONE definition, used by the digest AND by the wire, so the number
-// the panel shows and the number the hopper is being driven at cannot disagree.
-function refineMultFor(room, sid) {
-  if (!room || !invGatedRoom(room)) return 1;
-  const p = lastBodyPos(room, sid);
-  if (!p) return 1;
-  return buildsNear(room, p.x, p.y, CRUCIBLE_R, 'crucible').length ? Math.max(1, refineCfg.crucible | 0) : 1;
 }
 // ⭐ THE DIGEST. One pass a second over the sockets that have something in the hopper — not over every player
 // in the ledger, because a logged-in identity's record stays in memory after they disconnect and refining while
@@ -2943,8 +2941,16 @@ setInterval(() => {
     const key = playerKeyFor(sid);
     if (seen.has(key)) continue;
     seen.add(key);
+    // ⭐ KEEP THE POTS THIS PLAYER CAN SEE TICKING. Crucibles are caught up lazily and that is right for the
+    // thousands nobody is looking at — but a bar that only moves when you interact is indistinguishable from a
+    // bar that is broken, so the ones with somebody standing at them are advanced and re-sent every second.
+    // The cost is bounded by how many players are standing at crucibles, not by how many crucibles exist.
+    const bp = lastBodyPos(room, sid);
+    if (bp) for (const b of buildsNear(room, bp.x, bp.y, CRUCIBLE_R, 'crucible')) {
+      if (crucibleCatchUp(room, b) || (b.q && b.q.length)) sendCrucible(room, b);
+    }
     if (!ledger.refineTotal(key)) continue;
-    const made = ledger.refineStep(key, budget * refineMultFor(room, sid));
+    const made = ledger.refineStep(key, budget);
     refinePrimaMade += made;
     // Told every tick, not only when a cell completes: the progress bar is the feedback, and a bar that only
     // moves once every few minutes is indistinguishable from a bar that is broken.
@@ -6608,7 +6614,10 @@ function sendChunkContent(sock, room, chunks) {
     const bby = roomBuildChunk[room], bm = roomBuilds[room];
     if (bby && bm) {
       const list = [];
-      for (const p of chunks) { const s = bby.get(p); if (s) for (const id of s) { const b = bm.get(id); if (b) list.push(b); } }
+      // ⚠️ CAUGHT UP AS THEY ARE SENT. Streaming a chunk is the commonest way anybody "looks at" a crucible,
+      // and it is the moment the lazy catch-up is designed for — send it stale and the first thing a returning
+      // player sees is a pot that did nothing while they were away, corrected a second later.
+      for (const p of chunks) { const s = bby.get(p); if (s) for (const id of s) { const b = bm.get(id); if (b) { crucibleCatchUp(room, b); list.push(crucibleWire(b)); } } }
       if (list.length) sock.emit('builds-chunk', { builds: list, chunks: chunks.slice() });
     }
   }
@@ -10368,8 +10377,38 @@ setInterval(() => { try { dropFlush(); } catch (e) { dropsSaveErrors++; } }, DRO
 //  while nobody is connected — offline progress, a design decision rather than an implementation detail. The
 //  version here boosts the hopper of a player STANDING BESIDE IT, which is the half that makes the place matter.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  ⭐⭐ ONE POT, ONE FIRE, A QUEUE — how a crucible holds what is inside it (user decision 2026-08-27).
+//
+//  A crucible is a physical thing with one melt in it, so it gets ONE queue rather than a compartment per
+//  player, and each batch is TAGGED WITH WHO LOADED IT. That single choice answers both of the questions this
+//  was blocked on:
+//    · MULTIPLE USERS need no contention rules at all. It is a queue at the smithy: load ore behind mine and
+//      yours melts after mine. A busy village crucible becomes a real bottleneck, which is exactly the pressure
+//      that makes a group build a second one — a base grows because it is used.
+//    · OWNERSHIP is never ambiguous. Your ore is yours and your Prima is yours, so two friends can share one
+//      crucible without it becoming a mess, and nobody takes anything by accident.
+//  Griefing narrows to "filling the queue ahead of you", which has social answers (build another, break theirs)
+//  rather than needing a rule.
+//
+//  ⭐ THE FINISHED PRIMA STAYS IN THE CRUCIBLE until somebody collects it, and that is the part that matters:
+//  it is what makes an unattended crucible WORTH ROBBING, and what makes coming home to collect a moment rather
+//  than a number that quietly went up while you were elsewhere.
+//
+//  ⭐⭐ IT REFINES WHILE NOBODY IS THERE, AND THERE IS NO TIMER. It stores when it last ran and is advanced in
+//  ONE STEP the next time anybody looks at it — the same trick as the shared day/night clock, computed from the
+//  wall clock with no state to resynchronise. A world full of idle crucibles costs nothing.
+//  ⚠️ NOT INFLATION: the matter was already mined. Refining converts what somebody dug; it creates nothing.
+//  ⚠️ THE TRADE, ACCEPTED DELIBERATELY: N crucibles are N parallel refine streams, so §3's rate cap becomes
+//  per-STRUCTURE rather than per-player. The brakes are capital and exposure — each costs `CRUCIBLE_COST` and
+//  each is a raidable target standing in the open. That is industry, and it is meant to be reachable.
+//
+//  ⭐ BREAKING EJECTS EVERYTHING AS CAIRNS — every player's ore, every player's Prima, and the deposit. Raiding
+//  is therefore LOUD and destructive rather than a passive drain you could do by loitering, it reuses dispersal
+//  on death wholesale, and it is exactly conserving.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 const CRUCIBLE_COST = 500;          // Prima to place, refunded in full to whoever breaks it
-const CRUCIBLE_R = 96;              // how near you must stand for the boost, in world px (~12 cells)
+const CRUCIBLE_R = 96;              // how near you must stand to load, collect or break it (world px, ~12 cells)
 const CRUCIBLE_MIN_GAP = 64;        // …and how far apart two of them must be, so a base is not a wall of them
 const BUILD_FLUSH_MS = 5000;
 let buildsSaved = 0, buildsLoadedRows = 0, buildsSaveErrors = 0;
@@ -10407,7 +10446,9 @@ function ensureBuildsLoaded(room) {
     if (!Array.isArray(list)) continue;
     for (const p of list) {
       if (!p || !p.id || !isFinite(+p.x) || !isFinite(+p.y)) continue;
-      const b = { id: p.id, type: p.type || 'crucible', x: +p.x, y: +p.y, by: p.by || '', t0: p.t0 || Date.now() };
+      const b = { id: p.id, type: p.type || 'crucible', x: +p.x, y: +p.y, by: p.by || '', t0: p.t0 || Date.now(),
+                  q: Array.isArray(p.q) ? p.q.filter(e => e && e.n > 0) : [], paid: p.paid | 0,
+                  out: p.out || {}, spare: p.spare || {}, t: p.t || Date.now() };
       const k = +String(b.id).slice(1); if (k > hi) hi = k;   // …or the next placement claims a restored one's id
       buildIndex(room, b);
       n++;
@@ -10431,7 +10472,11 @@ function buildFlush(max) {
       const list = [];
       if (ids && bm) for (const id of ids) {
         const b = bm.get(id);
-        if (b) list.push({ id: b.id, type: b.type, x: b.x, y: b.y, by: b.by, t0: b.t0 });
+        // ⚠️ THE POT'S CONTENTS GO TO DISK WITH IT, `t` included. Without `t` a restart would look like the
+        // crucible had been idle since the moment it comes back, quietly throwing away however long it really
+        // stood there — matter that had melted and been forgotten.
+        if (b) list.push({ id: b.id, type: b.type, x: b.x, y: b.y, by: b.by, t0: b.t0,
+                          q: b.q || [], paid: b.paid | 0, out: b.out || {}, spare: b.spare || {}, t: b.t || Date.now() });
       }
       try {
         if (list.length) { _putBuildRow.run(room, ch, JSON.stringify(list)); buildsSaved++; }
@@ -10444,6 +10489,44 @@ function buildFlush(max) {
   return wrote;
 }
 setInterval(() => { try { buildFlush(); } catch (e) { buildsSaveErrors++; } }, BUILD_FLUSH_MS);
+// ⭐ CAUGHT UP LAZILY, NOT TICKED. Everything that reads a crucible calls this first, so a crucible nobody has
+// looked at for eight hours costs exactly one call when somebody finally does, and a world full of idle ones
+// costs nothing at all.
+// ⚠️ CLAMPED. A server that was down for a week must not hand back a week of refining the moment it comes up —
+// the queue is finite so the result is bounded anyway, but the intermediate arithmetic is not.
+const CRUCIBLE_MAX_CATCHUP_MS = 12 * 3600 * 1000;
+function crucibleCatchUp(room, b) {
+  if (!b || b.type !== 'crucible') return 0;
+  const now = Date.now();
+  if (!b.t) { b.t = now; return 0; }
+  const dt = Math.min(now - b.t, CRUCIBLE_MAX_CATCHUP_MS);
+  b.t = now;
+  if (dt < 1000 || !b.q || !b.q.length) return 0;
+  const rate = Math.max(0, refineCfg.rate | 0) * Math.max(1, refineCfg.crucible | 0);
+  const budget = Math.floor(rate * dt / 1000);
+  if (budget <= 0) return 0;
+  const st = { paid: b.paid | 0 };
+  const made = LEDGER.digestQueue(b.q, st, budget, (m) => MATGEN.primaWorthOf(m),
+    // ⭐ CREDITED TO WHOEVER LOADED IT, into the crucible's own store rather than their ledger. That is what
+    // makes a full crucible worth robbing, and what makes collecting it a moment.
+    (k, worth) => { b.out[k] = (b.out[k] | 0) + worth; },
+    // ⚠️ A material the table stops pricing cannot melt, and must not be destroyed for it. It goes into the
+    // pot's `spare` shelf, still tagged, and comes out with that player's Prima when they collect. Only
+    // reachable if the worth table changes under a loaded crucible — `build-load` refuses unpriced ore — but
+    // "cannot happen today" is exactly how matter gets deleted later.
+    (dud) => { const s = (b.spare[dud.k] = b.spare[dud.k] || {}); s[dud.m] = (s[dud.m] | 0) + dud.n; });
+  b.paid = st.paid;
+  if (made) buildsTouch(room, b.ch);
+  return made;
+}
+// What a socket is told about one crucible. ⚠️ EVERYBODY SEES WHOSE ORE IS IN IT — that is deliberate: the
+// queue is public, which is what makes "somebody is using my crucible" legible instead of mysterious.
+function crucibleWire(b) {
+  return { id: b.id, type: b.type, x: b.x, y: b.y, by: b.by, ch: b.ch,
+           q: (b.q || []).map(e => [e.k, e.m, e.n]), paid: b.paid | 0, out: b.out || {}, spare: b.spare || {},
+           rate: Math.max(0, refineCfg.rate | 0) * Math.max(1, refineCfg.crucible | 0) };
+}
+function sendCrucible(room, b) { emitToChunk(room, b.ch, 'build-add', crucibleWire(b)); }
 // Every structure within `r` of a point, cheaply: only the chunk it is in and the eight around it. Same shape as
 // `dropMergeTarget`'s neighbourhood scan and for the same reason — a radius can cross a chunk seam.
 function buildsNear(room, x, y, r, type) {
@@ -10633,10 +10716,18 @@ function releaseHoldings(room, key, x, y, spread) {
   const peek = ledger.snapshot(key);
   if (!peek.mats.length && !peek.prima) return null;
   const held = ledger.takeAll(key);
-  // ⚠️ SPLIT AFTER THE TAKE AND BEFORE THE SPAWNS, and it must be exhaustive: `splitHoldings` returns buckets
-  // whose contents sum EXACTLY to what came out of the ledger, because anything it rounded away would be
-  // matter destroyed by the act of dying — which is the leak this whole track exists to close.
-  const parts = spread > 1 ? splitHoldings(held.mats, held.prima, spread) : [{ mats: held.mats, prima: held.prima }];
+  const out = scatterMatter(room, x, y, held.mats, held.prima, spread);
+  console.log(`ledger: released ${held.mats.reduce((a, m) => a + m[1], 0)} cell(s) + ${held.prima} prima at ${x | 0},${y | 0} as `
+    + out.map(d => d.id).join('+'));
+  return out[0] || null;
+}
+// ⭐ MATTER ONTO THE GROUND, IN PIECES. Extracted from `releaseHoldings` when breaking a crucible needed exactly
+// the same act — a death and a smashed pot both end with somebody's things fanned across the ground for anyone
+// to pick up, and they should look the same because they ARE the same.
+// ⚠️ SPLIT BEFORE THE SPAWNS AND EXHAUSTIVELY: `splitHoldings` returns buckets summing EXACTLY to what went in,
+// because anything rounded away would be matter destroyed by the act of dying.
+function scatterMatter(room, x, y, mats, prima, spread) {
+  const parts = spread > 1 ? splitHoldings(mats, prima, spread) : [{ mats, prima }];
   const out = [];
   for (let i = 0; i < parts.length; i++) {
     // Fan the pieces out with a THROW rather than by teleporting them to scattered coordinates. The throw is
@@ -10644,14 +10735,12 @@ function releaseHoldings(room, key, x, y, spread) {
     // somewhere a player can actually stand — a hand-picked offset would happily post a cairn inside a cliff.
     const t = parts.length > 1 ? (i / (parts.length - 1)) * 2 - 1 : 0;   // -1 … +1 across the fan
     const vx = parts.length > 1 ? t * DEATH_SCATTER_VX : 0;
-    // A hold on this one too: a released haul that the next passer-by hoovers up before it has visibly landed
-    // reads as a bug rather than as an event. On a death it is also what makes the scramble a scramble — the
-    // killer cannot stand on the corpse and inhale it before anyone else arrives.
+    // A hold on this one too: a haul the next passer-by hoovers up before it has visibly landed reads as a bug
+    // rather than as an event. On a death it is also what makes the scramble a scramble — the killer cannot
+    // stand on the corpse and inhale it before anyone else arrives.
     out.push(spawnDrop(room, x, y, parts[i].mats, parts[i].prima, { hold: INV_DROP_HOLD_MS, vx }));
   }
-  console.log(`ledger: released ${held.mats.reduce((a, m) => a + m[1], 0)} cell(s) + ${held.prima} prima at ${x | 0},${y | 0} as `
-    + out.map(d => d.id).join('+'));
-  return out[0] || null;
+  return out;
 }
 // How many pieces a death makes. ⭐ SCALED BY WHAT YOU WERE CARRYING: a player who had one rock on them should
 // not leave a five-cairn battlefield, and a player who had an evening's mining should not leave one tidy heap
@@ -12343,31 +12432,98 @@ io.on('connection', (socket) => {
     // 🟥 THE DEPOSIT COMES OUT ONLY ONCE THERE IS SOMEWHERE FOR IT TO GO — the same rule `releaseHoldings`
     // records. Debit first and fail after, and the Prima is annihilated.
     const b = { id: 'b' + (++buildSeq), type: 'crucible', x: p.x, y: dropRestY(currentAvatarRoom, p.x, p.y),
-                by: currentUsername || '', t0: Date.now() };
+                by: currentUsername || '', t0: Date.now(),
+                q: [], paid: 0, out: {}, spare: {}, t: Date.now() };
     ledger.grantPrima(key, -CRUCIBLE_COST);
     buildIndex(currentAvatarRoom, b);
-    emitToChunk(currentAvatarRoom, b.ch, 'build-add', b);
-    socket.emit('build-add', b);                        // the placer may not be subscribed to the chunk it landed in
+    sendCrucible(currentAvatarRoom, b);
+    socket.emit('build-add', crucibleWire(b));          // the placer may not be subscribed to the chunk it landed in
     sendInvSync(socket, currentAvatarRoom);
     console.log(`crucible: ${currentUsername || 'someone'} placed ${b.id} at ${b.x | 0},${b.y | 0}`);
+  });
+  // Which crucible this socket is standing at, or null. ⚠️ CAUGHT UP FIRST, always: every path that reads one
+  // goes through here, so the record a handler acts on is never stale.
+  function atCrucible(id) {
+    if (!currentAvatarRoom || !invGatedRoom(currentAvatarRoom)) return null;
+    ensureBuildsLoaded(currentAvatarRoom);
+    const map = roomBuilds[currentAvatarRoom];
+    const b = map && map.get(id);
+    if (!b || b.type !== 'crucible') return null;
+    const p = lastBodyPos(currentAvatarRoom, socket.id);
+    if (!p || Math.hypot(b.x - p.x, b.y - p.y) > CRUCIBLE_R) return null;
+    crucibleCatchUp(currentAvatarRoom, b);
+    return b;
+  }
+  // ── loading the pot ───────────────────────────────────────────────────────────────────────────────────────
+  // ⚠️ MERGED BY (WHO, WHAT). Two loads of the same ore by the same player are one batch, so the queue stays a
+  // few readable entries rather than growing for ever — but two PLAYERS' gold stay separate entries, which is
+  // the whole point: the queue is FIFO and whose is whose has to survive it.
+  socket.on('build-load', ({ id, mat, n }) => {
+    const b = atCrucible(id); if (!b) return;
+    const m = mat | 0, want = Math.max(0, Math.min(1e9, n | 0));
+    if (!want || !MATGEN.primaRefinable(m)) return;
+    const key = playerKeyFor(socket.id);
+    const took = ledger.spend(key, m, want);
+    if (!took) return;
+    const e = b.q.find(x => x.k === key && x.m === m);
+    if (e) e.n += took; else b.q.push({ k: key, m, n: took });
+    buildsTouch(currentAvatarRoom, b.ch);
+    sendCrucible(currentAvatarRoom, b); socket.emit('build-add', crucibleWire(b));
+    sendInvSync(socket, currentAvatarRoom);
+  });
+  // Take your own ore back out. ⚠️ ONLY YOUR OWN — the queue is public to READ so you can see who is ahead of
+  // you, and private to touch. Unloading somebody else's batch would be theft with no cost and no risk, which
+  // is exactly what breaking the crucible is supposed to be the only route to.
+  socket.on('build-unload', ({ id, mat }) => {
+    const b = atCrucible(id); if (!b) return;
+    const key = playerKeyFor(socket.id), m = mat | 0;
+    const i = b.q.findIndex(x => x.k === key && x.m === m);
+    if (i < 0) return;
+    const back = b.q[i].n;
+    b.q.splice(i, 1);
+    if (i === 0) b.paid = 0;                            // the part-melted cell's progress is lost, not paid out
+    ledger.credit(key, [[m, back]]);
+    buildsTouch(currentAvatarRoom, b.ch);
+    sendCrucible(currentAvatarRoom, b); socket.emit('build-add', crucibleWire(b));
+    sendInvSync(socket, currentAvatarRoom);
+  });
+  // Collect what has melted for you — and anything the pot could not melt, which comes back as material.
+  socket.on('build-collect', ({ id }) => {
+    const b = atCrucible(id); if (!b) return;
+    const key = playerKeyFor(socket.id);
+    const got = b.out[key] | 0, sp = b.spare[key];
+    if (!got && !sp) return;
+    if (got) { ledger.grantPrima(key, got); delete b.out[key]; }
+    if (sp) { ledger.credit(key, Object.keys(sp).map(k => [k | 0, sp[k] | 0])); delete b.spare[key]; }
+    buildsTouch(currentAvatarRoom, b.ch);
+    sendCrucible(currentAvatarRoom, b); socket.emit('build-add', crucibleWire(b));
+    sendInvSync(socket, currentAvatarRoom);
   });
   // ⭐ ANYBODY CAN BREAK IT, AND THEY GET THE DEPOSIT. That is §6's "raidable, not safe" for free: a base is a
   // claim you keep by being there, not a title deed. It is also what makes the cost conserving — the Prima was
   // never spent, only parked.
   socket.on('build-break', ({ id }) => {
-    if (!currentAvatarRoom || !invGatedRoom(currentAvatarRoom)) return;
-    ensureBuildsLoaded(currentAvatarRoom);
-    const map = roomBuilds[currentAvatarRoom];
-    const b = map && map.get(id);
-    if (!b) return;                                     // already gone — somebody else got there first
-    const p = lastBodyPos(currentAvatarRoom, socket.id);
-    if (!p || Math.hypot(b.x - p.x, b.y - p.y) > CRUCIBLE_R) return;   // you have to be AT it
+    const b = atCrucible(id); if (!b) return;           // gone, or you are not standing at it
     buildUnindex(currentAvatarRoom, b);
-    ledger.grantPrima(playerKeyFor(socket.id), CRUCIBLE_COST);
+    // 🟥 EVERYTHING IN IT GOES ON THE GROUND — every player's ore, every player's Prima and the spare shelf,
+    // fanned out exactly as a death scatters a pouch. Nothing is handed to the breaker and nothing is deleted:
+    // they have to pick it up like anybody else, which is what makes a raid a SCRAMBLE rather than a transfer,
+    // and it is why the contents of somebody else's crucible are safe from everything except demolition.
+    const mats = new Map(); let prima = 0;
+    for (const e of (b.q || [])) if (e.n > 0) mats.set(e.m, (mats.get(e.m) || 0) + e.n);
+    for (const k of Object.keys(b.spare || {})) for (const m of Object.keys(b.spare[k])) mats.set(m | 0, (mats.get(m | 0) || 0) + (b.spare[k][m] | 0));
+    for (const k of Object.keys(b.out || {})) prima += b.out[k] | 0;
+    // ⭐ AND THE DEPOSIT SCATTERS TOO rather than being handed over. A build cost is Prima parked in the world,
+    // so demolishing it puts that Prima back IN the world — the breaker gets it by picking it up, in the open,
+    // where anyone else who heard the noise can reach it first.
+    prima += CRUCIBLE_COST;
+    const list = [...mats].filter(e => e[1] > 0);
+    const out = scatterMatter(currentAvatarRoom, b.x, b.y - 12, list, prima,
+      deathSpread(list, prima));
     emitToChunk(currentAvatarRoom, b.ch, 'build-removed', { id });
     socket.emit('build-removed', { id });
-    sendInvSync(socket, currentAvatarRoom);
-    console.log(`crucible: ${currentUsername || 'someone'} broke ${b.id} (built by ${b.by || 'unknown'})`);
+    console.log(`crucible: ${currentUsername || 'someone'} broke ${b.id} (built by ${b.by || 'unknown'}) — `
+      + `${list.reduce((a, e) => a + e[1], 0)} cell(s) + ${prima} prima scattered as ${out.map(d => d.id).join('+')}`);
   });
   // ══════════════════════════════════════════════════════════════════════════════════════════════════════════
   //  ⭐⭐ DISPERSAL ON DEATH (kickoff_prima.md §4). You drop everything — Prima AND material — scattered where

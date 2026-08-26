@@ -41,6 +41,36 @@
 const PERSIST_PREFIX = 'd:';                 // only authenticated keys reach the database
 const FLUSH_MS = 2500;                       // debounce: a dig swing is many credits in a moment
 
+// ⭐⭐ THE DIGEST ITSELF, AS ONE FUNCTION, because there are now two things that own a hopper: a player (the
+// slow trickle they carry) and a crucible (the fast one standing in the world). They differ in who is credited
+// and how fast, and in nothing else — so the arithmetic lives here once rather than being copied and then
+// diverging, which is the shape this project keeps getting caught by.
+//
+// 🟥 THE PROPERTY IT EXISTS TO HOLD: a cell yields EXACTLY its worth, and a part-finished cell is remembered as
+// `paid` rather than credited. Prima is granted only when a whole cell completes — anything else lets a
+// cancelled half-refined cell come back whole with the Prima already paid for it, which mints matter.
+//
+// `q` is a queue of { m: material, n: count, k?: whose }. `state.paid` is progress toward the head's current
+// cell. `onCell(k, worth)` is called once per completed cell — that is where the two callers differ.
+// ⚠️ `budget` is PRIMA of work, not cells. That is the §3 rule: income is capped by value per second whatever
+// you feed it, so cheap material does not become the best earner.
+function digestQueue(q, state, budget, worthOf, onCell, onDud) {
+  let left = budget | 0, made = 0;
+  while (left > 0 && q.length) {
+    const head = q[0], worth = worthOf(head.m) | 0;
+    // A material the table no longer prices would spin here for ever. Hand it back rather than dissolve it for
+    // nothing — the caller decides where "back" is.
+    if (worth <= 0) { if (onDud) onDud(head); q.shift(); state.paid = 0; continue; }
+    const need = worth - state.paid;
+    if (left < need) { state.paid += left; left = 0; break; }
+    left -= need; state.paid = 0;
+    head.n -= 1; made += worth;
+    onCell(head.k, worth);
+    if (head.n <= 0) q.shift();
+  }
+  return made;
+}
+
 class Ledger {
   constructor(db, opts) {
     this.db = db || null;
@@ -246,19 +276,11 @@ class Ledger {
     if (budget <= 0) return 0;
     const h = this._rec(key);
     if (!h.refine.length) return 0;
-    let left = budget, made = 0;
-    while (left > 0 && h.refine.length) {
-      const head = h.refine[0], worth = this.worthOf(head.m) | 0;
-      // A material whose worth has gone to zero (a re-measured table, a removed mineral) would otherwise spin
-      // here for ever. Hand it back rather than dissolve it for nothing.
-      if (worth <= 0) { this.refineCancel(key, head.m); continue; }
-      const need = worth - h.paid;
-      if (left < need) { h.paid += left; left = 0; break; }
-      left -= need; h.paid = 0;
-      head.n -= 1; made += worth;
-      if (head.n <= 0) h.refine.shift();
-      this.stats.refined++;
-    }
+    const st = { paid: h.paid };
+    const made = digestQueue(h.refine, st, budget, this.worthOf,
+      () => { this.stats.refined++; },
+      (dud) => { h.mats.set(dud.m, (h.mats.get(dud.m) || 0) + dud.n); });   // unpriced ⇒ straight back to the pouch
+    h.paid = st.paid;
     if (made) { h.prima += made; this.stats.primaMade += made; }
     this._touch(key);
     return made;
@@ -328,4 +350,4 @@ class Ledger {
   }
 }
 
-module.exports = { Ledger, PERSIST_PREFIX };
+module.exports = { Ledger, PERSIST_PREFIX, digestQueue };
