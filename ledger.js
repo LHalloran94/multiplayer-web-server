@@ -176,6 +176,18 @@ class Ledger {
       headWorth: head ? this.worthOf(head.m) : 0,
     };
   }
+  // ⭐ WHAT YOU ARE WORTH TO A KILLER — Prima carried, plus what everything in the pouch and the hopper would
+  // refine into. That is the quantity the wealth glow reads (§9): not the balance, but how much trouble you are
+  // in if somebody takes you down, which is the whole reason the glow exists.
+  // ⚠️ The crucible's contents are NOT in it. They are not on you, they do not drop when you die, and a glow
+  // that counted them would advertise a base's holdings from its owner's body.
+  carriedWorth(key) {
+    const h = this._rec(key);
+    let w = h.prima | 0;
+    for (const [m, n] of h.mats) w += this.worthOf(m) * n;
+    for (const e of h.refine) w += this.worthOf(e.m) * e.n;
+    return w;
+  }
   refineTotal(key) {
     const h = this._rec(key);
     let n = 0; for (const e of h.refine) n += e.n;

@@ -2917,7 +2917,14 @@ function sendInvSync(socket, room) {
     // yours. It is not a secret — it is `d:<discordId>` or `s:<socketId>`, both of which the client already
     // knows about itself — but it must not be GUESSED, because a logged-in player's key is not their socket id.
     me: playerKeyFor(socket.id),
+    // Your own band, from the same function everybody else's comes from — so the glow on your own body is the
+    // glow other people are seeing, not a second guess computed from numbers only you can see.
+    wband: wealthBandOf(room, socket.id), wbands: WEALTH_BANDS.length,
   });
+  // ⭐ ONE HOOK, HERE. `sendInvSync` is called from every path that can move a balance — a pickup, a placement,
+  // a refine tick, a death — so hanging the broadcast off it means there is no way to change somebody's wealth
+  // without the room finding out, and no second list of "places that must remember to do this".
+  pushWealth(socket, room);
 }
 // ⭐ THE DIGEST. One pass a second over the sockets that have something in the hopper — not over every player
 // in the ledger, because a logged-in identity's record stays in memory after they disconnect and refining while
@@ -7307,10 +7314,52 @@ function relayPos(room, sid, msg) {
 function relayProfile(room, sid, msg) {
   if (!room || !msg) return;
   const m = roomProfile[room] || (roomProfile[room] = new Map());
-  m.set(sid, { id: sid, username: String(msg.username || '').slice(0, 64), fill: msg.fill || null });
+  // ⚠️ `w` IS NOT TAKEN FROM `msg`. Username and fill are things you are entitled to describe about yourself;
+  // how rich you are is not. The first cheat anybody writes is the one that hides their own wealth glow.
+  m.set(sid, { id: sid, username: String(msg.username || '').slice(0, 64), fill: msg.fill || null,
+               w: wealthBandOf(room, sid) });
   return m.get(sid);
 }
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  ⭐⭐ THE WEALTH GLOW (kickoff_prima.md §9) — enough to paint a target on a rich player's back.
+//
+//  🟥 THE WIRE CARRIES THE BAND, NOT THE AMOUNT, and that is the design rather than a saving. §9 wants it
+//  "legible far away, vague up close" — the opposite of a normal HUD — so that a bandit can tell rich from poor
+//  across a valley and still cannot tell whether you have 900 or 1,000. Sending the balance and rounding it for
+//  DISPLAY would leave the exact figure sitting in the packet for anybody reading their own network traffic.
+//  Quantising at the source is the only version of "vague" that is actually true.
+//  ⭐ It also makes the update rate collapse to nothing: the band changes a handful of times over a session, so
+//  this rides the identity channel (`avt-profiles`, sent on change) rather than the position stream.
+//
+//  Logarithmic and saturating: each step is ~√10 of the last, so the scale spans a thousandfold and still has
+//  somewhere to go at the top. Below the first threshold there is no glow at all — most players, most of the
+//  time, are not carrying anything worth killing for.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+const WEALTH_BANDS = [1000, 3000, 10000, 30000, 100000, 300000];
+function wealthBandOf(room, sid) {
+  if (!room || !invGatedRoom(room)) return 0;      // no economy in this room ⇒ nothing to advertise
+  const w = ledger.carriedWorth(playerKeyFor(sid));
+  let b = 0; for (let i = 0; i < WEALTH_BANDS.length; i++) if (w >= WEALTH_BANDS[i]) b = i + 1;
+  return b;
+}
+// Tell the room when somebody's band CHANGES, and only then. ⚠️ It rides the existing profile record so a
+// client that has never heard of this player still gets a complete one; when there is no record yet it sends a
+// PARTIAL, which is why the client merges rather than replaces (a rebuild by name is how that seam has lost
+// fields six times — see project_render_parity).
+const _wealthSent = new Map();                     // socketId → the band its room was last told
+function pushWealth(socket, room) {
+  if (!room) return;
+  const b = wealthBandOf(room, socket.id);
+  if (_wealthSent.get(socket.id) === b) return;
+  _wealthSent.set(socket.id, b);
+  const p = (roomProfile[room] || new Map()).get(socket.id);
+  if (p) { p.w = b; socket.to(room).emit('avt-profiles', { profiles: [p] }); }
+  else socket.to(room).emit('avt-profiles', { profiles: [{ id: socket.id, w: b }] });
+}
 function dropRelay(room, sid) {
+  // ⚠️ …and the wealth band this socket was last announced at, or a reused socket id inherits somebody else's
+  // and its first real change is silently swallowed as "no change". Same reasoning as the ack maps below.
+  _wealthSent.delete(sid);
   const p = roomPos[room]; if (p) { p.delete(sid); if (!p.size) delete roomPos[room]; }
   const f = roomProfile[room]; if (f) { f.delete(sid); if (!f.size) delete roomProfile[room]; }
   // BOTH DIRECTIONS. The leaver's own ack map goes, and so does every mention of them in everyone
