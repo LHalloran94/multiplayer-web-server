@@ -19,6 +19,7 @@ const MWSim = require('./avatar-sim'); // shared authoritative avatar simulation
 const WORLDGEN = require('./worldgen');
 const WORLDGEN2 = require('./worldgen2'); // the PORTED world redesign (port inc 3-6). Ships OFF: worldCfg.gen2 // Phase 6 inc 4: chunk-on-demand world generation (the Overworld's generator)
 const DOMAINS = require('./domains');   // Phase 6 inc 6: which column of the Overworld a site spawns at
+const LEDGER = require('./ledger');     // the Prima economy: what each player carries, held HERE and not in a browser
 const MATGEN = require('./materials');  // Phase 6 world-redesign port inc 1: the generator's materials, ids 18..89
                                         // ⚠️ ALSO INLINED INTO THE CLIENT BUNDLE by extension/build.js (as MWMats),
                                         // the same way avatar-sim.js is. One table, two readers — never copy rows out.
@@ -2815,6 +2816,30 @@ const domains = DOMAINS.makeDomains({
 const domainsTest = DOMAINS.makeDomains({
   cols: OVERWORLD_DIMS.cols, rows: OVERWORLD_DIMS.rows, cell: TERRAIN_CELL, spacingPx: domainCfg.spacingPx,
 });
+// ⭐ THE PRIMA LEDGER, instantiated HERE for the same reason `domains` is: `probe_domains` B asserts that a
+// module-level require is not USED inside the sliced cell-store block, because instantiating one in there is a
+// ReferenceError in every rig and nowhere else — this project has hit that exact shape five times now. The
+// registry above is the precedent; this sits beside it deliberately.
+const ledger = new LEDGER.Ledger(db);
+// A player key: `d:` for a logged-in identity (persisted across restarts), `s:` for an anonymous socket
+// (ephemeral, gone when they go). ⚠️ ONE definition, because the credit path, the spend path and the wire all
+// have to agree about whose balance they are touching, and a second copy of this rule is a way to pay one
+// player and charge another.
+function playerKeyFor(socketId) {
+  const d = socketToDiscordId[socketId];
+  return d ? 'd:' + d : 's:' + socketId;
+}
+// Where the economy applies. ⚠️ MUST MATCH THE CLIENT'S `invGated()`, which is `!!avOverworld` — the placer,
+// the preview, the material picker and now the server's debit all have to agree about which world they are in,
+// or the client shows a cost the server does not charge (or worse, the reverse).
+function invGatedRoom(room) { return !!room && overworldRooms.has(room); }
+// ⚠️ The room is PASSED, not looked up: a socket's avatar room lives in the connection closure
+// (`currentAvatarRoom`) and there is no global map of it. Inventing one here would be a second source of truth
+// for which room a socket is in, which is exactly the kind of drift this file keeps getting bitten by.
+function sendInvSync(socket, room) {
+  const snap = ledger.snapshot(playerKeyFor(socket.id));
+  socket.emit('inv-sync', { prima: snap.prima, mats: snap.mats, gated: invGatedRoom(room) });
+}
 function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', worldGeom(room), room)); }
 function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', worldGeom(room), room)); }
 // Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
@@ -2835,32 +2860,43 @@ function carveCellSrv(grid, hp, mats, i, hard) {
   }
   grid.s(i, 0); hp.s(i, 0); return true;
 }
-function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard) {
+// ⭐ THESE RETURN THE NUMBER OF CELLS THEY CHANGED, NOT A BOOLEAN, and the Prima economy is why: a placement
+// has to be paid for in exactly the cells it actually placed, and only the raster knows that number (a cell
+// already holding this material costs nothing). 0 is falsy and any count is truthy, so every existing
+// `if (raster…)` reads the same — this is a widening, not a change of meaning.
+// `cap` limits how many cells a PAINT may change; the loop stops there. That is what makes "you place what you
+// can afford" a property of the raster rather than a pre-flight dry run over the same cells, which would double
+// the cost of the hottest edit path in the server. ⚠️ It does NOT limit carving: digging is free and always was.
+function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard, cap) {
   const COLS = grid.geom.cols, ROWS = grid.geom.rows;                 // Phase 6: the grid carries its own shape
   const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
   const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
-  const r2 = r * r; let changed = false;
+  const r2 = r * r; let changed = 0;
+  const lim = (val && cap != null) ? cap : Infinity;
   for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
+    if (changed >= lim) return changed;
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) > r2) continue;
     const i = cx * ROWS + ry;
-    if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed = true; } hp.s(i, matStrengthSrv(mats, val)); }
-    else if (carveCellSrv(grid, hp, mats, i, hard)) changed = true;
+    if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
+    else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
   }
   return changed;
 }
 // Axis-aligned square fill (the manual brush; r = half-extent). Carves/paints blocky, grid-aligned terrain.
-function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard) {
+function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard, cap) {
   const COLS = grid.geom.cols, ROWS = grid.geom.rows;                 // Phase 6: the grid carries its own shape
   const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
   const r0 = Math.max(0, Math.floor((wy - r) / TERRAIN_CELL)), r1 = Math.min(ROWS - 1, Math.floor((wy + r) / TERRAIN_CELL));
-  let changed = false;
+  let changed = 0;
+  const lim = (val && cap != null) ? cap : Infinity;
   for (let ry = r0; ry <= r1; ry++) for (let cx = c0; cx <= c1; cx++) {
+    if (changed >= lim) return changed;
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if (Math.abs(ccx - wx) > r || Math.abs(ccy - wy) > r) continue;
     const i = cx * ROWS + ry;
-    if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed = true; } hp.s(i, matStrengthSrv(mats, val)); }
-    else if (carveCellSrv(grid, hp, mats, i, hard)) changed = true;
+    if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
+    else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
   }
   return changed;
 }
@@ -10942,6 +10978,10 @@ io.on('connection', (socket) => {
       // lighting) was per-browser; a sun that casts shadows has to be the same sun for everyone in the room.
       clock: worldClockWire(),
       overworld: _isOver ? 1 : 0 });
+    // ⭐ WHAT YOU ARE CARRYING, on the same server-decided seam as `spawn` / `dims` / `clock`. The pouch was
+    // browser-local until the Prima economy, so a client arrived believing whatever its own storage said; now it
+    // is TOLD, on every join, and its own copy is a display of this one rather than a second source of truth.
+    sendInvSync(socket, avRoom);
     // ⭐ THE GROUND UNDER THE SPAWN, ASKED FOR BEFORE THE CLIENT CAN ASK FOR IT. The client holds its body still
     // until the chunks around its spawn have arrived (see the spawn gate in 16e), so how long that hold lasts is
     // decided entirely by how soon those chunks are queued. Waiting for the first beacon costs a round trip plus
@@ -11531,7 +11571,16 @@ io.on('connection', (socket) => {
   socket.on('drop-take', ({ id }) => {
     const map = currentAvatarRoom && roomDrops[currentAvatarRoom];
     if (!map || !map.has(id)) return;             // already gone — someone else got there first
+    // ⭐ CREDIT FROM THE SERVER'S OWN COPY OF THE PILE, never from the taker's claim about it. This is what
+    // makes crediting safe with no new trust machinery: the drop list was ALREADY server-owned (so two players
+    // could not both collect one pile), so the server already knows exactly what was in it. The client is told
+    // the result; it is never asked.
+    const d = map.get(id);
     map.delete(id);
+    if (d && d.mats && d.mats.length) {
+      ledger.credit(playerKeyFor(socket.id), d.mats);
+      sendInvSync(socket, currentAvatarRoom);
+    }
     io.to(currentAvatarRoom).emit('drop-removed', { id, by: socket.id });
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits }) => {
@@ -11582,8 +11631,28 @@ io.on('connection', (socket) => {
         const i = cc * _R + ry; _tr.box.push(i); if (grid.g(i)) _tr.solidBefore++;
       }
     }
-    let _did = false;
-    for (let _h = 0; _h < nHits; _h++) if ((sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd)) _did = true;
+    // ── THE DEBIT. In a gated room a paint is paid for out of the server's ledger, in exactly the cells it
+    // actually places. ⭐ THE BRUSH IS CAPPED RATHER THAN THE STROKE REFUSED: you place what you can afford and
+    // the rest simply does not appear, which is both kinder and cheaper than a pre-flight count over the same
+    // cells. ⚠️ Carving is NOT charged — digging is how you earn, and it always was free.
+    // ⚠️ A refused or clamped paint needs NO bespoke revert on the client. The client paints optimistically, the
+    // server does not, and the existing chunk sync heals the difference — the same mechanism that made a carve
+    // "appear locally then come back" when the server disagreed. That is why this is a small change.
+    const _payMat = (op === 'paint' && invGatedRoom(currentAvatarRoom)) ? m : 0;
+    const _payKey = _payMat ? playerKeyFor(socket.id) : null;
+    let _budget = _payMat ? ledger.budget(_payKey, _payMat) : null;
+    if (_payMat && _budget <= 0) return;                    // nothing to build with — the stroke does nothing
+    let _did = 0;
+    for (let _h = 0; _h < nHits; _h++) {
+      const _n = (sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd, _budget);
+      _did += _n;
+      if (_payMat) {
+        if (_n) ledger.spend(_payKey, _payMat, _n);
+        _budget -= _n;
+        if (_budget <= 0) break;
+      }
+    }
+    if (_payMat && _did) sendInvSync(socket, currentAvatarRoom);
     if (_tr) {
       let cleared = 0, chipped = 0, left = [];
       for (const i of _tr.box) { const v = grid.g(i); if (!v) cleared++; else { chipped++; if (left.length < 6) left.push(v + ':hp' + hp.g(i) + '/' + matStrengthSrv(mats, v)); } }
@@ -12154,6 +12223,10 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    // ⚠️ ONLY THE ANONYMOUS RECORD IS DROPPED. A logged-in player's holdings stay in memory: a page navigation
+    // is a new socket every single time, and re-reading from disk on each one would make the common case the
+    // slow one. `forgetEphemeral` is a no-op for a `d:` key by design.
+    ledger.forgetEphemeral(playerKeyFor(socket.id));
     if (currentRoom) {
       if (roomUsers[currentPresenceRoom]) delete roomUsers[currentPresenceRoom][socket.id];
       if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][socket.id];
@@ -12245,6 +12318,12 @@ server.listen(3000, () => console.log('Server running on port 3000'));
 function worldFlushAll(why) {
   try { const n = worldFlush(1e9); if (n) console.log(`world persistence: flushed ${n} resident chunk(s) on ${why}`); }
   catch (e) { console.log('world flush on ' + why + ' failed: ' + e.message); }
+  // ⚠️ THE LEDGER FLUSHES ON THE SAME SEAM AS THE WORLD, and it has to: its writes are debounced by seconds, so
+  // a restart inside that window is a player's haul deleted. This is the same lesson the world persistence
+  // already learned — eviction alone was not a sufficient write seam, because the ground you are STANDING on is
+  // the one thing never saved.
+  try { const n = ledger.flush(); if (n) console.log(`ledger: flushed ${n} player holding(s) on ${why}`); }
+  catch (e) { console.log('ledger flush on ' + why + ' failed: ' + e.message); }
 }
 process.on('SIGTERM', () => {
   worldFlushAll('SIGTERM');
