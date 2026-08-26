@@ -1667,7 +1667,14 @@ let objSeq = 0;
 // solid cell, and every client animates the drop from spawn to rest itself. That means one message per drop
 // for its whole life, and no per-tick position stream.
 const roomDrops = {};   // room → Map<dropId, drop>   drop = { id, x, y, gy, t0, mats:[[matId,count],…], n }
+const roomDropChunk = {};  // room → Map<chunkId, Set<dropId>> — the SAME set seen the other way round (see `dropIndex`)
 let dropSeq = 0;
+// ⚠️ DECLARED HERE, AT THE TOP, AND NOT BESIDE THE CODE THAT USES THEM. `wipeSavedWorlds` clears both, and the
+// `MW_FRESH_WORLD` startup wipe calls it at MODULE LOAD — so a declaration further down the file is a TDZ
+// ReferenceError on every `-FreshWorld` start. That is the same trap `_storedChunks` records one screen above
+// its own use, and the same one `PAGE_DIMS` / `rpOn` / a debug-panel row have each sprung once on this project.
+const _dropsLoaded = new Set();     // rooms whose stored piles have been read back from disk (once per room)
+const _dropsDirty = new Map();      // room → Set<chunk index> whose pile row differs from what is on disk
 // ⚠️ `MAX_DROPS_PER_ROOM` and `DROP_TTL_MS` USED TO LIVE HERE and are deleted, not raised — see the note where
 // the expiry sweep was. Both destroyed matter; merging and per-chunk indexing replace them.
 const DROP_FALL_MAX_CELLS = 96;    // how far down the resting scan looks — bounded because the scan can FAULT PAGES IN (see dropRestY)
@@ -5233,7 +5240,18 @@ function fineReactTickRoom(room, SUB) {
       if (g === 1 || g === 3 || g === 5) { if (!ss) ss = soilSet(room); ss.add(j); }   // earth/sand/mud beside water → absorb
     }
     if (snowJ < 0 && saltJ < 0) continue;
-    let nearLava = false; for (const j of NB) { if (j >= 0 && j < N && amt.rp(j)[amt.o(j)] > 0) { nearLava = true; break; } }
+    // 🟥 THIS READ `NB`, WHICH THE OPTIMISATION ABOVE HAD JUST DELETED — a ReferenceError that killed the whole
+    // server process, latent because it sits behind the `continue` and only fires when a water cell actually
+    // touches snow or salt. `node --check` cannot see it (the name is legal syntax) and neither can the liquid
+    // probes, whose scenes have never put water beside snow without lava — a coverage gap, not a tooling one.
+    // ⚠️ The four neighbours are recomputed rather than hoisted back into an array on purpose: rebuilding the
+    // array is exactly the per-water-cell allocation the note above records removing, and this loop is paid for
+    // only by the cells that got past the snow/salt test.
+    let nearLava = false;
+    for (let n = 0; n < 4 && !nearLava; n++) {
+      const j = n === 0 ? (r < ROWS - 1 ? i + 1 : -1) : n === 1 ? (r > 0 ? i - 1 : -1) : n === 2 ? i - ROWS : i + ROWS;
+      if (j >= 0 && j < N && amt.rp(j)[amt.o(j)] > 0) nearLava = true;
+    }
     if (!nearLava) {
       // One reaction per water cell per tick, freeze first — same shape as the lava phase, and it keeps the
       // water's cost from being charged twice for a cell that happens to touch both snow and salt.
@@ -6500,6 +6518,7 @@ function sendChunkContent(sock, room, chunks) {
   // ⚠️ `chunks` here is the list being sent, and a pile's chunk is where it RESTS, so this and `dropChunkOf`
   // have to agree; they are the same expression, which is why `dropChunkOf` is the only place it is written.
   {
+    ensureDropsLoaded(room);              // ⚠️ one of the three doors into the pile maps — see `ensureDropsLoaded`
     const by = roomDropChunk[room], dm = roomDrops[room];
     if (by && dm) {
       const list = [];
@@ -7241,7 +7260,10 @@ function cfgWire() {
     worldStats: { produced: genPagesProduced, liquidSeeded: genLiquidSeeded, powderSeeded: genPowderSeeded, powderRewoken: genPowderRewoken, faceWoken: genFaceWoken, dropped: genChunksDropped, deltad: genChunksDeltad,
       saved: worldSaved, loaded: worldLoaded, applied: worldApplied, liqRestored: worldLiquidRestored, flushes: worldFlushes, flushed: worldFlushWrites, saveErrors: worldSaveErrors,
       // `liquidCfg.storedWakeAudit` only — see the note beside these. movable/seen is the whole diagnosis.
-      auditSeen: storedAuditSeen, auditMovable: storedAuditMovable, auditChunks: storedAuditChunks },
+      auditSeen: storedAuditSeen, auditMovable: storedAuditMovable, auditChunks: storedAuditChunks,
+      // Same reasoning one layer over, for the piles: "the cairn is still there" is also true of a client that
+      // simply kept a stale copy, so the counters are what say the SERVER wrote it and read it back.
+      pilesSaved: dropsSaved, pilesLoaded: dropsLoadedRows, pileSaveErrors: dropsSaveErrors },
   });
 }
 
@@ -7586,6 +7608,39 @@ const _delChunkRow = db.prepare('DELETE FROM world_chunks WHERE room = ? AND chu
 const _countChunkRows = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(terrain)), 0) AS b FROM world_chunks');
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  ⭐⭐ PILES ON THE GROUND, ON DISK. THE LAST CONSERVATION LEAK THAT WAS MINE TO FIX (kickoff_prima.md §8).
+//  Matter that nobody is holding lives in the world as a CAIRN, and cairns already stream, merge and never
+//  expire — but they were memory only, so a restart annihilated every one of them. In an economy whose entire
+//  premise is that matter is conserved, "the server restarted" was the largest destroyer of matter in the game.
+//
+//  🟥 A SEPARATE TABLE, NOT A `drops` COLUMN ON `world_chunks`, AND THE REASON IS THE VERSION COLUMN.
+//  Every `world_chunks` row carries the `WORLDGEN_VERSION` its diff was taken against, and a row whose version
+//  no longer matches is DELETED on read — correctly, because a terrain diff is meaningless without the ground it
+//  was cut from. A pile has no such dependency: seven granite in a bundle is seven granite whatever the
+//  generator does next. Riding the same row would silently make every generator change destroy every pile in
+//  the world, which is precisely the leak this is closing. So piles get their own row, with no `ver` at all.
+//  ⚠️ The consequence to accept deliberately: a generator change can leave a cairn resting inside new rock. It
+//  is visible, it is diggable, and it is matter that still exists — which is the right side of the trade.
+//
+//  ONE ROW PER CHUNK, holding that chunk's piles as JSON. Per chunk rather than per pile because the chunk is
+//  already the unit everything else about a cairn is keyed by — it is how they are indexed, how they stream, and
+//  how they are found — and because merging means one chunk's piles change together.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+db.exec(`CREATE TABLE IF NOT EXISTS world_drops (
+  room    TEXT    NOT NULL,
+  chunk   INTEGER NOT NULL,
+  piles   TEXT    NOT NULL,
+  updated INTEGER NOT NULL,
+  PRIMARY KEY (room, chunk)
+)`);
+const _putDropRow = db.prepare(`INSERT INTO world_drops (room, chunk, piles, updated)
+  VALUES (?, ?, ?, unixepoch())
+  ON CONFLICT(room, chunk) DO UPDATE SET piles=excluded.piles, updated=excluded.updated`);
+const _delDropRow = db.prepare('DELETE FROM world_drops WHERE room = ? AND chunk = ?');
+const _listDropRows = db.prepare('SELECT chunk, piles FROM world_drops WHERE room = ?');
+const _countDropRows = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(piles)), 0) AS b FROM world_drops');
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //  🟥🟥 WHERE EACH SITE LIVES, ON DISK. THE ONE THING ABOVE IS MEANINGLESS WITHOUT.
 //  Every chunk row above is keyed by (room, CHUNK) — an absolute column in the shared Overworld. Which column a
 //  site occupies was decided by `server/domains.js`, an ALLOCATION whose result "depends on the ORDER sites were
@@ -7655,13 +7710,27 @@ const _storedChunks = new Map();                       // room → Map<chunk ind
 // exactly like "the wipe did not work".
 function wipeSavedWorlds() {
   const before = _countChunkRows.get();
+  const beforeDrops = _countDropRows.get();
   db.exec('DELETE FROM world_chunks');
+  db.exec('DELETE FROM world_drops');
   _storedChunks.clear();                                 // the in-memory mirror, or a wiped chunk still comes back
+  // ⚠️ AND THE PILES' IN-MEMORY MIRROR TOO, for the same reason and one more: `_dropsDirty` is what the flush
+  // writes from, so leaving it populated would put the wiped rows straight back within seconds. The live
+  // per-room maps are cleared as well, so a wipe means a wipe — the world's ground and the things lying on it
+  // are one thing to reset, not two.
+  // ⚠️ Clients already showing a pile keep drawing it until they next re-enter that chunk. `wipeSavedWorlds` in
+  // practice runs at module load, when nothing is connected; the debug-panel door is the case where that shows,
+  // and it is the same stale-view caveat the terrain half already has.
+  _dropsLoaded.clear(); _dropsDirty.clear();
+  for (const k of Object.keys(roomDrops)) delete roomDrops[k];
+  for (const k of Object.keys(roomDropChunk)) delete roomDropChunk[k];
+  before.drops = beforeDrops.n; before.dropBytes = beforeDrops.b;
   return before;
 }
 if (process.env.MW_FRESH_WORLD === '1') {
   const _before = wipeSavedWorlds();
-  console.log(`MW_FRESH_WORLD=1 — wiped ${_before.n} stored chunk(s), ${(_before.b / 1024).toFixed(1)}KB of edits`);
+  console.log(`MW_FRESH_WORLD=1 — wiped ${_before.n} stored chunk(s), ${(_before.b / 1024).toFixed(1)}KB of edits`
+    + `, and ${_before.drops} chunk(s) of piles`);
 }
 
 // A diff packs to (index u16, material u8, damage u8) per changed cell — the shape `encodeChunkDelta` already
@@ -10063,7 +10132,112 @@ function dropRestY(room, x, y) {
 //  lookup is still needed; this is a second VIEW of one set, not a second copy of it. Both are maintained in
 //  `dropIndex` / `dropUnindex` and nowhere else, so they cannot drift.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
-const roomDropChunk = {};    // room → Map<chunkId, Set<dropId>>
+// (`roomDropChunk` itself is declared beside `roomDrops` at the top of the file — the two are one set seen two
+//  ways and belong together, and `wipeSavedWorlds` clears both at MODULE LOAD, which a declaration down here
+//  would make a TDZ ReferenceError on every `-FreshWorld` start.)
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  PILE PERSISTENCE. The table and the reasoning for its own row live beside `world_chunks`; this is the part
+//  that decides WHEN it is read and written.
+//
+//  READ: once per room, lazily, at the first access of any kind. Every entry point that touches the pile maps
+//  goes through `ensureDropsLoaded` first — there are exactly three (streaming a chunk's piles to a socket,
+//  spawning one, taking one), which is few enough to hold in the head and is checked by the guard.
+//  ⚠️ THE WHOLE ROOM AT ONCE, deliberately, exactly like `storedFor` above and bounded by the same thing:
+//  what players have actually put down. A pile is ~200 bytes and `drop-take` arrives with an id and no chunk,
+//  so a chunk-lazy read would need the id index loaded anyway.
+//
+//  WRITE: from a DIRTY SET, on a short interval, plus shutdown. Not at eviction, and that is the one real
+//  departure from the terrain half. Terrain persistence learned that eviction alone is not a sufficient seam
+//  because the ground you are STANDING on is never evicted; here the dirty set covers resident and evicted
+//  chunks identically, so eviction adds nothing — and `evictChunk` lives inside the block the probe rigs slice
+//  out and run in a bare `new Function`, where a database handle does not exist. Ten instances of that
+//  ReferenceError are recorded on this project. Not reaching into that block at all is better than a hook.
+//  ⚠️ THE INTERVAL IS SHORT (5s, against the world's 30s) BECAUSE THE FLUSH IS THE ONLY REAL SEAM ON THIS
+//  MACHINE: `restart-server.ps1` force-kills the process on Windows, so the shutdown handler never runs. What
+//  is at stake is somebody's whole pouch lying on the ground after they logged out, and the cost of a pass is
+//  O(chunks whose piles changed), which is zero on almost every tick.
+const DROP_FLUSH_MS = 5000;
+let dropsSaved = 0, dropsLoadedRows = 0, dropsSaveErrors = 0;
+function dropsTouch(room, ch) {
+  if (!room || !(ch >= 0)) return;
+  let s = _dropsDirty.get(room); if (!s) _dropsDirty.set(room, s = new Set());
+  s.add(ch);
+}
+// What of a pile actually goes to disk. ⭐ THE RESTING POSITION IS THE ONLY POSITION A STORED PILE HAS: `x`/`y`
+// is where it was released and `gx`/`gy` where it came to rest, and a pile being read back has manifestly
+// finished falling. Collapsing the two here means a restored throw cannot animate its arc a second time, and
+// means the row does not carry three coordinates for one object.
+// ⚠️ THE PICKUP HOLD IS NOT STORED. It is an interval measured from the moment somebody put the pile down; a
+// pile that has been on the ground since the last restart is not "just dropped", and re-arming it would make
+// every cairn in the world untakeable for a moment after a restart. Same reasoning the client already applies
+// when it declines to start a hold on a pile that arrives as part of a chunk.
+function dropRow(d) {
+  const o = { id: d.id, x: (d.gx != null ? d.gx : d.x), y: d.gy != null ? d.gy : d.y, t0: d.t0 || 0, n: d.n | 0 };
+  if (d.mats && d.mats.length) o.mats = d.mats;
+  if (d.prima > 0) o.prima = d.prima | 0;
+  return o;
+}
+function ensureDropsLoaded(room) {
+  if (!room || _dropsLoaded.has(room)) return;
+  _dropsLoaded.add(room);                              // set FIRST: a failed read must not retry on every access
+  let rows = [];
+  try { rows = _listDropRows.all(room); } catch (e) { console.log('world_drops load failed: ' + e.message); return; }
+  if (!rows.length) return;
+  let n = 0, hi = 0;
+  for (const r of rows) {
+    let list = null;
+    try { list = JSON.parse(r.piles); } catch (e) { continue; }
+    if (!Array.isArray(list)) continue;
+    for (const p of list) {
+      if (!p || !p.id) continue;
+      const d = { id: p.id, x: +p.x, y: +p.y, gy: +p.y, t0: p.t0 || Date.now(), mats: p.mats || [], n: p.n | 0 };
+      if (p.prima > 0) d.prima = p.prima | 0;
+      if (!isFinite(d.x) || !isFinite(d.y)) continue;
+      // 🟥 THE ID COUNTER MUST BE MOVED PAST WHAT CAME BACK. `dropSeq` restarts at 0 in a fresh process, so
+      // without this the first pile anybody drops is called `d1` — the id a restored pile is already using —
+      // and `dropIndex` would overwrite it in `roomDrops` while leaving the old id in its chunk set. Two piles,
+      // one id, and the older one becomes an untakeable ghost. Found by writing it down, not by running it.
+      const k = +String(d.id).slice(1); if (k > hi) hi = k;
+      dropIndex(room, d);                              // ⭐ the ONE definition of "index a pile", not a second copy
+      n++;
+    }
+  }
+  if (hi > dropSeq) dropSeq = Math.ceil(hi);
+  // Loading is not a change. `dropIndex` marks every chunk it touches dirty, which is right for a spawn and
+  // wrong for a read-back — left as is, the next flush would rewrite the whole room byte for byte.
+  _dropsDirty.delete(room);
+  dropsLoadedRows += n;
+  console.log(`pile persistence: ${n} cairn(s) in ${rows.length} chunk(s) restored for ${room}`);
+}
+// ⚠️ CAPPED PER PASS for the same reason the world flush is: a burst of digging can touch many chunks at once
+// and a save must never become a stall. The remainder simply carries to the next pass, five seconds later.
+const DROP_FLUSH_MAX = 64;
+function dropFlush(max) {
+  const cap = max || DROP_FLUSH_MAX;
+  let wrote = 0;
+  for (const [room, set] of _dropsDirty) {
+    if (wrote >= cap) break;
+    const by = roomDropChunk[room], dm = roomDrops[room];
+    for (const ch of Array.from(set)) {
+      if (wrote >= cap) break;
+      set.delete(ch);
+      const ids = by && by.get(ch);
+      const list = [];
+      if (ids && dm) for (const id of ids) { const d = dm.get(id); if (d) list.push(dropRow(d)); }
+      try {
+        // ⭐ AN EMPTY CHUNK DELETES ITS ROW rather than storing "[]". Everything in it was picked up, which is
+        // the ordinary end of a cairn's life; the alternative accumulates a row per square of ground anybody
+        // ever dug through. Same shape as a chunk that goes back to pristine dropping its terrain row.
+        if (list.length) { _putDropRow.run(room, ch, JSON.stringify(list)); dropsSaved++; }
+        else _delDropRow.run(room, ch);
+        wrote++;
+      } catch (e) { dropsSaveErrors++; if (dropsSaveErrors < 5) console.log('world_drops save failed: ' + e.message); }
+    }
+    if (!set.size) _dropsDirty.delete(room);
+  }
+  return wrote;
+}
+setInterval(() => { try { dropFlush(); } catch (e) { dropsSaveErrors++; } }, DROP_FLUSH_MS);
 function dropChunkOf(room, d) {
   const geom = worldGeom(room), span = CHUNK_SIDE * TERRAIN_CELL;
   // The RESTING place, not the release point: a thrown pile is indexed where it ends up, or a player standing
@@ -10084,8 +10258,10 @@ function dropIndex(room, d) {
   const by = roomDropChunk[room] || (roomDropChunk[room] = new Map());
   let s = by.get(d.ch); if (!s) by.set(d.ch, s = new Set());
   s.add(d.id);
+  dropsTouch(room, d.ch);
 }
 function dropUnindex(room, d) {
+  dropsTouch(room, d.ch);
   const map = roomDrops[room]; if (map) map.delete(d.id);
   const by = roomDropChunk[room];
   const s = by && by.get(d.ch);
@@ -10171,6 +10347,7 @@ function dropMergeTarget(room, x, y, mats, prima) {
   return null;
 }
 function spawnDrop(room, x, y, mats, prima, opts) {
+  ensureDropsLoaded(room);                // ⚠️ before the merge scan, or a restored cairn is not a merge target
   const map = roomDrops[room] || (roomDrops[room] = new Map());
   let n = 0; for (const [, k] of mats) n += k;
   const vx = (opts && isFinite(+opts.vx)) ? Math.max(-0.6, Math.min(0.6, +opts.vx)) : 0;
@@ -10196,6 +10373,10 @@ function spawnDrop(room, x, y, mats, prima, opts) {
       if (e) e[1] += k; else into.mats.push([m, k]);
     }
     into.n += n;
+    // ⚠️ A MERGE CHANGES A PILE WITHOUT RE-INDEXING IT, so nothing else marks this chunk for saving — the pile
+    // was already in `roomDrops` and already in its chunk set, and only its contents moved. Without this line
+    // every merged addition is on screen, in the ledger's future, and absent from disk.
+    dropsTouch(room, into.ch);
     emitToChunk(room, into.ch, 'drop-add', into);      // re-sent whole: the client keys on id, so this updates it
     return into;
   }
@@ -10210,16 +10391,71 @@ function spawnDrop(room, x, y, mats, prima, opts) {
 // 🟥 IT MUST NOT DESTROY ANYTHING. `takeAll` empties the ledger and hands the contents back; if this function
 // returns without spawning them, that is matter annihilated, in an economy whose entire premise is that matter
 // is conserved. Hence the guard: nothing is taken until there is somewhere to put it.
-function releaseHoldings(room, key, x, y) {
+// How far the pieces of a death are flung, as a horizontal velocity — `spawnDrop` clamps to ±0.6 and the arc is
+// capped at `DROP_THROW_MAX_CELLS`, so this is a fraction of that, not a distance.
+// ⚠️ DECLARED ABOVE ITS USE, for the reason `DROP_FALL_A_SRV` records a few screens up: a `const` read before
+// its declaration is a ReferenceError, and "nothing calls this during module evaluation today" is exactly the
+// kind of true-until-someone-moves-a-call this project has already shipped three times.
+const DEATH_SCATTER_VX = 0.45;
+const DEATH_PILES_MAX = 5;
+// ⭐ `spread` is the ONLY thing dispersal-on-death adds. Leaving quietly puts your things down in one heap;
+// dying throws them about. Same take, same guard, same conservation — a different number of landing sites.
+function releaseHoldings(room, key, x, y, spread) {
   if (!room || !isFinite(x) || !isFinite(y)) return null;
   const peek = ledger.snapshot(key);
   if (!peek.mats.length && !peek.prima) return null;
   const held = ledger.takeAll(key);
-  // A hold on this one too: a released haul that the next passer-by hoovers up before it has visibly landed
-  // reads as a bug rather than as an event.
-  const d = spawnDrop(room, x, y, held.mats, held.prima, { hold: INV_DROP_HOLD_MS });
-  console.log(`ledger: released ${held.mats.reduce((a, m) => a + m[1], 0)} cell(s) + ${held.prima} prima at ${x | 0},${y | 0} as ${d.id}`);
-  return d;
+  // ⚠️ SPLIT AFTER THE TAKE AND BEFORE THE SPAWNS, and it must be exhaustive: `splitHoldings` returns buckets
+  // whose contents sum EXACTLY to what came out of the ledger, because anything it rounded away would be
+  // matter destroyed by the act of dying — which is the leak this whole track exists to close.
+  const parts = spread > 1 ? splitHoldings(held.mats, held.prima, spread) : [{ mats: held.mats, prima: held.prima }];
+  const out = [];
+  for (let i = 0; i < parts.length; i++) {
+    // Fan the pieces out with a THROW rather than by teleporting them to scattered coordinates. The throw is
+    // already resolved server-side against real terrain (`dropThrowLanding`), so every piece comes to rest
+    // somewhere a player can actually stand — a hand-picked offset would happily post a cairn inside a cliff.
+    const t = parts.length > 1 ? (i / (parts.length - 1)) * 2 - 1 : 0;   // -1 … +1 across the fan
+    const vx = parts.length > 1 ? t * DEATH_SCATTER_VX : 0;
+    // A hold on this one too: a released haul that the next passer-by hoovers up before it has visibly landed
+    // reads as a bug rather than as an event. On a death it is also what makes the scramble a scramble — the
+    // killer cannot stand on the corpse and inhale it before anyone else arrives.
+    out.push(spawnDrop(room, x, y, parts[i].mats, parts[i].prima, { hold: INV_DROP_HOLD_MS, vx }));
+  }
+  console.log(`ledger: released ${held.mats.reduce((a, m) => a + m[1], 0)} cell(s) + ${held.prima} prima at ${x | 0},${y | 0} as `
+    + out.map(d => d.id).join('+'));
+  return out[0] || null;
+}
+// How many pieces a death makes. ⭐ SCALED BY WHAT YOU WERE CARRYING: a player who had one rock on them should
+// not leave a five-cairn battlefield, and a player who had an evening's mining should not leave one tidy heap
+// that the killer picks up in a single step. Two is the floor because the whole point of the spread is that
+// there is more than one thing to reach for.
+function deathSpread(mats, prima) {
+  return Math.max(2, Math.min(DEATH_PILES_MAX, (mats ? mats.length : 0) + (prima > 0 ? 1 : 0)));
+}
+// 🟥 CONSERVING BY CONSTRUCTION, WHICH IS THE ONLY PROPERTY THAT MATTERS HERE. Every quantity is split with
+// integer division PLUS ITS REMAINDER handed out one unit at a time, so the buckets sum to exactly what went
+// in. Rounding, or a share computed as a fraction, would quietly annihilate matter on every death — invisible
+// per death and unbounded over a server's life.
+// ⚠️ A stack is never split finer than one cell per pile (`spread = min(n, k)`), or three grains of gold turn
+// into three separate cairns holding one grain each, which is clutter rather than drama.
+// ⚠️ Each stack starts at a DIFFERENT bucket. Starting them all at bucket 0 puts a bit of everything in the
+// first pile and leaves the last ones empty, which is a heap plus some crumbs rather than a spread.
+function splitHoldings(mats, prima, n) {
+  const buckets = []; for (let i = 0; i < n; i++) buckets.push({ mats: [], prima: 0 });
+  (mats || []).forEach((entry, i) => {
+    const m = entry[0], k = entry[1] | 0;
+    if (k <= 0) return;
+    const spread = Math.min(n, k), base = (k / spread) | 0, rem = k % spread;
+    for (let j = 0; j < spread; j++) {
+      const q = base + (j < rem ? 1 : 0);
+      if (q > 0) buckets[(i + j) % n].mats.push([m, q]);
+    }
+  });
+  if (prima > 0) {
+    const base = (prima / n) | 0, rem = prima % n;
+    for (let j = 0; j < n; j++) buckets[j].prima = base + (j < rem ? 1 : 0);
+  }
+  return buckets.filter(b => b.mats.length || b.prima > 0);
 }
 // Where a socket's body was, in pixels, as of its last beacon. ⚠️ Falls back to nothing rather than to the
 // world origin: dropping a haul at (0,0) because the position was unknown is worse than not dropping it, and
@@ -11833,7 +12069,40 @@ io.on('connection', (socket) => {
     }
     sendInvSync(socket, currentAvatarRoom);
   });
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+  //  ⭐⭐ DISPERSAL ON DEATH (kickoff_prima.md §4). You drop everything — Prima AND material — scattered where
+  //  you fell, for anyone to pick up.
+  //
+  //  🟥 THE CLIENT REPORTS ITS OWN DEATH, AND THAT IS SOUND RATHER THAN A COMPROMISE. §4 is explicit about why:
+  //  dispersal removed the TRANSFER from a kill, so there is no balance to adjudicate and nothing to mint. What
+  //  is left to audit is one bit — "was B killed?" — about the only party who would ever want to lie, and their
+  //  lie can only be a DENIAL. Claiming a death you did not suffer scatters your own haul on the ground for
+  //  other people; it is not an exploit, it is a donation. So the report is trusted, exactly as the drop
+  //  position already is, and this needs none of the server-side sim that Phase 7 will eventually bring.
+  //  ⚠️ NOT ANY RESPAWN. Tapping R to go back to a checkpoint is a deliberate teleport, not a death, and
+  //  emptying somebody's pouch for using their own travel key would be indefensible. Only lava/acid contact,
+  //  a Level hazard and a KO send this — the client decides, at the three places it already knows the
+  //  difference.
+  //  ⚠️ RATE-LIMITED, because a client that says it died a hundred times a second would otherwise spray a
+  //  hundred piles. It cannot cost the sender anything after the first (the ledger is empty by then), but the
+  //  piles are real objects in real chunks and somebody else pays to receive them.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════════════════
+  let lastDeathAt = 0;
+  socket.on('avt-died', () => {
+    if (!currentAvatarRoom) return;
+    const now = Date.now();
+    if (now - lastDeathAt < 1500) return;
+    lastDeathAt = now;
+    const p = lastBodyPos(currentAvatarRoom, socket.id);
+    if (!p) return;                                       // no idea where they fell ⇒ they keep it (see lastBodyPos)
+    const key = playerKeyFor(socket.id);
+    const held = ledger.snapshot(key);
+    if (!held.mats.length && !held.prima) return;
+    releaseHoldings(currentAvatarRoom, key, p.x, p.y - 12, deathSpread(held.mats, held.prima));
+    sendInvSync(socket, currentAvatarRoom);
+  });
   socket.on('drop-take', ({ id }) => {
+    if (currentAvatarRoom) ensureDropsLoaded(currentAvatarRoom);   // the third door: an id can name a restored cairn
     const map = currentAvatarRoom && roomDrops[currentAvatarRoom];
     if (!map || !map.has(id)) return;             // already gone — someone else got there first
     // ⚠️ ENFORCED HERE, not only on the client that dropped it. The client stops asking during the hold, which
@@ -12614,6 +12883,10 @@ function worldFlushAll(why) {
   // the one thing never saved.
   try { const n = ledger.flush(); if (n) console.log(`ledger: flushed ${n} player holding(s) on ${why}`); }
   catch (e) { console.log('ledger flush on ' + why + ' failed: ' + e.message); }
+  // The piles on the ground are the same matter as the piles in the ledger — one of them being carried and the
+  // other lying about is the only difference — so they leave on the same seam.
+  try { const n = dropFlush(1e9); if (n) console.log(`pile persistence: flushed ${n} chunk(s) of cairns on ${why}`); }
+  catch (e) { console.log('pile flush on ' + why + ' failed: ' + e.message); }
 }
 process.on('SIGTERM', () => {
   worldFlushAll('SIGTERM');
