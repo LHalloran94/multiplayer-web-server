@@ -1668,8 +1668,8 @@ let objSeq = 0;
 // for its whole life, and no per-tick position stream.
 const roomDrops = {};   // room → Map<dropId, drop>   drop = { id, x, y, gy, t0, mats:[[matId,count],…], n }
 let dropSeq = 0;
-const MAX_DROPS_PER_ROOM = 300;    // oldest are culled first; a pile of drops is litter, not state worth keeping
-const DROP_TTL_MS = 4 * 60 * 1000; // un-collected material rots away, so a dug-out area does not accumulate forever
+// ⚠️ `MAX_DROPS_PER_ROOM` and `DROP_TTL_MS` USED TO LIVE HERE and are deleted, not raised — see the note where
+// the expiry sweep was. Both destroyed matter; merging and per-chunk indexing replace them.
 const DROP_FALL_MAX_CELLS = 96;    // how far down the resting scan looks — bounded because the scan can FAULT PAGES IN (see dropRestY)
 const MAX_OBJECTS_PER_ROOM = 150;  // Phase 6: per-Level cap on USER-placed objects (generated 'world-' scatter exempt); mirrors client OBJECT_CAP. Over-cap spawns are rejected.
 const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter)
@@ -6492,6 +6492,21 @@ function sendChunkContent(sock, room, chunks) {
   }
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
   sock.emit('liquid-fine-cells', { sub: 1, cols: geom.cols, cells, clear: chunks.slice() });
+  // ⭐⭐ AND THE PILES LYING IN THESE CHUNKS. This is what replaces the whole-list join replay: a socket is told
+  // about the material on the ground where it can SEE it, on the same seam that brings it the terrain, so an
+  // unbounded number of piles in the world costs a joiner nothing.
+  // ⚠️ SENT UNCONDITIONALLY on every re-entry, exactly as increment 3d made chunk content unconditional — a
+  // client that forgets a chunk when it leaves cannot be told "nothing has changed since you were last here".
+  // ⚠️ `chunks` here is the list being sent, and a pile's chunk is where it RESTS, so this and `dropChunkOf`
+  // have to agree; they are the same expression, which is why `dropChunkOf` is the only place it is written.
+  {
+    const by = roomDropChunk[room], dm = roomDrops[room];
+    if (by && dm) {
+      const list = [];
+      for (const p of chunks) { const s = by.get(p); if (s) for (const id of s) { const d = dm.get(id); if (d) list.push(d); } }
+      if (list.length) sock.emit('drops-chunk', { drops: list, chunks: chunks.slice() });
+    }
+  }
   if (TRACE_SUBS) console.log('[subs] ...emitted in ' + (Date.now() - _T0) + 'ms total');
 }
 // ==INTEREST_BLOCK_START== (probe_subscriptions slices this out — stub io/chunkHash/worldGeom/geomPage when you do)
@@ -10031,6 +10046,66 @@ function dropRestY(room, x, y) {
 // ⚠️ The step matches the client's fall constant, so the arc the client animates and the landing the server
 // resolves are the same curve. They are two implementations of one motion; if they drift, a pile lands visibly
 // somewhere other than where it settles.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  PILES ARE PER-CHUNK — kickoff_prima.md §5b.
+//
+//  🟥 THEY USED TO BE ONE FLAT PER-ROOM `Map`, broadcast to the WHOLE room on every add and remove and replayed
+//  IN FULL to every joiner. That is precisely the whole-room-broadcast + whole-list-join-replay pattern that
+//  already hung this server at Overworld scale and had to be rebuilt twice (terrain's join replay, then
+//  Phase 4's interest filtering). With piles that never expire — which conservation requires — it comes back.
+//
+//  ⭐ The fix is the REPLICATION, not the representation. A pile keeps its compressed shape (a material and a
+//  count, not cells — see §5a for why settling it into the grid is ruinous) and instead gets INDEXED BY THE
+//  CHUNK IT RESTS IN, so it streams with that chunk under the subscription filter that already exists, and a
+//  joiner is told about the piles where it is standing rather than every pile in the world.
+//
+//  ⚠️ `roomDrops` STAYS as the id → pile index. `drop-take` arrives with an id and nothing else, so an id
+//  lookup is still needed; this is a second VIEW of one set, not a second copy of it. Both are maintained in
+//  `dropIndex` / `dropUnindex` and nowhere else, so they cannot drift.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+const roomDropChunk = {};    // room → Map<chunkId, Set<dropId>>
+function dropChunkOf(room, d) {
+  const geom = worldGeom(room), span = CHUNK_SIDE * TERRAIN_CELL;
+  // The RESTING place, not the release point: a thrown pile is indexed where it ends up, or a player standing
+  // at its landing site would not be told about it.
+  const x = (d.gx != null ? d.gx : d.x), y = (d.gy != null ? d.gy : d.y);
+  const gx = Math.max(0, Math.min(geom.cx - 1, Math.floor(x / span)));
+  const gy = Math.max(0, Math.min(geom.cy - 1, Math.floor(y / span)));
+  return gx * geom.cy + gy;
+}
+function dropIndex(room, d) {
+  const map = roomDrops[room] || (roomDrops[room] = new Map());
+  map.set(d.id, d);
+  // ⭐ `ch` RIDES THE WIRE, deliberately un-prefixed. The client has to know which chunk a pile belongs to so a
+  // `drops-chunk` message can be AUTHORITATIVE for the chunks it names — and the alternative was the client
+  // recomputing `gx * cy + gy` for itself, i.e. a second copy of an addressing rule, which is the exact shape
+  // of drift this project has been bitten by repeatedly. One definition, in `dropChunkOf`, sent along.
+  d.ch = dropChunkOf(room, d);
+  const by = roomDropChunk[room] || (roomDropChunk[room] = new Map());
+  let s = by.get(d.ch); if (!s) by.set(d.ch, s = new Set());
+  s.add(d.id);
+}
+function dropUnindex(room, d) {
+  const map = roomDrops[room]; if (map) map.delete(d.id);
+  const by = roomDropChunk[room];
+  const s = by && by.get(d.ch);
+  if (s) { s.delete(d.id); if (!s.size) by.delete(d.ch); }
+}
+// Everyone who can see that chunk, and nobody else.
+// 🟥 IT FALLS BACK TO THE WHOLE ROOM WHEN FILTERING IS OFF, and that is not defensive padding: `updateSubs`
+// returns immediately when `interestCfg.chunks` is 0, so every socket's `subs` is EMPTY and a subscription-only
+// fan-out would send piles to nobody at all. CLAUDE.md already records `interestCfg.chunks = 0` as a footgun
+// for exactly this reason on the client window; this is the same footgun one layer down.
+function emitToChunk(room, chunk, ev, payload) {
+  if (!interestCfg.chunks) { io.to(room).emit(ev, payload); return; }
+  const m = roomSubs[room];
+  if (!m) return;
+  for (const [sid, e] of m) {
+    if (!e.subs.has(chunk)) continue;
+    const sock = io.sockets.sockets.get(sid);
+    if (sock) sock.emit(ev, payload);
+  }
+}
 const DROP_THROW_MAX_CELLS = 24;                      // how far sideways a throw may carry, in cells
 // How long a deliberately-dropped pile refuses to be collected. Long enough that you can walk away from what
 // you meant to put down, short enough that it is not a penalty. ⚠️ A DIG's pile has NO hold — instant pickup is
@@ -10060,9 +10135,43 @@ function dropThrowLanding(room, x, y, vx) {
   }
   return { x: px, y: dropRestY(room, px, py) };
 }
+// ⭐ MERGE INTO A PILE THAT IS ALREADY THERE, rather than adding a millionth icon to the same square metre.
+// This is what bounds clutter now that nothing expires: an area somebody has mined out ends up with a few big
+// cairns instead of ten thousand little ones, and NOTHING IS DESTROYED to achieve it — which is the whole
+// difference between merging and the TTL it replaces.
+// ⚠️ Only piles that are ALIKE: same materials, and neither carrying Prima. Merging unlike things would make
+// one pile that is a bit of everything, which is worse to read and impossible to un-mix.
+// ⚠️ And only piles that are AT REST and out of their pickup hold — merging into something still in flight
+// would teleport what you just threw back to where you threw it from.
+const DROP_MERGE_R = TERRAIN_CELL * 3;                // within three cells is "the same place"
+function dropMergeTarget(room, x, y, mats, prima) {
+  if (prima > 0 || !mats.length) return null;
+  const by = roomDropChunk[room], map = roomDrops[room];
+  if (!by || !map) return null;
+  const geom = worldGeom(room), span = CHUNK_SIDE * TERRAIN_CELL;
+  const gx = Math.floor(x / span), gy = Math.floor(y / span);
+  const key = mats.map(m => m[0]).sort((a, b) => a - b).join(',');
+  const now = Date.now();
+  // The pile's own chunk and its eight neighbours: a candidate three cells away can be over a chunk seam.
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+    const cx = gx + dx, cy = gy + dy;
+    if (cx < 0 || cy < 0 || cx >= geom.cx || cy >= geom.cy) continue;
+    const s = by.get(cx * geom.cy + cy);
+    if (!s) continue;
+    for (const id of s) {
+      const o = map.get(id);
+      if (!o || o.prima > 0 || !o.mats || !o.mats.length) continue;
+      if (o._np > now) continue;                      // still held — not a merge target
+      if (Math.abs((o.gx != null ? o.gx : o.x) - x) > DROP_MERGE_R) continue;
+      if (Math.abs(o.gy - y) > DROP_MERGE_R) continue;
+      if (o.mats.map(m => m[0]).sort((a, b) => a - b).join(',') !== key) continue;
+      return o;
+    }
+  }
+  return null;
+}
 function spawnDrop(room, x, y, mats, prima, opts) {
   const map = roomDrops[room] || (roomDrops[room] = new Map());
-  if (map.size >= MAX_DROPS_PER_ROOM) { const oldest = map.keys().next().value; if (oldest !== undefined) { map.delete(oldest); io.to(room).emit('drop-removed', { id: oldest }); } }
   let n = 0; for (const [, k] of mats) n += k;
   const vx = (opts && isFinite(+opts.vx)) ? Math.max(-0.6, Math.min(0.6, +opts.vx)) : 0;
   const land = vx ? dropThrowLanding(room, x, y, vx) : { x, y: dropRestY(room, x, y) };
@@ -10077,8 +10186,21 @@ function spawnDrop(room, x, y, mats, prima, opts) {
   // were holding, but dispersal-on-death needs exactly this shape, and adding the field now means that
   // increment does not have to change the wire, the client decoder and the collect path all over again.
   if (prima > 0) d.prima = prima | 0;
-  map.set(d.id, d);
-  io.to(room).emit('drop-add', d);
+  // ⚠️ MERGE ONLY WHAT HAS COME TO REST. A thrown pile is merged at its LANDING place, not its release point,
+  // which is why this is here rather than at the top: `land` has to be resolved first.
+  const into = (!(opts && opts.hold > 0))
+    ? dropMergeTarget(room, (d.gx != null ? d.gx : d.x), d.gy, mats, prima) : null;
+  if (into) {
+    for (const [m, k] of mats) {
+      const e = into.mats.find(p => p[0] === m);
+      if (e) e[1] += k; else into.mats.push([m, k]);
+    }
+    into.n += n;
+    emitToChunk(room, into.ch, 'drop-add', into);      // re-sent whole: the client keys on id, so this updates it
+    return into;
+  }
+  dropIndex(room, d);
+  emitToChunk(room, d.ch, 'drop-add', d);
   return d;
 }
 // ⭐⭐ EVERYTHING A PLAYER IS CARRYING, PUT BACK INTO THE WORLD. ONE primitive with three eventual callers:
@@ -10108,17 +10230,13 @@ function lastBodyPos(room, sid) {
   if (!r || !(r.apx >= 0) || !(r.apy >= 0)) return null;
   return { x: r.apx, y: r.apy };
 }
-// Expire un-collected drops. One sweep over every room's list — the lists are capped, so this is bounded by
-// (rooms × 300) and runs once a second, not per tick.
-setInterval(() => {
-  const cut = Date.now() - DROP_TTL_MS;
-  for (const room in roomDrops) {
-    const map = roomDrops[room]; const gone = [];
-    for (const [id, d] of map) if (d.t0 < cut) { map.delete(id); gone.push(id); }
-    if (gone.length) io.to(room).emit('drops-removed', { ids: gone });
-    if (!map.size) delete roomDrops[room];
-  }
-}, 1000);
+// 🟥 THE EXPIRY SWEEP IS GONE, AND SO IS THE PER-ROOM CAP. Both destroyed matter, in an economy whose premise
+// is that matter is conserved (kickoff_prima.md §8, rows 2 and 3) — a four-minute TTL means a haul dropped and
+// not collected in time simply ceases to exist, and the 300-pile cap silently deleted the oldest to make room.
+// What replaces them is not a longer timer: it is MERGING (see `dropMergeTarget`), which bounds clutter without
+// annihilating anything, plus per-chunk indexing so an unbounded number of piles costs nothing to replicate.
+// ⚠️ `MAX_DROPS_PER_ROOM` and `DROP_TTL_MS` are deleted rather than raised, deliberately: a constant that is
+// still there is a constant somebody re-applies.
 
 io.on('connection', (socket) => {
   let currentRoom = null;
@@ -11118,7 +11236,14 @@ io.on('connection', (socket) => {
     // Replay the current world objects to the new joiner (late-joiner sync). `levelIndex` lets the client
     // drop a replay that arrives AFTER it has switched Levels again (rapid switching → stale cross-Level bleed).
     socket.emit('avatar-objects-init', { levelIndex, objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
-    socket.emit('drops-init', { drops: roomDrops[avRoom] ? [...roomDrops[avRoom].values()] : [] });   // material lying on the ground (capped + TTL'd, so this list is small)
+    // 🟥 THE WHOLE-LIST JOIN REPLAY IS GONE. It sent every pile in the room to every joiner — fine while a TTL
+    // and a 300 cap kept the list small, and the same shape as the whole-world terrain replay that hung this
+    // server once piles stopped expiring. Piles now arrive WITH THEIR CHUNK, in `sendChunkContent`, so a joiner
+    // is told about the ones where it is standing and nothing else.
+    // ⚠️ Still emitted, with an empty list: it is what makes the client CLEAR the previous room's piles, and a
+    // Level switch does not run `exitAvatarMode`. Dropping the message would leave the old world's cairns
+    // hanging in the new one.
+    socket.emit('drops-init', { drops: [] });
     // Replay the terrain grid (RLE) — present for any 'world' room and any 'sandbox' room with placed terrain.
     // 🟥 THE WHOLE-WORLD JOIN REPLAY IS FATAL IN THE OVERWORLD AND IS WHAT HUNG THE SERVER.
     // `terrainRLE` walks the entire index space — 524,224 x 4,096 = 2.15 BILLION cells, 33.5 million page
@@ -11720,14 +11845,18 @@ io.on('connection', (socket) => {
     // could not both collect one pile), so the server already knows exactly what was in it. The client is told
     // the result; it is never asked.
     const d = map.get(id);
-    map.delete(id);
+    dropUnindex(currentAvatarRoom, d);
     if (d && ((d.mats && d.mats.length) || d.prima > 0)) {
       const key = playerKeyFor(socket.id);
       if (d.mats && d.mats.length) ledger.credit(key, d.mats);
       if (d.prima > 0) ledger.grantPrima(key, d.prima);
       sendInvSync(socket, currentAvatarRoom);
     }
-    io.to(currentAvatarRoom).emit('drop-removed', { id, by: socket.id });
+    // ⚠️ To the chunk's subscribers, plus the taker — who may not be subscribed to the chunk the pile RESTS in
+    // (it can be one over from the one they are standing in) and must be told regardless, since their own copy
+    // is what they are collecting.
+    emitToChunk(currentAvatarRoom, d.ch, 'drop-removed', { id, by: socket.id });
+    socket.emit('drop-removed', { id, by: socket.id });
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits }) => {
     if (!currentAvatarRoom || (op !== 'paint' && op !== 'carve')) return;
