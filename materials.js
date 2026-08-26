@@ -203,6 +203,92 @@
   };
   Object.keys(EMIT).forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].emit = EMIT[n]; });
 
+  // ---- PRIMA WORTH — what a cell of this refines into ------------------------------------------------------
+  // ⭐ MEASURED, NOT CHOSEN. Every number below is the output of `scratchpad/probe_material_abundance.js`,
+  // which samples the shipping generator and counts cells per material. Re-derive with:
+  //     COLS=48000 JSON=scratchpad/material_abundance.json node scratchpad/probe_material_abundance.js
+  // (48,000 full-depth columns = 9.2% of the Overworld, 106.6M solid cells, ~4 minutes; run 2026-08-26 against
+  // worldgen2 v10, layout seed 1234. Smaller samples are fine for a sanity check but CANNOT price the rare
+  // gems — at 3,000 columns Diamond read 35 on 90 hits against its true 20.)
+  //
+  // worth = (frequency of the commonest mineral / this material's frequency) ^ 0.5, rounded, floor 1.
+  // ⚠️ THE EXPONENT IS A GAME DECISION, NOT A MEASUREMENT. At 1.0 worth exactly compensates rarity and the
+  // rarest mineral is 4,107x the commonest — one lucky find then dwarfs an evening of honest digging, which is
+  // a lottery rather than an economy. At 0.5 it is 64x: a vein is still worth far more than the rock around it.
+  //
+  // 🟥 ONLY MINERALS ARE PRICED, and that is the whole design, not an omission. Rarity measures value only for
+  // things distributed THROUGH ROCK. The probe's first run priced everything by rarity and made LICHEN the most
+  // valuable substance in the world at 532x granite — flora is rare because it is a thin skin on the surface,
+  // not because it is precious, and scree/pumice/ash/tufa are LOCALISED (common on a volcano flank, rare
+  // world-wide). Bulk rock, soil and plants are below the refine threshold: they never dissolve into Prima and
+  // never conjure from it. See `scratchpad/kickoff_prima.md` §3 and §7.
+  // ⭐ Which materials count as minerals is NOT a list here — it is `worldgen2/minerals.js`'s own catalogue, read
+  // by the probe. A mineral added to the generator is priced by re-running it, with nothing to remember.
+  // ⚠️ Named like EMIT rather than filed as a column in ROWS: 72 rows would gain a `0` to reach it and only 44
+  // have anything to say. NAMES is the same table's own index, so a typo here is a silent no-op.
+  const WORTH = {
+    Meteorite:      64,   // 84 — 3.97 per million, hardness 5. ⚠️ impact craters only, so it is CLUSTERED
+    Platinum:       30,   // 73 — 18 per million, hardness 3
+    Obsidian:       28,   // 43 — 20 per million, hardness 3
+    Orpiment:       28,   // 88 — 21 per million, hardness 1
+    Cinnabar:       23,   // 58 — 32 per million, hardness 2
+    Realgar:        23,   // 87 — 30 per million, hardness 1
+    Garnet:         22,   // 70 — 33 per million, hardness 4
+    Diamond:        20,   // 62 — 39 per million, hardness 6. ⚠️ >90% DEEP — scarcer in practice than the count
+    Opal:           15,   // 63 — 70 per million, hardness 3
+    Sulphur:        15,   // 59 — 72 per million, hardness 1
+    Jade:           12,   // 67 — 105 per million, hardness 4
+    Sapphire:       12,   // 66 — 109 per million, hardness 5
+    Emerald:        10,   // 61 — 177 per million, hardness 5
+    Lapis:          10,   // 71 — 166 per million, hardness 3
+    Ruby:            9,   // 65 — 188 per million, hardness 5
+    Uranium:         9,   // 74 — 191 per million, hardness 3
+    Amethyst:        8,   // 60 — 276 per million, hardness 4
+    Topaz:           8,   // 69 — 228 per million, hardness 4
+    Turquoise:       8,   // 68 — 281 per million, hardness 2
+    Agate:           7,   // 72 — 301 per million, hardness 4
+    Amber:           7,   // 75 — 369 per million, hardness 1
+    Flint:           6,   // 76 — 409 per million, hardness 4
+    Gold:            5,   // 51 — 602 per million, hardness 3. ⚠️ low for its cultural weight — see the note below
+    Gypsum:          5,   // 85 — 616 per million, hardness 1
+    Malachite:       4,   // 57 — 949 per million, hardness 3
+    Bauxite:         3,   // 64 — 1346 per million, hardness 2
+    Conglomerate:    3,   // 89 — 1955 per million, hardness 3
+    Gneiss:          3,   // 81 — 2583 per million, hardness 4
+    Pyrite:          3,   // 55 — 1634 per million, hardness 4
+    Silver:          3,   // 52 — 1984 per million, hardness 3
+    Tin:             3,   // 54 — 1933 per million, hardness 3
+    Crystal:         2,   // 36 — 5331 per million, hardness 3
+    Fluorite:        2,   // 86 — 3012 per million, hardness 3
+    Hematite:        2,   // 56 — 6559 per million, hardness 4
+    Marble:          2,   // 77 — 3907 per million, hardness 3
+    'Oil shale':     2,   // 33 — 6002 per million, hardness 2
+    Quartzite:       2,   // 80 — 3866 per million, hardness 5
+    Salt:            2,   // 27 — 5496 per million, hardness 2
+    Slate:           2,   // 79 — 6256 per million, hardness 3
+    Coal:            1,   // 41 — 8420 per million, hardness 2
+    Copper:          1,   // 35 — 7412 per million, hardness 3
+    Galena:          1,   // 53 — 8182 per million, hardness 3
+    Iron:            1,   // 34 — 12255 per million, hardness 4
+    Quartz:          1,   // 42 — 16297 per million, hardness 4
+  };
+  // ⚠️ GOLD IS WORTH 5 AND THAT IS AN OPEN QUESTION, not an oversight: the generator places it fairly freely
+  // (602 per million, plus stream placers), so the measurement says what it says. Making gold FEEL like gold is
+  // a change to `worldgen2/minerals.js`'s rarity for it, after which this table is re-derived — it is not a
+  // number to nudge by hand, or the table stops meaning anything.
+  const PRIMA_WORTH = {};
+  Object.keys(WORTH).forEach((n) => {
+    const id = NAMES[n];
+    if (id !== undefined) { DEFS[id].worth = WORTH[n]; PRIMA_WORTH[id] = WORTH[n]; }
+  });
+  // The refine threshold as a dial (kickoff_prima.md §3): a material dissolves into Prima only at or above this,
+  // and — 🟥 SYMMETRY IS COMPULSORY — can only be conjured back out of Prima on the same test. Anything you can
+  // conjure but not dissolve is a one-way street that creates matter from nothing, in a world whose whole
+  // economy is that matter is conserved. At 1 every priced mineral refines and nothing else does.
+  const PRIMA_REFINE_MIN = 1;
+  const primaWorthOf = (id) => PRIMA_WORTH[id] || 0;
+  const primaRefinable = (id) => primaWorthOf(id) >= PRIMA_REFINE_MIN;
+
   // ---- the spike's name → this game's id ------------------------------------------------------------------
   // ⭐ THE PORT'S ONE LOOKUP. The generator (increment 4) emits spike names; this is the only place that turns
   // one into a number, so an unmapped name is a loud failure here rather than `undefined` stored into a
@@ -225,6 +311,7 @@
 
   return {
     ROWS, DEFS, NAMES, NAME_TO_ID, idOf, STRENGTH, EMIT,
+    WORTH, PRIMA_WORTH, PRIMA_REFINE_MIN, primaWorthOf, primaRefinable,
     GEN_MAT_MIN, GEN_MAT_MAX,
     POWDER_IDS, PLANT_IDS, HANGS_IDS,
     COUNT: ROWS.length,
