@@ -1675,6 +1675,19 @@ let dropSeq = 0;
 // its own use, and the same one `PAGE_DIMS` / `rpOn` / a debug-panel row have each sprung once on this project.
 const _dropsLoaded = new Set();     // rooms whose stored piles have been read back from disk (once per room)
 const _dropsDirty = new Map();      // room → Set<chunk index> whose pile row differs from what is on disk
+// ⭐⭐ THINGS PLAYERS HAVE BUILT — today just the crucible (kickoff_prima.md §3). Deliberately its OWN index
+// rather than a `kind` on a pile, even though the two are the same shape: a pile is picked up and a build is
+// not, they merge and it does not, they are thrown and it is placed. One structure meaning two things is the
+// shape that has already cost this project a serious bug (a `null` that meant three things and deleted the row
+// for all of them), and every "…unless it is a crucible" branch scattered through the pile code would be a
+// chance to miss one.
+// ⭐ It is also the pattern objects and props in the Overworld have been blocked on: a per-chunk entity that
+// streams, evicts and persists with its ground. This is that, in its smallest useful form.
+const roomBuilds = {};              // room → Map<buildId, build>
+const roomBuildChunk = {};          // room → Map<chunkId, Set<buildId>> — the same set seen the other way round
+let buildSeq = 0;
+const _buildsLoaded = new Set();
+const _buildsDirty = new Map();
 // ⚠️ `MAX_DROPS_PER_ROOM` and `DROP_TTL_MS` USED TO LIVE HERE and are deleted, not raised — see the note where
 // the expiry sweep was. Both destroyed matter; merging and per-chunk indexing replace them.
 const DROP_FALL_MAX_CELLS = 96;    // how far down the resting scan looks — bounded because the scan can FAULT PAGES IN (see dropRestY)
@@ -2892,8 +2905,21 @@ function sendInvSync(socket, room) {
     // The hopper and its progress. ⚠️ `headWorth` comes from the SERVER's worth table rather than being looked
     // up client-side: the client has a copy of that table, but a progress bar drawn against a different number
     // from the one the digest is counting to is a bar that never reaches its end.
-    refine: snap.refine, refPaid: snap.paid, refWorth: snap.headWorth, refRate: refineCfg.rate,
+    refine: snap.refine, refPaid: snap.paid, refWorth: snap.headWorth,
+    // ⚠️ THE RATE REPORTED IS THE RATE IN EFFECT, boost included — the panel's "✦ N / sec" and its "how long
+    // for this one" line have to agree with what the digest is actually doing, or standing at a crucible looks
+    // like nothing happened for ten times as long as it should.
+    refRate: refineCfg.rate * refineMultFor(room, socket.id), refMult: refineMultFor(room, socket.id),
+    crucCost: CRUCIBLE_COST, crucR: CRUCIBLE_R,
   });
+}
+// Is this socket standing at a crucible? ⭐ ONE definition, used by the digest AND by the wire, so the number
+// the panel shows and the number the hopper is being driven at cannot disagree.
+function refineMultFor(room, sid) {
+  if (!room || !invGatedRoom(room)) return 1;
+  const p = lastBodyPos(room, sid);
+  if (!p) return 1;
+  return buildsNear(room, p.x, p.y, CRUCIBLE_R, 'crucible').length ? Math.max(1, refineCfg.crucible | 0) : 1;
 }
 // ⭐ THE DIGEST. One pass a second over the sockets that have something in the hopper — not over every player
 // in the ledger, because a logged-in identity's record stays in memory after they disconnect and refining while
@@ -2918,7 +2944,7 @@ setInterval(() => {
     if (seen.has(key)) continue;
     seen.add(key);
     if (!ledger.refineTotal(key)) continue;
-    const made = ledger.refineStep(key, budget);
+    const made = ledger.refineStep(key, budget * refineMultFor(room, sid));
     refinePrimaMade += made;
     // Told every tick, not only when a cell completes: the progress bar is the feedback, and a bar that only
     // moves once every few minutes is indistinguishable from a bar that is broken.
@@ -6576,6 +6602,15 @@ function sendChunkContent(sock, room, chunks) {
       for (const p of chunks) { const s = by.get(p); if (s) for (const id of s) { const d = dm.get(id); if (d) list.push(d); } }
       if (list.length) sock.emit('drops-chunk', { drops: list, chunks: chunks.slice() });
     }
+    // …and what has been BUILT in them, on the same seam and by the same rule: authoritative for the chunks it
+    // names, sent unconditionally on re-entry because a client that forgets a chunk cannot be told "unchanged".
+    ensureBuildsLoaded(room);
+    const bby = roomBuildChunk[room], bm = roomBuilds[room];
+    if (bby && bm) {
+      const list = [];
+      for (const p of chunks) { const s = bby.get(p); if (s) for (const id of s) { const b = bm.get(id); if (b) list.push(b); } }
+      if (list.length) sock.emit('builds-chunk', { builds: list, chunks: chunks.slice() });
+    }
   }
   if (TRACE_SUBS) console.log('[subs] ...emitted in ' + (Date.now() - _T0) + 'ms total');
 }
@@ -7691,6 +7726,21 @@ const _putDropRow = db.prepare(`INSERT INTO world_drops (room, chunk, piles, upd
 const _delDropRow = db.prepare('DELETE FROM world_drops WHERE room = ? AND chunk = ?');
 const _listDropRows = db.prepare('SELECT chunk, piles FROM world_drops WHERE room = ?');
 const _countDropRows = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(piles)), 0) AS b FROM world_drops');
+// The same row-per-chunk shape for what players have BUILT, and separate for the same reason the in-memory
+// index is: a pile and a structure are not the same kind of thing and should not share a decoder.
+db.exec(`CREATE TABLE IF NOT EXISTS world_builds (
+  room    TEXT    NOT NULL,
+  chunk   INTEGER NOT NULL,
+  items   TEXT    NOT NULL,
+  updated INTEGER NOT NULL,
+  PRIMARY KEY (room, chunk)
+)`);
+const _putBuildRow = db.prepare(`INSERT INTO world_builds (room, chunk, items, updated)
+  VALUES (?, ?, ?, unixepoch())
+  ON CONFLICT(room, chunk) DO UPDATE SET items=excluded.items, updated=excluded.updated`);
+const _delBuildRow = db.prepare('DELETE FROM world_builds WHERE room = ? AND chunk = ?');
+const _listBuildRows = db.prepare('SELECT chunk, items FROM world_builds WHERE room = ?');
+const _countBuildRows = db.prepare('SELECT COUNT(*) AS n FROM world_builds');
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //  🟥🟥 WHERE EACH SITE LIVES, ON DISK. THE ONE THING ABOVE IS MEANINGLESS WITHOUT.
@@ -7776,13 +7826,18 @@ function wipeSavedWorlds() {
   _dropsLoaded.clear(); _dropsDirty.clear();
   for (const k of Object.keys(roomDrops)) delete roomDrops[k];
   for (const k of Object.keys(roomDropChunk)) delete roomDropChunk[k];
-  before.drops = beforeDrops.n; before.dropBytes = beforeDrops.b;
+  const beforeBuilds = _countBuildRows.get();
+  db.exec('DELETE FROM world_builds');
+  _buildsLoaded.clear(); _buildsDirty.clear();
+  for (const k of Object.keys(roomBuilds)) delete roomBuilds[k];
+  for (const k of Object.keys(roomBuildChunk)) delete roomBuildChunk[k];
+  before.drops = beforeDrops.n; before.dropBytes = beforeDrops.b; before.builds = beforeBuilds.n;
   return before;
 }
 if (process.env.MW_FRESH_WORLD === '1') {
   const _before = wipeSavedWorlds();
   console.log(`MW_FRESH_WORLD=1 — wiped ${_before.n} stored chunk(s), ${(_before.b / 1024).toFixed(1)}KB of edits`
-    + `, and ${_before.drops} chunk(s) of piles`);
+    + `, ${_before.drops} chunk(s) of piles and ${_before.builds} of structures`);
 }
 
 // A diff packs to (index u16, material u8, damage u8) per changed cell — the shape `encodeChunkDelta` already
@@ -10290,6 +10345,127 @@ function dropFlush(max) {
   return wrote;
 }
 setInterval(() => { try { dropFlush(); } catch (e) { dropsSaveErrors++; } }, DROP_FLUSH_MS);
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  ⭐⭐ THE CRUCIBLE (kickoff_prima.md §3) — the reason a base exists.
+//
+//  Refining on your person is a trickle so that a solo player far from home is never stuck; a crucible is the
+//  same digest an order of magnitude faster. What that buys the design is not speed, it is a PLACE: you have to
+//  go somewhere, and stand there, with everything you are carrying, for as long as it takes. That is the
+//  predictable route banditry needs, and it falls out of the mechanic rather than being added on top.
+//
+//  🟥 IT COSTS PRIMA AND BREAKING IT RETURNS THE PRIMA, EXACTLY. Under conservation (§2) matter cannot be spent,
+//  only moved, so a build cost has to be a deposit rather than a fee. That single rule also hands over three
+//  things for nothing:
+//    · it is §6's "raidable, not safe" — ANYBODY can break it and collect, so a base is a claim, not a title;
+//    · it needs no recipe, no crafting UI and no decision about which rock a crucible is made of;
+//    · it makes the first one a real milestone, because the only way to afford it is the slow trickle.
+//  ⚠️ It is deliberately NOT a use of Prima in §10's sense — nothing is annihilated, so the fork the user
+//  deferred there stays deferred. A crucible is Prima parked in the world, and it can always be un-parked.
+//
+//  ⏭️ NOT BUILT, AND NAMED SO IT IS NOT MISTAKEN FOR AN OVERSIGHT: §3's "a hopper you can leave full and walk
+//  away from". That needs the crucible to own a queue rather than the player, which means deciding what happens
+//  while nobody is connected — offline progress, a design decision rather than an implementation detail. The
+//  version here boosts the hopper of a player STANDING BESIDE IT, which is the half that makes the place matter.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+const CRUCIBLE_COST = 500;          // Prima to place, refunded in full to whoever breaks it
+const CRUCIBLE_R = 96;              // how near you must stand for the boost, in world px (~12 cells)
+const CRUCIBLE_MIN_GAP = 64;        // …and how far apart two of them must be, so a base is not a wall of them
+const BUILD_FLUSH_MS = 5000;
+let buildsSaved = 0, buildsLoadedRows = 0, buildsSaveErrors = 0;
+function buildsTouch(room, ch) {
+  if (!room || !(ch >= 0)) return;
+  let s = _buildsDirty.get(room); if (!s) _buildsDirty.set(room, s = new Set());
+  s.add(ch);
+}
+function buildIndex(room, b) {
+  const map = roomBuilds[room] || (roomBuilds[room] = new Map());
+  map.set(b.id, b);
+  b.ch = dropChunkOf(room, b);       // one definition of "which chunk is this at", shared with piles
+  const by = roomBuildChunk[room] || (roomBuildChunk[room] = new Map());
+  let s = by.get(b.ch); if (!s) by.set(b.ch, s = new Set());
+  s.add(b.id);
+  buildsTouch(room, b.ch);
+}
+function buildUnindex(room, b) {
+  buildsTouch(room, b.ch);
+  const map = roomBuilds[room]; if (map) map.delete(b.id);
+  const by = roomBuildChunk[room];
+  const s = by && by.get(b.ch);
+  if (s) { s.delete(b.id); if (!s.size) by.delete(b.ch); }
+}
+function ensureBuildsLoaded(room) {
+  if (!room || _buildsLoaded.has(room)) return;
+  _buildsLoaded.add(room);                             // set FIRST: a failed read must not retry on every access
+  let rows = [];
+  try { rows = _listBuildRows.all(room); } catch (e) { console.log('world_builds load failed: ' + e.message); return; }
+  if (!rows.length) return;
+  let n = 0, hi = 0;
+  for (const r of rows) {
+    let list = null;
+    try { list = JSON.parse(r.items); } catch (e) { continue; }
+    if (!Array.isArray(list)) continue;
+    for (const p of list) {
+      if (!p || !p.id || !isFinite(+p.x) || !isFinite(+p.y)) continue;
+      const b = { id: p.id, type: p.type || 'crucible', x: +p.x, y: +p.y, by: p.by || '', t0: p.t0 || Date.now() };
+      const k = +String(b.id).slice(1); if (k > hi) hi = k;   // …or the next placement claims a restored one's id
+      buildIndex(room, b);
+      n++;
+    }
+  }
+  if (hi > buildSeq) buildSeq = Math.ceil(hi);
+  _buildsDirty.delete(room);                           // loading is not a change
+  buildsLoadedRows += n;
+  console.log(`build persistence: ${n} structure(s) in ${rows.length} chunk(s) restored for ${room}`);
+}
+function buildFlush(max) {
+  const cap = max || 64;
+  let wrote = 0;
+  for (const [room, set] of _buildsDirty) {
+    if (wrote >= cap) break;
+    const by = roomBuildChunk[room], bm = roomBuilds[room];
+    for (const ch of Array.from(set)) {
+      if (wrote >= cap) break;
+      set.delete(ch);
+      const ids = by && by.get(ch);
+      const list = [];
+      if (ids && bm) for (const id of ids) {
+        const b = bm.get(id);
+        if (b) list.push({ id: b.id, type: b.type, x: b.x, y: b.y, by: b.by, t0: b.t0 });
+      }
+      try {
+        if (list.length) { _putBuildRow.run(room, ch, JSON.stringify(list)); buildsSaved++; }
+        else _delBuildRow.run(room, ch);
+        wrote++;
+      } catch (e) { buildsSaveErrors++; if (buildsSaveErrors < 5) console.log('world_builds save failed: ' + e.message); }
+    }
+    if (!set.size) _buildsDirty.delete(room);
+  }
+  return wrote;
+}
+setInterval(() => { try { buildFlush(); } catch (e) { buildsSaveErrors++; } }, BUILD_FLUSH_MS);
+// Every structure within `r` of a point, cheaply: only the chunk it is in and the eight around it. Same shape as
+// `dropMergeTarget`'s neighbourhood scan and for the same reason — a radius can cross a chunk seam.
+function buildsNear(room, x, y, r, type) {
+  ensureBuildsLoaded(room);
+  const by = roomBuildChunk[room], bm = roomBuilds[room];
+  if (!by || !bm) return [];
+  const geom = worldGeom(room), span = CHUNK_SIDE * TERRAIN_CELL;
+  const gx = Math.floor(x / span), gy = Math.floor(y / span);
+  const out = [];
+  for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+    const cx = gx + dx, cy = gy + dy;
+    if (cx < 0 || cy < 0 || cx >= geom.cx || cy >= geom.cy) continue;
+    const s = by.get(cx * geom.cy + cy);
+    if (!s) continue;
+    for (const id of s) {
+      const b = bm.get(id);
+      if (!b || (type && b.type !== type)) continue;
+      if (Math.hypot(b.x - x, b.y - y) <= r) out.push(b);
+    }
+  }
+  return out;
+}
 function dropChunkOf(room, d) {
   const geom = worldGeom(room), span = CHUNK_SIDE * TERRAIN_CELL;
   // The RESTING place, not the release point: a thrown pile is indexed where it ends up, or a player standing
@@ -12142,6 +12318,57 @@ io.on('connection', (socket) => {
     if (!ledger.refineCancel(playerKeyFor(socket.id), mat | 0)) return;
     sendInvSync(socket, currentAvatarRoom);
   });
+  // ── the crucible ──────────────────────────────────────────────────────────────────────────────────────────
+  // Placed at your feet, which is where you would stand to use it anyway — no placement cursor, no new mode,
+  // and one fewer thing to aim. ⚠️ It SETTLES to the ground under that point (`dropRestY`) rather than floating
+  // where the body happened to be, using the same bounded scan a pile does and for the same reason: a read
+  // faults a page in, so an unbounded search would materialise world nobody is looking at.
+  socket.on('build-place', ({ type }) => {
+    if (!currentAvatarRoom || !invGatedRoom(currentAvatarRoom)) return;
+    if (type !== 'crucible') return;                    // one kind so far; named rather than assumed
+    const p = lastBodyPos(currentAvatarRoom, socket.id);
+    if (!p) return;
+    ensureBuildsLoaded(currentAvatarRoom);
+    // ⚠️ NOT ON TOP OF ANOTHER ONE. Without this a base is a stack of crucibles in one square metre, which
+    // looks like a bug and does nothing — the boost does not add up.
+    if (buildsNear(currentAvatarRoom, p.x, p.y, CRUCIBLE_MIN_GAP, 'crucible').length) {
+      socket.emit('build-refused', { why: 'There is already a crucible here.' });
+      return;
+    }
+    const key = playerKeyFor(socket.id);
+    if (ledger.prima(key) < CRUCIBLE_COST) {
+      socket.emit('build-refused', { why: `A crucible costs ✦${CRUCIBLE_COST}. Refine some more first.` });
+      return;
+    }
+    // 🟥 THE DEPOSIT COMES OUT ONLY ONCE THERE IS SOMEWHERE FOR IT TO GO — the same rule `releaseHoldings`
+    // records. Debit first and fail after, and the Prima is annihilated.
+    const b = { id: 'b' + (++buildSeq), type: 'crucible', x: p.x, y: dropRestY(currentAvatarRoom, p.x, p.y),
+                by: currentUsername || '', t0: Date.now() };
+    ledger.grantPrima(key, -CRUCIBLE_COST);
+    buildIndex(currentAvatarRoom, b);
+    emitToChunk(currentAvatarRoom, b.ch, 'build-add', b);
+    socket.emit('build-add', b);                        // the placer may not be subscribed to the chunk it landed in
+    sendInvSync(socket, currentAvatarRoom);
+    console.log(`crucible: ${currentUsername || 'someone'} placed ${b.id} at ${b.x | 0},${b.y | 0}`);
+  });
+  // ⭐ ANYBODY CAN BREAK IT, AND THEY GET THE DEPOSIT. That is §6's "raidable, not safe" for free: a base is a
+  // claim you keep by being there, not a title deed. It is also what makes the cost conserving — the Prima was
+  // never spent, only parked.
+  socket.on('build-break', ({ id }) => {
+    if (!currentAvatarRoom || !invGatedRoom(currentAvatarRoom)) return;
+    ensureBuildsLoaded(currentAvatarRoom);
+    const map = roomBuilds[currentAvatarRoom];
+    const b = map && map.get(id);
+    if (!b) return;                                     // already gone — somebody else got there first
+    const p = lastBodyPos(currentAvatarRoom, socket.id);
+    if (!p || Math.hypot(b.x - p.x, b.y - p.y) > CRUCIBLE_R) return;   // you have to be AT it
+    buildUnindex(currentAvatarRoom, b);
+    ledger.grantPrima(playerKeyFor(socket.id), CRUCIBLE_COST);
+    emitToChunk(currentAvatarRoom, b.ch, 'build-removed', { id });
+    socket.emit('build-removed', { id });
+    sendInvSync(socket, currentAvatarRoom);
+    console.log(`crucible: ${currentUsername || 'someone'} broke ${b.id} (built by ${b.by || 'unknown'})`);
+  });
   // ══════════════════════════════════════════════════════════════════════════════════════════════════════════
   //  ⭐⭐ DISPERSAL ON DEATH (kickoff_prima.md §4). You drop everything — Prima AND material — scattered where
   //  you fell, for anyone to pick up.
@@ -12960,6 +13187,8 @@ function worldFlushAll(why) {
   // other lying about is the only difference — so they leave on the same seam.
   try { const n = dropFlush(1e9); if (n) console.log(`pile persistence: flushed ${n} chunk(s) of cairns on ${why}`); }
   catch (e) { console.log('pile flush on ' + why + ' failed: ' + e.message); }
+  try { const n = buildFlush(1e9); if (n) console.log(`build persistence: flushed ${n} chunk(s) on ${why}`); }
+  catch (e) { console.log('build flush on ' + why + ' failed: ' + e.message); }
 }
 process.on('SIGTERM', () => {
   worldFlushAll('SIGTERM');
