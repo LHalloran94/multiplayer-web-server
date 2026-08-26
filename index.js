@@ -10024,11 +10024,55 @@ function dropRestY(room, x, y) {
   for (; r <= lim; r++) if (isSolidCell(grid.g(c * rows + r))) return (r - 0.5) * TERRAIN_CELL;   // rest ON TOP of the solid cell
   return (lim + 0.5) * TERRAIN_CELL;
 }
-function spawnDrop(room, x, y, mats, prima) {
+// ⭐ WHERE A THROWN PILE COMES DOWN. `dropRestY` answers "straight down from here", which is right for a pile
+// that a dig swing shook loose and wrong for one you deliberately threw. Same bounded-scan discipline and the
+// same reason for it: `grid.g()` FAULTS A PAGE IN on a generated world (F21), so an unbounded arc would let one
+// flick materialise a corridor of the world nobody is looking at.
+// ⚠️ The step matches the client's fall constant, so the arc the client animates and the landing the server
+// resolves are the same curve. They are two implementations of one motion; if they drift, a pile lands visibly
+// somewhere other than where it settles.
+const DROP_THROW_MAX_CELLS = 24;                      // how far sideways a throw may carry, in cells
+// How long a deliberately-dropped pile refuses to be collected. Long enough that you can walk away from what
+// you meant to put down, short enough that it is not a penalty. ⚠️ A DIG's pile has NO hold — instant pickup is
+// the whole feel of mining, and this is the opposite gesture.
+const INV_DROP_HOLD_MS = 1400;
+// ⚠️ DECLARED ABOVE ITS USE, not below. `dropThrowLanding` is hoisted and this is not — a `const` read before
+// its declaration is a ReferenceError, and this project has shipped that exact TDZ trap three times
+// (`PAGE_DIMS`, `rpOn`, a debug-panel row). Nothing calls this during module evaluation today, which is
+// precisely the kind of "true until someone moves a call" that those three were.
+const DROP_FALL_A_SRV = 0.0011;                       // must equal the client's DROP_FALL_A (16b)
+function dropThrowLanding(room, x, y, vx) {
+  const s = peekCells(room); const grid = s.terrain;
+  const dims = roomDims(room);
+  if (!grid || !vx) return { x, y: dropRestY(room, x, y) };
+  const maxX = DROP_THROW_MAX_CELLS * TERRAIN_CELL;
+  let px = x, py = y, t = 0;
+  const DT = 16;                                      // ms per step — one frame, so the curve is the client's
+  for (let i = 0; i < 260; i++) {
+    t += DT;
+    const nx = x + vx * t, ny = y + 0.5 * DROP_FALL_A_SRV * t * t;
+    if (Math.abs(nx - x) > maxX) break;
+    if (ny - y > DROP_FALL_MAX_CELLS * TERRAIN_CELL) break;
+    const c = Math.max(0, Math.min(dims.cols - 1, Math.floor(nx / TERRAIN_CELL)));
+    const r = Math.max(0, Math.min(dims.rows - 1, Math.floor(ny / TERRAIN_CELL)));
+    if (isSolidCell(grid.g(c * dims.rows + r))) return { x: px, y: (r - 0.5) * TERRAIN_CELL };
+    px = nx; py = ny;
+  }
+  return { x: px, y: dropRestY(room, px, py) };
+}
+function spawnDrop(room, x, y, mats, prima, opts) {
   const map = roomDrops[room] || (roomDrops[room] = new Map());
   if (map.size >= MAX_DROPS_PER_ROOM) { const oldest = map.keys().next().value; if (oldest !== undefined) { map.delete(oldest); io.to(room).emit('drop-removed', { id: oldest }); } }
   let n = 0; for (const [, k] of mats) n += k;
-  const d = { id: 'd' + (++dropSeq), x, y, gy: dropRestY(room, x, y), t0: Date.now(), mats, n };
+  const vx = (opts && isFinite(+opts.vx)) ? Math.max(-0.6, Math.min(0.6, +opts.vx)) : 0;
+  const land = vx ? dropThrowLanding(room, x, y, vx) : { x, y: dropRestY(room, x, y) };
+  const d = { id: 'd' + (++dropSeq), x, y, gy: land.y, t0: Date.now(), mats, n };
+  if (vx) { d.vx = vx; d.gx = land.x; }
+  // 🟥 HOW LONG BEFORE ANYONE MAY TAKE IT. Without this, putting something down is instantly undone: the
+  // collector runs every frame against anything within reach, and you are standing on top of what you just
+  // dropped. The server holds the deadline because it owns the list; the client is TOLD the interval and stops
+  // asking, so the two agree without either needing the other's clock.
+  if (opts && opts.hold > 0) { d.hold = opts.hold | 0; d._np = Date.now() + (opts.hold | 0); }
   // ⭐ A PILE CAN CARRY PRIMA AS WELL AS MATERIAL. Nothing spawns one yet except a player releasing what they
   // were holding, but dispersal-on-death needs exactly this shape, and adding the field now means that
   // increment does not have to change the wire, the client decoder and the collect path all over again.
@@ -10049,7 +10093,9 @@ function releaseHoldings(room, key, x, y) {
   const peek = ledger.snapshot(key);
   if (!peek.mats.length && !peek.prima) return null;
   const held = ledger.takeAll(key);
-  const d = spawnDrop(room, x, y, held.mats, held.prima);
+  // A hold on this one too: a released haul that the next passer-by hoovers up before it has visibly landed
+  // reads as a bug rather than as an event.
+  const d = spawnDrop(room, x, y, held.mats, held.prima, { hold: INV_DROP_HOLD_MS });
   console.log(`ledger: released ${held.mats.reduce((a, m) => a + m[1], 0)} cell(s) + ${held.prima} prima at ${x | 0},${y | 0} as ${d.id}`);
   return d;
 }
@@ -11638,29 +11684,37 @@ io.on('connection', (socket) => {
   // ⚠️ SERVER-AUTHORITATIVE LIKE EVERY OTHER LEDGER MOVE: the client asks, the server decides how much it
   // actually had, and the pile carries what was really taken. A client asking to drop a thousand diamonds it
   // does not hold spawns nothing.
-  socket.on('inv-drop', ({ mat, n }) => {
+  // ⚠️ `vx` is the throw, taken from the direction the player DRAGGED the stack out of the pouch. Clamped in
+  // `spawnDrop`, so a client cannot fling a pile across the world; and it is only a nicety, so an absent or
+  // silly value degrades to a pile at your feet rather than a rejection.
+  socket.on('inv-drop', ({ mat, n, vx }) => {
     if (!currentAvatarRoom) return;
     const key = playerKeyFor(socket.id);
     const p = lastBodyPos(currentAvatarRoom, socket.id);
     if (!p) return;                                       // no idea where they are ⇒ nowhere to put it
     const id = mat | 0, want = Math.max(0, Math.min(1e9, n | 0));
     if (!want) return;
+    const opts = { vx: +vx || 0, hold: INV_DROP_HOLD_MS };
     if (id === 0) {
       const have = ledger.prima(key);
       const take = Math.min(have, want);
       if (!take) return;
       ledger.grantPrima(key, -take);
-      spawnDrop(currentAvatarRoom, p.x, p.y - 12, [], take);
+      spawnDrop(currentAvatarRoom, p.x, p.y - 12, [], take, opts);
     } else {
       const took = ledger.spend(key, id, want);
       if (!took) return;
-      spawnDrop(currentAvatarRoom, p.x, p.y - 12, [[id, took]], 0);
+      spawnDrop(currentAvatarRoom, p.x, p.y - 12, [[id, took]], 0, opts);
     }
     sendInvSync(socket, currentAvatarRoom);
   });
   socket.on('drop-take', ({ id }) => {
     const map = currentAvatarRoom && roomDrops[currentAvatarRoom];
     if (!map || !map.has(id)) return;             // already gone — someone else got there first
+    // ⚠️ ENFORCED HERE, not only on the client that dropped it. The client stops asking during the hold, which
+    // is what makes it feel right; this is what makes it TRUE — otherwise a modified client picks its own
+    // throw straight back up, and so does anyone else's.
+    if (map.get(id)._np > Date.now()) return;
     // ⭐ CREDIT FROM THE SERVER'S OWN COPY OF THE PILE, never from the taker's claim about it. This is what
     // makes crediting safe with no new trust machinery: the drop list was ALREADY server-owned (so two players
     // could not both collect one pile), so the server already knows exactly what was in it. The client is told
