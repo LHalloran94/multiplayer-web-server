@@ -2856,7 +2856,20 @@ const domainsTest = DOMAINS.makeDomains({
 // module-level require is not USED inside the sliced cell-store block, because instantiating one in there is a
 // ReferenceError in every rig and nowhere else — this project has hit that exact shape five times now. The
 // registry above is the precedent; this sits beside it deliberately.
-const ledger = new LEDGER.Ledger(db);
+const ledger = new LEDGER.Ledger(db, { worthOf: (id) => MATGEN.primaWorthOf(id) });
+// ⭐⭐ REFINING — THE FIRST AND ONLY THING THAT CREATES PRIMA (kickoff_prima.md §3).
+// ⚠️ `rate` IS PRIMA PER SECOND, NOT CELLS PER SECOND, and that is the whole rule rather than a unit choice.
+// Value comes from rarity while digging cost comes from hardness, so a cells-per-second refiner would make the
+// softest common material the best earner in the game — dig turf forever. A constant value-rate caps income at
+// `rate` whatever you feed it, so the exploit is throughput-capped with no extra rule, and rare ore buys you
+// less DIGGING for the same wait rather than more income.
+// The user's call: start at 2 and tune it in play, which is the only place the evidence is.
+const refineCfg = {
+  rate: 2,            // Prima per second, on your person — the slow trickle §3 wants for a solo player far from home
+  crucible: 10,       // multiplier when standing at a built crucible. Nothing places one yet; the dial is here so
+                      // the placed-crucible increment is a location test rather than a second digest.
+};
+const REFINE_TICK_MS = 1000;
 // A player key: `d:` for a logged-in identity (persisted across restarts), `s:` for an anonymous socket
 // (ephemeral, gone when they go). ⚠️ ONE definition, because the credit path, the spend path and the wire all
 // have to agree about whose balance they are touching, and a second copy of this rule is a way to pay one
@@ -2874,8 +2887,46 @@ function invGatedRoom(room) { return !!room && overworldRooms.has(room); }
 // for which room a socket is in, which is exactly the kind of drift this file keeps getting bitten by.
 function sendInvSync(socket, room) {
   const snap = ledger.snapshot(playerKeyFor(socket.id));
-  socket.emit('inv-sync', { prima: snap.prima, mats: snap.mats, gated: invGatedRoom(room) });
+  socket.emit('inv-sync', {
+    prima: snap.prima, mats: snap.mats, gated: invGatedRoom(room),
+    // The hopper and its progress. ⚠️ `headWorth` comes from the SERVER's worth table rather than being looked
+    // up client-side: the client has a copy of that table, but a progress bar drawn against a different number
+    // from the one the digest is counting to is a bar that never reaches its end.
+    refine: snap.refine, refPaid: snap.paid, refWorth: snap.headWorth, refRate: refineCfg.rate,
+  });
 }
+// ⭐ THE DIGEST. One pass a second over the sockets that have something in the hopper — not over every player
+// in the ledger, because a logged-in identity's record stays in memory after they disconnect and refining while
+// nobody is connected would be a different design decision (offline progress), not an implementation detail.
+// ⚠️ ONE SOCKET PER KEY. A logged-in player can have several sockets open (a second tab, a stale one mid-
+// navigation) and every one of them maps to the same `d:` key — digesting once per socket would refine their
+// hopper twice as fast for having two tabs open.
+let refineTicks = 0, refinePrimaMade = 0;
+setInterval(() => {
+  const rate = Math.max(0, refineCfg.rate | 0);
+  if (!rate) return;
+  const budget = Math.max(1, Math.round(rate * REFINE_TICK_MS / 1000));
+  const seen = new Set();
+  // ⚠️ `socketToAvatarRoom` rather than the ledger's own key list, and that is the deliberate half: a `d:`
+  // record is KEPT in memory after its socket goes (a page navigation is a new socket every time), so walking
+  // the ledger would refine for players who are not here — offline progress, which is a design decision this
+  // increment has not taken. Refining happens while you are in the world.
+  for (const sid of Object.keys(socketToAvatarRoom)) {
+    const room = socketToAvatarRoom[sid];
+    if (!invGatedRoom(room)) continue;                 // the economy applies in the Overworld and nowhere else
+    const key = playerKeyFor(sid);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (!ledger.refineTotal(key)) continue;
+    const made = ledger.refineStep(key, budget);
+    refinePrimaMade += made;
+    // Told every tick, not only when a cell completes: the progress bar is the feedback, and a bar that only
+    // moves once every few minutes is indistinguishable from a bar that is broken.
+    const sock = io.sockets.sockets.get(sid);
+    if (sock) sendInvSync(sock, room);
+  }
+  refineTicks++;
+}, REFINE_TICK_MS);
 function ensureTerrain(room) { const s = cellsOf(room); return s.terrain || (s.terrain = newPagedField('terrain', worldGeom(room), room)); }
 function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || (s.terrainHp = newPagedField('terrainHp', worldGeom(room), room)); }
 // Per-cell durability lookup. Built-ins are always breakable / instant (strength 1); customs (id>=16) read their def.
@@ -7234,6 +7285,7 @@ function cfgWire() {
   return Object.assign({}, liquidCfg, {
     relayOn: !!relayCfg.on, relayHz: relayCfg.hz, relayCap: relayCfg.cap,
     relayFarHz: relayCfg.farHz, relayFarCap: relayCfg.farCap,
+    refineRate: refineCfg.rate, refineCrucible: refineCfg.crucible,
     secTicks: liqSecTicks, secDeferred: liqSecDeferred, secFallOnly: liqSecFallOnly,
     chunkQueue: !!interestCfg.queue, chunkQueueMs: interestCfg.queueMs, chunkQueueBatch: interestCfg.queueBatch,
     chunkQStats: { sent: chunkQSent, drains: chunkQDrains, dropped: chunkQDropped },
@@ -10753,6 +10805,10 @@ io.on('connection', (socket) => {
     if ('relayCap' in patch) relayCfg.cap = Math.max(0, Math.min(512, patch.relayCap | 0));
     if ('relayFarHz' in patch) relayCfg.farHz = Math.max(0, Math.min(50, patch.relayFarHz | 0));
     if ('relayFarCap' in patch) relayCfg.farCap = Math.max(0, Math.min(512, patch.relayFarCap | 0));
+    // ⚠️ The refine rate is GLOBAL, like the day length and for the same reason: a per-browser value would let
+    // one player refine faster than another in the same economy, which is not a setting, it is a cheat.
+    if ('refineRate' in patch) refineCfg.rate = Math.max(0, Math.min(10000, patch.refineRate | 0));
+    if ('refineCrucible' in patch) refineCfg.crucible = Math.max(1, Math.min(1000, patch.refineCrucible | 0));
     // Batching is behaviour-preserving (same events, same order, one envelope), so unlike the two above it needs
     // no repair when toggled — the next tick simply arrives unwrapped.
     if ('interestBatch' in patch) interestCfg.batch = !!patch.interestBatch;
@@ -12067,6 +12123,23 @@ io.on('connection', (socket) => {
       if (!took) return;
       spawnDrop(currentAvatarRoom, p.x, p.y - 12, [[id, took]], 0, opts);
     }
+    sendInvSync(socket, currentAvatarRoom);
+  });
+  // ── the hopper ────────────────────────────────────────────────────────────────────────────────────────────
+  // ⚠️ SERVER-AUTHORITATIVE LIKE EVERY OTHER LEDGER MOVE: the client asks, the server decides how much they
+  // actually had, and refuses anything the worth table prices at nothing. A client asking to refine a thousand
+  // cells of turf moves nothing — which is the §3 threshold, not a validation nicety: if everything dissolved,
+  // 89 materials would collapse into one number and the pouch would stop meaning anything.
+  socket.on('refine-add', ({ mat, n }) => {
+    if (!currentAvatarRoom || !invGatedRoom(currentAvatarRoom)) return;
+    const id = mat | 0, want = Math.max(0, Math.min(1e9, n | 0));
+    if (!want || !MATGEN.primaRefinable(id)) return;
+    if (!ledger.refineAdd(playerKeyFor(socket.id), id, want)) return;
+    sendInvSync(socket, currentAvatarRoom);
+  });
+  socket.on('refine-cancel', ({ mat }) => {
+    if (!currentAvatarRoom) return;
+    if (!ledger.refineCancel(playerKeyFor(socket.id), mat | 0)) return;
     sendInvSync(socket, currentAvatarRoom);
   });
   // ══════════════════════════════════════════════════════════════════════════════════════════════════════════

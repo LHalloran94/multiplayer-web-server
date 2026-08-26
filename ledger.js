@@ -21,10 +21,21 @@
 //  ⚠️ It follows that "log in to keep what you find" is a real gameplay rule, and it should be SAID in the UI
 //  rather than discovered by losing a haul.
 //
-//  ── WHAT IS NOT HERE YET ──────────────────────────────────────────────────────────────────────────────────
-//  Refining (materials → Prima) is the crucible, a later increment: `prima` exists and moves, but nothing
-//  credits it yet except a direct grant. Dispersal on death, cairns and the conservation audit are also later.
-//  The shape is here so the wire and the table do not have to change when they land.
+//  ── REFINING — THE ONE PLACE PRIMA IS CREATED ─────────────────────────────────────────────────────────────
+//  A player puts refinable material into a QUEUE and it dissolves at a fixed PRIMA PER SECOND (kickoff_prima.md
+//  §3). Not blocks per second: value comes from rarity while digging cost comes from hardness, so a
+//  blocks-per-second rate would make turf the best earner in the game. A constant value-rate throughput-caps
+//  every material at once, with no extra rule.
+//
+//  🟥 PRIMA IS GRANTED ONLY WHEN A WHOLE CELL FINISHES, AND THAT IS NOT A SIMPLIFICATION — IT IS WHAT MAKES
+//  CANCELLING SAFE. Crediting the balance a little at a time reads better, but then a player who cancels a
+//  half-refined cell gets the whole cell BACK while keeping the Prima already paid for it: matter created out
+//  of nothing, on demand, by anybody, in the one system whose entire premise is that matter is conserved.
+//  `paid` is therefore PROGRESS, not currency — cancelling discards it, which destroys nothing because it was
+//  never anything. The progress bar is what gives back the feedback that incremental crediting would have.
+//
+//  ⚠️ THE QUEUE IS PART OF WHAT YOU ARE CARRYING. It leaves in `takeAll` with everything else, or dying with a
+//  full hopper would delete it — a leak in the same list as the ones this track exists to close.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 const PERSIST_PREFIX = 'd:';                 // only authenticated keys reach the database
@@ -37,7 +48,11 @@ class Ledger {
     this.dirty = new Set();                  // persisted keys whose rows are behind memory
     this.flushTimer = null;
     this.flushMs = (opts && opts.flushMs) || FLUSH_MS;
-    this.stats = { credits: 0, spends: 0, refused: 0, loads: 0, flushes: 0 };
+    // What a cell of a material is worth in Prima. Injected rather than required, because the worth table
+    // lives in `materials.js` alongside the generator that the numbers were measured from, and this file has
+    // no business knowing what a mineral is.
+    this.worthOf = (opts && opts.worthOf) || (() => 0);
+    this.stats = { credits: 0, spends: 0, refused: 0, loads: 0, flushes: 0, refined: 0, primaMade: 0 };
     if (this.db) this._initDb();
   }
 
@@ -55,6 +70,14 @@ class Ledger {
         player_key TEXT PRIMARY KEY,
         amount     INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS player_refine (
+        player_key TEXT    NOT NULL,
+        seq        INTEGER NOT NULL,
+        mat_id     INTEGER NOT NULL,
+        n          INTEGER NOT NULL,
+        paid       INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (player_key, seq)
+      );
     `);
     this._selMats = this.db.prepare('SELECT mat_id, n FROM player_holdings WHERE player_key = ?');
     this._selPrima = this.db.prepare('SELECT amount FROM player_prima WHERE player_key = ?');
@@ -62,6 +85,11 @@ class Ledger {
     this._insMat = this.db.prepare('INSERT INTO player_holdings (player_key, mat_id, n) VALUES (?, ?, ?)');
     this._upPrima = this.db.prepare('INSERT INTO player_prima (player_key, amount) VALUES (?, ?) ' +
                                     'ON CONFLICT(player_key) DO UPDATE SET amount = excluded.amount');
+    // ⚠️ `seq` is what keeps the queue a QUEUE. Without an explicit order column the rows come back in
+    // whatever order SQLite likes, and the head — the one thing `paid` belongs to — stops being knowable.
+    this._selRefine = this.db.prepare('SELECT mat_id, n, paid FROM player_refine WHERE player_key = ? ORDER BY seq');
+    this._delRefine = this.db.prepare('DELETE FROM player_refine WHERE player_key = ?');
+    this._insRefine = this.db.prepare('INSERT INTO player_refine (player_key, seq, mat_id, n, paid) VALUES (?, ?, ?, ?, ?)');
   }
 
   _persisted(key) { return !!this.db && typeof key === 'string' && key.startsWith(PERSIST_PREFIX); }
@@ -71,12 +99,17 @@ class Ledger {
   _rec(key) {
     let h = this.holdings.get(key);
     if (h) return h;
-    h = { prima: 0, mats: new Map() };
+    h = { prima: 0, mats: new Map(), refine: [], paid: 0 };
     if (this._persisted(key)) {
       try {
         for (const row of this._selMats.all(key)) if (row.n > 0) h.mats.set(row.mat_id | 0, row.n | 0);
         const p = this._selPrima.get(key);
         h.prima = p ? (p.amount | 0) : 0;
+        for (const row of this._selRefine.all(key)) {
+          if (row.n > 0) h.refine.push({ m: row.mat_id | 0, n: row.n | 0 });
+          if (!h.refine.length) continue;
+          if (h.refine.length === 1) h.paid = row.paid | 0;      // `paid` belongs to the head and only the head
+        }
         this.stats.loads++;
       } catch (e) { console.error('ledger: load failed for', key, e.message); }
     }
@@ -102,7 +135,21 @@ class Ledger {
     const mats = [];
     for (const [m, n] of h.mats) if (n > 0) mats.push([m, n]);
     mats.sort((a, b) => b[1] - a[1]);
-    return { prima: h.prima, mats };
+    // ⚠️ `paid` and the head's worth both ride along. The client draws a progress bar out of them and must not
+    // compute the worth itself: the table is the server's, and a client that disagrees about what a cell is
+    // worth draws a bar that never reaches its end.
+    const head = h.refine[0];
+    return {
+      prima: h.prima, mats,
+      refine: h.refine.map(e => [e.m, e.n]),
+      paid: head ? h.paid : 0,
+      headWorth: head ? this.worthOf(head.m) : 0,
+    };
+  }
+  refineTotal(key) {
+    const h = this._rec(key);
+    let n = 0; for (const e of h.refine) n += e.n;
+    return n;
   }
 
   // ── writes ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -153,14 +200,86 @@ class Ledger {
     return h.prima;
   }
 
+  // ── refining ───────────────────────────────────────────────────────────────────────────────────────────
+  // Move material out of the pouch and into the hopper. Returns how much actually went in — the caller asks,
+  // the server decides how much they had, exactly as `spend` does.
+  // ⚠️ REFUSES ANYTHING WORTH NOTHING, and that is the §3 threshold doing its job rather than a safety check:
+  // bulk rock and soil have no Prima worth, so a cell of them would sit at the head of the queue for ever,
+  // never completing. It is also what stops the pouch's 89 materials collapsing into one number.
+  // ⭐ Merged by material rather than appended, so feeding the same stack twice makes one entry rather than a
+  // list that grows for ever. Merging into the HEAD is safe because `paid` is progress toward one CELL of that
+  // material and the material has not changed.
+  refineAdd(key, matId, n) {
+    const id = matId | 0, want = n | 0;
+    if (id <= 0 || want <= 0) return 0;
+    if (this.worthOf(id) <= 0) { this.stats.refused++; return 0; }
+    const took = this.spend(key, id, want);
+    if (!took) return 0;
+    const h = this._rec(key);
+    const e = h.refine.find(x => x.m === id);
+    if (e) e.n += took; else h.refine.push({ m: id, n: took });
+    this._touch(key);
+    return took;
+  }
+  // Change your mind: everything of `matId` comes back out of the hopper and into the pouch.
+  // 🟥 THE HEAD'S PROGRESS IS DISCARDED, AND NOTHING IS LOST BY IT. `paid` is Prima that has NOT been granted
+  // (see the header): the cell is whole, it goes back whole, and the partial work simply did not happen. Had
+  // the balance been credited as it went, this line would be a machine for printing matter.
+  refineCancel(key, matId) {
+    const id = matId | 0;
+    const h = this._rec(key);
+    const i = h.refine.findIndex(x => x.m === id);
+    if (i < 0) return 0;
+    const back = h.refine[i].n;
+    h.refine.splice(i, 1);
+    if (i === 0) h.paid = 0;
+    h.mats.set(id, (h.mats.get(id) || 0) + back);
+    this._touch(key);
+    return back;
+  }
+  // Advance the hopper by `prima` units of work. ⭐ THE UNIT OF WORK IS PRIMA, NOT CELLS — that is the whole
+  // rule: a cell takes `worth / rate` seconds, so income is capped at the rate whatever you feed it, and a
+  // mountain of cheap material takes proportionally for ever.
+  // Returns how much Prima was actually created, which is 0 unless a cell completed.
+  refineStep(key, prima) {
+    const budget = prima | 0;
+    if (budget <= 0) return 0;
+    const h = this._rec(key);
+    if (!h.refine.length) return 0;
+    let left = budget, made = 0;
+    while (left > 0 && h.refine.length) {
+      const head = h.refine[0], worth = this.worthOf(head.m) | 0;
+      // A material whose worth has gone to zero (a re-measured table, a removed mineral) would otherwise spin
+      // here for ever. Hand it back rather than dissolve it for nothing.
+      if (worth <= 0) { this.refineCancel(key, head.m); continue; }
+      const need = worth - h.paid;
+      if (left < need) { h.paid += left; left = 0; break; }
+      left -= need; h.paid = 0;
+      head.n -= 1; made += worth;
+      if (head.n <= 0) h.refine.shift();
+      this.stats.refined++;
+    }
+    if (made) { h.prima += made; this.stats.primaMade += made; }
+    this._touch(key);
+    return made;
+  }
+
   // Everything this player is carrying, removed and handed back. The shape dispersal-on-death needs: the
   // ledger empties, the caller decides where the matter goes. ⭐ Returning it rather than deleting it is what
   // keeps conservation checkable — nothing here may destroy matter, only move it.
   takeAll(key) {
     const h = this._rec(key);
     const out = { prima: h.prima, mats: [] };
-    for (const [m, n] of h.mats) if (n > 0) out.mats.push([m, n]);
-    h.prima = 0; h.mats.clear();
+    const bag = new Map(h.mats);
+    // 🟥 THE HOPPER LEAVES TOO. Material in the refine queue is material you are CARRYING — it is out of the
+    // pouch but it has not become anything yet — so leaving it behind here would mean dying with a full hopper
+    // silently deleted it. That is a leak of exactly the kind §8 lists, and it would have been invisible: the
+    // pouch empties, the piles look right, and the ore that was mid-refine is simply gone.
+    // ⚠️ Merged back into the material totals rather than reported separately, because what lands on the
+    // ground is a pile of ore; nothing about a cairn knows that some of it was queued.
+    for (const e of h.refine) if (e.n > 0) bag.set(e.m, (bag.get(e.m) || 0) + e.n);
+    for (const [m, n] of bag) if (n > 0) out.mats.push([m, n]);
+    h.prima = 0; h.mats.clear(); h.refine.length = 0; h.paid = 0;
     this._touch(key);
     return out;
   }
@@ -188,6 +307,13 @@ class Ledger {
         this._delMats.run(key);
         for (const [m, n] of h.mats) if (n > 0) this._insMat.run(key, m, n);
         this._upPrima.run(key, h.prima);
+        // Same delete-then-insert, for the same reason: an UPSERT would leave rows for entries that have
+        // finished refining, and a stale row here is ore that comes back from the dead.
+        this._delRefine.run(key);
+        for (let i = 0; i < h.refine.length; i++) {
+          const e = h.refine[i];
+          if (e.n > 0) this._insRefine.run(key, i, e.m, e.n, i === 0 ? (h.paid | 0) : 0);
+        }
         wrote++;
       }
       this.db.exec('COMMIT');
