@@ -12657,7 +12657,10 @@ io.on('connection', (socket) => {
       // crucible's stored `t` records.
       // 🟥 DEBITED ONLY ONCE THE PROP IS CERTAIN TO EXIST, after every refusal above. Debit first and fail after,
       // and the Prima is annihilated — the rule `releaseHoldings` and `build-place` both already carry.
-      if (invGatedRoom(currentAvatarRoom)) {
+      // ⚠️ …unless it came from the BUILD MENU, which is the editor and is outside the economy (see the same
+      // flag on `terrain-edit`). A prop placed there costs nothing and therefore refunds nothing — `cost` is
+      // simply absent, and every refund path already keys on it being present.
+      if (invGatedRoom(currentAvatarRoom) && !data.editor) {
         const _k = playerKeyFor(socket.id), _cost = objPriceOf(obj);
         if (ledger.prima(_k) < _cost) {
           socket.emit('build-refused', { why: `That costs ✦${_cost.toLocaleString()} — refine some more first.` });
@@ -12991,7 +12994,7 @@ io.on('connection', (socket) => {
     emitToChunk(currentAvatarRoom, d.ch, 'drop-removed', { id, by: socket.id });
     socket.emit('drop-removed', { id, by: socket.id });
   });
-  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits }) => {
+  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
     // arrived" from "a guard rejected it", and those need completely different fixes — which cost a whole round
     // of wrong theories on 2026-08-27.
@@ -13067,7 +13070,16 @@ io.on('connection', (socket) => {
     // deliberately LEAVES liquid so it can never enter a pouch either, which made the budget permanently zero
     // and painting liquid in the Overworld impossible. What the player saw was their own optimistic cell,
     // uncorrected (see `sendPaintTruth`) — a water-coloured block no simulation owns.
-    const _payMat = (op === 'paint' && invGatedRoom(currentAvatarRoom) && !isFluidId(m)) ? m : 0;
+    // ⭐⭐ …AND SO IS THE BUILD MENU (user, 2026-08-27). The editor toolset is a SANDBOX surface that happens to
+    // be reachable in the Overworld for testing; the limit on what people can build and destroy out there is the
+    // POUCH — dig it, carry it, or conjure it. Keeping the two apart is the whole point of the crafting side
+    // existing, so an editor paint is not charged and not capped.
+    // ⚠️ FORGEABLE, KNOWINGLY. Both tools send the same message, so only the client can say which one it was, and
+    // anyone reading their own traffic could send `editor: 1` and build for nothing. The user's call is that this
+    // is acceptable while the server is local and they are the only player. The real fix is to gate the build
+    // menu to an authorised identity in the Overworld, which is a permission model, not a flag — recorded rather
+    // than half-built.
+    const _payMat = (op === 'paint' && invGatedRoom(currentAvatarRoom) && !isFluidId(m) && !editor) ? m : 0;
     const _payKey = _payMat ? playerKeyFor(socket.id) : null;
     const _conjW = _payMat && MATGEN.primaRefinable(_payMat) ? MATGEN.primaWorthOf(_payMat) : 0;
     let _haveMat = _payMat ? ledger.budget(_payKey, _payMat) : 0;
