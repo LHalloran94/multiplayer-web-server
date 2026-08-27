@@ -1804,6 +1804,18 @@ const OVERWORLD_DIMS = Object.freeze({ cols: 524224, rows: 4096 });
 // A Set rather than a key test because the sector split (§7: N scheduling rooms over one cell store) registers
 // each sector here too — one shape, many scheduling keys.
 const overworldRooms = new Set();
+// ⭐⭐ WHERE THE ECONOMY APPLIES — every NON-SANDBOX Level, not just the Overworld (user decision, 2026-08-27:
+// "the crafting mode is the build mode for the overworld and non-sandbox rooms"). Recorded per avatar-room at
+// join, the same way `overworldRooms` is, because a Level's kind is a property of (roomId, levelIndex) and so
+// every socket in one avatar-room agrees about it.
+// 🟥 IT IS NOT DERIVED FROM THE JOIN'S `type`, AND THAT IS THE WHOLE TRAP. `levelWireType` on the client sends
+// `'sandbox'` for a Level bound to host-saved or published content, deliberately, so the room joins BLANK and
+// hydration can fill it. `type` therefore means "generate terrain for me", NOT "this is a sandbox" — gating on
+// it would leave every published world Level free to build in. The Level's real kind comes from the room's
+// `env_spec`, and from the documented per-URL default (`[sandbox = 0, life = 1]`) when there is no DB row.
+// ⚠️ ADD-ONLY. Nothing ever removes a room from this: the kind cannot change under a room key, and a delete
+// would let whichever socket joined last decide for everybody.
+const gatedRooms = new Set();
 // ⭐ ONE ROOM FOR EVERYONE. The Overworld is a single continuous world, so every page that enters it enters the
 // SAME room key — which is what makes it shared at all. The page you came from decides only your spawn COLUMN.
 // ⚠️ Deliberately not a valid `avatarRoomKey` output: those are 'av:<url>:<level>' and a URL cannot be '@over'.
@@ -2937,7 +2949,21 @@ function playerKeyFor(socketId) {
 // Where the economy applies. ⚠️ MUST MATCH THE CLIENT'S `invGated()`, which is `!!avOverworld` — the placer,
 // the preview, the material picker and now the server's debit all have to agree about which world they are in,
 // or the client shows a cost the server does not charge (or worse, the reverse).
-function invGatedRoom(room) { return !!room && overworldRooms.has(room); }
+function invGatedRoom(room) { return !!room && gatedRooms.has(room); }
+// Does the economy apply to this Level? Decided ONCE, at join, and recorded in `gatedRooms` — see the note
+// there for why the join's `type` is the wrong input and `env_spec` is the right one.
+// ⚠️ `life` (generated) and `stage` (host-authored) are both non-sandbox and both gated. The vocabulary is
+// `LEVEL_TYPES`, so a new Level kind is gated unless it is literally called 'sandbox' — which is the safe
+// default: a kind nobody has taught this function about should not silently become free-build.
+function levelIsGated(rinfo, levelIndex, isOver) {
+  if (isOver) return true;                             // the Overworld, always
+  const spec = rinfo ? parseEnvSpec(rinfo.env_spec) : null;
+  const lvl = (spec && Array.isArray(spec.levels)) ? spec.levels[levelIndex | 0] : null;
+  if (lvl) return lvl.type !== 'sandbox';
+  // No DB row (a per-URL page room): the documented default pair is [sandbox = 0, life = 1] — the same
+  // assumption `levelIndex`'s own fallback above makes, written once more where it is acted on.
+  return (levelIndex | 0) !== 0;
+}
 // ⚠️ The room is PASSED, not looked up: a socket's avatar room lives in the connection closure
 // (`currentAvatarRoom`) and there is no global map of it. Inventing one here would be a second source of truth
 // for which room a socket is in, which is exactly the kind of drift this file keeps getting bitten by.
@@ -7633,7 +7659,10 @@ function sameUserAvSockets(avRoom, sid) {
 // it only after an access check — member of a private room, or any public room — else fall back to the
 // default per-URL room (currentRoom). Falsy/unknown id → the per-URL room. The page URL is never a valid
 // `rooms.id` (it's not a generated code), so a malicious URL-as-roomId just resolves to itself.
-const _avRoomLookup = db.prepare('SELECT public, owner_id FROM rooms WHERE id = ?');
+// ⚠️ `env_spec` rides along because the join needs the Level's real KIND to decide whether the economy applies
+// there (see `gatedRooms`). Widening the existing lookup rather than adding a second one: it is read once per
+// join, and two statements against the same row would be two chances to ask about different rooms.
+const _avRoomLookup = db.prepare('SELECT public, owner_id, env_spec FROM rooms WHERE id = ?');
 const _avRoomMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?');
 // Stage 6 Phase 3 — L2 build permissions, PER-ROOM (covers every Level in the room's World). A role
 // default `mode` ('all' = anyone present can build, today's behavior; 'host' = only the owner + granted
@@ -12041,6 +12070,8 @@ io.on('connection', (socket) => {
     const _isTestOver = _isOver && isTestIdentity(roomId);
     const avRoom = _isOver ? (_isTestOver ? OVERWORLD_TEST_ROOM : OVERWORLD_ROOM) : avatarRoomKey(roomId, levelIndex);
     if (_isOver) overworldRooms.add(avRoom);
+    // ⭐ …and whether the economy applies here, recorded on the room at the one moment the Level's kind is known.
+    if (levelIsGated(rinfo, levelIndex, _isOver)) gatedRooms.add(avRoom);
     // Where in the Overworld THIS socket arrives: an allocation against the page's permanent identity, which is
     // the whole of `server/domains.js`. `place` (not `peek`) because arriving is what claims a column.
     // ⚠️ PER SOCKET, NOT PER ROOM. Everywhere else `spawn` is a property of the room; in a shared world every
