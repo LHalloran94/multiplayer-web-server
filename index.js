@@ -1705,6 +1705,38 @@ const DROP_FALL_MAX_CELLS = 96;    // how far down the resting scan looks — bo
 const MAX_OBJECTS_PER_ROOM = 150;  // Phase 6: per-Level cap on USER-placed objects (generated 'world-' scatter exempt); mirrors client OBJECT_CAP. Over-cap spawns are rejected.
 const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter)
 const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
+// ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
+// nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
+// back, smash anybody's and it falls on the ground as a cairn for whoever gets there first. That one rule is
+// also what gives props "raidable, not safe" for free, with no separate ownership or decay mechanic.
+// ⭐ PRICED BY AREA rather than by a flat number per type, and that is the part worth defending: a prop is an
+// alternative to building the same shape out of conjured terrain, so if it were flat then one enormous platform
+// would be the cheapest wall in the game. Area pricing makes a plank cost about what the plank-shaped piece of
+// rock would, and it needs no balancing pass to stay that way as sizes change.
+// ⚠️ The flag types (checkpoint/goal/spawn/portal) have no meaningful area — they are markers — so they are the
+// exception and are flat. A portal is dearer than the rest because a teleporter is worth more than a sign.
+// ⚠️ THE NUMBERS ARE CHOSEN, NOT MEASURED, unlike the worth table. They are dials on the config wire so they can
+// be tuned by playing, which is the only way to price a thing whose value is how useful it is.
+const objCfg = {
+  perCell: 10,          // Prima per terrain-cell of area (10 = one cell of the commonest conjurable mineral)
+  flat: 100,            // …for the markers, which have no area
+  portal: 250,
+};
+// The area of a prop in TERRAIN CELLS, which is the unit `perCell` is denominated in.
+function objAreaCells(o) {
+  if (o.type === 'stroke') {
+    let len = 0;
+    for (let i = 1; i < o.pts.length; i++) len += Math.hypot(o.pts[i].x - o.pts[i - 1].x, o.pts[i].y - o.pts[i - 1].y);
+    return Math.max(1, (len * (o.w || 8)) / (TERRAIN_CELL * TERRAIN_CELL));
+  }
+  return Math.max(1, ((o.w || 0) * (o.h || 0)) / (TERRAIN_CELL * TERRAIN_CELL));
+}
+function objPriceOf(o) {
+  if (!o) return 0;
+  if (o.type === 'portal') return Math.max(0, objCfg.portal | 0);
+  if (o.type === 'checkpoint' || o.type === 'goal' || o.type === 'spawn') return Math.max(0, objCfg.flat | 0);
+  return Math.max(1, Math.round(objAreaCells(o) * Math.max(0, objCfg.perCell | 0)));
+}
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
 
 // ---- Destructible terrain (Tier C) -----------------------------------------
@@ -2923,6 +2955,11 @@ function sendInvSync(socket, room) {
     // player at one crucible two parallel streams. The trickle is what you carry; the pot is the fast one.
     refRate: refineCfg.rate,
     crucCost: CRUCIBLE_COST, crucR: CRUCIBLE_R, crucRate: refineCfg.rate * Math.max(1, refineCfg.crucible | 0),
+    // ⭐ WHAT A PROP COSTS, AS THE RULE RATHER THAN AS A LIST OF PRICES. The client sizes its own props, so it
+    // can only show a price before you click if it can compute one — and it has to be the SERVER's arithmetic
+    // or the number on the button is not the number that gets charged. Sent as the two dials plus the flats,
+    // which is the whole of `objPriceOf`.
+    objCost: { perCell: objCfg.perCell | 0, flat: objCfg.flat | 0, portal: objCfg.portal | 0, cell: TERRAIN_CELL },
     // ⚠️ WHO THIS SOCKET IS, in the ledger's own terms. The crucible's queue is public and every batch carries
     // the key that loaded it, so the panel cannot tell "yours" from "theirs" without being told which key is
     // yours. It is not a secret — it is `d:<discordId>` or `s:<socketId>`, both of which the client already
@@ -10752,6 +10789,11 @@ function ensureObjectsLoaded(room) {
       const o = buildWorldObject(p.type, p, p.id, p.ownerId || '', p.owner || '', room);
       if (!o) continue;
       if (typeof p.hp === 'number' || p.hp === null) o.hp = p.hp;   // damage survives a restart; the ground it stands on does
+      // 🟥 AND SO DOES THE DEPOSIT, or every restart quietly confiscates the Prima parked in every prop in the
+      // world — the same shape as the bug that made a server restart the largest destroyer of matter in the
+      // game (`kickoff_prima.md` §8 row 4b). `buildWorldObject` cannot know it: it is a ledger fact, not a
+      // shape fact, so it is reapplied here beside `hp`.
+      if (p.cost > 0) o.cost = p.cost | 0;
       objIndex(room, o);
       n++;
     }
@@ -12555,6 +12597,22 @@ io.on('connection', (socket) => {
         socket.emit('build-refused', { why: 'Too much built here already — spread out a little.' });
         return;
       }
+      // ── THE DEPOSIT. ⭐ `cost` IS STORED ON THE PROP, not recomputed from the price table when it is broken.
+      // A refund taken from today's table would pay out a different number from the one that went in the moment
+      // anybody tunes a dial — matter created or destroyed by an admin changing their mind. Same lesson the
+      // crucible's stored `t` records.
+      // 🟥 DEBITED ONLY ONCE THE PROP IS CERTAIN TO EXIST, after every refusal above. Debit first and fail after,
+      // and the Prima is annihilated — the rule `releaseHoldings` and `build-place` both already carry.
+      if (invGatedRoom(currentAvatarRoom)) {
+        const _k = playerKeyFor(socket.id), _cost = objPriceOf(obj);
+        if (ledger.prima(_k) < _cost) {
+          socket.emit('build-refused', { why: `That costs ✦${_cost.toLocaleString()} — refine some more first.` });
+          return;
+        }
+        obj.cost = _cost;
+        ledger.grantPrima(_k, -_cost);
+        sendInvSync(socket, currentAvatarRoom);
+      }
       objIndex(currentAvatarRoom, obj);
       // ⚠️ AND TO THE PLACER EXPLICITLY. `emitObjToChunks` reaches subscribers, and the socket that placed it may
       // not be subscribed to the chunk it landed in (a prop dropped at the edge of the view). Without this the
@@ -12580,6 +12638,14 @@ io.on('connection', (socket) => {
     // process that no longer exists, so ownership of anything persisted is carried entirely by the name.
     if (!obj || !(obj.ownerId === socket.id || (obj.owner && obj.owner === currentUsername))) return;
     objUnindex(currentAvatarRoom, obj);
+    // ⭐ ERASING YOUR OWN PROP HANDS THE DEPOSIT STRAIGHT BACK, because this path is owner-only — it is
+    // un-building, not a raid, and making you chase your own Prima across the floor for changing your mind
+    // would be a penalty on tidying up. SMASHING one scatters instead (see `avatar-object-hit`): the difference
+    // between the two is exactly the difference between demolishing your own wall and somebody else's.
+    if (obj.cost > 0 && invGatedRoom(currentAvatarRoom)) {
+      ledger.grantPrima(playerKeyFor(socket.id), obj.cost | 0);
+      sendInvSync(socket, currentAvatarRoom);
+    }
     emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-removed', { id });
     if (objChunked(currentAvatarRoom)) socket.emit('avatar-object-removed', { id });   // …the eraser may not be subscribed there
   });
@@ -12926,16 +12992,35 @@ io.on('connection', (socket) => {
     // ⚠️ A refused or clamped paint needs NO bespoke revert on the client. The client paints optimistically, the
     // server does not, and the existing chunk sync heals the difference — the same mechanism that made a carve
     // "appear locally then come back" when the server disagreed. That is why this is a small change.
+    // ⭐⭐ …AND IF YOU HAVE NONE OF IT, PRIMA CONJURES IT. This is `kickoff_prima.md` §2's philosopher's stone
+    // arriving as a build tool: `worth` Prima becomes one cell of that material, at exactly the number the
+    // crucible pays for dissolving one, so the round trip is free and no matter is made or lost.
+    // 🟥 ONLY WHAT PRIMA CAN DISSOLVE — `primaRefinable`, the same test `refine-add` uses. §3 marks the
+    // symmetry COMPULSORY: conjuring something that cannot dissolve back is matter of unaccounted mass entering
+    // a world whose whole economy is that mass is conserved. Bulk rock, soil and plants are therefore
+    // dig-and-carry only, which is the user's decision of 2026-08-27 and is also what keeps hauling stone home a
+    // different activity from hauling ore.
+    // ⚠️ HELD MATERIAL IS SPENT FIRST. Otherwise standing on a pile of quartz and painting quartz would burn
+    // Prima while the pouch stayed full — the same matter, charged for twice over.
     const _payMat = (op === 'paint' && invGatedRoom(currentAvatarRoom)) ? m : 0;
     const _payKey = _payMat ? playerKeyFor(socket.id) : null;
-    let _budget = _payMat ? ledger.budget(_payKey, _payMat) : null;
+    const _conjW = _payMat && MATGEN.primaRefinable(_payMat) ? MATGEN.primaWorthOf(_payMat) : 0;
+    let _haveMat = _payMat ? ledger.budget(_payKey, _payMat) : 0;
+    let _havePri = _conjW ? ledger.prima(_payKey) : 0;
+    let _budget = _payMat ? _haveMat + (_conjW ? Math.floor(_havePri / _conjW) : 0) : null;
     if (_payMat && _budget <= 0) return;                    // nothing to build with — the stroke does nothing
-    let _did = 0;
+    let _did = 0, _conjured = 0;
     for (let _h = 0; _h < nHits; _h++) {
       const _n = (sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd, _budget);
       _did += _n;
       if (_payMat) {
-        if (_n) ledger.spend(_payKey, _payMat, _n);
+        // ⚠️ `spend` CLAMPS AND REPORTS, so the split is taken from what it actually took rather than from what
+        // was asked for. Deriving the Prima half by subtraction off an unclamped number is how a rounding hole
+        // gets into a ledger.
+        const _fromMat = _n ? ledger.spend(_payKey, _payMat, Math.min(_haveMat, _n)) : 0;
+        _haveMat -= _fromMat;
+        const _fromPri = _n - _fromMat;
+        if (_fromPri > 0 && _conjW) { ledger.grantPrima(_payKey, -_fromPri * _conjW); _havePri -= _fromPri * _conjW; _conjured += _fromPri; }
         _budget -= _n;
         if (_budget <= 0) break;
       }
@@ -13046,7 +13131,16 @@ io.on('connection', (socket) => {
     const obj = roomObjects[currentAvatarRoom].get(id);
     if (!obj || typeof obj.hp !== 'number') return;
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
-    if (obj.hp <= 0) { objUnindex(currentAvatarRoom, obj); emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-removed', { id }); }
+    if (obj.hp <= 0) {
+      objUnindex(currentAvatarRoom, obj);
+      // ⭐ SMASHED, SO THE DEPOSIT FALLS ON THE GROUND rather than being handed to whoever hit it — the same
+      // rule as breaking a crucible, and for the same reason: a raid should be a SCRAMBLE in the open, where
+      // anyone who heard the noise can reach the spoils, not a silent transfer to the attacker.
+      // ⚠️ ONE pile, not `deathSpread`'s fan. A fan exists so a whole pouch is not collected in a single step;
+      // one prop's deposit is one thing, and scattering it into two cairns is clutter rather than drama.
+      if (obj.cost > 0 && invGatedRoom(currentAvatarRoom)) scatterMatter(currentAvatarRoom, obj.x, obj.y - 12, [], obj.cost | 0, 1);
+      emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-removed', { id });
+    }
     else { objsTouch(currentAvatarRoom, obj.ch); emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-update', { id, hp: obj.hp }); }
   });
 
