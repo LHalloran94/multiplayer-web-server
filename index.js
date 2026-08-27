@@ -58,7 +58,40 @@ app.use((req, res, next) => {
   next();
 });
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+// ---- JWT SIGNING SECRET ----------------------------------------------------------------------------------
+// 🟥 THIS USED TO FALL BACK TO A CONSTANT STRING THAT LIVES IN A PUBLIC REPO. A correctly-signed token IS the
+// proof of identity here — `jwt.verify` in `authUser` and in the socket `join` believe whatever `sub` it names —
+// so anyone holding that string could mint a token for any Discord id and read that person's DMs, own their
+// rooms, post as them. Nothing would look wrong at either end; that is what makes it worth failing loudly over.
+// ⭐ The fallback is now a RANDOM secret persisted beside the database, so there is never a publicly-known one
+// and local development still survives a restart without re-logging-in. A real host sets JWT_SECRET instead.
+// ⚠️ Rotating it — deleting the file, or changing the env var — invalidates every token already issued, so
+// everyone has to log in again. That is the price of a rotation, not a fault.
+const JWT_SECRET_FILE = path.join(__dirname, '.jwt-secret');
+const JWT_SECRET = (() => {
+  const fromEnv = (process.env.JWT_SECRET || '').trim();
+  if (fromEnv) {
+    // Fail closed on the historical placeholder: it is public, so treating it as a real secret is worse than
+    // not starting at all.
+    if (fromEnv === 'dev-secret-change-in-production') {
+      console.error('FATAL: JWT_SECRET is still the old placeholder. Set a real value, or unset it and one will be generated.');
+      process.exit(1);
+    }
+    if (fromEnv.length < 32) {
+      console.error('FATAL: JWT_SECRET is shorter than 32 characters. Use a long random value.');
+      process.exit(1);
+    }
+    return fromEnv;
+  }
+  try {
+    const onDisk = fs.readFileSync(JWT_SECRET_FILE, 'utf8').trim();
+    if (onDisk.length >= 32) return onDisk;
+  } catch { /* first run on this machine — fall through and mint one */ }
+  const minted = crypto.randomBytes(48).toString('base64url');
+  fs.writeFileSync(JWT_SECRET_FILE, minted + '\n', { encoding: 'utf8', mode: 0o600 });
+  console.log('Generated a new signing secret → ' + JWT_SECRET_FILE + '  (existing logins are now invalid)');
+  return minted;
+})();
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID || '';
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
 
