@@ -10848,6 +10848,25 @@ function emitObjToChunks(room, o, ev, payload) {
     }
   }
 }
+// ⭐⭐ WHAT IS REALLY THERE, SENT BACK TO THE PLAYER WHO JUST PAINTED — the fix for a whole CLASS of bug rather
+// than one instance of it.
+// 🟥 THE ASSUMPTION THAT FAILED: `terrain-edit`'s debit carried a note saying "a refused or clamped paint needs
+// NO bespoke revert on the client — the client paints optimistically, the server does not, and the existing
+// chunk sync heals the difference." It does not. `terrain-edited` is `socket.to(room)`, which EXCLUDES the
+// sender, and a chunk is only re-sent when a socket RE-ENTERS it — so for the chunk you are standing in, the
+// correction never arrives at all. The optimistic cell simply stays, and a stuck liquid cell looks exactly like
+// a frozen simulation. That is one report already, and it would be one per refused paint for ever.
+// ⚠️ Only the brush's own box, and only when something was actually refused. It is at most ~41x41 cells and it
+// is where the player is standing, so those pages are resident by construction — but `.g()` DOES fault pages in
+// on a generated world (`feedback_a_read_is_not_free`), so this must never be pointed at anything wider.
+function sendPaintTruth(sock, room, cx, cy, rr) {
+  const grid = peekCells(room).terrain; if (!grid || !sock) return;
+  const geom = grid.geom, tc = [];
+  const c0 = Math.max(0, Math.floor((cx - rr) / TERRAIN_CELL)), c1 = Math.min(geom.cols - 1, Math.floor((cx + rr) / TERRAIN_CELL));
+  const r0 = Math.max(0, Math.floor((cy - rr) / TERRAIN_CELL)), r1 = Math.min(geom.rows - 1, Math.floor((cy + rr) / TERRAIN_CELL));
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const i = c * geom.rows + r; tc.push(i, grid.g(i)); }
+  if (tc.length) sock.emit('terrain-set', { cells: tc });
+}
 function dropChunkOf(room, d) {
   const geom = worldGeom(room), span = CHUNK_SIDE * TERRAIN_CELL;
   // The RESTING place, not the release point: a thrown pile is indexed where it ends up, or a player standing
@@ -12938,6 +12957,10 @@ io.on('connection', (socket) => {
     socket.emit('drop-removed', { id, by: socket.id });
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits }) => {
+    // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
+    // arrived" from "a guard rejected it", and those need completely different fixes — which cost a whole round
+    // of wrong theories on 2026-08-27.
+    if (worldCfg.trace) console.log(`[trace] terrain-edit IN op=${op} mat=${mat} @${x | 0},${y | 0} r=${r} room=${currentAvatarRoom ? 'yes' : 'NONE'}`);
     if (!currentAvatarRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!canBuild()) return;                                // Phase 3: L2 build permission
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
@@ -13002,13 +13025,22 @@ io.on('connection', (socket) => {
     // different activity from hauling ore.
     // ⚠️ HELD MATERIAL IS SPENT FIRST. Otherwise standing on a pile of quartz and painting quartz would burn
     // Prima while the pouch stayed full — the same matter, charged for twice over.
-    const _payMat = (op === 'paint' && invGatedRoom(currentAvatarRoom)) ? m : 0;
+    // 🟥🟥 LIQUIDS ARE OUTSIDE THIS ENTIRELY, and leaving them inside it was the "I place liquid and it freezes
+    // in mid-air" report of 2026-08-27. `kickoff_prima.md` §8 row 9 already says so — "liquids: explicitly OUT
+    // OF SCOPE at first, they have their own ledgered unit system" — but the debit never asked. The result was
+    // not a refusal anybody could see: water has no Prima worth so it cannot be conjured, and digging
+    // deliberately LEAVES liquid so it can never enter a pouch either, which made the budget permanently zero
+    // and painting liquid in the Overworld impossible. What the player saw was their own optimistic cell,
+    // uncorrected (see `sendPaintTruth`) — a water-coloured block no simulation owns.
+    const _payMat = (op === 'paint' && invGatedRoom(currentAvatarRoom) && !isFluidId(m)) ? m : 0;
     const _payKey = _payMat ? playerKeyFor(socket.id) : null;
     const _conjW = _payMat && MATGEN.primaRefinable(_payMat) ? MATGEN.primaWorthOf(_payMat) : 0;
     let _haveMat = _payMat ? ledger.budget(_payKey, _payMat) : 0;
     let _havePri = _conjW ? ledger.prima(_payKey) : 0;
     let _budget = _payMat ? _haveMat + (_conjW ? Math.floor(_havePri / _conjW) : 0) : null;
-    if (_payMat && _budget <= 0) return;                    // nothing to build with — the stroke does nothing
+    // ⚠️ REFUSED, AND THE SENDER IS TOLD SO. Returning silently is what left a painted cell on their screen that
+    // nothing owned — see `sendPaintTruth`.
+    if (_payMat && _budget <= 0) { sendPaintTruth(socket, currentAvatarRoom, cx, cy, rr); return; }
     let _did = 0, _conjured = 0;
     for (let _h = 0; _h < nHits; _h++) {
       const _n = (sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd, _budget);
@@ -13022,8 +13054,18 @@ io.on('connection', (socket) => {
         const _fromPri = _n - _fromMat;
         if (_fromPri > 0 && _conjW) { ledger.grantPrima(_payKey, -_fromPri * _conjW); _havePri -= _fromPri * _conjW; _conjured += _fromPri; }
         _budget -= _n;
-        if (_budget <= 0) break;
+        // …and the same when the stroke runs out PART WAY through. The cells it could not afford are on the
+        // sender's screen exactly as if it had been refused outright.
+        if (_budget <= 0) { sendPaintTruth(socket, currentAvatarRoom, cx, cy, rr); break; }
       }
+    }
+    // ── THE EDIT TRACE, the PAINT half. The carve half above has existed since the chunk-deletion track; a paint
+    // had none, and "the server placed nothing and said nothing about it" is exactly the state that takes a
+    // whole session to diagnose from the outside. One line, behind the same flag.
+    if (worldCfg.trace && op === 'paint') {
+      console.log(`[trace] paint mat=${m} @${cx | 0},${cy | 0} r=${rr} ${sq ? 'square' : 'circle'}`
+        + ` | pay=${_payMat} budget=${_budget} → ${_did} cell(s) changed`
+        + (_conjured ? `, ${_conjured} conjured` : '') + ` | fluid=${isFluidId(m) ? 1 : 0}`);
     }
     if (_payMat && _did) sendInvSync(socket, currentAvatarRoom);
     if (_tr) {
