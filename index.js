@@ -58,6 +58,81 @@ app.use((req, res, next) => {
   next();
 });
 
+// ---- RATE LIMITING ---------------------------------------------------------------------------------------
+// 🟥 NOTHING throttled either surface: ~110 socket events and ~69 routes all accepted work as fast as it
+// arrived, so anyone with a browser console open could flood a room's chat, or hammer terrain edits until the
+// liquid tick collapsed for everybody standing in it. This is the companion to MAX_RELAY_FIELD above — that
+// bounds how BIG one message may be, this bounds how OFTEN they may come.
+//
+// ⭐ A TOKEN BUCKET, not a fixed window. A bucket refills continuously, so a legitimate burst — arriving in a
+// busy room, one voice offer per peer, a brush dragged across the ground — is absorbed by the burst capacity
+// while a sustained flood still settles to the refill rate. A fixed window has to either reject that burst or
+// let through twice the rate across a boundary.
+//
+// ⚠️ THE NUMBERS COME FROM THE CLIENT'S OWN SEND CADENCE, not from taste. `SEND_INTERVAL_MS` is 20ms, i.e. the
+// position stream is ~50/s BY DESIGN, so `hot` sits at 3× that. A limit below what our own client legitimately
+// sends does not look like a limit — it looks exactly like packet loss, and would be debugged as netcode for
+// a week. That is why these are deliberately loose: tighten them on measurement, never on feel.
+const RATE = {
+  hot:    { perSec: 150, burst: 300, shared: false },  // per-frame streams: position, cursor, a terrain drag
+  normal: { perSec: 40,  burst: 80,  shared: false },  // everything not named below
+  // ⭐ SHARED ON PURPOSE — one budget across every verb that reaches a whole room, so a flood cannot get around
+  // the limit by rotating between chat, DM, reaction and spray. The others are per-event, so that a busy
+  // position stream can never starve the event that says you punched someone.
+  low:    { perSec: 6,   burst: 20,  shared: true  },
+};
+const RATE_CLASS = new Map(Object.entries({
+  cursor: 'hot', 'avt-pos': 'hot', 'avt-where': 'hot', 'avatar-move': 'hot', 'avatar-input': 'hot',
+  'avt-evt': 'hot', 'terrain-edit': 'hot', 'terrain-drop': 'hot', 'terrain-set': 'hot',
+  'chunk-want': 'hot', 'chunk-verify': 'hot', 'draw-points': 'hot', 'canvas-stroke-points': 'hot',
+  'scroll-position': 'hot', 'pointer-pulse': 'hot', 'liquid-step': 'hot',
+  message: 'low', 'dm-message': 'low', 'private-room-message': 'low', 'group-message': 'low',
+  reaction: 'low', 'spray-add': 'low', highlight: 'low', soundboard: 'low', 'media-add': 'low',
+  'annotation-add': 'low', 'room-invite': 'low', 'group-invite': 'low', 'cursor-emote': 'low',
+  'avatar-emote': 'low', 'msg-react': 'low', 'mat-define': 'low',
+}));
+// ⚠️ `disconnect` is raised by the server's own teardown, not by the client. Dropping it would leak presence.
+const RATE_EXEMPT = new Set(['disconnect', 'disconnecting']);
+
+function rateTake(buckets, key, cls, now) {
+  const lim = RATE[cls];
+  let b = buckets.get(key);
+  if (!b) { b = { t: lim.burst, at: now }; buckets.set(key, b); }
+  b.t = Math.min(lim.burst, b.t + ((now - b.at) / 1000) * lim.perSec);
+  b.at = now;
+  if (b.t < 1) return false;
+  b.t -= 1;
+  return true;
+}
+
+// One line every 10s naming what is actually being dropped, so a limit set too tight shows up as a log entry
+// rather than as an unexplained gap in play.
+const rateDropped = new Map();
+function rateNoteDrop(event) { rateDropped.set(event, (rateDropped.get(event) || 0) + 1); }
+// ⚠️ REPORTED ON A TIMER, NOT ON THE DROP PATH. Two bugs came out of doing it on the drop: the first drop
+// satisfied the elapsed test and printed "×1" before anything accumulated, and once that was fixed a flood
+// that STOPPED was never reported at all, because the report needed a later drop to carry it. A flood ending
+// is exactly when you want the number. The interval is unref'd so it cannot hold the process open.
+setInterval(() => {
+  if (!rateDropped.size) return;
+  console.log('rate-limited: ' + [...rateDropped.entries()].sort((a, b) => b[1] - a[1])
+    .slice(0, 6).map(([e, n]) => e + '×' + n).join(', '));
+  rateDropped.clear();
+}, 10000).unref();
+
+// HTTP: one bucket per client address per class. Writes are held to the `low` rate; reads to `normal`.
+const httpBuckets = new Map();
+setInterval(() => {
+  const cut = Date.now() - 120000;
+  for (const [k, b] of httpBuckets) if (b.at < cut) httpBuckets.delete(k);
+}, 60000).unref();
+app.use((req, res, next) => {
+  const cls = (req.method === 'GET' || req.method === 'OPTIONS') ? 'normal' : 'low';
+  const who = req.ip || (req.socket && req.socket.remoteAddress) || '?';
+  if (rateTake(httpBuckets, who + '|' + cls, cls, Date.now())) return next();
+  res.status(429).json({ error: 'Too many requests — slow down.' });
+});
+
 // ---- JWT SIGNING SECRET ----------------------------------------------------------------------------------
 // 🟥 THIS USED TO FALL BACK TO A CONSTANT STRING THAT LIVES IN A PUBLIC REPO. A correctly-signed token IS the
 // proof of identity here — `jwt.verify` in `authUser` and in the socket `join` believe whatever `sub` it names —
@@ -11206,6 +11281,19 @@ function lastBodyPos(room, sid) {
 // still there is a constant somebody re-applies.
 
 io.on('connection', (socket) => {
+  // ---- the per-socket rate limit (see RATE, above) ----
+  // ⚠️ NOT CALLING next() IS THE DROP, and it has to be: `next(err)` emits an error to that client and, on this
+  // version, tears the connection down — turning a throttle into a disconnect loop, which is a far worse
+  // failure than a lost packet. The buckets live in this closure, so they are freed with the socket.
+  const rateBuckets = new Map();
+  socket.use((packet, next) => {
+    const event = packet && packet[0];
+    if (typeof event !== 'string' || RATE_EXEMPT.has(event)) return next();
+    const cls = RATE_CLASS.get(event) || 'normal';
+    if (rateTake(rateBuckets, RATE[cls].shared ? '@' + cls : event, cls, Date.now())) return next();
+    rateNoteDrop(event);
+  });
+
   let currentRoom = null;
   let currentUsername = null;
   let currentPresenceRoom = null; // this socket's who-list bucket: URL room by default, or 'pg:'+ctxRoomId when in a context Room
