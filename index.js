@@ -12746,7 +12746,12 @@ io.on('connection', (socket) => {
     // handler does `terrain.fill(0)` — on a page room that is a 7.8M-cell wipe of a world you own, and on the
     // shared Overworld it is a 2.15-BILLION-cell erasure of everybody's ground, from a button labelled "remove
     // all mine". The same trap `terrain-init` and the rebuild button were each caught by.
-    if (objChunked(currentAvatarRoom)) { socket.emit('build-refused', { why: 'Not in the shared world — this erases terrain, and out here it is not yours.' }); return; }
+    // 🟥 EVERY GATED ROOM, NOT JUST THE OVERWORLD. This tested `objChunked` — Overworld only — which was right
+    // while page rooms were outside the economy and became wrong the moment they were not. The line at the
+    // bottom of this handler is `terrain.fill(0)`, so in a page world Level it would wipe terrain that people
+    // had PAID for out of their pouches, which is matter destroyed rather than parked. The button is hidden
+    // there now as well (its tool is authoring-only), and this is the half that does not depend on the UI.
+    if (invGatedRoom(currentAvatarRoom)) { socket.emit('build-refused', { why: 'Not out here — this erases terrain, and in a world with an economy that is not yours to erase.' }); return; }
     const map = roomObjects[currentAvatarRoom], ids = [];
     for (const [id, o] of map) if (o.ownerId === socket.id || (o.owner && o.owner === currentUsername)) ids.push(id);
     for (const id of ids) map.delete(id);
@@ -12758,7 +12763,7 @@ io.on('connection', (socket) => {
   socket.on('avatar-objects-clear-all', () => {
     if (!currentAvatarRoom) return;
     if (!canBuild()) return;                                // Phase 3: full wipe → a build op
-    if (objChunked(currentAvatarRoom)) { socket.emit('build-refused', { why: 'Not in the shared world — there is no "clear everything" out here.' }); return; }   // see remove-mine
+    if (invGatedRoom(currentAvatarRoom)) { socket.emit('build-refused', { why: 'Not out here — there is no "clear everything" in a world with an economy.' }); return; }   // see remove-mine
     if (roomObjects[currentAvatarRoom]) {
       const map = roomObjects[currentAvatarRoom], ids = [...map.keys()];
       map.clear();
