@@ -10354,16 +10354,40 @@ setInterval(autosavePersistentWorlds, 30000);
 // would let one dig over a shaft materialise a column of the world nobody is looking at.
 // ⚠️ Order matters and it is not an accident: the client emits `terrain-edit` (the carve) before
 // `terrain-drop`, and socket.io preserves per-socket order, so the cell the drop spawns in is already air.
-function dropRestY(room, x, y) {
+// ⭐⭐ A PILE FLOATS (user request 2026-08-27). Liquid is DECOUPLED from the terrain grid — it lives in the fine
+// arrays and a flooded cell reads as 0 solid — so the resting scan fell straight through a lake and every cairn
+// ended up on the bed of it, invisible under ten metres of water.
+// ⚠️ TWO DIRECTIONS, because a pile can arrive either way. Dropped from above it lands ON the surface instead of
+// sinking through; dug loose UNDERWATER it starts submerged and has to RISE to the surface, which a downward-only
+// scan can never express. Both are bounded by the same `DROP_FALL_MAX_CELLS` and for the same reason: `.g()`
+// FAULTS A PAGE IN on a generated world (F21), so an unbounded scan lets one pile materialise a column of the
+// world nobody is looking at.
+// ⚠️ `wet` implies NOT SOLID by construction — the sim never puts liquid in a solid cell — which is what lets the
+// rise loop stop at rock without testing for it separately.
+// ⭐ Returns the flag as well as the row, because "is it floating" is decided HERE and nothing downstream can
+// recover it: by the time the caller has a y, the difference between resting on stone and resting on water is
+// gone. It rides the wire so the client can bob it.
+function dropRestAt(room, x, y) {
   const s = peekCells(room); const grid = s.terrain;
   const dims = roomDims(room);
   const c = Math.max(0, Math.min(dims.cols - 1, Math.floor(x / TERRAIN_CELL)));
   let r = Math.max(0, Math.floor(y / TERRAIN_CELL));
-  if (!grid) return (Math.min(dims.rows - 1, r) + 0.5) * TERRAIN_CELL;
+  if (!grid) return { y: (Math.min(dims.rows - 1, r) + 0.5) * TERRAIN_CELL, float: 0 };
   const rows = dims.rows, lim = Math.min(rows - 1, r + DROP_FALL_MAX_CELLS);
-  for (; r <= lim; r++) if (isSolidCell(grid.g(c * rows + r))) return (r - 0.5) * TERRAIN_CELL;   // rest ON TOP of the solid cell
-  return (lim + 0.5) * TERRAIN_CELL;
+  const liq = dropCfg.float ? s.fineTotal : null;       // the dial is what makes this A/B-able against the old rule
+  const wet = (rr) => liq ? ((liq.g(c * rows + rr) | 0) > 0) : false;
+  if (wet(r)) {                                        // already under water — bob up to the top of it
+    const top = Math.max(0, r - DROP_FALL_MAX_CELLS);
+    while (r > top && wet(r - 1)) r--;
+    return { y: (r - 0.5) * TERRAIN_CELL, float: 1 };
+  }
+  for (; r <= lim; r++) {
+    if (isSolidCell(grid.g(c * rows + r))) return { y: (r - 0.5) * TERRAIN_CELL, float: 0 };  // rest ON TOP of the solid cell
+    if (wet(r)) return { y: (r - 0.5) * TERRAIN_CELL, float: 1 };                             // …or on top of the water
+  }
+  return { y: (lim + 0.5) * TERRAIN_CELL, float: 0 };
 }
+function dropRestY(room, x, y) { return dropRestAt(room, x, y).y; }
 // ⭐ WHERE A THROWN PILE COMES DOWN. `dropRestY` answers "straight down from here", which is right for a pile
 // that a dig swing shook loose and wrong for one you deliberately threw. Same bounded-scan discipline and the
 // same reason for it: `grid.g()` FAULTS A PAGE IN on a generated world (F21), so an unbounded arc would let one
@@ -10431,6 +10455,7 @@ function dropRow(d) {
   const o = { id: d.id, x: (d.gx != null ? d.gx : d.x), y: d.gy != null ? d.gy : d.y, t0: d.t0 || 0, n: d.n | 0 };
   if (d.mats && d.mats.length) o.mats = d.mats;
   if (d.prima > 0) o.prima = d.prima | 0;
+  if (d.fl) o.fl = 1;                                  // …or it stops bobbing the first time the server restarts
   return o;
 }
 function ensureDropsLoaded(room) {
@@ -10911,6 +10936,10 @@ function emitToChunk(room, chunk, ev, payload) {
     if (sock) sock.emit(ev, payload);
   }
 }
+// ⭐ Piles float on liquid rather than sinking through it (user, 2026-08-27). A dial because it changes where
+// every pile in the world comes to rest, which is the kind of thing that wants an A/B against the old rule
+// rather than an argument — and it is how the "did this move the spawn's piles?" question was actually settled.
+const dropCfg = { float: 1 };
 const DROP_THROW_MAX_CELLS = 24;                      // how far sideways a throw may carry, in cells
 // How long a deliberately-dropped pile refuses to be collected. Long enough that you can walk away from what
 // you meant to put down, short enough that it is not a penalty. ⚠️ A DIG's pile has NO hold — instant pickup is
@@ -10924,7 +10953,7 @@ const DROP_FALL_A_SRV = 0.0011;                       // must equal the client's
 function dropThrowLanding(room, x, y, vx) {
   const s = peekCells(room); const grid = s.terrain;
   const dims = roomDims(room);
-  if (!grid || !vx) return { x, y: dropRestY(room, x, y) };
+  if (!grid || !vx) { const rr = dropRestAt(room, x, y); return { x, y: rr.y, float: rr.float }; }
   const maxX = DROP_THROW_MAX_CELLS * TERRAIN_CELL;
   let px = x, py = y, t = 0;
   const DT = 16;                                      // ms per step — one frame, so the curve is the client's
@@ -10935,10 +10964,14 @@ function dropThrowLanding(room, x, y, vx) {
     if (ny - y > DROP_FALL_MAX_CELLS * TERRAIN_CELL) break;
     const c = Math.max(0, Math.min(dims.cols - 1, Math.floor(nx / TERRAIN_CELL)));
     const r = Math.max(0, Math.min(dims.rows - 1, Math.floor(ny / TERRAIN_CELL)));
-    if (isSolidCell(grid.g(c * dims.rows + r))) return { x: px, y: (r - 0.5) * TERRAIN_CELL };
+    if (isSolidCell(grid.g(c * dims.rows + r))) return { x: px, y: (r - 0.5) * TERRAIN_CELL, float: 0 };
+    // …and the arc stops at a water surface too, or a thrown pile skips across a lake and buries itself in the
+    // far bank. The same rule as the straight fall, on the same curve.
+    if (dropCfg.float && s.fineTotal && (s.fineTotal.g(c * dims.rows + r) | 0) > 0) return { x: px, y: (r - 0.5) * TERRAIN_CELL, float: 1 };
     px = nx; py = ny;
   }
-  return { x: px, y: dropRestY(room, px, py) };
+  const rr = dropRestAt(room, px, py);
+  return { x: px, y: rr.y, float: rr.float };
 }
 // ⭐ MERGE INTO A PILE THAT IS ALREADY THERE, rather than adding a millionth icon to the same square metre.
 // This is what bounds clutter now that nothing expires: an area somebody has mined out ends up with a few big
@@ -10980,9 +11013,10 @@ function spawnDrop(room, x, y, mats, prima, opts) {
   const map = roomDrops[room] || (roomDrops[room] = new Map());
   let n = 0; for (const [, k] of mats) n += k;
   const vx = (opts && isFinite(+opts.vx)) ? Math.max(-0.6, Math.min(0.6, +opts.vx)) : 0;
-  const land = vx ? dropThrowLanding(room, x, y, vx) : { x, y: dropRestY(room, x, y) };
+  const land = vx ? dropThrowLanding(room, x, y, vx) : (() => { const rr = dropRestAt(room, x, y); return { x, y: rr.y, float: rr.float }; })();
   const d = { id: 'd' + (++dropSeq), x, y, gy: land.y, t0: Date.now(), mats, n };
   if (vx) { d.vx = vx; d.gx = land.x; }
+  if (land.float) d.fl = 1;                            // ⭐ it came to rest on liquid — the client bobs it there
   // 🟥 HOW LONG BEFORE ANYONE MAY TAKE IT. Without this, putting something down is instantly undone: the
   // collector runs every frame against anything within reach, and you are standing on top of what you just
   // dropped. The server holds the deadline because it owns the list; the client is TOLD the interval and stops
@@ -11318,6 +11352,7 @@ io.on('connection', (socket) => {
     if ('chunkMargin' in patch) chunkCfg.margin = Math.max(0, Math.min(64, patch.chunkMargin | 0));
     if ('chunkGraceMs' in patch) chunkCfg.graceMs = Math.max(0, Math.min(600000, patch.chunkGraceMs | 0));
     if ('worldTrace' in patch) { worldCfg.trace = patch.worldTrace ? 1 : 0; console.log('[trace] edit tracing ' + (worldCfg.trace ? 'ON' : 'off')); }
+    if ('dropFloat' in patch) dropCfg.float = patch.dropFloat ? 1 : 0;   // piles rest on liquid instead of sinking through it
     if ('chunkQuiesce' in patch) chunkCfg.quiesce = !!patch.chunkQuiesce;
     if ('chunkQuiesceMs' in patch) chunkCfg.quiesceMs = Math.max(0, Math.min(600000, patch.chunkQuiesceMs | 0));
     // INTEREST-LIMITED REPLICATION (Phase 4) — same reasoning as chunkEvict: it has to be A/B-able live, because
