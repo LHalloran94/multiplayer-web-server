@@ -10210,13 +10210,44 @@ function identityCount(bucket) {
 }
 
 // Headcount of distinct identities on a page (bare URL room), independent of context Room.
-function broadcastPagePresence(room) {
+function pageHeadcount(room) {
   const seen = new Set();
-  for (const u of Object.values(pageUsers[room] || {})) {
-    const key = u.discord_id || ('u:' + u.username);
-    seen.add(key);
+  for (const u of Object.values(pageUsers[room] || {})) seen.add(u.discord_id || ('u:' + u.username));
+  return seen.size;
+}
+function broadcastPagePresence(room) {
+  io.to(room).emit('page-presence', { count: pageHeadcount(room) });
+  pushPageCounts(room);
+}
+
+// ---- AMBIENT PAGE COUNTS ---------------------------------------------------------------------------------
+// ⭐ A tab that has not entered anything still needs to know whether a page is worth entering — that number IS
+// the reason anyone clicks. Until now every open tab held its own socket to learn it, which is why an idle
+// browser cost one connection per tab. This lets ONE ambient socket ask about many urls at once instead.
+// 🟥 IT IS A QUERY, NOT A JOIN. A watcher never enters `pageUsers`, is never announced and is never counted:
+// asking how busy a room is must not be the thing that makes it busier. That also means the number now reads
+// as "people actually here" rather than "tabs left open on this url", which is the more useful of the two.
+const countWatchers = new Map();   // socketId → Set(room)
+const countRooms = new Map();      // room → Set(socketId)
+
+function clearCountWatch(socketId) {
+  const rooms = countWatchers.get(socketId);
+  if (!rooms) return;
+  for (const r of rooms) {
+    const s = countRooms.get(r);
+    if (s) { s.delete(socketId); if (!s.size) countRooms.delete(r); }
   }
-  io.to(room).emit('page-presence', { count: seen.size });
+  countWatchers.delete(socketId);
+}
+
+function pushPageCounts(room) {
+  const watchers = countRooms.get(room);
+  if (!watchers || !watchers.size) return;
+  const payload = { [room]: pageHeadcount(room) };
+  for (const sid of watchers) {
+    const s = io.sockets.sockets.get(sid);
+    if (s) s.emit('presence-counts', payload);
+  }
 }
 
 function buildTabSnapshot(discordId, username) {
@@ -13850,7 +13881,25 @@ io.on('connection', (socket) => {
     }
   });
 
+  // ---- ambient page counts (see pushPageCounts) ----
+  // ⚠️ Replaces the whole watch set rather than adding to it: the ambient socket re-sends the full list of urls
+  // it cares about whenever a tab opens or closes, so treating this as incremental would leak closed tabs.
+  socket.on('presence-watch', ({ urls } = {}) => {
+    if (!Array.isArray(urls)) return;
+    clearCountWatch(socket.id);
+    const set = new Set(urls.slice(0, 64).map((u) => String(u || '').slice(0, 500)).filter(Boolean));
+    countWatchers.set(socket.id, set);
+    const out = {};
+    for (const r of set) {
+      if (!countRooms.has(r)) countRooms.set(r, new Set());
+      countRooms.get(r).add(socket.id);
+      out[r] = pageHeadcount(r);
+    }
+    socket.emit('presence-counts', out);
+  });
+
   socket.on('disconnect', () => {
+    clearCountWatch(socket.id);
     // 🟥 AN EPHEMERAL BALANCE IS PUT BACK INTO THE WORLD, NOT DELETED. Until this existed, a logged-out player
     // leaving with a full pouch simply annihilated it — a conservation leak (kickoff_prima.md §8 row 4) and,
     // much more immediately, the worst possible way to learn that you were not logged in.
