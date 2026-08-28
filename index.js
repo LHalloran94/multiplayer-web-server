@@ -510,7 +510,10 @@ if (process.env.MW_DEV_LOGIN === '1') {
     if (!LOOPBACK.test(ip)) return res.status(404).end();
     const name = String(req.query.name || 'dev').slice(0, 24).replace(/[^A-Za-z0-9_-]/g, '') || 'dev';
     const sub = 'dev:' + name;
-    db.prepare('INSERT OR REPLACE INTO users (discord_id, username, avatar, updated_at) VALUES (?, ?, ?, unixepoch())').run(sub, name, null);
+    // Same trap as the join path: a dev login must not wipe the settings it is about to be used to test.
+    db.prepare(`INSERT INTO users (discord_id, username, avatar, updated_at) VALUES (?, ?, ?, unixepoch())
+                ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username, updated_at = excluded.updated_at`)
+      .run(sub, name, null);
     const token = jwt.sign({ sub, username: name, avatar: null }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ jwt: token, username: name, avatar: null });
   });
@@ -10262,6 +10265,19 @@ function buildTabSnapshot(discordId, username) {
   return { leaderId: discordId, username, tabs, activeId, activeUrl, seq, epoch };
 }
 
+// 🟥 "SHOW MY LOCATION" GATED THE FOLLOWER SNAPSHOT AND NOTHING ELSE. Two other paths sent the same
+// information to every online friend with no check at all — `friend-online` on every join and
+// `friend-location` on every navigation — and the friends panel renders that as a clickable chip whose
+// tooltip is the whole URL. So the switch a user turned OFF to stop being watched did almost nothing.
+// One helper, used by all four call sites. An unverified user has no row and no setting: unchanged.
+function browsingVisible(discordId) {
+  if (!discordId) return true;
+  try {
+    const r = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(discordId);
+    return r ? !!r.browsing_visible : true;
+  } catch { return false; }
+}
+
 // Build + push the current snapshot to all of this user's followers.
 function emitTabSnapshot(discordId, username) {
   const settings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(discordId);
@@ -11722,10 +11738,19 @@ io.on('connection', (socket) => {
     return rb.mode === 'all';
   }
 
-  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId, color, entered }) => {
+  // ⭐ A QUIET PAGE STILL JOINS. The client decides, per site, whether this page's address may leave the
+  // browser (see extension/src/00_sites.js). When it may not, it sends `priv` and no url — but it still
+  // needs this socket, because the socket is what carries DMs, friends, notifications and any Room the
+  // user is locked into. So we authenticate as normal and park them in a room of one.
+  // ⚠️ `tabSession` still arrives on a private join, and that is the point: it lets us REMOVE this tab from
+  // the set the user's followers mirror. Sending nothing would have left the tab's previous, public URL
+  // sitting in the snapshot — followers would keep opening the page you just navigated away from.
+  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId, color, entered, priv }) => {
     let verified = false;
     let avatar = null;
     let discordId = null;
+    const isPriv = !!priv || !url;
+    if (isPriv) { url = 'priv:' + socket.id; fullUrl = null; }
 
     if (token) {
       try {
@@ -11735,7 +11760,16 @@ io.on('connection', (socket) => {
         discordId = decoded.sub;
         if (!username || !username.trim()) username = decoded.username;
         // Upsert user in DB
-        db.prepare('INSERT OR REPLACE INTO users (discord_id, username, avatar, updated_at) VALUES (?, ?, ?, unixepoch())').run(discordId, username, avatar);
+        // 🟥🟥 THIS WAS `INSERT OR REPLACE` AND IT WIPED THE WHOLE ROW ON EVERY PAGE LOAD. Replace deletes
+        // and re-inserts, so every column not named here went back to its default: browsing_visible,
+        // follow_policy, follow_allowlist, bio, status, social_links, beacon_url. That is why "Show my
+        // location" appeared to do nothing — the setting was real, was saved, and was destroyed by the
+        // next join, which is to say within a second of being set. Measured, not read: set it off, join,
+        // read it back, it is on again.
+        // ⭐ It also explains the profile: a bio survived until you loaded another page.
+        db.prepare(`INSERT INTO users (discord_id, username, avatar, updated_at) VALUES (?, ?, ?, unixepoch())
+                    ON CONFLICT(discord_id) DO UPDATE SET username = excluded.username,
+                      avatar = excluded.avatar, updated_at = excluded.updated_at`).run(discordId, username, avatar);
         socketToDiscordId[socket.id] = discordId;
         discordIdToSocket[discordId] = socket.id;
         if (!discordIdToFollowSockets[discordId]) discordIdToFollowSockets[discordId] = new Set();
@@ -11747,12 +11781,20 @@ io.on('connection', (socket) => {
           clearTimeout(tabDisconnectTimers[debounceKey]);
           delete tabDisconnectTimers[debounceKey];
           socketToTabSession[socket.id] = tabSession;
-          if (!leaderTabs[discordId]) {
-            leaderTabs[discordId] = new Map();
-            leaderEpoch[discordId] = Date.now(); // fresh browsing session → new epoch
+          if (isPriv) {
+            // Went somewhere private in this tab → the tab leaves the followed set entirely.
+            if (leaderTabs[discordId]) {
+              leaderTabs[discordId].delete(tabSession);
+              if (leaderActiveTab[discordId] === tabSession) delete leaderActiveTab[discordId];
+            }
+          } else {
+            if (!leaderTabs[discordId]) {
+              leaderTabs[discordId] = new Map();
+              leaderEpoch[discordId] = Date.now(); // fresh browsing session → new epoch
+            }
+            leaderTabs[discordId].set(tabSession, fullUrl || url);
+            if (visible) leaderActiveTab[discordId] = tabSession;
           }
-          leaderTabs[discordId].set(tabSession, fullUrl || url);
-          if (visible) leaderActiveTab[discordId] = tabSession;
         }
       } catch {
         // invalid/expired token — fall through as anonymous
@@ -11765,7 +11807,7 @@ io.on('connection', (socket) => {
     currentAvatarRoom = avatarRoomKey(url, 0);   // default Level 0 (sandbox) until avt-join picks a Level
     socket.join(currentRoom);
     socket.join('user:' + username);
-    userCurrentFullUrl[username] = fullUrl || url;
+    if (!isPriv) userCurrentFullUrl[username] = fullUrl || url;
     // 2c: presence bucket follows the context Room (membership-gated). Page-default Room → URL room (== today).
     currentPresenceRoom = resolvePresenceRoom(ctxRoomId, currentRoom, socket.id);
     if (currentPresenceRoom !== currentRoom) socket.join(currentPresenceRoom);
@@ -11813,11 +11855,28 @@ io.on('connection', (socket) => {
     if (roomVoice[currentRoom] && Object.keys(roomVoice[currentRoom]).length) socket.emit('voice-init', roomVoice[currentRoom]);
     broadcastPresence(currentPresenceRoom);
     broadcastPagePresence(currentRoom);
+    // ⚠️ Going somewhere private has to CLEAR what was said last, not merely stop saying it. Otherwise the
+    // friends panel keeps showing — and offering a click through to — the last public page you were on.
+    if (isPriv && discordId) {
+      delete discordIdToFullUrl[discordId];
+      try {
+        db.prepare(
+          `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
+           FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
+        ).all(discordId, discordId, discordId).forEach(r => {
+          const fs = discordIdToSocket[r.fid];
+          if (fs) io.to(fs).emit('friend-location', { discord_id: discordId, url: null });
+        });
+      } catch {}
+      if (tabSession) { try { emitTabSnapshot(discordId, username); } catch {} }
+    }
     // Phase 4: seed the active Room's feature policy (null payload for the page-default Room = all open).
     { const fr = resolveAvRoomId(ctxRoomId, currentRoom, socket.id);
       socket.emit('feature-perms', featurePermsPayload(fr !== currentRoom ? fr : null)); }
     // #4: no "joined" chat line — peers see it via the presence diff (transient toast) + the live who-list.
-    socket.to('user:' + username).emit('user-location', { url: userCurrentFullUrl[username] });
+    if (!isPriv && browsingVisible(discordId)) {
+      socket.to('user:' + username).emit('user-location', { url: userCurrentFullUrl[username] });
+    }
 
     // Friends: notify online friends + send friends list to joiner
     if (discordId) {
@@ -11827,9 +11886,10 @@ io.on('connection', (socket) => {
            FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
         ).all(discordId, discordId, discordId);
         const ownBeaconRow = db.prepare('SELECT beacon_url FROM users WHERE discord_id=?').get(discordId);
+        const shareLoc = !isPriv && browsingVisible(discordId);
         acceptedFriends.forEach(r => {
           const fs = discordIdToSocket[r.fid];
-          if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar, url: fullUrl || url, beacon_url: ownBeaconRow?.beacon_url || null });
+          if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar, url: shareLoc ? (fullUrl || url) : null, beacon_url: ownBeaconRow?.beacon_url || null });
         });
         const friendsData = db.prepare(`
           SELECT u.discord_id, u.username, u.avatar, f.status,
@@ -13741,14 +13801,16 @@ io.on('connection', (socket) => {
       const ts = socketToTabSession[socket.id];
       if (ts && leaderTabs[dId]) leaderTabs[dId].set(ts, url);
       try {
-        const fRows = db.prepare(
-          `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
-           FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
-        ).all(dId, dId, dId);
-        fRows.forEach(r => {
-          const fs = discordIdToSocket[r.fid];
-          if (fs) io.to(fs).emit('friend-location', { discord_id: dId, url });
-        });
+        if (browsingVisible(dId)) {
+          const fRows = db.prepare(
+            `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
+             FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
+          ).all(dId, dId, dId);
+          fRows.forEach(r => {
+            const fs = discordIdToSocket[r.fid];
+            if (fs) io.to(fs).emit('friend-location', { discord_id: dId, url });
+          });
+        }
       } catch {}
       // Push an updated tab snapshot to followers.
       try { emitTabSnapshot(dId, username); } catch {}
