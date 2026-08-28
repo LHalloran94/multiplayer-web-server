@@ -236,6 +236,21 @@ try { db.exec('ALTER TABLE users ADD COLUMN follow_allowlist TEXT DEFAULT \'\'')
 try { db.exec('ALTER TABLE users ADD COLUMN browsing_visible INTEGER DEFAULT 1'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN social_links TEXT'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN beacon_url TEXT'); } catch {}
+// Your overlay, on any machine you log in from. One row per account holding a JSON blob of the settings the
+// CLIENT decided are portable — see `SYNC_SKIP` in 01_state.js. The server deliberately does not know or care
+// what is in it: what counts as "yours" is a client-side judgement that will keep changing as settings are
+// added, and a schema here would have to be edited every time one was.
+// ⚠️ `rev` is the client's clock, not the server's, and it is what last-write-wins compares. A device whose
+// clock is badly wrong can therefore hold onto a stale blob — acceptable for preferences, and much simpler
+// than a merge nobody would be able to predict.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_settings (
+    discord_id TEXT PRIMARY KEY,
+    blob       TEXT NOT NULL,
+    rev        INTEGER NOT NULL,
+    updated_at INTEGER DEFAULT (unixepoch())
+  );
+`);
 // Stage 6 Phase 2b — rooms can host an avatar World. `env_spec` = JSON { levels:[{type,name,…cfg}], nav }
 // (the ordered Level list + per-Level config + nav mode; terrain/object CONTENT stays host-local in v1,
 // hydrated live on entry). `kind` distinguishes a plain chat room from one with a World; `perms`/`meta`
@@ -1591,6 +1606,41 @@ app.delete('/groups/:id/members/:discordId', (req, res) => {
     if (discordId === user.sub) return res.status(400).json({ error: 'Cannot kick yourself' });
     db.prepare('DELETE FROM group_members WHERE group_id = ? AND discord_id = ?').run(id, discordId);
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ---- Account settings: your overlay follows your login ----------------------------------------------------
+// ⚠️ 512KB CAP, and it is not arbitrary. The blob carries soundboard slots, stamp slots and reaction
+// favourites, any of which can hold a data: URL the user pasted in. Without a cap one enthusiastic sticker
+// collection becomes a row that has to be read and written on every page load of every device.
+const SETTINGS_MAX = 512 * 1024;
+app.get('/settings', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const row = db.prepare('SELECT blob, rev, updated_at FROM user_settings WHERE discord_id = ?').get(user.sub);
+    if (!row) return res.json({ blob: null, rev: 0 });
+    res.json({ blob: row.blob, rev: row.rev, updated_at: row.updated_at });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+app.put('/settings', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { blob, rev } = req.body || {};
+  if (typeof blob !== 'string' || !blob) return res.status(400).json({ error: 'Invalid' });
+  if (blob.length > SETTINGS_MAX) return res.status(413).json({ error: 'Too large', max: SETTINGS_MAX });
+  try { JSON.parse(blob); } catch { return res.status(400).json({ error: 'Not JSON' }); }
+  const r = Number(rev) || Date.now();
+  try {
+    // ⚠️ REFUSES AN OLDER REVISION rather than taking the last write to arrive. Two devices open on the same
+    // account both push after every change, and without this the one with the slower network would win by
+    // arriving last — silently reverting settings the user had just changed on the other.
+    const cur = db.prepare('SELECT rev FROM user_settings WHERE discord_id = ?').get(user.sub);
+    if (cur && cur.rev > r) return res.json({ ok: false, stale: true, rev: cur.rev });
+    db.prepare(`INSERT INTO user_settings (discord_id, blob, rev, updated_at) VALUES (?, ?, ?, unixepoch())
+                ON CONFLICT(discord_id) DO UPDATE SET blob = excluded.blob, rev = excluded.rev, updated_at = excluded.updated_at`)
+      .run(user.sub, blob, r);
+    res.json({ ok: true, rev: r });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
