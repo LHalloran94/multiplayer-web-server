@@ -1,12 +1,12 @@
 // ============================================================================
 // server/index.js — TABLE OF CONTENTS  (grep the "// ---- <name> ----" marker to jump; line numbers drift, marker text does not)
 //   Setup (top → ~330):  express + socket.io + CORS init · SQLite open + ~20 CREATE TABLEs · JWT auth middleware · in-memory presence/relay maps (discordIdToSocket, leaderTabs, roomObjects, …)
-//   REST endpoints:      Discord OAuth · Friends · Profile · Block · Room avatar-World spec · Private rooms · Room social signals (favourite/like/rating) · Published Worlds (gallery/publish/remix/unpublish) · Shared animation library · Groups · Follow settings & follows
+//   REST endpoints:      Discord OAuth · Friends · Profile · Block · Room avatar-World spec · Private rooms · Room social signals (favourite/like/rating) · Published Worlds (gallery/publish/remix/unpublish) · Shared animation library · Groups · Stalk settings & stalks
 //   Terrain / world:     Destructible terrain (Tier C) · Custom material registry · Avatar-world MODES (sandbox/world)
 //   Published Worlds:    server-side persistence + unattended hydration (hydrateRoomFromBlob) · Persistent durability snapshot sweep
 //   Shared libraries:    animation library (socket) · Generic shared libraries (emojis/sounds/templates/blocks) · Overlay THEME library
 //   Realtime core:       Authoritative avatar simulation (Stage 1b, 60Hz tick — legacy 'server' transport) · Follow per-leader tab snapshots (emitTabSnapshot)
-//   Totals: ~64 REST routes + ~84 socket.on handlers. Ephemeral state (cursors/sprays/drawing/chat/avatar objects) in-memory; users/friends/dm/blocks/rooms/groups/follows/published_worlds persisted in SQLite.
+//   Totals: ~64 REST routes + ~84 socket.on handlers. Ephemeral state (cursors/sprays/drawing/chat/avatar objects) in-memory; users/friends/dm/blocks/rooms/groups/stalks/published_worlds persisted in SQLite.
 // ============================================================================
 const express = require('express');
 const http = require('http');
@@ -1660,7 +1660,7 @@ app.put('/settings', (req, res) => {
 });
 
 // ---- Follow settings & follows endpoints ----
-app.get('/follow-settings', (req, res) => {
+app.get('/stalk-settings', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
@@ -1673,24 +1673,24 @@ app.get('/follow-settings', (req, res) => {
       allowlist = db.prepare(`SELECT discord_id, username FROM users WHERE discord_id IN (${placeholders})`).all(...allowlistIds)
         .map(r => ({ discordId: r.discord_id, username: r.username }));
     }
-    res.json({ follow_policy: row.stalk_policy || 'friends', browsing_visible: !!row.browsing_visible, allowlist });
+    res.json({ stalk_policy: row.stalk_policy || 'friends', browsing_visible: !!row.browsing_visible, allowlist });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
-app.put('/follow-settings', (req, res) => {
+app.put('/stalk-settings', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  // ⚠️ `follow_policy` HERE IS A WIRE FIELD, NOT A COLUMN — the column is `stalk_policy` now. The JSON field,
+  // ⚠️ `stalk_policy` HERE IS A WIRE FIELD, NOT A COLUMN — the column is `stalk_policy` now. The JSON field,
   // the REST paths (/follows) and the socket event names still say "follow" because renaming them is a
   // FLAG DAY: the extension has to change in the same breath or every stalk feature breaks. That is slice 2.
-  const { follow_policy, browsing_visible, allowlist } = req.body;
+  const { stalk_policy, browsing_visible, allowlist } = req.body;
   const validPolicies = ['anyone', 'friends', 'specific', 'nobody'];
   try {
     const updates = [];
     const params = [];
-    if (follow_policy !== undefined) {
-      if (!validPolicies.includes(follow_policy)) return res.status(400).json({ error: 'Invalid policy' });
-      updates.push('stalk_policy = ?'); params.push(follow_policy);
+    if (stalk_policy !== undefined) {
+      if (!validPolicies.includes(stalk_policy)) return res.status(400).json({ error: 'Invalid policy' });
+      updates.push('stalk_policy = ?'); params.push(stalk_policy);
     }
     if (browsing_visible !== undefined) {
       updates.push('browsing_visible = ?'); params.push(browsing_visible ? 1 : 0);
@@ -1706,55 +1706,55 @@ app.put('/follow-settings', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
-app.post('/follows', (req, res) => {
+app.post('/stalks', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { followeeDiscordId } = req.body;
-  if (!followeeDiscordId || followeeDiscordId === user.sub) return res.status(400).json({ error: 'Invalid' });
+  const { stalkeeDiscordId } = req.body;
+  if (!stalkeeDiscordId || stalkeeDiscordId === user.sub) return res.status(400).json({ error: 'Invalid' });
   try {
-    const followee = db.prepare('SELECT discord_id, stalk_policy, stalk_allowlist FROM users WHERE discord_id = ?').get(followeeDiscordId);
-    if (!followee) return res.status(404).json({ error: 'User not found' });
-    const policy = followee.stalk_policy || 'friends';
-    if (policy === 'nobody') return res.status(403).json({ error: 'user_blocks_follow' });
+    const stalkee = db.prepare('SELECT discord_id, stalk_policy, stalk_allowlist FROM users WHERE discord_id = ?').get(stalkeeDiscordId);
+    if (!stalkee) return res.status(404).json({ error: 'User not found' });
+    const policy = stalkee.stalk_policy || 'friends';
+    if (policy === 'nobody') return res.status(403).json({ error: 'user_blocks_stalk' });
     if (policy === 'friends') {
       const friendship = db.prepare(
         `SELECT 1 FROM friends WHERE ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND status='accepted'`
-      ).get(user.sub, followeeDiscordId, followeeDiscordId, user.sub);
+      ).get(user.sub, stalkeeDiscordId, stalkeeDiscordId, user.sub);
       if (!friendship) return res.status(403).json({ error: 'friends_only' });
     }
     if (policy === 'specific') {
-      const allowed = (followee.stalk_allowlist || '').split(',').includes(user.sub);
+      const allowed = (stalkee.stalk_allowlist || '').split(',').includes(user.sub);
       if (!allowed) return res.status(403).json({ error: 'not_on_allowlist' });
     }
-    db.prepare('INSERT OR IGNORE INTO stalks (stalker_id, stalkee_id) VALUES (?, ?)').run(user.sub, followeeDiscordId);
+    db.prepare('INSERT OR IGNORE INTO stalks (stalker_id, stalkee_id) VALUES (?, ?)').run(user.sub, stalkeeDiscordId);
     // Notify followee they have a new follower
-    const followeeSocks = discordIdToStalkSockets[followeeDiscordId];
-    if (followeeSocks) {
-      const followerUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(user.sub);
-      followeeSocks.forEach(sid => io.to(sid).emit('persistent-follow-start', { followerDiscordId: user.sub, username: followerUser?.username || user.username }));
+    const stalkeeSocks = discordIdToStalkSockets[stalkeeDiscordId];
+    if (stalkeeSocks) {
+      const stalkerUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(user.sub);
+      stalkeeSocks.forEach(sid => io.to(sid).emit('persistent-stalk-start', { stalkerDiscordId: user.sub, username: stalkerUser?.username || user.username }));
     }
     // Immediately send the followee's current tab snapshot to the new follower's tabs so
     // following takes effect right away (don't wait for the followee to next navigate).
-    const followeeUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(followeeDiscordId);
-    const followerSocks = discordIdToStalkSockets[user.sub];
-    if (followerSocks) followerSocks.forEach(sid => emitSnapshotToStalker(followeeDiscordId, followeeUser?.username, sid));
+    const stalkeeUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(stalkeeDiscordId);
+    const stalkerSocks = discordIdToStalkSockets[user.sub];
+    if (stalkerSocks) stalkerSocks.forEach(sid => emitSnapshotToStalker(stalkeeDiscordId, stalkeeUser?.username, sid));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
-app.delete('/follows/:followeeDiscordId', (req, res) => {
+app.delete('/stalks/:stalkeeDiscordId', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    db.prepare('DELETE FROM stalks WHERE stalker_id = ? AND stalkee_id = ?').run(user.sub, req.params.followeeDiscordId);
+    db.prepare('DELETE FROM stalks WHERE stalker_id = ? AND stalkee_id = ?').run(user.sub, req.params.stalkeeDiscordId);
     // Notify followee on all their tabs
-    const followeeSocks = discordIdToStalkSockets[req.params.followeeDiscordId];
-    if (followeeSocks) followeeSocks.forEach(sid => io.to(sid).emit('persistent-follow-end', { followerDiscordId: user.sub }));
+    const stalkeeSocks = discordIdToStalkSockets[req.params.stalkeeDiscordId];
+    if (stalkeeSocks) stalkeeSocks.forEach(sid => io.to(sid).emit('persistent-stalk-end', { stalkerDiscordId: user.sub }));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
-app.get('/follows/followers', (req, res) => {
+app.get('/stalks/stalkers', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
@@ -1767,19 +1767,19 @@ app.get('/follows/followers', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
-app.delete('/follows/by-follower/:followerDiscordId', (req, res) => {
+app.delete('/stalks/by-stalker/:stalkerDiscordId', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { followerDiscordId } = req.params;
+  const { stalkerDiscordId } = req.params;
   try {
-    db.prepare('DELETE FROM stalks WHERE stalker_id = ? AND stalkee_id = ?').run(followerDiscordId, user.sub);
-    const followerSocks = discordIdToStalkSockets[followerDiscordId];
-    if (followerSocks) followerSocks.forEach(sid => io.to(sid).emit('follow-kicked', { followeeDiscordId: user.sub }));
+    db.prepare('DELETE FROM stalks WHERE stalker_id = ? AND stalkee_id = ?').run(stalkerDiscordId, user.sub);
+    const stalkerSocks = discordIdToStalkSockets[stalkerDiscordId];
+    if (stalkerSocks) stalkerSocks.forEach(sid => io.to(sid).emit('stalk-kicked', { stalkeeDiscordId: user.sub }));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
-app.get('/follows', (req, res) => {
+app.get('/stalks', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
@@ -7347,7 +7347,7 @@ endWireBatch = () => { const b = wireBatch; wireBatch = null; if (b) for (const 
 const peerCfg = {
   cap: 0,              // 0 = OFF. Ships off, like chunkCfg.evict did: turn it on after eyeballing it in-browser.
   friendRings: 6,      // ⭐ a friend counts as this many chunks CLOSER, rather than jumping the queue outright —
-  followRings: 3,      //   §3 says favour friends "when they are nearby", so it is a discount, not an override.
+  stalkRings: 3,      //   §3 says favour friends "when they are nearby", so it is a discount, not an override.
   stickyRings: 2,      // hysteresis: someone already meshed is held slightly, or the set flaps at the boundary and
   affinityTtlMs: 60000,//   WebRTC connections are torn down and rebuilt every beacon for no reason at all
 };
@@ -7358,13 +7358,13 @@ function affinityOf(discordId) {
   if (!discordId) return null;
   const hit = _affinity.get(discordId);
   if (hit && Date.now() - hit.at < peerCfg.affinityTtlMs) return hit;
-  const friends = new Set(), follows = new Set();
+  const friends = new Set(), stalkees = new Set();
   try {
     for (const r of db.prepare(`SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END AS o
                                 FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`).all(discordId, discordId, discordId)) friends.add(r.o);
-    for (const r of db.prepare(`SELECT stalkee_id AS o FROM stalks WHERE stalker_id=?`).all(discordId)) follows.add(r.o);
+    for (const r of db.prepare(`SELECT stalkee_id AS o FROM stalks WHERE stalker_id=?`).all(discordId)) stalkees.add(r.o);
   } catch {}
-  const rec = { at: Date.now(), friends, follows };
+  const rec = { at: Date.now(), friends, stalkees };
   _affinity.set(discordId, rec); return rec;
 }
 // Where a player IS, in chunk coordinates. The avatar point when there is a body, the middle of the viewport when
@@ -7384,7 +7384,7 @@ function peerCost(room, sid, aff, cur, other) {
   if (!a || !b) return -Infinity;
   let d = Math.hypot(a[0] - b[0], a[1] - b[1]);
   const od = socketToDiscordId[other];
-  if (aff && od) { if (aff.friends.has(od)) d -= peerCfg.friendRings; else if (aff.follows.has(od)) d -= peerCfg.followRings; }
+  if (aff && od) { if (aff.friends.has(od)) d -= peerCfg.friendRings; else if (aff.stalkees.has(od)) d -= peerCfg.stalkRings; }
   if (cur && cur.has(other)) d -= peerCfg.stickyRings;
   return d;
 }
@@ -10235,7 +10235,7 @@ const socketDmRooms = {};      // socketId → Set of DM roomIds
 const socketToDiscordId = {};  // socketId → discordId
 const socketToUsername = {};   // socketId → username (identity key for unverified users; dedup + avatar takeover)
 const discordIdToSocket = {};       // discordId → socketId (latest socket, for DMs/invites/etc.)
-const discordIdToStalkSockets = {}; // discordId → Set<socketId> (all active tabs, for followee-nav)
+const discordIdToStalkSockets = {}; // discordId → Set<socketId> (all active tabs, for stalkee-nav)
 const discordIdToFullUrl = {}; // discordId → current full URL (active tab)
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
@@ -10353,19 +10353,19 @@ function emitTabSnapshot(discordId, username) {
   const snap = buildTabSnapshot(discordId, username);
   if (!snap) return;
   discordIdToFullUrl[discordId] = snap.activeUrl; // keep friends-panel location in sync
-  const followers = db.prepare('SELECT stalker_id FROM stalks WHERE stalkee_id = ?').all(discordId);
-  followers.forEach(r => {
+  const stalkers = db.prepare('SELECT stalker_id FROM stalks WHERE stalkee_id = ?').all(discordId);
+  stalkers.forEach(r => {
     const fSocks = discordIdToStalkSockets[r.stalker_id];
-    if (fSocks) fSocks.forEach(sid => io.to(sid).emit('followee-tabs', snap));
+    if (fSocks) fSocks.forEach(sid => io.to(sid).emit('stalkee-tabs', snap));
   });
 }
 
 // Send one followee's current snapshot to a single follower socket (resync on connect).
-function emitSnapshotToStalker(followeeId, followeeUsername, socketId) {
-  const settings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(followeeId);
+function emitSnapshotToStalker(stalkeeId, stalkeeUsername, socketId) {
+  const settings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(stalkeeId);
   if (!settings?.browsing_visible) return;
-  const snap = buildTabSnapshot(followeeId, followeeUsername);
-  if (snap) io.to(socketId).emit('followee-tabs', snap);
+  const snap = buildTabSnapshot(stalkeeId, stalkeeUsername);
+  if (snap) io.to(socketId).emit('stalkee-tabs', snap);
 }
 
 // Build a validated world object from a client/stored descriptor. Shared by the live `avatar-object-spawn`
@@ -12006,26 +12006,26 @@ io.on('connection', (socket) => {
 
       // Follows: send this user their follow list + their followers list
       try {
-        const userFollows = db.prepare(`
+        const myStalkees = db.prepare(`
           SELECT f.stalkee_id, u.username, u.avatar
           FROM stalks f JOIN users u ON u.discord_id = f.stalkee_id
           WHERE f.stalker_id = ?
         `).all(discordId);
-        socket.emit('follows-init', userFollows.map(r => ({ discordId: r.stalkee_id, username: r.username, avatar: r.avatar })));
+        socket.emit('stalks-init', myStalkees.map(r => ({ discordId: r.stalkee_id, username: r.username, avatar: r.avatar })));
         // Resync: send each followee's current tab snapshot to this newly-connected follower.
-        userFollows.forEach(r => emitSnapshotToStalker(r.stalkee_id, r.username, socket.id));
+        myStalkees.forEach(r => emitSnapshotToStalker(r.stalkee_id, r.username, socket.id));
 
-        const myFollowersList = db.prepare(`
+        const myStalkersList = db.prepare(`
           SELECT f.stalker_id, u.username
           FROM stalks f JOIN users u ON u.discord_id = f.stalker_id
           WHERE f.stalkee_id = ?
         `).all(discordId);
-        socket.emit('followers-init', myFollowersList.map(r => ({ discordId: r.stalker_id, username: r.username })));
-      } catch (e) { console.error('[follows-init]', e); }
+        socket.emit('stalkers-init', myStalkersList.map(r => ({ discordId: r.stalker_id, username: r.username })));
+      } catch (e) { console.error('[stalks-init]', e); }
 
       // Follows: this user's tab set changed (new tab loaded / address-bar nav / foreground tab).
       // Push a fresh snapshot to their followers.
-      try { emitTabSnapshot(discordId, username); } catch (e) { console.error('[follows-online]', e); }
+      try { emitTabSnapshot(discordId, username); } catch (e) { console.error('[stalks-online]', e); }
     }
 
     console.log(`[join] ${username} (verified:${verified}) joined room: ${currentRoom}`);
@@ -13896,14 +13896,14 @@ io.on('connection', (socket) => {
     try { emitTabSnapshot(dId, currentUsername); } catch {}
   });
 
-  socket.on('follow-start',     ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-start', { target, from: currentUsername || '' }); });
-  socket.on('follow-end',       ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('follow-end',   { target, from: currentUsername || '' }); });
+  socket.on('stalk-start',     ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('stalk-start', { target, from: currentUsername || '' }); });
+  socket.on('stalk-end',       ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('stalk-end',   { target, from: currentUsername || '' }); });
 
-  socket.on('follow-subscribe', ({ target }) => {
+  socket.on('stalk-subscribe', ({ target }) => {
     socket.join('user:' + target);
     if (userCurrentFullUrl[target]) socket.emit('user-location', { url: userCurrentFullUrl[target] });
   });
-  socket.on('follow-unsubscribe', ({ target }) => { socket.leave('user:' + target); });
+  socket.on('stalk-unsubscribe', ({ target }) => { socket.leave('user:' + target); });
 
   socket.on('friend-beacon', ({ url }) => {
     const dId = socketToDiscordId[socket.id];
