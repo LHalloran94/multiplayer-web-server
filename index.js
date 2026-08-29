@@ -10496,16 +10496,28 @@ const leaderEpoch = {};        // discordId → epoch token (changes each fresh 
 const tabDisconnectTimers = {}; // `${discordId}:${tabSession}` → timerId
 const TAB_DISCONNECT_DEBOUNCE_MS = 1000;
 
+// Is this tab in the foreground? socketId → boolean. Deliberately NOT stored on the roomUsers entry: those
+// entries are rebuilt at five different places (join, room-presence, two ctx-room paths, re-entry) and a field
+// that has to be remembered at all five is a field that will be forgotten at one. roomUsers is keyed by
+// socket.id, so presence can just look the answer up.
+const socketVisible = {};
+
 function broadcastPresence(room) {
   // Collapse multiple sockets of the SAME user into one who-list entry — when locked into a context Room,
   // every page you open auto-joins that Room's presence bucket, and two tabs on one page share a bucket too;
   // either way one identity = one member. Keyed by discord_id (verified) or username (unverified).
-  const seen = new Set(), users = [];
-  for (const u of Object.values(roomUsers[room] || {})) {
+  // ⭐ AND THAT COLLAPSE IS EXACTLY WHERE CARD #58'S RULE BELONGS: "you are away for a room if you are not
+  // active on any tab where you are in that room — active on one overrides the others." One entry per
+  // identity, and it is away only if EVERY tab behind it is. Nothing else has to know the rule.
+  const byKey = new Map();
+  for (const [sid, u] of Object.entries(roomUsers[room] || {})) {
+    const away = socketVisible[sid] === false;          // unknown (an older client) counts as present, not away
     const key = u.discord_id || ('u:' + u.username);
-    if (seen.has(key)) continue;
-    seen.add(key); users.push(u);
+    const prev = byKey.get(key);
+    if (!prev) { byKey.set(key, { ...u, away }); continue; }
+    if (!away) prev.away = false;                        // one active tab is enough
   }
+  const users = [...byKey.values()];
   io.to(room).emit('presence', { count: users.length, users });
 }
 
@@ -12187,6 +12199,7 @@ io.on('connection', (socket) => {
     currentEntered = (currentPresenceRoom !== currentRoom) || !!entered;
     currentColor = color || null;
     currentBlob = sanitizeBlob(blob) || currentBlob;
+    socketVisible[socket.id] = visible !== false;
     if (currentEntered) roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId, color: currentColor, blob: currentBlob };
     pageUsers[currentRoom][socket.id] = { username, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
@@ -14285,6 +14298,25 @@ io.on('connection', (socket) => {
   // Item 10: explicit enter/leave + tab-visibility withdraw/restore for the CURRENT presence bucket
   // (no bucket switch — that's ctx-room's job). #4: join/left no longer post chat lines; peers learn
   // from the presence diff (transient toast) + the live who-list, so `announce` is now a no-op.
+  // ---- Card #58: a backgrounded tab goes AWAY, it does not disappear ----
+  // 🟥 IT USED TO DISAPPEAR. Backgrounding a tab emitted `room-presence {active:false}`, which DELETES the
+  // roomUsers entry — so someone with the page open behind another window simply vanished from the who-list,
+  // and there was nothing an away indicator could have been drawn on. That is now a separate signal: presence
+  // is kept (so `broadcastPresence` can mark it away), and only the live cursor/avatar are withdrawn, which
+  // is the half of the old behaviour worth keeping — a motionless cursor sitting in an abandoned tab.
+  // ⚠️ DELIBERATE Leave (`announce:true`, the Enter/Leave control) still removes you. Only the visibility-
+  // driven pair changed.
+  socket.on('tab-visible', ({ visible } = {}) => {
+    const vis = visible !== false;
+    if (socketVisible[socket.id] === vis) return;
+    socketVisible[socket.id] = vis;
+    if (!vis) {
+      socket.to(currentPageRoom).emit('cursor-leave', { id: socket.id });
+      socket.to(currentRoom).emit('avatar-leave', { id: socket.id });
+    }
+    if (currentPresenceRoom) broadcastPresence(currentPresenceRoom);
+  });
+
   socket.on('room-presence', ({ active } = {}) => {
     if (!currentRoom || !currentPresenceRoom) return;
     if (active) {
@@ -14382,6 +14414,7 @@ io.on('connection', (socket) => {
       delete socketDmRooms[socket.id];
     }
     delete socketToUsername[socket.id];
+    delete socketVisible[socket.id];   // or a closed tab would keep voting on whether its owner is away
     // Friends: notify accepted friends this user went offline
     const dId = socketToDiscordId[socket.id];
     if (dId) {
