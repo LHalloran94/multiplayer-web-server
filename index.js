@@ -11675,6 +11675,23 @@ io.on('connection', (socket) => {
   // custom/locked context Room is always entered. Drives whether we add to roomUsers + announce.
   let currentEntered = false;
   let currentColor = null;        // this socket's chosen name colour — tracked separately so every roomUsers entry we (re)build (join, room-presence, ctx-room) carries it
+  // 🟥 AND THE SAME FOR THE BLOB, WHICH USED TO RIDE ONLY ON CURSOR PACKETS (Trello #59). Appearance was
+  // learned from the live `cursor` stream and nowhere else, so anyone who had not moved their mouse since you
+  // arrived was drawn as a fallback — which is precisely the card's "doesn't show up in past chat messages".
+  // Name colour was already on presence and was already fine; this is the half that was not.
+  let currentBlob = null;
+  // ⚠️ A CAP, BECAUSE PRESENCE IS NOT A CURSOR PACKET. A cursor packet costs one sender; presence goes to
+  // everyone in the room every time anyone's changes. `src` is normally a short https URL, but the settings
+  // panel accepts a pasted data: URL of any size. Over the cap presence carries type+hue only and the cursor
+  // packet still delivers the full picture when they move — degraded, not broken, and bounded.
+  const BLOB_SRC_MAX = 2048;
+  function sanitizeBlob(b) {
+    if (!b || typeof b !== 'object') return null;
+    const hue = Number(b.hue);
+    const src = typeof b.src === 'string' && b.src.length <= BLOB_SRC_MAX ? b.src : '';
+    const type = b.type === 'image' && src ? 'image' : 'color';
+    return { type, hue: Number.isFinite(hue) ? hue : null, src: type === 'image' ? src : '' };
+  }
   // ---- Liquid Debug config (GLOBAL, live-tunable sim switches driven by the client's Liquid Debug menu) ----
   socket.emit('liquid-cfg', cfgWire());                     // send current state so a joining client's menu reflects it
   socket.on('liquid-cfg-get', () => socket.emit('liquid-cfg', cfgWire()));
@@ -12070,7 +12087,7 @@ io.on('connection', (socket) => {
   // ⚠️ `tabSession` still arrives on a private join, and that is the point: it lets us REMOVE this tab from
   // the set the user's followers mirror. Sending nothing would have left the tab's previous, public URL
   // sitting in the snapshot — followers would keep opening the page you just navigated away from.
-  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId, color, entered, priv }) => {
+  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId, color, blob, entered, priv }) => {
     let verified = false;
     let avatar = null;
     let discordId = null;
@@ -12169,7 +12186,8 @@ io.on('connection', (socket) => {
     // in roomUsers and announces nothing — general browsing isn't broadcast.
     currentEntered = (currentPresenceRoom !== currentRoom) || !!entered;
     currentColor = color || null;
-    if (currentEntered) roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId, color: currentColor };
+    currentBlob = sanitizeBlob(blob) || currentBlob;
+    if (currentEntered) roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId, color: currentColor, blob: currentBlob };
     pageUsers[currentRoom][socket.id] = { username, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
@@ -12301,6 +12319,18 @@ io.on('connection', (socket) => {
   });
 
   // Live name-colour change — update this socket's presence entry and re-broadcast so peers recolour.
+  // Appearance changed mid-session. Mirrors `set-name-color` exactly, and for the same reason: a change has to
+  // reach people who are not going to receive a cursor packet from you any time soon.
+  socket.on('set-blob', ({ blob }) => {
+    const b = sanitizeBlob(blob);
+    if (!b) return;
+    currentBlob = b;
+    const entry = roomUsers[currentPresenceRoom] && roomUsers[currentPresenceRoom][socket.id];
+    if (!entry) return;                       // remembered above, so a later enter still carries it
+    entry.blob = currentBlob;
+    broadcastPresence(currentPresenceRoom);
+  });
+
   socket.on('set-name-color', ({ color }) => {
     currentColor = color || null;   // remember it even while un-entered, so a later enter carries the colour
     const entry = roomUsers[currentPresenceRoom] && roomUsers[currentPresenceRoom][socket.id];
@@ -14224,13 +14254,13 @@ io.on('connection', (socket) => {
       currentPresenceRoom = next;
       if (next !== currentRoom) socket.join(next);
       if (!roomUsers[next]) roomUsers[next] = {};
-      if (nextEntered) roomUsers[next][socket.id] = info || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor };
+      if (nextEntered) roomUsers[next][socket.id] = info || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor, blob: currentBlob };
       currentEntered = nextEntered;
       broadcastPresence(next);
     } else if (nextEntered !== currentEntered) {
       // Same bucket, entered intent changed (e.g. explicit Leave/Enter on the page-default Room without
       // a bucket switch) — fall through to room-presence semantics inline.
-      if (nextEntered) roomUsers[next][socket.id] = (roomUsers[next] && roomUsers[next][socket.id]) || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor };
+      if (nextEntered) roomUsers[next][socket.id] = (roomUsers[next] && roomUsers[next][socket.id]) || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor, blob: currentBlob };
       else if (roomUsers[next]) delete roomUsers[next][socket.id];
       currentEntered = nextEntered;
       broadcastPresence(next);
@@ -14260,7 +14290,7 @@ io.on('connection', (socket) => {
     if (active) {
       if (currentEntered) return;                 // already in — idempotent
       if (!roomUsers[currentPresenceRoom]) roomUsers[currentPresenceRoom] = {};
-      roomUsers[currentPresenceRoom][socket.id] = { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor };
+      roomUsers[currentPresenceRoom][socket.id] = { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor, blob: currentBlob };
       currentEntered = true;
       broadcastPresence(currentPresenceRoom);
     } else {
