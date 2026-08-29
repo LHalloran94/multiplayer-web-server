@@ -231,8 +231,17 @@ try { db.exec('ALTER TABLE users ADD COLUMN status TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN public INTEGER DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN scope TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN description TEXT'); } catch {}
-try { db.exec(`ALTER TABLE users ADD COLUMN follow_policy TEXT DEFAULT 'friends'`); } catch {}
-try { db.exec('ALTER TABLE users ADD COLUMN follow_allowlist TEXT DEFAULT \'\''); } catch {}
+// 🟥 THESE TWO SAID "follow" AND MEANT "stalk". The product renamed follow → stalk in the UI long ago and the
+// storage was never renamed, so the old name now describes a DIFFERENT feature (real social following, which
+// does not exist yet and is about to be built beside it). The stale name is not cosmetic: it produced a
+// confident wrong conclusion — "both tables already exist" — within one message.
+// ⚠️ ORDER MATTERS. RENAME first so an existing database carries its data across; ADD second so a fresh one
+// gets the column at all. Do it the other way and an existing database gets an empty `stalk_policy` added,
+// the rename then fails because the name is taken, and every policy silently reverts to the default.
+try { db.exec('ALTER TABLE users RENAME COLUMN follow_policy TO stalk_policy'); } catch {}
+try { db.exec('ALTER TABLE users RENAME COLUMN follow_allowlist TO stalk_allowlist'); } catch {}
+try { db.exec(`ALTER TABLE users ADD COLUMN stalk_policy TEXT DEFAULT 'friends'`); } catch {}
+try { db.exec('ALTER TABLE users ADD COLUMN stalk_allowlist TEXT DEFAULT \'\''); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN browsing_visible INTEGER DEFAULT 1'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN social_links TEXT'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN beacon_url TEXT'); } catch {}
@@ -303,12 +312,18 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_room_favs_user    ON room_favourites(discord_id);
 `);
 
+// ⚠️ THE RENAME MUST RUN BEFORE THE CREATE. `CREATE TABLE IF NOT EXISTS stalks` on an un-migrated database
+// would make an EMPTY stalks table, after which the rename fails because the name is taken and every existing
+// row is orphaned in a table nothing reads. Rename first, then create only if there was nothing to rename.
+try { db.exec('ALTER TABLE follows RENAME TO stalks'); } catch {}
+try { db.exec('ALTER TABLE stalks RENAME COLUMN follower_id TO stalker_id'); } catch {}
+try { db.exec('ALTER TABLE stalks RENAME COLUMN followee_id TO stalkee_id'); } catch {}
 db.exec(`
-  CREATE TABLE IF NOT EXISTS follows (
-    follower_id  TEXT NOT NULL,
-    followee_id  TEXT NOT NULL,
+  CREATE TABLE IF NOT EXISTS stalks (
+    stalker_id   TEXT NOT NULL,
+    stalkee_id   TEXT NOT NULL,
     created_at   INTEGER DEFAULT (unixepoch()),
-    PRIMARY KEY (follower_id, followee_id)
+    PRIMARY KEY (stalker_id, stalkee_id)
   );
 `);
 
@@ -1649,22 +1664,25 @@ app.get('/follow-settings', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const row = db.prepare('SELECT follow_policy, follow_allowlist, browsing_visible FROM users WHERE discord_id = ?').get(user.sub);
+    const row = db.prepare('SELECT stalk_policy, stalk_allowlist, browsing_visible FROM users WHERE discord_id = ?').get(user.sub);
     if (!row) return res.status(404).json({ error: 'User not found' });
-    const allowlistIds = (row.follow_allowlist || '').split(',').filter(Boolean);
+    const allowlistIds = (row.stalk_allowlist || '').split(',').filter(Boolean);
     let allowlist = [];
     if (allowlistIds.length) {
       const placeholders = allowlistIds.map(() => '?').join(',');
       allowlist = db.prepare(`SELECT discord_id, username FROM users WHERE discord_id IN (${placeholders})`).all(...allowlistIds)
         .map(r => ({ discordId: r.discord_id, username: r.username }));
     }
-    res.json({ follow_policy: row.follow_policy || 'friends', browsing_visible: !!row.browsing_visible, allowlist });
+    res.json({ follow_policy: row.stalk_policy || 'friends', browsing_visible: !!row.browsing_visible, allowlist });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
 app.put('/follow-settings', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  // ⚠️ `follow_policy` HERE IS A WIRE FIELD, NOT A COLUMN — the column is `stalk_policy` now. The JSON field,
+  // the REST paths (/follows) and the socket event names still say "follow" because renaming them is a
+  // FLAG DAY: the extension has to change in the same breath or every stalk feature breaks. That is slice 2.
   const { follow_policy, browsing_visible, allowlist } = req.body;
   const validPolicies = ['anyone', 'friends', 'specific', 'nobody'];
   try {
@@ -1672,14 +1690,14 @@ app.put('/follow-settings', (req, res) => {
     const params = [];
     if (follow_policy !== undefined) {
       if (!validPolicies.includes(follow_policy)) return res.status(400).json({ error: 'Invalid policy' });
-      updates.push('follow_policy = ?'); params.push(follow_policy);
+      updates.push('stalk_policy = ?'); params.push(follow_policy);
     }
     if (browsing_visible !== undefined) {
       updates.push('browsing_visible = ?'); params.push(browsing_visible ? 1 : 0);
     }
     if (allowlist !== undefined) {
       const ids = Array.isArray(allowlist) ? allowlist.map(a => a.discordId).filter(Boolean).join(',') : '';
-      updates.push('follow_allowlist = ?'); params.push(ids);
+      updates.push('stalk_allowlist = ?'); params.push(ids);
     }
     if (!updates.length) return res.json({ ok: true });
     params.push(user.sub);
@@ -1694,9 +1712,9 @@ app.post('/follows', (req, res) => {
   const { followeeDiscordId } = req.body;
   if (!followeeDiscordId || followeeDiscordId === user.sub) return res.status(400).json({ error: 'Invalid' });
   try {
-    const followee = db.prepare('SELECT discord_id, follow_policy, follow_allowlist FROM users WHERE discord_id = ?').get(followeeDiscordId);
+    const followee = db.prepare('SELECT discord_id, stalk_policy, stalk_allowlist FROM users WHERE discord_id = ?').get(followeeDiscordId);
     if (!followee) return res.status(404).json({ error: 'User not found' });
-    const policy = followee.follow_policy || 'friends';
+    const policy = followee.stalk_policy || 'friends';
     if (policy === 'nobody') return res.status(403).json({ error: 'user_blocks_follow' });
     if (policy === 'friends') {
       const friendship = db.prepare(
@@ -1705,12 +1723,12 @@ app.post('/follows', (req, res) => {
       if (!friendship) return res.status(403).json({ error: 'friends_only' });
     }
     if (policy === 'specific') {
-      const allowed = (followee.follow_allowlist || '').split(',').includes(user.sub);
+      const allowed = (followee.stalk_allowlist || '').split(',').includes(user.sub);
       if (!allowed) return res.status(403).json({ error: 'not_on_allowlist' });
     }
-    db.prepare('INSERT OR IGNORE INTO follows (follower_id, followee_id) VALUES (?, ?)').run(user.sub, followeeDiscordId);
+    db.prepare('INSERT OR IGNORE INTO stalks (stalker_id, stalkee_id) VALUES (?, ?)').run(user.sub, followeeDiscordId);
     // Notify followee they have a new follower
-    const followeeSocks = discordIdToFollowSockets[followeeDiscordId];
+    const followeeSocks = discordIdToStalkSockets[followeeDiscordId];
     if (followeeSocks) {
       const followerUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(user.sub);
       followeeSocks.forEach(sid => io.to(sid).emit('persistent-follow-start', { followerDiscordId: user.sub, username: followerUser?.username || user.username }));
@@ -1718,8 +1736,8 @@ app.post('/follows', (req, res) => {
     // Immediately send the followee's current tab snapshot to the new follower's tabs so
     // following takes effect right away (don't wait for the followee to next navigate).
     const followeeUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(followeeDiscordId);
-    const followerSocks = discordIdToFollowSockets[user.sub];
-    if (followerSocks) followerSocks.forEach(sid => emitSnapshotToFollower(followeeDiscordId, followeeUser?.username, sid));
+    const followerSocks = discordIdToStalkSockets[user.sub];
+    if (followerSocks) followerSocks.forEach(sid => emitSnapshotToStalker(followeeDiscordId, followeeUser?.username, sid));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -1728,9 +1746,9 @@ app.delete('/follows/:followeeDiscordId', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    db.prepare('DELETE FROM follows WHERE follower_id = ? AND followee_id = ?').run(user.sub, req.params.followeeDiscordId);
+    db.prepare('DELETE FROM stalks WHERE stalker_id = ? AND stalkee_id = ?').run(user.sub, req.params.followeeDiscordId);
     // Notify followee on all their tabs
-    const followeeSocks = discordIdToFollowSockets[req.params.followeeDiscordId];
+    const followeeSocks = discordIdToStalkSockets[req.params.followeeDiscordId];
     if (followeeSocks) followeeSocks.forEach(sid => io.to(sid).emit('persistent-follow-end', { followerDiscordId: user.sub }));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
@@ -1741,11 +1759,11 @@ app.get('/follows/followers', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT f.follower_id, u.username, u.avatar
-      FROM follows f JOIN users u ON u.discord_id = f.follower_id
-      WHERE f.followee_id = ?
+      SELECT f.stalker_id, u.username, u.avatar
+      FROM stalks f JOIN users u ON u.discord_id = f.stalker_id
+      WHERE f.stalkee_id = ?
     `).all(user.sub);
-    res.json(rows.map(r => ({ discordId: r.follower_id, username: r.username, avatar: r.avatar })));
+    res.json(rows.map(r => ({ discordId: r.stalker_id, username: r.username, avatar: r.avatar })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -1754,8 +1772,8 @@ app.delete('/follows/by-follower/:followerDiscordId', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   const { followerDiscordId } = req.params;
   try {
-    db.prepare('DELETE FROM follows WHERE follower_id = ? AND followee_id = ?').run(followerDiscordId, user.sub);
-    const followerSocks = discordIdToFollowSockets[followerDiscordId];
+    db.prepare('DELETE FROM stalks WHERE stalker_id = ? AND stalkee_id = ?').run(followerDiscordId, user.sub);
+    const followerSocks = discordIdToStalkSockets[followerDiscordId];
     if (followerSocks) followerSocks.forEach(sid => io.to(sid).emit('follow-kicked', { followeeDiscordId: user.sub }));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
@@ -1766,15 +1784,15 @@ app.get('/follows', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT f.followee_id, u.username, u.avatar, u.browsing_visible
-      FROM follows f JOIN users u ON u.discord_id = f.followee_id
-      WHERE f.follower_id = ?
+      SELECT f.stalkee_id, u.username, u.avatar, u.browsing_visible
+      FROM stalks f JOIN users u ON u.discord_id = f.stalkee_id
+      WHERE f.stalker_id = ?
     `).all(user.sub);
     res.json(rows.map(r => ({
-      discordId: r.followee_id,
+      discordId: r.stalkee_id,
       username: r.username,
       avatar: r.avatar,
-      currentUrl: r.browsing_visible ? (discordIdToFullUrl[r.followee_id] || null) : null
+      currentUrl: r.browsing_visible ? (discordIdToFullUrl[r.stalkee_id] || null) : null
     })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -7344,7 +7362,7 @@ function affinityOf(discordId) {
   try {
     for (const r of db.prepare(`SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END AS o
                                 FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`).all(discordId, discordId, discordId)) friends.add(r.o);
-    for (const r of db.prepare(`SELECT followee_id AS o FROM follows WHERE follower_id=?`).all(discordId)) follows.add(r.o);
+    for (const r of db.prepare(`SELECT stalkee_id AS o FROM stalks WHERE stalker_id=?`).all(discordId)) follows.add(r.o);
   } catch {}
   const rec = { at: Date.now(), friends, follows };
   _affinity.set(discordId, rec); return rec;
@@ -10217,7 +10235,7 @@ const socketDmRooms = {};      // socketId → Set of DM roomIds
 const socketToDiscordId = {};  // socketId → discordId
 const socketToUsername = {};   // socketId → username (identity key for unverified users; dedup + avatar takeover)
 const discordIdToSocket = {};       // discordId → socketId (latest socket, for DMs/invites/etc.)
-const discordIdToFollowSockets = {}; // discordId → Set<socketId> (all active tabs, for followee-nav)
+const discordIdToStalkSockets = {}; // discordId → Set<socketId> (all active tabs, for followee-nav)
 const discordIdToFullUrl = {}; // discordId → current full URL (active tab)
 const MAX_HISTORY = 50;
 const MAX_SPRAYS = 50;
@@ -10335,15 +10353,15 @@ function emitTabSnapshot(discordId, username) {
   const snap = buildTabSnapshot(discordId, username);
   if (!snap) return;
   discordIdToFullUrl[discordId] = snap.activeUrl; // keep friends-panel location in sync
-  const followers = db.prepare('SELECT follower_id FROM follows WHERE followee_id = ?').all(discordId);
+  const followers = db.prepare('SELECT stalker_id FROM stalks WHERE stalkee_id = ?').all(discordId);
   followers.forEach(r => {
-    const fSocks = discordIdToFollowSockets[r.follower_id];
+    const fSocks = discordIdToStalkSockets[r.stalker_id];
     if (fSocks) fSocks.forEach(sid => io.to(sid).emit('followee-tabs', snap));
   });
 }
 
 // Send one followee's current snapshot to a single follower socket (resync on connect).
-function emitSnapshotToFollower(followeeId, followeeUsername, socketId) {
+function emitSnapshotToStalker(followeeId, followeeUsername, socketId) {
   const settings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(followeeId);
   if (!settings?.browsing_visible) return;
   const snap = buildTabSnapshot(followeeId, followeeUsername);
@@ -11812,7 +11830,7 @@ io.on('connection', (socket) => {
         // Upsert user in DB
         // 🟥🟥 THIS WAS `INSERT OR REPLACE` AND IT WIPED THE WHOLE ROW ON EVERY PAGE LOAD. Replace deletes
         // and re-inserts, so every column not named here went back to its default: browsing_visible,
-        // follow_policy, follow_allowlist, bio, status, social_links, beacon_url. That is why "Show my
+        // stalk_policy, stalk_allowlist, bio, status, social_links, beacon_url. That is why "Show my
         // location" appeared to do nothing — the setting was real, was saved, and was destroyed by the
         // next join, which is to say within a second of being set. Measured, not read: set it off, join,
         // read it back, it is on again.
@@ -11822,8 +11840,8 @@ io.on('connection', (socket) => {
                       avatar = excluded.avatar, updated_at = excluded.updated_at`).run(discordId, username, avatar);
         socketToDiscordId[socket.id] = discordId;
         discordIdToSocket[discordId] = socket.id;
-        if (!discordIdToFollowSockets[discordId]) discordIdToFollowSockets[discordId] = new Set();
-        discordIdToFollowSockets[discordId].add(socket.id);
+        if (!discordIdToStalkSockets[discordId]) discordIdToStalkSockets[discordId] = new Set();
+        discordIdToStalkSockets[discordId].add(socket.id);
         // Register this tab in the leader's tab set (drives follow snapshots).
         if (tabSession) {
           // Cancel any pending "tab gone" debounce for this session (same-tab navigation rejoining).
@@ -11989,20 +12007,20 @@ io.on('connection', (socket) => {
       // Follows: send this user their follow list + their followers list
       try {
         const userFollows = db.prepare(`
-          SELECT f.followee_id, u.username, u.avatar
-          FROM follows f JOIN users u ON u.discord_id = f.followee_id
-          WHERE f.follower_id = ?
+          SELECT f.stalkee_id, u.username, u.avatar
+          FROM stalks f JOIN users u ON u.discord_id = f.stalkee_id
+          WHERE f.stalker_id = ?
         `).all(discordId);
-        socket.emit('follows-init', userFollows.map(r => ({ discordId: r.followee_id, username: r.username, avatar: r.avatar })));
+        socket.emit('follows-init', userFollows.map(r => ({ discordId: r.stalkee_id, username: r.username, avatar: r.avatar })));
         // Resync: send each followee's current tab snapshot to this newly-connected follower.
-        userFollows.forEach(r => emitSnapshotToFollower(r.followee_id, r.username, socket.id));
+        userFollows.forEach(r => emitSnapshotToStalker(r.stalkee_id, r.username, socket.id));
 
         const myFollowersList = db.prepare(`
-          SELECT f.follower_id, u.username
-          FROM follows f JOIN users u ON u.discord_id = f.follower_id
-          WHERE f.followee_id = ?
+          SELECT f.stalker_id, u.username
+          FROM stalks f JOIN users u ON u.discord_id = f.stalker_id
+          WHERE f.stalkee_id = ?
         `).all(discordId);
-        socket.emit('followers-init', myFollowersList.map(r => ({ discordId: r.follower_id, username: r.username })));
+        socket.emit('followers-init', myFollowersList.map(r => ({ discordId: r.stalker_id, username: r.username })));
       } catch (e) { console.error('[follows-init]', e); }
 
       // Follows: this user's tab set changed (new tab loaded / address-bar nav / foreground tab).
@@ -14074,9 +14092,9 @@ io.on('connection', (socket) => {
     const dId = socketToDiscordId[socket.id];
     if (dId) {
       delete socketToDiscordId[socket.id];
-      if (discordIdToFollowSockets[dId]) {
-        discordIdToFollowSockets[dId].delete(socket.id);
-        if (!discordIdToFollowSockets[dId].size) delete discordIdToFollowSockets[dId];
+      if (discordIdToStalkSockets[dId]) {
+        discordIdToStalkSockets[dId].delete(socket.id);
+        if (!discordIdToStalkSockets[dId].size) delete discordIdToStalkSockets[dId];
       }
       // Remove this tab from the leader's tab set. Debounced: same-tab navigation causes a
       // disconnect + reconnect with the same tabSession — wait briefly so the rejoin can cancel
