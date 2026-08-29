@@ -690,6 +690,13 @@ app.post('/friends/remove', (req, res) => {
   const { other } = req.body;
   try {
     db.prepare('DELETE FROM friends WHERE (from_id=? AND to_id=?) OR (from_id=? AND to_id=?)').run(user.sub, other, other, user.sub);
+    // 🟥 THE DELETE WAS ALWAYS SYMMETRIC — the bug was that NOBODY TOLD THE OTHER PERSON. `friend-request` and
+    // `friend-accepted` both push, removal pushed nothing, so the other client kept the friendship in memory
+    // until a reload. That is why they "stay a friend on their end", and why they cannot re-add you: their
+    // button still says Remove, because their list still has you. Offline users need nothing — `friends-init`
+    // reads the table on connect, and the row is already gone.
+    const otherSocket = discordIdToSocket[other];
+    if (otherSocket) io.to(otherSocket).emit('friend-removed', { discord_id: user.sub });
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
