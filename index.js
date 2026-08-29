@@ -487,7 +487,12 @@ function areFriends(a, b) { return a && b && a !== b && !!_friendStmt.get(a, b, 
 const SHAREABLE = {
   presence:   { def: 'everyone',  label: 'That I am online' },
   profile:    { def: 'everyone',  label: 'My bio, status and links' },
-  dm:         { def: 'followers', label: 'Who can message me' },
+  // ⭐ OPEN BY DEFAULT (the user's call, 2026-08-30). Meeting someone on a page and messaging them is the
+  // product's main loop, and a followers-only default breaks it for exactly the person who has just arrived.
+  // The answer to an unwanted message is not a locked door but a sorted inbox: the DM list groups
+  // conversations into Friends / Followers / everyone else, so a stranger can reach you and still be visibly
+  // a stranger. The setting stays, for anyone who does want the door shut.
+  dm:         { def: 'everyone',  label: 'Who can message me' },
   room:       { def: 'followers', label: 'Which Room I am in' },
   location:   { def: 'friends',   label: 'What page I am on' },
   // The private-account escape hatch. Only 'everyone' and 'nobody' are meaningful (a friend already outranks
