@@ -327,6 +327,42 @@ db.exec(`
   );
 `);
 
+// ---- Cards #46 + #47: SOCIAL FOLLOWING, a lighter tier than friendship ----
+// 🟥 THE TABLE IS `followers`, NOT `follows`, AND THAT IS NOT A STYLE CHOICE. The migration a few lines up
+// (`ALTER TABLE follows RENAME TO stalks`) still runs at every startup for un-migrated databases. A table
+// called `follows` would be silently swallowed by that rename the moment anyone rolled the server back to a
+// build older than this one — losing BOTH features' data in one statement. The name that cannot collide wins.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS followers (
+    follower_id TEXT NOT NULL,
+    followee_id TEXT NOT NULL,
+    created_at  INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (follower_id, followee_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_followers_followee ON followers(followee_id);
+`);
+// ⭐ AUDIENCES. One JSON blob per user: { capabilityKey: 'everyone'|'followers'|'friends'|'nobody' }.
+// A column per capability was the obvious alternative and it is the wrong one — the whole point of the model
+// is that making something newly shareable costs a line in SHAREABLE and nothing else, and a column per
+// capability puts a schema migration in front of every one of them. Nothing joins on these in SQL: every
+// consumer already loops over recipients and emits per socket, so the gate is a per-PAIR question answered in
+// JS. Same reasoning, and the same shape, as `user_settings.blob`.
+try { db.exec('ALTER TABLE users ADD COLUMN share_prefs TEXT'); } catch {}
+// BACKFILL — READ THE PAIR, NOT THE BOOLEAN. `browsing_visible` is absorbed by the `location` capability, and
+// a boolean cannot say what a three-valued audience says. Backfilling from it alone would quietly change what
+// an existing account's setup MEANS: someone who set "anyone may stalk me" AND left location visible had, in
+// effect, chosen `everyone`, and would wake up on `friends`. So the two columns are read together.
+// Idempotent: only rows that have never had a share_prefs are touched.
+try {
+  db.exec(`UPDATE users SET share_prefs = CASE
+             WHEN COALESCE(browsing_visible, 1) = 0 THEN '{"location":"nobody"}'
+             WHEN stalk_policy = 'anyone'           THEN '{"location":"everyone"}'
+             ELSE                                        '{"location":"friends"}'
+           END WHERE share_prefs IS NULL`);
+} catch {}
+// ⚠️ `browsing_visible` is deliberately left in place and simply stops being read, so a rollback to the
+// previous server build finds the column it expects instead of an empty one.
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS groups (
     id          TEXT PRIMARY KEY,
@@ -437,6 +473,88 @@ function normalizeRoomSocial(r) {
 // True if a and b are accepted friends (either direction). Used to gate friends-only room access.
 const _friendStmt = db.prepare(`SELECT 1 FROM friends WHERE ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND status='accepted'`);
 function areFriends(a, b) { return a && b && a !== b && !!_friendStmt.get(a, b, b, a); }
+
+// ============================ AUDIENCES — THE ONE SOCIAL GATE ============================
+// Cards #46/#47 asked for a follower tier. The trap is building two relationship TYPES each carrying a
+// hard-coded bundle of permissions: that survives one feature and then every new shareable thing forces a
+// fresh binary decision, the bundles drift, and nobody can say what a follower can see. `stalk_policy` /
+// `stalk_allowlist` / `browsing_visible` are already the beginning of that tangle.
+// ⭐ So: three named AUDIENCES crossed with a list of shareable THINGS. "Follower" and "friend" are names for
+// audiences, not two hard-wired feature sets. Making something newly shareable is one row in SHAREABLE.
+//
+// ⚠️ EVERYTHING SOCIAL ASKS `mayShare`. If you find yourself writing a second relationship test beside a
+// third capability check, that is this comment's warning coming true — put it here instead.
+const SHAREABLE = {
+  presence:   { def: 'everyone',  label: 'That I am online' },
+  profile:    { def: 'everyone',  label: 'My bio, status and links' },
+  dm:         { def: 'followers', label: 'Who can message me' },
+  room:       { def: 'followers', label: 'Which Room I am in' },
+  location:   { def: 'friends',   label: 'What page I am on' },
+  // The private-account escape hatch. Only 'everyone' and 'nobody' are meaningful (a friend already outranks
+  // every follower-level gate, so "only friends may follow me" would be a no-op wearing a setting's clothes),
+  // and the UI offers only those two — but it lives here so it costs nothing and reads through the same gate.
+  followable: { def: 'everyone',  label: 'Who can follow me' },
+};
+// Ordered by how much RELATIONSHIP is required. Comparing ranks is what makes the superset rule structural.
+const AUD_RANK = { everyone: 0, followers: 1, friends: 2, nobody: 3 };
+const AUD_VALUES = Object.keys(AUD_RANK);
+function shareDefaults() { const o = {}; for (const k in SHAREABLE) o[k] = SHAREABLE[k].def; return o; }
+
+// discordId → { at, prefs }. Same treatment as `_affinity`: these are read once per recipient per emit, and
+// the location emitters fan out to every online friend on every navigation.
+const _sharePrefs = new Map();
+const SHARE_TTL_MS = 60000;
+function sharePrefs(discordId) {
+  const hit = _sharePrefs.get(discordId);
+  if (hit && Date.now() - hit.at < SHARE_TTL_MS) return hit.prefs;
+  let prefs = {};
+  try {
+    const row = db.prepare('SELECT share_prefs FROM users WHERE discord_id = ?').get(discordId);
+    if (row?.share_prefs) prefs = JSON.parse(row.share_prefs) || {};
+  } catch {}
+  _sharePrefs.set(discordId, { at: Date.now(), prefs });
+  return prefs;
+}
+function invalidateSharePrefs(discordId) { _sharePrefs.delete(discordId); }
+
+const _followStmt = db.prepare('SELECT 1 FROM followers WHERE follower_id = ? AND followee_id = ?');
+function isFollower(followerId, followeeId) {
+  if (!followerId || !followeeId || followerId === followeeId) return false;
+  try { return !!_followStmt.get(followerId, followeeId); } catch { return false; }
+}
+const _blockPairStmt = db.prepare('SELECT 1 FROM blocks WHERE (blocker_id=? AND blocked_id=?) OR (blocker_id=? AND blocked_id=?)');
+function blockedEitherWay(a, b) {
+  if (!a || !b || a === b) return false;
+  try { return !!_blockPairStmt.get(a, b, b, a); } catch { return false; }
+}
+
+// The HIGHEST tier `viewer` holds with respect to `owner`.
+// ⭐⭐ FRIENDS ARE A SUPERSET OF FOLLOWERS BY CONSTRUCTION, NOT BY DATA. `friends` outranks `followers`, so a
+// friend passes every follower-level gate without owning a row in `followers`. The alternative — inserting an
+// implied follow row when a friendship forms — creates a cleanup obligation on friend removal and drifts the
+// first time anything forgets. "My friend can see less than a stranger" is the incoherence being ruled out.
+// ⚠️ A friend is therefore NOT COUNTED as a follower. The public count is `followers` rows only; that is the
+// honest number, and it is the one #47's "conferring status" is about.
+function relationTo(ownerId, viewerId) {
+  if (areFriends(ownerId, viewerId)) return 'friends';
+  if (isFollower(viewerId, ownerId)) return 'followers';
+  return 'everyone';
+}
+// "May `viewerId` see `ownerId`'s `cap`?" — the single question. An unknown viewer (no account) is a stranger,
+// which is exactly `everyone`, so it needs no special case.
+function mayShare(ownerId, viewerId, cap) {
+  if (!ownerId || ownerId === viewerId) return true;
+  // ⭐ BLOCKING IS CHECKED BEFORE THE AUDIENCE GATE, AND IN BOTH DIRECTIONS. One choke point, or the shunning
+  // work (#53/#54) and the audience work will disagree about who can see whom.
+  if (blockedEitherWay(ownerId, viewerId)) return false;
+  const spec = SHAREABLE[cap];
+  if (!spec) return true;                      // an unknown capability is not a secret; it was never declared
+  const want = sharePrefs(ownerId)[cap] || spec.def;
+  const need = AUD_RANK[want];
+  if (need === undefined || need >= AUD_RANK.nobody) return false;
+  return AUD_RANK[relationTo(ownerId, viewerId)] >= need;
+}
+// ==========================================================================================
 
 // Coerce a published_worlds row (joined to its backing room for env_spec/perms + social subqueries) into
 // the client-facing gallery shape. Shared by GET /worlds and the favourited-Worlds half of /rooms/favourites.
@@ -701,6 +819,104 @@ app.post('/friends/remove', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ---- Followers (#46/#47) + the audience settings that go with them ----
+
+// Your own audience choices, plus the defaults so the client can render a row per capability without keeping
+// its own copy of the list. `defaults` is the contract: add a capability server-side and the UI grows a row.
+app.get('/share-settings', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const prefs = { ...shareDefaults(), ...sharePrefs(user.sub) };
+  res.json({ prefs, defaults: shareDefaults(), labels: Object.fromEntries(Object.entries(SHAREABLE).map(([k, v]) => [k, v.label])) });
+});
+
+// ⚠️ MERGE, NEVER REPLACE. Read-modify-write of the JSON and a targeted UPDATE of the one column — the
+// `INSERT OR REPLACE` shape resets every column it does not name, which is how a setting once saved and was
+// gone a second later. A partial body updates only the keys it carries.
+app.put('/share-settings', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const body = req.body || {};
+  const next = { ...sharePrefs(user.sub) };
+  for (const [k, v] of Object.entries(body)) {
+    if (!SHAREABLE[k]) return res.status(400).json({ error: 'Unknown capability: ' + k });
+    if (!AUD_VALUES.includes(v)) return res.status(400).json({ error: 'Invalid audience: ' + v });
+    next[k] = v;
+  }
+  try {
+    db.prepare('UPDATE users SET share_prefs = ? WHERE discord_id = ?').run(JSON.stringify(next), user.sub);
+    invalidateSharePrefs(user.sub);
+    res.json({ prefs: { ...shareDefaults(), ...next } });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Counts are PUBLIC (the user's call): #47 wants followers to confer status, and a number nobody can see
+// confers none. The LIST of who they are is profile detail and goes through the audience gate like the rest.
+app.get('/followers/:discordId', (req, res) => {
+  const user = verifyToken(req);
+  const target = req.params.discordId;
+  try {
+    const follower_count = db.prepare('SELECT COUNT(*) AS n FROM followers WHERE followee_id = ?').get(target)?.n || 0;
+    const following_count = db.prepare('SELECT COUNT(*) AS n FROM followers WHERE follower_id = ?').get(target)?.n || 0;
+    const out = { follower_count, following_count, i_follow: user ? isFollower(user.sub, target) : false };
+    if (user && mayShare(target, user.sub, 'profile')) {
+      out.followers = db.prepare(`
+        SELECT u.discord_id, u.username, u.avatar FROM followers f
+        JOIN users u ON u.discord_id = f.follower_id
+        WHERE f.followee_id = ? ORDER BY f.created_at DESC LIMIT 100`).all(target)
+        .map(r => ({ ...r, online: !!discordIdToSocket[r.discord_id] }));
+    }
+    res.json(out);
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Who I follow. Always my own — there is no "show me someone else's following list" route, deliberately.
+app.get('/following', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(`
+      SELECT u.discord_id, u.username, u.avatar FROM followers f
+      JOIN users u ON u.discord_id = f.followee_id
+      WHERE f.follower_id = ? ORDER BY f.created_at DESC`).all(user.sub);
+    res.json(rows.map(r => ({ ...r, online: !!discordIdToSocket[r.discord_id] })));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Following is one-sided and takes effect immediately — no approval queue (the user's call). The private
+// account case is covered by the `followable` audience rather than by a second request/accept flow.
+app.post('/followers/:discordId', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const target = req.params.discordId;
+  if (!target || target === user.sub) return res.status(400).json({ error: 'Invalid' });
+  try {
+    if (!db.prepare('SELECT 1 FROM users WHERE discord_id = ?').get(target)) return res.status(404).json({ error: 'User not found' });
+    // The same gate as everything else, so a block stops a follow without needing its own check here.
+    if (!mayShare(target, user.sub, 'followable')) return res.status(403).json({ error: 'not_followable' });
+    db.prepare('INSERT OR IGNORE INTO followers (follower_id, followee_id) VALUES (?, ?)').run(user.sub, target);
+    // Notified, not approved. Reuses the friend-request toast path on the client.
+    const sock = discordIdToSocket[target];
+    if (sock) {
+      const me = db.prepare('SELECT username, avatar FROM users WHERE discord_id = ?').get(user.sub);
+      io.to(sock).emit('follower-added', { discord_id: user.sub, username: me?.username || user.username, avatar: me?.avatar || null });
+    }
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Unfollowing needs no ceremony and no notification.
+app.delete('/followers/:discordId', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    db.prepare('DELETE FROM followers WHERE follower_id = ? AND followee_id = ?').run(user.sub, req.params.discordId);
+    const sock = discordIdToSocket[req.params.discordId];
+    if (sock) io.to(sock).emit('follower-removed', { discord_id: user.sub });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 // ---- Profile endpoints ----
 app.get('/profile/:discordId', (req, res) => {
   try {
@@ -753,6 +969,11 @@ app.post('/blocks', (req, res) => {
   if (!blocked || blocked === user.sub) return res.status(400).json({ error: 'Invalid' });
   try {
     db.prepare('INSERT OR IGNORE INTO blocks (blocker_id, blocked_id) VALUES (?, ?)').run(user.sub, blocked);
+    // ⭐ A BLOCK DROPS FOLLOWS IN BOTH DIRECTIONS. `mayShare` already refuses a blocked pair, so leaving the
+    // rows would change nothing about access — but it would leave the follower COUNT, which is public,
+    // counting someone who can no longer see anything. The number has to mean what it says.
+    db.prepare('DELETE FROM followers WHERE (follower_id=? AND followee_id=?) OR (follower_id=? AND followee_id=?)')
+      .run(user.sub, blocked, blocked, user.sub);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -1733,6 +1954,11 @@ app.post('/stalks', (req, res) => {
       const allowed = (stalkee.stalk_allowlist || '').split(',').includes(user.sub);
       if (!allowed) return res.status(403).json({ error: 'not_on_allowlist' });
     }
+    // ⭐ STALKING NEEDS BOTH: its own permission (above, unchanged) AND the location visibility everyone else
+    // is gated on. They are deliberately two axes — `stalk_policy` says who may TRAVEL WITH you, `location`
+    // says who may SEE where you are, and the first is meaningless without the second. Letting one policy do
+    // both jobs is how "follow" came to mean two different things in the first place.
+    if (!maySeeLocation(stalkeeDiscordId, user.sub)) return res.status(403).json({ error: 'user_blocks_stalk' });
     db.prepare('INSERT OR IGNORE INTO stalks (stalker_id, stalkee_id) VALUES (?, ?)').run(user.sub, stalkeeDiscordId);
     // Notify followee they have a new follower
     const stalkeeSocks = discordIdToStalkSockets[stalkeeDiscordId];
@@ -1744,7 +1970,7 @@ app.post('/stalks', (req, res) => {
     // following takes effect right away (don't wait for the followee to next navigate).
     const stalkeeUser = db.prepare('SELECT username FROM users WHERE discord_id = ?').get(stalkeeDiscordId);
     const stalkerSocks = discordIdToStalkSockets[user.sub];
-    if (stalkerSocks) stalkerSocks.forEach(sid => emitSnapshotToStalker(stalkeeDiscordId, stalkeeUser?.username, sid));
+    if (stalkerSocks) stalkerSocks.forEach(sid => emitSnapshotToStalker(stalkeeDiscordId, stalkeeUser?.username, sid, user.sub));
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -1791,7 +2017,7 @@ app.get('/stalks', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT f.stalkee_id, u.username, u.avatar, u.browsing_visible
+      SELECT f.stalkee_id, u.username, u.avatar
       FROM stalks f JOIN users u ON u.discord_id = f.stalkee_id
       WHERE f.stalker_id = ?
     `).all(user.sub);
@@ -1799,7 +2025,7 @@ app.get('/stalks', (req, res) => {
       discordId: r.stalkee_id,
       username: r.username,
       avatar: r.avatar,
-      currentUrl: r.browsing_visible ? (discordIdToFullUrl[r.stalkee_id] || null) : null
+      currentUrl: maySeeLocation(r.stalkee_id, user.sub) ? (discordIdToFullUrl[r.stalkee_id] || null) : null
     })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -10344,33 +10570,52 @@ function buildTabSnapshot(discordId, username) {
 // information to every online friend with no check at all — `friend-online` on every join and
 // `friend-location` on every navigation — and the friends panel renders that as a clickable chip whose
 // tooltip is the whole URL. So the switch a user turned OFF to stop being watched did almost nothing.
-// One helper, used by all four call sites. An unverified user has no row and no setting: unchanged.
-function browsingVisible(discordId) {
-  if (!discordId) return true;
-  try {
-    const r = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(discordId);
-    return r ? !!r.browsing_visible : true;
-  } catch { return false; }
+//
+// 🟥 IT IS NOW AN AUDIENCE, AND THAT MOVES THE CHECK. `browsing_visible` was a per-OWNER boolean, so it could
+// be asked once and the whole emit abandoned. `location` is a per-PAIR question — "may THIS person see where
+// I am" — so the check has to happen inside the recipient loop, once per recipient. Asking it once outside
+// would be the old boolean wearing a new name, and it would answer for the wrong person.
+function maySeeLocation(ownerId, viewerId) { return mayShare(ownerId, viewerId, 'location'); }
+
+// `user:<name>` is a socket.io room holding this person's OWN tabs PLUS anyone session-stalking them
+// (`stalk-subscribe`), so `socket.to(room).emit(...)` cannot express a per-pair audience — it is one decision
+// for a mixed audience. Fan out by hand and ask once per recipient instead.
+// ⚠️ A viewer with no account resolves to a stranger, and an OWNER with no account has no settings and is
+// unchanged — so this tightens things only for people who actually have a setting to have chosen.
+function emitUserLocation(ownerId, username, url, exceptSid) {
+  if (!url || !username) return;
+  const room = io.sockets.adapter.rooms.get('user:' + username);
+  if (!room) return;
+  for (const sid of room) {
+    if (sid === exceptSid) continue;
+    if (!maySeeLocation(ownerId, socketToDiscordId[sid])) continue;
+    io.to(sid).emit('user-location', { url });
+  }
+}
+// Session stalking addresses people by USERNAME, but an audience is a question about an ACCOUNT. Resolve the
+// name the way the who-list already does (line ~8060): an online socket carrying that display name.
+function discordIdForUsername(uname) {
+  if (!uname) return null;
+  for (const sid in socketToUsername) if (socketToUsername[sid] === uname) return socketToDiscordId[sid] || null;
+  return null;
 }
 
-// Build + push the current snapshot to all of this user's followers.
+// Build + push the current snapshot to each stalker allowed to see it.
 function emitTabSnapshot(discordId, username) {
-  const settings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(discordId);
-  if (!settings?.browsing_visible) return;
   const snap = buildTabSnapshot(discordId, username);
   if (!snap) return;
   discordIdToFullUrl[discordId] = snap.activeUrl; // keep friends-panel location in sync
   const stalkers = db.prepare('SELECT stalker_id FROM stalks WHERE stalkee_id = ?').all(discordId);
   stalkers.forEach(r => {
+    if (!maySeeLocation(discordId, r.stalker_id)) return;   // per pair, not per owner
     const fSocks = discordIdToStalkSockets[r.stalker_id];
     if (fSocks) fSocks.forEach(sid => io.to(sid).emit('stalkee-tabs', snap));
   });
 }
 
-// Send one followee's current snapshot to a single follower socket (resync on connect).
-function emitSnapshotToStalker(stalkeeId, stalkeeUsername, socketId) {
-  const settings = db.prepare('SELECT browsing_visible FROM users WHERE discord_id = ?').get(stalkeeId);
-  if (!settings?.browsing_visible) return;
+// Send one stalkee's current snapshot to a single stalker socket (resync on connect).
+function emitSnapshotToStalker(stalkeeId, stalkeeUsername, socketId, stalkerId) {
+  if (!maySeeLocation(stalkeeId, stalkerId)) return;
   const snap = buildTabSnapshot(stalkeeId, stalkeeUsername);
   if (snap) io.to(socketId).emit('stalkee-tabs', snap);
 }
@@ -11949,9 +12194,7 @@ io.on('connection', (socket) => {
     { const fr = resolveAvRoomId(ctxRoomId, currentRoom, socket.id);
       socket.emit('feature-perms', featurePermsPayload(fr !== currentRoom ? fr : null)); }
     // #4: no "joined" chat line — peers see it via the presence diff (transient toast) + the live who-list.
-    if (!isPriv && browsingVisible(discordId)) {
-      socket.to('user:' + username).emit('user-location', { url: userCurrentFullUrl[username] });
-    }
+    if (!isPriv) emitUserLocation(discordId, username, userCurrentFullUrl[username], socket.id);
 
     // Friends: notify online friends + send friends list to joiner
     if (discordId) {
@@ -11961,9 +12204,11 @@ io.on('connection', (socket) => {
            FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
         ).all(discordId, discordId, discordId);
         const ownBeaconRow = db.prepare('SELECT beacon_url FROM users WHERE discord_id=?').get(discordId);
-        const shareLoc = !isPriv && browsingVisible(discordId);
         acceptedFriends.forEach(r => {
           const fs = discordIdToSocket[r.fid];
+          // Per FRIEND, not per owner: `location` can be set to `everyone`/`followers`/`friends`/`nobody`, and
+          // only the last two are answerable without knowing who is asking.
+          const shareLoc = !isPriv && maySeeLocation(discordId, r.fid);
           if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar, url: shareLoc ? (fullUrl || url) : null, beacon_url: ownBeaconRow?.beacon_url || null });
         });
         const friendsData = db.prepare(`
@@ -11974,7 +12219,10 @@ io.on('connection', (socket) => {
           JOIN users u ON u.discord_id = CASE WHEN f.from_id=? THEN f.to_id ELSE f.from_id END
           WHERE f.from_id=? OR f.to_id=?
         `).all(discordId, discordId, discordId, discordId)
-          .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id], url: discordIdToFullUrl[r.discord_id] || null, beacon_url: r.beacon_url || null }));
+          // 🟥 A FIFTH LOCATION PATH, AND IT WAS NEVER GATED AT ALL. The join replay handed the arriving user
+          // every friend's current URL outright — the friends panel renders it as a clickable chip — so the
+          // three sites the previous pass fixed were not "all four". Same gate, asked per friend.
+          .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id], url: maySeeLocation(r.discord_id, discordId) ? (discordIdToFullUrl[r.discord_id] || null) : null, beacon_url: r.beacon_url || null }));
         socket.emit('friends-init', friendsData);
       } catch (e) { console.error('[friends-init]', e); }
 
@@ -12020,7 +12268,7 @@ io.on('connection', (socket) => {
         `).all(discordId);
         socket.emit('stalks-init', myStalkees.map(r => ({ discordId: r.stalkee_id, username: r.username, avatar: r.avatar })));
         // Resync: send each followee's current tab snapshot to this newly-connected follower.
-        myStalkees.forEach(r => emitSnapshotToStalker(r.stalkee_id, r.username, socket.id));
+        myStalkees.forEach(r => emitSnapshotToStalker(r.stalkee_id, r.username, socket.id, discordId));
 
         const myStalkersList = db.prepare(`
           SELECT f.stalker_id, u.username
@@ -13710,9 +13958,9 @@ io.on('connection', (socket) => {
       if (!recipientDiscordId) {
         try { const row = db.prepare('SELECT discord_id FROM users WHERE username = ?').get(to); recipientDiscordId = row?.discord_id; } catch {}
       }
-      if (recipientDiscordId) {
-        try { if (db.prepare('SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?').get(recipientDiscordId, senderDiscordId)) return; } catch {}
-      }
+      // The block test that used to live here is inside `mayShare`, which asks it first and in both
+      // directions — so this is the same protection plus the recipient's `dm` audience.
+      if (recipientDiscordId && !mayShare(recipientDiscordId, senderDiscordId, 'dm')) return;
     }
     socket.join(roomId);
     if (!socketDmRooms[socket.id]) socketDmRooms[socket.id] = new Set();
@@ -13739,9 +13987,7 @@ io.on('connection', (socket) => {
   socket.on('dm-message', ({ roomId, from, text, toDiscordId }) => {
     if (!roomId || !text) return;
     const senderDiscordId = socketToDiscordId[socket.id];
-    if (senderDiscordId && toDiscordId) {
-      try { if (db.prepare('SELECT 1 FROM blocks WHERE blocker_id = ? AND blocked_id = ?').get(toDiscordId, senderDiscordId)) return; } catch {}
-    }
+    if (senderDiscordId && toDiscordId && !mayShare(toDiscordId, senderDiscordId, 'dm')) return;
     const ts = Date.now();
     socket.to(roomId).emit('dm-message', { roomId, from, text, timestamp: ts });
     const fromDiscordId = socketToDiscordId[socket.id];
@@ -13876,16 +14122,15 @@ io.on('connection', (socket) => {
       const ts = socketToTabSession[socket.id];
       if (ts && leaderTabs[dId]) leaderTabs[dId].set(ts, url);
       try {
-        if (browsingVisible(dId)) {
-          const fRows = db.prepare(
-            `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
-             FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
-          ).all(dId, dId, dId);
-          fRows.forEach(r => {
-            const fs = discordIdToSocket[r.fid];
-            if (fs) io.to(fs).emit('friend-location', { discord_id: dId, url });
-          });
-        }
+        const fRows = db.prepare(
+          `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
+           FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
+        ).all(dId, dId, dId);
+        fRows.forEach(r => {
+          if (!maySeeLocation(dId, r.fid)) return;
+          const fs = discordIdToSocket[r.fid];
+          if (fs) io.to(fs).emit('friend-location', { discord_id: dId, url });
+        });
       } catch {}
       // Push an updated tab snapshot to followers.
       try { emitTabSnapshot(dId, username); } catch {}
@@ -13907,7 +14152,14 @@ io.on('connection', (socket) => {
   socket.on('stalk-end',       ({ target })        => { if (currentRoom) socket.to(currentRoom).emit('stalk-end',   { target, from: currentUsername || '' }); });
 
   socket.on('stalk-subscribe', ({ target }) => {
+    // 🟥 SESSION STALKING WAS UNGATED ENTIRELY — anyone could subscribe to any username and be handed that
+    // person's live URL, while PERSISTENT stalking (`POST /stalks`) has been consent-gated all along. Two
+    // routes to the same information, one of them with no lock on it. Now both go through `location`.
+    // ⚠️ It still JOINS the room either way: leaving is the client's own bookkeeping, and the fan-out in
+    // `emitUserLocation` re-asks per recipient, so membership alone reveals nothing.
     socket.join('user:' + target);
+    const ownerId = discordIdForUsername(target);
+    if (!maySeeLocation(ownerId, socketToDiscordId[socket.id])) return;
     if (userCurrentFullUrl[target]) socket.emit('user-location', { url: userCurrentFullUrl[target] });
   });
   socket.on('stalk-unsubscribe', ({ target }) => { socket.leave('user:' + target); });
