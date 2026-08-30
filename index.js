@@ -1263,6 +1263,52 @@ app.post('/social/verify', async (req, res) => {
   res.json({ ok: !!r.ok, reason: r.reason || null, links: socialLinksOf(user.sub, { own: true }) });
 });
 
+// ============================ "IT REALLY IS THEM, AND THIS IS THEIR PAGE" (#61) ============================
+// The card asks for people to "interact in real time on their own or others' posts and have people know it is
+// them". The second half is the profile card above — a proved link says who somebody is anywhere. This is the
+// first half: when the page everyone is standing on IS that person's page, say so where their name appears.
+//
+// ⭐ IT NEEDS NO NEW MACHINERY, WHICH IS WHY IT BELONGS WITH #45 RATHER THAN AFTER IT. Ownership is a proved
+// handle and the current URL agreeing, and both already exist. It is also SAFE for exactly one reason: only a
+// VERIFIED link is ever matched, so an impersonator claiming `x.com/somebody` is never announced as them —
+// this is the feature that would be actively harmful without the proof.
+function ownsPage(key, handle, u) {
+  const host = u.hostname.replace(/^www\./, '').toLowerCase();
+  const seg = u.pathname.split('/').filter(Boolean).map(s => s.toLowerCase());
+  const h = String(handle || '').toLowerCase();
+  switch (key) {
+    // ⭐ Any path under their handle, so their own POST counts and not merely their profile — which is the
+    // half of the card that makes it worth having ("on their own posts").
+    case 'twitter':  return (host === 'x.com' || host === 'twitter.com' || host === 'mobile.twitter.com') && seg[0] === h;
+    case 'github':   return host === 'github.com' && seg[0] === h;
+    case 'twitch':   return host === 'twitch.tv' && seg[0] === h;
+    // A YouTube VIDEO page cannot be resolved to a channel without a second fetch, so only channel pages
+    // match. Claiming ownership of a video we have not checked is the one mistake this must not make.
+    case 'youtube':  return host === 'youtube.com' && seg[0] === '@' + h;
+    case 'bluesky':  return host === 'bsky.app' && seg[0] === 'profile' && seg[1] === h;
+    case 'mastodon': { const [user, mhost] = h.split('@'); return !!mhost && host === mhost && seg[0] === '@' + user; }
+    default: return false;    // instagram is never verifiable, so it can never get here anyway
+  }
+}
+// ids → who among them owns this page, from the asking viewer's point of view.
+// ⚠️ GATED ON `profile`, per pair, inside the loop. A verified handle is profile information, and somebody
+// who has narrowed their profile to friends has not agreed to have it announced to a room of strangers
+// because they happened to open their own page.
+app.get('/page-owner', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  let u; try { u = new URL(String(req.query.url || '')); } catch { return res.json({}); }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return res.json({});
+  const ids = String(req.query.ids || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 60);
+  const out = {};
+  for (const id of ids) {
+    if (!mayShare(id, user.sub, 'profile')) { out[id] = null; continue; }
+    const hit = socialLinksOf(id).find(l => l.verified && ownsPage(l.key, l.handle, u));
+    out[id] = hit ? { key: hit.key, label: hit.label, handle: hit.handle, url: hit.url } : null;
+  }
+  res.json(out);
+});
+
 // ⭐ RE-CHECKING IS FREE, because the fetch that refreshes the follower count is the same one that re-reads
 // the code. A proof deleted since lapses, and the imported number goes with it.
 const SOCIAL_RECHECK_MS = 6 * 60 * 60 * 1000;
