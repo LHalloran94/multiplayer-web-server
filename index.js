@@ -376,6 +376,18 @@ try {
 // ⚠️ `browsing_visible` is deliberately left in place and simply stops being read, so a rollback to the
 // previous server build finds the column it expects instead of an empty one.
 
+// ⭐ BACKFILL: EVERY EXISTING FRIENDSHIP BECOMES A MUTUAL FOLLOW. See `befriendFollows` for why this
+// reverses the earlier "never insert an implied row" rule. Without this, the change would only apply to
+// friendships made from now on, and every friendship that already exists would keep showing "Follow" —
+// which is the exact confusion being fixed, preserved for precisely the people who have used the product
+// longest. `INSERT OR IGNORE` over both directions, so it is idempotent and safe to run at every startup.
+try {
+  db.exec(`INSERT OR IGNORE INTO followers (follower_id, followee_id)
+           SELECT from_id, to_id FROM friends WHERE status='accepted'
+           UNION
+           SELECT to_id, from_id FROM friends WHERE status='accepted'`);
+} catch {}
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS groups (
     id          TEXT PRIMARY KEY,
@@ -613,11 +625,19 @@ function shunSummary(targetId, viewerId, scope) {
     const row = _shunNameStmt.get(id);
     if (!row) continue;
     const friend = areFriends(viewerId, id);
-    named.push({ discord_id: id, username: row.username, friend });
+    // ⚠️ "FOLLOWER" HERE MEANS A FOLLOW CONNECTION IN EITHER DIRECTION, which is the same definition
+    // the DM sections use. Both are somebody one of you chose, and it keeps the ladder at three rungs instead
+    // of splitting a tier most people would have one name in.
+    const follows = !friend && (isFollower(viewerId, id) || isFollower(id, viewerId));
+    // Each entry says whether that shunner is IN THE ROOM being asked about, so the who-list can list exactly
+    // the people present and the profile card can list everyone, off one reply.
+    named.push({ discord_id: id, username: row.username, friend, follows, in_room: !!(scope && scope.has(id)) });
   }
-  // Friends first: #54 asks for the plain number AND "specifically what friends of yours" have shunned them,
-  // and the second is the half that actually carries information — a name you recognise, not a tally.
-  named.sort((a, b) => (b.friend ? 1 : 0) - (a.friend ? 1 : 0));
+  // ⭐ FRIENDS, THEN FOLLOWERS, THEN THE REST — the user's ordering. #54 asks for the plain number AND
+  // "specifically what friends of yours", and the second is the half that carries information: a name you
+  // recognise, not a tally. A stranger's name is the least useful line in the list, so it sorts last.
+  const rank = (x) => (x.friend ? 0 : x.follows ? 1 : 2);
+  named.sort((a, b) => rank(a) - rank(b));
   out.named = named;
   out.friends = named.filter(n => n.friend).map(n => n.username);
   return out;
@@ -859,6 +879,7 @@ app.post('/friends/accept', (req, res) => {
   try {
     const result = db.prepare(`UPDATE friends SET status='accepted' WHERE from_id=? AND to_id=? AND status='pending'`).run(from, user.sub);
     if (!result.changes) return res.status(404).json({ error: 'Not found' });
+    befriendFollows(from, user.sub);
     const fromSocket = discordIdToSocket[from];
     if (fromSocket) {
       const me = db.prepare('SELECT username, avatar FROM users WHERE discord_id = ?').get(user.sub);
@@ -886,6 +907,30 @@ app.post('/friends/remove', (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
+
+// ⭐⭐ BECOMING FRIENDS MAKES THE FOLLOW REAL, IN BOTH DIRECTIONS — REVERSING AN EARLIER DECISION, ON
+// THE USER'S QUESTION ("shouldn't being friends with somebody automatically make you follow them?").
+// The earlier rule was that friends are a superset of followers BY CONSTRUCTION and no implied row should
+// ever be inserted, on the grounds that a row creates a cleanup obligation when the friendship ends. That
+// reasoning was about ACCESS, and access was never the complaint: the complaint is that the product SAYS you
+// do not follow someone you are friends with, which is simply false to the user, and the follower count —
+// which is public and exists to confer status — leaves out the people closest to you.
+// ⭐ THE SUPERSET RULE STAYS EXACTLY AS IT WAS. `friends` still outranks `followers` in AUD_RANK, so access
+// is still correct even if a row is missing, lost or never backfilled. This is additive: it makes the DISPLAY
+// honest without making correctness depend on data being present.
+// ⚠️ UNFRIENDING DELIBERATELY LEAVES THE ROWS — it is a downgrade to mutual followers, not a
+// severance, and that is what dissolves the cleanup obligation the old rule was worried about. The deciding
+// argument is the reverse row: when I unfriend you, deleting "you follow me" would be ME deleting YOUR
+// follow, silently, as a side effect of my own unrelated action. Nobody should be able to do that. And it
+// grants nothing new, because following is open by default and they could always have followed you anyway.
+// Blocking still drops follows both ways; that is the tool for actually severing a connection.
+function befriendFollows(a, b) {
+  if (!a || !b || a === b) return;
+  try {
+    const ins = db.prepare('INSERT OR IGNORE INTO followers (follower_id, followee_id) VALUES (?, ?)');
+    ins.run(a, b); ins.run(b, a);
+  } catch {}
+}
 
 // ---- Followers (#46/#47) + the audience settings that go with them ----
 
