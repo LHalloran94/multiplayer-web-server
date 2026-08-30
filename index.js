@@ -528,10 +528,13 @@ const SHAREABLE = {
   // viewer be told, BY NAME, that I blocked or muted someone". The COUNT is public regardless and is not
   // gated here -- that is the same call already made for follower counts, and for the same reason (a number
   // nobody can see confers nothing, in either direction).
-  // ⭐ `followers` is what makes #54's actually-useful half work by construction: a friend outranks a
-  // follower, so "which of YOUR friends shunned this person" resolves without a special case, while a
-  // stranger still sees only a number. Anyone who wants their blocks fully private sets it to `nobody`.
-  shunning:   { def: 'followers', label: 'That I blocked or muted someone' },
+  // ⭐ DEFAULT `everyone`, CHANGED 2026-08-30 AFTER THE USER TESTED IT. At `followers` the popup showed
+  // "and 1 other" and no names at all to anyone who did not already follow the shunner — which is most
+  // people, most of the time — so the feature read as broken rather than as private. #54 asks in as many
+  // words for "specifically who has blocked/muted them", and the count is already public; withholding the
+  // name while publishing the tally is the least useful of the three possible positions. The setting stays
+  // for anyone who does want their blocks unattributed.
+  shunning:   { def: 'everyone',  label: 'That I blocked or muted someone' },
 };
 // Ordered by how much RELATIONSHIP is required. Comparing ranks is what makes the superset rule structural.
 const AUD_RANK = { everyone: 0, followers: 1, friends: 2, nobody: 3 };
@@ -624,19 +627,23 @@ function shunSummary(targetId, viewerId, scope) {
     if (!mayShare(id, viewerId, 'shunning')) continue;
     const row = _shunNameStmt.get(id);
     if (!row) continue;
-    const friend = areFriends(viewerId, id);
+    // 🟥 YOU ARE NOT "EVERYONE ELSE". `areFriends(x, x)` is false by construction, so the viewer's own
+    // entry fell through every group and landed in the stranger bucket — which reads as simply wrong to the
+    // one person who can check it. Tagged, and rendered first without a group heading.
+    const self = id === viewerId;
+    const friend = !self && areFriends(viewerId, id);
     // ⚠️ "FOLLOWER" HERE MEANS A FOLLOW CONNECTION IN EITHER DIRECTION, which is the same definition
     // the DM sections use. Both are somebody one of you chose, and it keeps the ladder at three rungs instead
     // of splitting a tier most people would have one name in.
-    const follows = !friend && (isFollower(viewerId, id) || isFollower(id, viewerId));
+    const follows = !self && !friend && (isFollower(viewerId, id) || isFollower(id, viewerId));
     // Each entry says whether that shunner is IN THE ROOM being asked about, so the who-list can list exactly
     // the people present and the profile card can list everyone, off one reply.
-    named.push({ discord_id: id, username: row.username, friend, follows, in_room: !!(scope && scope.has(id)) });
+    named.push({ discord_id: id, username: row.username, self, friend, follows, in_room: !!(scope && scope.has(id)) });
   }
   // ⭐ FRIENDS, THEN FOLLOWERS, THEN THE REST — the user's ordering. #54 asks for the plain number AND
   // "specifically what friends of yours", and the second is the half that carries information: a name you
   // recognise, not a tally. A stranger's name is the least useful line in the list, so it sorts last.
-  const rank = (x) => (x.friend ? 0 : x.follows ? 1 : 2);
+  const rank = (x) => (x.self ? -1 : x.friend ? 0 : x.follows ? 1 : 2);
   named.sort((a, b) => rank(a) - rank(b));
   out.named = named;
   out.friends = named.filter(n => n.friend).map(n => n.username);
