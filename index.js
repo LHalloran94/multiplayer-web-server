@@ -10792,6 +10792,69 @@ function buildTabSnapshot(discordId, username) {
 // would be the old boolean wearing a new name, and it would answer for the wrong person.
 function maySeeLocation(ownerId, viewerId) { return mayShare(ownerId, viewerId, 'location'); }
 
+// ============================ WHICH ROOM A FRIEND IS IN (#49) ============================
+// 🟥 THE `room` CAPABILITY WAS DECLARED AND NEVER ENFORCED. The handover note said this card was "the
+// UI half only, the capability already exists and is enforced" — it does not: before this there was no
+// `mayShare(..., 'room')` call site anywhere, so the dropdown in Who-sees-what changed nothing, and nothing
+// about a Room was ever sent to anybody. What travelled was the URL, gated by `location`. So #49 is both
+// halves, and the settings row people could already see was inert.
+//
+// ⚠️ A "Room" here means a NAMED Room, never the page-default one. Being on a page is what `location`
+// answers and the friends panel already shows it; reporting the page room here would be the same fact twice
+// under a permission that is supposed to mean something different.
+const discordIdToRoom = {};      // discordId -> { id, name, public } | null   (their most recent tab wins)
+const _roomNameStmt = db.prepare('SELECT id, name, public, friends_only, owner_id FROM rooms WHERE id = ?');
+const _roomMemberStmt = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?');
+// Can this viewer actually GO there? A chip that cannot be clicked is worth drawing differently, and one that
+// looks live and then refuses is worse than no chip — the same shape as the stalk button that used to fire
+// a toast nobody could see.
+// ⚠️ THIS MUST MIRROR `/rooms/join`, WHICH IS WHAT THE CLICK CALLS. A private-by-code room IS joinable:
+// the code is the mechanism, and a friend who has chosen to show you which Room they are in has handed it to
+// you — that is the card ("click on it to go there"). The real gate is `friends_only`, and it is friendship
+// with the room's OWNER, who need not be the friend you are looking at.
+function roomJoinableBy(room, viewerId) {
+  if (!room || !viewerId) return false;
+  if (room.public) return true;
+  try { if (_roomMemberStmt.get(room.id, viewerId)) return true; } catch {}
+  if (room.friends_only) return room.owner_id === viewerId || areFriends(viewerId, room.owner_id);
+  return true;
+}
+function roomChipFor(ownerId, viewerId) {
+  if (!mayShare(ownerId, viewerId, 'room')) return null;
+  const r = discordIdToRoom[ownerId];
+  if (!r) return null;
+  return { id: r.id, name: r.name, joinable: roomJoinableBy(r, viewerId) };
+}
+// Called wherever a socket's context Room is decided: join, and every `ctx-room` switch.
+function noteUserRoom(discordId, roomId, currentRoom, socketId) {
+  if (!discordId) return;
+  let rec = null;
+  const rid = resolveAvRoomId(roomId, currentRoom, socketId);
+  if (rid && rid !== currentRoom) {
+    try { const row = _roomNameStmt.get(rid); if (row) rec = { id: row.id, name: row.name, public: !!row.public, friends_only: !!row.friends_only, owner_id: row.owner_id }; } catch {}
+  }
+  const had = discordIdToRoom[discordId];
+  if ((had && had.id) === (rec && rec.id)) return;      // nothing changed; do not fan out
+  if (rec) discordIdToRoom[discordId] = rec; else delete discordIdToRoom[discordId];
+  pushRoomToFriends(discordId);
+}
+function pushRoomToFriends(discordId) {
+  try {
+    const rows = db.prepare(
+      `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
+       FROM friends WHERE (from_id=? OR to_id=?) AND status='accepted'`
+    ).all(discordId, discordId, discordId);
+    for (const r of rows) {
+      const sock = discordIdToSocket[r.fid];
+      if (!sock) continue;
+      // Per FRIEND, not per owner — an audience is a per-pair answer, and asking it once outside the loop
+      // is the old boolean in a new coat. Same mistake the location work had to undo.
+      io.to(sock).emit('friend-room', { discord_id: discordId, room: roomChipFor(discordId, r.fid) });
+    }
+  } catch {}
+}
+// ===========================================================================================
+
 // `user:<name>` is a socket.io room holding this person's OWN tabs PLUS anyone session-stalking them
 // (`stalk-subscribe`), so `socket.to(room).emit(...)` cannot express a per-pair audience — it is one decision
 // for a mixed audience. Fan out by hand and ask once per recipient instead.
@@ -12363,6 +12426,7 @@ io.on('connection', (socket) => {
     // 2c: presence bucket follows the context Room (membership-gated). Page-default Room → URL room (== today).
     currentPresenceRoom = resolvePresenceRoom(ctxRoomId, currentRoom, socket.id);
     if (currentPresenceRoom !== currentRoom) socket.join(currentPresenceRoom);
+    noteUserRoom(socketToDiscordId[socket.id], ctxRoomId, currentRoom, socket.id);   // #49
     if (!roomUsers[currentPresenceRoom]) roomUsers[currentPresenceRoom] = {};
     // 2d: page-bound bucket follows (context Room, url). Page-default Room → URL room (== today).
     currentPageRoom = resolvePageRoom(ctxRoomId, currentRoom, socket.id);
@@ -12413,6 +12477,7 @@ io.on('connection', (socket) => {
     // friends panel keeps showing — and offering a click through to — the last public page you were on.
     if (isPriv && discordId) {
       delete discordIdToFullUrl[discordId];
+      delete discordIdToRoom[discordId];       // #49 - or they linger in a Room they have left
       try {
         db.prepare(
           `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
@@ -12443,7 +12508,7 @@ io.on('connection', (socket) => {
           // Per FRIEND, not per owner: `location` can be set to `everyone`/`followers`/`friends`/`nobody`, and
           // only the last two are answerable without knowing who is asking.
           const shareLoc = !isPriv && maySeeLocation(discordId, r.fid);
-          if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar, url: shareLoc ? (fullUrl || url) : null, beacon_url: ownBeaconRow?.beacon_url || null });
+          if (fs) io.to(fs).emit('friend-online', { discord_id: discordId, username, avatar, url: shareLoc ? (fullUrl || url) : null, beacon_url: ownBeaconRow?.beacon_url || null, room: roomChipFor(discordId, r.fid) });
         });
         const friendsData = db.prepare(`
           SELECT u.discord_id, u.username, u.avatar, f.status,
@@ -12456,7 +12521,8 @@ io.on('connection', (socket) => {
           // 🟥 A FIFTH LOCATION PATH, AND IT WAS NEVER GATED AT ALL. The join replay handed the arriving user
           // every friend's current URL outright — the friends panel renders it as a clickable chip — so the
           // three sites the previous pass fixed were not "all four". Same gate, asked per friend.
-          .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id], url: maySeeLocation(r.discord_id, discordId) ? (discordIdToFullUrl[r.discord_id] || null) : null, beacon_url: r.beacon_url || null }));
+          .map(r => ({ ...r, incoming: !!r.incoming, online: !!discordIdToSocket[r.discord_id], url: maySeeLocation(r.discord_id, discordId) ? (discordIdToFullUrl[r.discord_id] || null) : null, beacon_url: r.beacon_url || null,
+                       room: roomChipFor(r.discord_id, discordId) }));
         socket.emit('friends-init', friendsData);
       } catch (e) { console.error('[friends-init]', e); }
 
@@ -14491,6 +14557,9 @@ io.on('connection', (socket) => {
     // ---- feature policy (Phase 4): re-seed for the new context Room (null = page room → all open) ----
     { const fr = resolveAvRoomId(roomId, currentRoom, socket.id);
       socket.emit('feature-perms', featurePermsPayload(fr !== currentRoom ? fr : null)); }
+    // #49 — tell friends which Room you are in now. `noteUserRoom` is a no-op when it has not changed, so
+    // this costs nothing on the switches that do not move you between named Rooms.
+    noteUserRoom(socketToDiscordId[socket.id], roomId, currentRoom, socket.id);
   });
 
   // Item 10: explicit enter/leave + tab-visibility withdraw/restore for the CURRENT presence bucket
@@ -14641,6 +14710,7 @@ io.on('connection', (socket) => {
       if (discordIdToSocket[dId] === socket.id) {
         delete discordIdToSocket[dId];
         delete discordIdToFullUrl[dId];
+        delete discordIdToRoom[dId];             // #49
         try {
           const fRows = db.prepare(
             `SELECT CASE WHEN from_id=? THEN to_id ELSE from_id END as fid
