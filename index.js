@@ -205,6 +205,19 @@ db.exec(`
     blocked_id TEXT NOT NULL,
     PRIMARY KEY (blocker_id, blocked_id)
   );
+  -- Cards #53/#54, the shunning display. A MUTE USED TO BE A PURELY LOCAL ACT: userFeaturePrefs lives in
+  -- the browser, keyed by USERNAME, and never left the machine. #53 asks for it to be visible to others, so
+  -- it needs a server record and a stable identity -- hence discord ids, and hence a mute is only reported
+  -- for someone who HAS an account. An anonymous or logged-out person cannot be shunned, which is correct:
+  -- shunning is a reputation, and a reputation needs something to attach to.
+  CREATE TABLE IF NOT EXISTS mutes (
+    muter_id TEXT NOT NULL,
+    muted_id TEXT NOT NULL,
+    created_at INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (muter_id, muted_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_mutes_target ON mutes(muted_id);
+  CREATE INDEX IF NOT EXISTS idx_blocks_target ON blocks(blocked_id);
   CREATE TABLE IF NOT EXISTS rooms (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -499,6 +512,14 @@ const SHAREABLE = {
   // every follower-level gate, so "only friends may follow me" would be a no-op wearing a setting's clothes),
   // and the UI offers only those two — but it lives here so it costs nothing and reads through the same gate.
   followable: { def: 'everyone',  label: 'Who can follow me' },
+  // Cards #53/#54. This is the SHUNNER'S setting about their own acts, not the shunned person's: "may this
+  // viewer be told, BY NAME, that I blocked or muted someone". The COUNT is public regardless and is not
+  // gated here -- that is the same call already made for follower counts, and for the same reason (a number
+  // nobody can see confers nothing, in either direction).
+  // ⭐ `followers` is what makes #54's actually-useful half work by construction: a friend outranks a
+  // follower, so "which of YOUR friends shunned this person" resolves without a special case, while a
+  // stranger still sees only a number. Anyone who wants their blocks fully private sets it to `nobody`.
+  shunning:   { def: 'followers', label: 'That I blocked or muted someone' },
 };
 // Ordered by how much RELATIONSHIP is required. Comparing ranks is what makes the superset rule structural.
 const AUD_RANK = { everyone: 0, followers: 1, friends: 2, nobody: 3 };
@@ -558,6 +579,48 @@ function mayShare(ownerId, viewerId, cap) {
   const need = AUD_RANK[want];
   if (need === undefined || need >= AUD_RANK.nobody) return false;
   return AUD_RANK[relationTo(ownerId, viewerId)] >= need;
+}
+
+// ---- SHUNNING (#53/#54) — one query, one shape, one gate ----
+// The user accepted these cards with an explicit escape hatch: "we can always remove it if it's not good".
+// So it is deliberately ONE function, ONE route (`GET /shun`) and one renderer on the client. Removing the
+// feature is deleting those three things and the `shunning` row in SHAREABLE; nothing else asks about it.
+//
+// ⭐ UNION, NOT TWO COUNTS. `blockUser` on the client mutes as a side effect, so the same person is very
+// often both a blocker and a muter. Summing the two tables would report them twice and inflate every number
+// in the feature; the honest quantity is DISTINCT PEOPLE who have turned away from you.
+const _shunnersStmt = db.prepare(`
+  SELECT blocker_id AS id FROM blocks WHERE blocked_id = ?
+  UNION
+  SELECT muter_id   AS id FROM mutes  WHERE muted_id   = ?`);
+const SHUN_NAME_CAP = 50;
+const _shunNameStmt = db.prepare('SELECT username FROM users WHERE discord_id = ?');
+// `scope` (optional) = the discord ids of the room the viewer is looking at, so #53's "muted by anyone IN
+// THAT ROOM, and how many" is answered without the client needing anybody's shunner list.
+function shunSummary(targetId, viewerId, scope) {
+  const out = { count: 0, friends: [], named: [], in_room: 0 };
+  if (!targetId) return out;
+  let ids;
+  try { ids = _shunnersStmt.all(targetId, targetId).map(r => r.id).filter(id => id && id !== targetId); }
+  catch { return out; }
+  out.count = ids.length;
+  if (scope && scope.size) out.in_room = ids.filter(id => scope.has(id)).length;
+  if (!viewerId) return out;                      // a stranger with no account gets the number and nothing else
+  const named = [];
+  for (const id of ids) {
+    if (named.length >= SHUN_NAME_CAP) break;
+    if (!mayShare(id, viewerId, 'shunning')) continue;
+    const row = _shunNameStmt.get(id);
+    if (!row) continue;
+    const friend = areFriends(viewerId, id);
+    named.push({ discord_id: id, username: row.username, friend });
+  }
+  // Friends first: #54 asks for the plain number AND "specifically what friends of yours" have shunned them,
+  // and the second is the half that actually carries information — a name you recognise, not a tally.
+  named.sort((a, b) => (b.friend ? 1 : 0) - (a.friend ? 1 : 0));
+  out.named = named;
+  out.friends = named.filter(n => n.friend).map(n => n.username);
+  return out;
 }
 // ==========================================================================================
 
@@ -992,6 +1055,54 @@ app.delete('/blocks', (req, res) => {
     db.prepare('DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?').run(user.sub, blockedId);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ---- Shunning: mute reports + the read (#53/#54) ----
+// A mute is reported here ONLY as "fully muted" -- every feature off. Reporting a partial filter ("I hid
+// their sprays") would turn a fiddly per-feature preference into a public accusation, and it is not what the
+// card asks about. `isFullyMuted` on the client is the same test, and it is the only thing that calls this.
+app.post('/mutes', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { muted } = req.body;
+  if (!muted || muted === user.sub) return res.status(400).json({ error: 'Invalid' });
+  try {
+    if (!db.prepare('SELECT 1 FROM users WHERE discord_id = ?').get(muted)) return res.status(404).json({ error: 'User not found' });
+    db.prepare('INSERT OR IGNORE INTO mutes (muter_id, muted_id) VALUES (?, ?)').run(user.sub, muted);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+app.delete('/mutes', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const mutedId = req.query.muted;
+  if (!mutedId) return res.status(400).json({ error: 'Missing muted param' });
+  try {
+    db.prepare('DELETE FROM mutes WHERE muter_id = ? AND muted_id = ?').run(user.sub, mutedId);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// One read for both surfaces. `?ids=a,b,c` is who to answer ABOUT; the optional `?room=a,b,c` is the roster
+// to count shunners WITHIN, which is #53's "by anyone in that room, and how many".
+// 🟥 THESE TWO ARE NOT THE SAME LIST, AND ASSUMING THEY WERE WAS A REAL BUG THAT ONLY A BROWSER CAUGHT. The
+// who-list caches, so `ids` is whoever is not cached yet — often one person. Scoping the room tally to that
+// meant the room shrank to whoever happened to be uncached, and the count read 0 with the shunner standing
+// right there. The roster has to be sent as itself.
+// ⚠️ A GET on purpose: the rate limiter holds writes to a much lower rate than reads, and the who-list asks
+// this whenever the roster changes.
+const SHUN_IDS_CAP = 60;
+const idList = (v) => String(v || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, SHUN_IDS_CAP);
+app.get('/shun', (req, res) => {
+  const user = verifyToken(req);
+  const ids = idList(req.query.ids);
+  if (!ids.length) return res.json({});
+  const room = idList(req.query.room);
+  const scope = room.length ? new Set(room) : null;
+  const out = {};
+  for (const id of ids) out[id] = shunSummary(id, user ? user.sub : null, scope);
+  res.json(out);
 });
 
 // ---- Room avatar-World spec (Stage 6 Phase 2b) ----
