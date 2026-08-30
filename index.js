@@ -1052,6 +1052,241 @@ app.delete('/followers/:discordId', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ============================ SOCIAL LINKS: PROVING ONE IS YOURS (#45 / #50 / #61) ============================
+// ⭐ THE REFRAMING THAT MAKES THIS SMALL: LOGGING IN AND PROVING YOU OWN AN ACCOUNT ARE DIFFERENT JOBS, and
+// only the second one is needed. Supporting another provider as a LOGIN means account merging, session
+// handling, recovery paths and a second front door to keep secure — that was judged costly and it still is.
+// A one-shot proof answers "this person controls account X" and stores nothing but the answer. Discord stays
+// the only way in.
+//
+// The proof is PROOF-BY-POSTING, which is what Mastodon, Bluesky and Keybase do: we hand out a code, the
+// owner puts it somewhere only they can write (their bio), and we go and read it. Write access IS the proof,
+// so no OAuth relationship with the platform is needed at all.
+//
+// 🟥 TWO RULES CARRY THE WHOLE FEATURE, AND BREAKING EITHER MAKES IT WORSE THAN NOT HAVING IT:
+//   1. NEVER IMPORT A METRIC ONTO AN UNVERIFIED LINK. A follower count on an unproven handle is borrowed
+//      credibility, which is precisely what an impersonator is after.
+//   2. AN UNVERIFIED LINK MUST NOT LOOK VERIFIED. A platform badge beside a handle reads as endorsement to
+//      most people, so the honest treatment is the default and the badge is the exception.
+//
+// ⚠️ MEASURED 2026-08-30, and it CORRECTS the planning note that said X/Twitter is unfetchable: from this
+// machine x.com, youtube.com and twitch.tv all serve an `og:description` carrying the account's real bio, so
+// the token CAN be found there. What they do not serve is a machine-readable follower count. Instagram serves
+// neither. That is why `proof` and `counts` are two separate columns below rather than one "supported" flag —
+// they turned out to be independent, and assuming they were the same would have cost X its verification.
+const SOCIAL_PLATFORMS = [
+  // `proof`: 'api' = a documented JSON endpoint (exact, cheap, gives the count too) · 'og' = read the public
+  // profile page's description meta (works, but brittle by nature) · null = no way to check, claim only.
+  { key: 'twitter',   label: 'Twitter/X',  abbr: '\u{1D54F}', url: 'https://x.com/{h}',            proof: 'og',  counts: false, hint: 'handle, without the @' },
+  { key: 'bluesky',   label: 'Bluesky',    abbr: 'BS', url: 'https://bsky.app/profile/{h}', proof: 'api', counts: true,  hint: 'e.g. alice.bsky.social' },
+  { key: 'mastodon',  label: 'Mastodon',   abbr: 'MA', url: 'https://{host}/@{user}',       proof: 'api', counts: true,  hint: 'e.g. alice@mastodon.social' },
+  { key: 'github',    label: 'GitHub',     abbr: 'GH', url: 'https://github.com/{h}',       proof: 'api', counts: true,  hint: 'username' },
+  { key: 'twitch',    label: 'Twitch',     abbr: 'TV', url: 'https://twitch.tv/{h}',        proof: 'og',  counts: false, hint: 'channel name' },
+  { key: 'youtube',   label: 'YouTube',    abbr: 'YT', url: 'https://youtube.com/@{h}',     proof: 'og',  counts: false, hint: 'handle, without the @' },
+  { key: 'instagram', label: 'Instagram',  abbr: 'IG', url: 'https://instagram.com/{h}',    proof: null,  counts: false, hint: 'username' },
+];
+const SOCIAL_BY_KEY = Object.fromEntries(SOCIAL_PLATFORMS.map(p => [p.key, p]));
+const SOCIAL_KEYS = SOCIAL_PLATFORMS.map(p => p.key);
+const socialPublicTable = () => SOCIAL_PLATFORMS.map(p =>
+  ({ key: p.key, label: p.label, abbr: p.abbr, proof: p.proof, counts: p.counts, hint: p.hint }));
+
+try {
+  db.exec(`CREATE TABLE IF NOT EXISTS social_verifications (
+    discord_id TEXT NOT NULL, platform TEXT NOT NULL,
+    handle TEXT NOT NULL,
+    verified_at INTEGER, checked_at INTEGER, followers INTEGER, fail TEXT,
+    PRIMARY KEY (discord_id, platform))`);
+} catch (e) { console.error('social_verifications:', e.message); }
+// ⭐ `handle` IS A COLUMN AND THAT IS THE POINT: editing the handle must drop the proof, or the badge
+// transfers to a name nobody ever proved. That is the impersonation hole the whole feature exists to close.
+const _svAll  = db.prepare('SELECT * FROM social_verifications WHERE discord_id = ?');
+const _svPut  = db.prepare(`INSERT INTO social_verifications (discord_id, platform, handle, verified_at, checked_at, followers, fail)
+                            VALUES (?,?,?,?,?,?,?)
+                            ON CONFLICT(discord_id, platform) DO UPDATE SET
+                              handle = excluded.handle, verified_at = excluded.verified_at,
+                              checked_at = excluded.checked_at, followers = excluded.followers, fail = excluded.fail`);
+
+// The code the owner pastes. Derived rather than stored, so it is STABLE — somebody who copies it, gets
+// distracted and comes back tomorrow finds the same code — and unguessable without the server secret.
+function proofToken(discordId, platform) {
+  return 'mw-' + crypto.createHmac('sha256', JWT_SECRET).update(discordId + ':' + platform).digest('hex').slice(0, 12);
+}
+
+// ⚠️ HANDLE SANITISATION IS LOAD-BEARING, NOT TIDINESS: every handle is interpolated into a URL the server
+// then FETCHES. A handle carrying a slash, a dot-dot or a scheme would aim that fetch somewhere else.
+function validHandle(key, h) {
+  if (typeof h !== 'string' || !h || h.length > 64) return false;
+  if (key === 'mastodon') return /^[A-Za-z0-9._-]{1,40}@[A-Za-z0-9-]{1,60}(\.[A-Za-z0-9-]{1,60})+$/.test(h);
+  if (key === 'bluesky')  return /^[A-Za-z0-9-]{1,60}(\.[A-Za-z0-9-]{1,60})+$/.test(h) || /^did:[A-Za-z0-9:._-]{5,60}$/.test(h);
+  return /^[A-Za-z0-9._-]{1,40}$/.test(h);
+}
+function socialUrl(key, h) {
+  const p = SOCIAL_BY_KEY[key];
+  if (!p || !validHandle(key, h)) return null;
+  if (key === 'mastodon') { const [user, host] = h.split('@'); return `https://${host}/@${encodeURIComponent(user)}`; }
+  return p.url.replace('{h}', encodeURIComponent(h));
+}
+
+const SOCIAL_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36';
+async function socialGet(url, headers) {
+  const r = await fetch(url, { headers: { 'user-agent': SOCIAL_UA, ...(headers || {}) }, redirect: 'follow',
+                               signal: AbortSignal.timeout(8000) });
+  if (!r.ok) { const e = new Error('HTTP ' + r.status); e.status = r.status; throw e; }
+  return r;
+}
+const stripTags = s => String(s || '').replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ');
+
+// Returns { bio, followers } — the ONE fetch that answers both questions the feature asks. That is not a
+// coincidence to optimise away: a re-check that refreshes the number also re-proves the token, so an imported
+// count can never outlive the proof that allowed it.
+async function fetchSocial(key, handle) {
+  if (key === 'github') {
+    const j = await (await socialGet('https://api.github.com/users/' + encodeURIComponent(handle),
+                                     { accept: 'application/vnd.github+json' })).json();
+    return { bio: [j.bio, j.name, j.blog].filter(Boolean).join(' \n '), followers: j.followers };
+  }
+  if (key === 'bluesky') {
+    const j = await (await socialGet('https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile?actor=' + encodeURIComponent(handle))).json();
+    return { bio: [j.description, j.displayName].filter(Boolean).join(' \n '), followers: j.followersCount };
+  }
+  if (key === 'mastodon') {
+    const [user, host] = handle.split('@');
+    const j = await (await socialGet(`https://${host}/api/v1/accounts/lookup?acct=` + encodeURIComponent(user))).json();
+    return { bio: stripTags([j.note, j.display_name].join(' \n ')) + ' ' +
+                  (j.fields || []).map(f => stripTags(f.name + ' ' + f.value)).join(' '),
+             followers: j.followers_count };
+  }
+  // 'og': read the public profile page and take the description meta. No count — none of these three publish
+  // one anywhere a parser could trust, and rule 1 says a guessed number is worse than no number.
+  const body = await (await socialGet(socialUrl(key, handle))).text();
+  const m = body.match(/<meta[^>]+(?:property|name)=["'](?:og:description|description)["'][^>]*content=["']([^"']{0,400})/i)
+         || body.match(/content=["']([^"']{0,400})["'][^>]*(?:property|name)=["'](?:og:description|description)["']/i);
+  return { bio: m ? m[1] : '', followers: null };
+}
+
+// 🟥 THE SOFT/HARD DISTINCTION IS THE WHOLE CORRECTNESS OF THE RE-CHECK. A fetch that FAILED tells us nothing
+// about whether the proof is still there — the platform was rate-limiting us, or the network blinked. Only a
+// fetch that SUCCEEDED and did not contain the code is evidence of anything. Revoking on a soft failure would
+// un-verify everybody the first time a platform had a bad afternoon.
+async function runVerify(discordId, key, handle) {
+  const p = SOCIAL_BY_KEY[key];
+  if (!p) return { ok: false, hard: true, reason: 'Unknown platform.' };
+  if (!p.proof) return { ok: false, hard: true, reason: p.label + ' cannot be checked automatically — it does not publish a profile the server can read.' };
+  if (!validHandle(key, handle)) return { ok: false, hard: true, reason: 'That does not look like a ' + p.label + ' handle.' };
+  let got;
+  try { got = await fetchSocial(key, handle); }
+  catch (e) {
+    return { ok: false, hard: false,
+             reason: e.name === 'TimeoutError' ? p.label + ' did not answer in time — try again in a minute.'
+                   : e.status === 404 ? 'No such account on ' + p.label + '.'
+                   : 'Could not reach ' + p.label + ' just now (' + (e.message || 'error') + ').' };
+  }
+  const token = proofToken(discordId, key);
+  if (!String(got.bio || '').toLowerCase().includes(token)) {
+    return { ok: false, hard: true, reason: 'The code was not in your ' + p.label + ' profile. Paste it in, save it there, then check again.' };
+  }
+  return { ok: true, followers: (p.counts && Number.isFinite(got.followers)) ? got.followers : null };
+}
+
+// One user's links, as the client renders them. The server resolves the URL and owns the platform table, so
+// there is no second copy to drift — the same reason SHAREABLE is declared once and the settings rows are
+// built from what it declares.
+function socialLinksOf(discordId, opts) {
+  let links = {};
+  try {
+    const row = db.prepare('SELECT social_links FROM users WHERE discord_id = ?').get(discordId);
+    if (row?.social_links) links = JSON.parse(row.social_links) || {};
+  } catch {}
+  const ver = {};
+  try { for (const r of _svAll.all(discordId)) ver[r.platform] = r; } catch {}
+  const out = [];
+  for (const p of SOCIAL_PLATFORMS) {
+    const handle = links[p.key];
+    if (!handle) continue;
+    const v = ver[p.key];
+    // Verified only while the stored row still names the handle on show — belt and braces with the PUT that
+    // drops it, because this is the one comparison that must never be skipped.
+    const good = !!(v && v.verified_at && String(v.handle).toLowerCase() === String(handle).toLowerCase());
+    const item = { key: p.key, label: p.label, abbr: p.abbr, handle, url: socialUrl(p.key, handle),
+                   verified: good, followers: good ? v.followers : null };
+    if (opts && opts.own) {
+      item.proof = p.proof; item.counts = p.counts; item.hint = p.hint;
+      item.token = proofToken(discordId, p.key);
+      item.checked_at = v ? v.checked_at : null;
+      item.fail = good ? null : (v ? v.fail : null);
+    }
+    out.push(item);
+  }
+  return out;
+}
+
+// Drop the proof for any handle that is no longer the one on show. Called from PUT /profile.
+function reconcileSocialProofs(discordId, links) {
+  try {
+    for (const r of _svAll.all(discordId)) {
+      const now = (links || {})[r.platform];
+      if (!now || String(now).toLowerCase() !== String(r.handle).toLowerCase()) {
+        db.prepare('DELETE FROM social_verifications WHERE discord_id = ? AND platform = ?').run(discordId, r.platform);
+      }
+    }
+  } catch {}
+}
+
+app.get('/social/links', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  res.json({ links: socialLinksOf(user.sub, { own: true }), platforms: socialPublicTable() });
+});
+
+// One outbound fetch per call, so it carries its own per-user per-platform gate on top of the global limiter.
+const _verifyAt = new Map();
+app.post('/social/verify', async (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const key = String(req.body?.platform || '');
+  if (!SOCIAL_BY_KEY[key]) return res.status(400).json({ error: 'Unknown platform' });
+  const gate = user.sub + ':' + key, now = Date.now();
+  if (now - (_verifyAt.get(gate) || 0) < 10000) return res.status(429).json({ error: 'Give it a few seconds before checking again.' });
+  _verifyAt.set(gate, now);
+  let handle = null;
+  try {
+    const row = db.prepare('SELECT social_links FROM users WHERE discord_id = ?').get(user.sub);
+    if (row?.social_links) handle = (JSON.parse(row.social_links) || {})[key] || null;
+  } catch {}
+  if (!handle) return res.status(400).json({ error: 'Add the handle and save your profile first.' });
+  const r = await runVerify(user.sub, key, handle);
+  const sec = Math.floor(now / 1000);
+  try {
+    if (r.ok) _svPut.run(user.sub, key, handle, sec, sec, r.followers ?? null, null);
+    else      _svPut.run(user.sub, key, handle, null, sec, null, r.reason);
+  } catch {}
+  res.json({ ok: !!r.ok, reason: r.reason || null, links: socialLinksOf(user.sub, { own: true }) });
+});
+
+// ⭐ RE-CHECKING IS FREE, because the fetch that refreshes the follower count is the same one that re-reads
+// the code. A proof deleted since lapses, and the imported number goes with it.
+const SOCIAL_RECHECK_MS = 6 * 60 * 60 * 1000;
+async function socialRecheckSweep() {
+  let rows = [];
+  try {
+    rows = db.prepare(`SELECT discord_id, platform, handle FROM social_verifications
+                       WHERE verified_at IS NOT NULL AND (checked_at IS NULL OR checked_at < ?)
+                       ORDER BY checked_at ASC LIMIT 20`).all(Math.floor((Date.now() - SOCIAL_RECHECK_MS) / 1000));
+  } catch { return; }
+  for (const row of rows) {
+    const r = await runVerify(row.discord_id, row.platform, row.handle);
+    const sec = Math.floor(Date.now() / 1000);
+    try {
+      if (r.ok) _svPut.run(row.discord_id, row.platform, row.handle, sec, sec, r.followers ?? null, null);
+      else if (r.hard) _svPut.run(row.discord_id, row.platform, row.handle, null, sec, null, r.reason);
+      else db.prepare('UPDATE social_verifications SET checked_at = ? WHERE discord_id = ? AND platform = ?')
+             .run(sec, row.discord_id, row.platform);   // 🟥 soft failure: touch the clock, KEEP the proof
+    } catch {}
+    await new Promise(done => setTimeout(done, 1500));  // a polite visitor to somebody else's server
+  }
+}
+setInterval(() => { socialRecheckSweep().catch(() => {}); }, 30 * 60 * 1000).unref?.();
+
 // ---- Profile endpoints ----
 app.get('/profile/:discordId', (req, res) => {
   try {
@@ -1059,7 +1294,10 @@ app.get('/profile/:discordId', (req, res) => {
     if (!row) return res.status(404).json({ error: 'Not found' });
     let socialLinks = {};
     try { if (row.social_links) socialLinks = JSON.parse(row.social_links); } catch {}
-    res.json({ ...row, social_links: socialLinks });
+    // `links` is the rendered form: resolved URL, verified flag, and the imported count where there is one.
+    // The old `social_links` map stays for anything that still reads it, but the CLIENT reads `links` — so
+    // the platform table lives in exactly one place and cannot drift into a second copy.
+    res.json({ ...row, social_links: socialLinks, links: socialLinksOf(req.params.discordId) });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -1067,10 +1305,11 @@ app.put('/profile', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   const { bio, status, social_links } = req.body;
-  const ALLOWED_KEYS = ['twitter', 'github', 'twitch', 'youtube', 'instagram'];
+  const ALLOWED_KEYS = SOCIAL_KEYS;      // one platform table, declared once (see the verification block)
   let linksJson = null;
+  const cleanedLinks = {};
   if (social_links && typeof social_links === 'object') {
-    const cleaned = {};
+    const cleaned = cleanedLinks;
     for (const k of ALLOWED_KEYS) {
       if (social_links[k] && typeof social_links[k] === 'string') {
         cleaned[k] = social_links[k].trim().slice(0, 64).replace(/^@/, '');
@@ -1081,7 +1320,11 @@ app.put('/profile', (req, res) => {
   try {
     db.prepare('UPDATE users SET bio = ?, status = ?, social_links = ?, updated_at = unixepoch() WHERE discord_id = ?')
       .run((bio || '').slice(0, 160) || null, (status || '').slice(0, 60) || null, linksJson, user.sub);
-    res.json({ ok: true });
+    // 🟥 EDITING A HANDLE DROPS ITS PROOF. Without this the badge earned by proving `github:alice` would sit
+    // beside `github:someone-else` the moment the field is retyped — an impersonation route through the very
+    // feature built to close one.
+    reconcileSocialProofs(user.sub, cleanedLinks);
+    res.json({ ok: true, links: socialLinksOf(user.sub, { own: true }) });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
