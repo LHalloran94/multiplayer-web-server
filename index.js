@@ -13152,6 +13152,9 @@ io.on('connection', (socket) => {
     broadcastPresence(currentPresenceRoom);
   });
 
+  // Kept beside the handler that enforces it. The client has its own copy for the immediate refusal; if the
+  // two ever disagree the server wins, and the symptom is a reaction that appears and then does not stick.
+  const MSG_REACT_MAX = 3;
   socket.on('msg-react', ({ msgId, emoji, username }) => {
     if (!currentRoom || !msgId || !emoji || !username) return;
     if (!roomMsgReactions[currentRoom]) roomMsgReactions[currentRoom] = {};
@@ -13160,7 +13163,14 @@ io.on('connection', (socket) => {
     if (!reactions[msgId][emoji]) reactions[msgId][emoji] = [];
     const users = reactions[msgId][emoji];
     const idx = users.indexOf(username);
-    if (idx === -1) users.push(username); else users.splice(idx, 1);
+    if (idx === -1) {
+      // #67 — AT MOST 3 REACTIONS PER PERSON PER MESSAGE. The client checks first so the answer is immediate,
+      // but a client-side limit is a suggestion; this is the one that holds. Removing is never capped.
+      let mine = 0;
+      for (const list of Object.values(reactions[msgId])) if (list.includes(username)) mine++;
+      if (mine >= MSG_REACT_MAX) return;
+      users.push(username);
+    } else users.splice(idx, 1);
     if (users.length === 0) delete reactions[msgId][emoji];
     io.to(currentRoom).emit('msg-reaction-update', { msgId, emoji, users: reactions[msgId][emoji] || [] });
   });
