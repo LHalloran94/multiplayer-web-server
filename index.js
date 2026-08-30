@@ -604,10 +604,13 @@ function mayShare(ownerId, viewerId, cap) {
 // ⭐ UNION, NOT TWO COUNTS. `blockUser` on the client mutes as a side effect, so the same person is very
 // often both a blocker and a muter. Summing the two tables would report them twice and inflate every number
 // in the feature; the honest quantity is DISTINCT PEOPLE who have turned away from you.
+// ⚠️ UNION ALL PLUS A TAG, NOT `UNION`. The distinct-people count still has to be right (blocking also
+// mutes on the client, so the same person is usually in both tables), but the user asked for each name to say
+// WHICH it was, and a plain UNION throws exactly that away. Aggregated by id in JS below.
 const _shunnersStmt = db.prepare(`
-  SELECT blocker_id AS id FROM blocks WHERE blocked_id = ?
-  UNION
-  SELECT muter_id   AS id FROM mutes  WHERE muted_id   = ?`);
+  SELECT blocker_id AS id, 1 AS blocked, 0 AS muted FROM blocks WHERE blocked_id = ?
+  UNION ALL
+  SELECT muter_id   AS id, 0 AS blocked, 1 AS muted FROM mutes  WHERE muted_id   = ?`);
 const SHUN_NAME_CAP = 50;
 const _shunNameStmt = db.prepare('SELECT username FROM users WHERE discord_id = ?');
 // `scope` (optional) = the discord ids of the room the viewer is looking at, so #53's "muted by anyone IN
@@ -615,9 +618,16 @@ const _shunNameStmt = db.prepare('SELECT username FROM users WHERE discord_id = 
 function shunSummary(targetId, viewerId, scope) {
   const out = { count: 0, friends: [], named: [], in_room: 0 };
   if (!targetId) return out;
-  let ids;
-  try { ids = _shunnersStmt.all(targetId, targetId).map(r => r.id).filter(id => id && id !== targetId); }
-  catch { return out; }
+  const acts = new Map();                        // shunnerId -> { blocked, muted }
+  try {
+    for (const r of _shunnersStmt.all(targetId, targetId)) {
+      if (!r.id || r.id === targetId) continue;
+      const a = acts.get(r.id) || { blocked: 0, muted: 0 };
+      a.blocked |= r.blocked; a.muted |= r.muted;
+      acts.set(r.id, a);
+    }
+  } catch { return out; }
+  const ids = [...acts.keys()];
   out.count = ids.length;
   if (scope && scope.size) out.in_room = ids.filter(id => scope.has(id)).length;
   if (!viewerId) return out;                      // a stranger with no account gets the number and nothing else
@@ -638,7 +648,12 @@ function shunSummary(targetId, viewerId, scope) {
     const follows = !self && !friend && (isFollower(viewerId, id) || isFollower(id, viewerId));
     // Each entry says whether that shunner is IN THE ROOM being asked about, so the who-list can list exactly
     // the people present and the profile card can list everyone, off one reply.
-    named.push({ discord_id: id, username: row.username, self, friend, follows, in_room: !!(scope && scope.has(id)) });
+    // ⭐ A BLOCK SUBSUMES ITS MUTE. `blockUser` fully mutes as a side effect, so almost every block would
+    // otherwise read "blocked and muted", which is noise dressed as detail: the mute is an artefact of the
+    // block, not a second decision. One word, and it is the stronger one.
+    const a = acts.get(id) || {};
+    named.push({ discord_id: id, username: row.username, self, friend, follows,
+                 act: a.blocked ? 'blocked' : 'muted', in_room: !!(scope && scope.has(id)) });
   }
   // ⭐ FRIENDS, THEN FOLLOWERS, THEN THE REST — the user's ordering. #54 asks for the plain number AND
   // "specifically what friends of yours", and the second is the half that carries information: a name you
@@ -1094,6 +1109,7 @@ app.post('/blocks', (req, res) => {
     // counting someone who can no longer see anything. The number has to mean what it says.
     db.prepare('DELETE FROM followers WHERE (follower_id=? AND followee_id=?) OR (follower_id=? AND followee_id=?)')
       .run(user.sub, blocked, blocked, user.sub);
+    announceShunChange(blocked, user.sub);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -1105,11 +1121,28 @@ app.delete('/blocks', (req, res) => {
   if (!blockedId) return res.status(400).json({ error: 'Missing blocked param' });
   try {
     db.prepare('DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?').run(user.sub, blockedId);
+    announceShunChange(blockedId, user.sub);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
 // ---- Shunning: mute reports + the read (#53/#54) ----
+// 🟥 THE DISPLAY HAS TO BE TOLD, OR IT IS ONLY EVER RIGHT BY ACCIDENT. The who-list caches what it is
+// told about each person and re-asks only when it meets somebody new, so a mute made by anyone ELSE never
+// arrived until the cache expired minutes later. Same shape as #56's bug (an action that updates one end and
+// not the other), and the same shape as the follower panel that stayed empty.
+// Emitted to every room the TARGET is in — that is exactly the set of people with their row on screen —
+// plus the actor, whose own view must not wait for a round trip either.
+function announceShunChange(targetId, actorId) {
+  try {
+    for (const [room, bucket] of Object.entries(roomUsers)) {
+      if (Object.values(bucket).some(u => u.discord_id === targetId)) io.to(room).emit('shun-changed', { target: targetId });
+    }
+    const me = discordIdToSocket[actorId];
+    if (me) io.to(me).emit('shun-changed', { target: targetId });
+  } catch {}
+}
+
 // A mute is reported here ONLY as "fully muted" -- every feature off. Reporting a partial filter ("I hid
 // their sprays") would turn a fiddly per-feature preference into a public accusation, and it is not what the
 // card asks about. `isFullyMuted` on the client is the same test, and it is the only thing that calls this.
@@ -1121,6 +1154,7 @@ app.post('/mutes', (req, res) => {
   try {
     if (!db.prepare('SELECT 1 FROM users WHERE discord_id = ?').get(muted)) return res.status(404).json({ error: 'User not found' });
     db.prepare('INSERT OR IGNORE INTO mutes (muter_id, muted_id) VALUES (?, ?)').run(user.sub, muted);
+    announceShunChange(muted, user.sub);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -1132,6 +1166,7 @@ app.delete('/mutes', (req, res) => {
   if (!mutedId) return res.status(400).json({ error: 'Missing muted param' });
   try {
     db.prepare('DELETE FROM mutes WHERE muter_id = ? AND muted_id = ?').run(user.sub, mutedId);
+    announceShunChange(mutedId, user.sub);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
