@@ -1092,14 +1092,14 @@ app.delete('/followers/:discordId', (req, res) => {
 const SOCIAL_PLATFORMS = [
   { key: 'facebook',  label: 'Facebook',   abbr: 'FB',  url: 'https://facebook.com/{h}',      proof: null,  counts: false, hint: 'username' },              // ~3.1B
   { key: 'instagram', label: 'Instagram',  abbr: 'IG',  url: 'https://instagram.com/{h}',     proof: null,  counts: false, hint: 'username' },              // ~3.0B
-  { key: 'youtube',   label: 'YouTube',    abbr: 'YT',  url: 'https://youtube.com/@{h}',      proof: 'og',  counts: false, hint: 'handle, without the @' }, // ~2.5B
+  { key: 'youtube',   label: 'YouTube',    abbr: 'YT',  url: 'https://youtube.com/@{h}',      proof: 'og',  counts: true,  hint: 'handle, without the @' }, // ~2.5B
   { key: 'tiktok',    label: 'TikTok',     abbr: 'TT',  url: 'https://tiktok.com/@{h}',       proof: null,  counts: false, hint: 'handle, without the @' }, // ~2.0B
   { key: 'reddit',    label: 'Reddit',     abbr: 'RD',  url: 'https://reddit.com/user/{h}',   proof: null,  counts: false, hint: 'username' },              // ~850M
   { key: 'twitter',   label: 'X (Twitter)', abbr: '\u{1D54F}', url: 'https://x.com/{h}',      proof: 'og',  counts: false, hint: 'handle, without the @' }, // ~650M
   { key: 'pinterest', label: 'Pinterest',  abbr: 'PIN', url: 'https://pinterest.com/{h}',     proof: 'og',  counts: false, hint: 'username' },              // ~578M
   { key: 'threads',   label: 'Threads',    abbr: 'TH',  url: 'https://threads.net/@{h}',      proof: null,  counts: false, hint: 'handle, without the @' }, // ~400M
   { key: 'linkedin',  label: 'LinkedIn',   abbr: 'IN',  url: 'https://linkedin.com/in/{h}',   proof: 'og',  counts: false, hint: 'the bit after /in/' },    // ~310M
-  { key: 'twitch',    label: 'Twitch',     abbr: 'TV',  url: 'https://twitch.tv/{h}',         proof: 'og',  counts: false, hint: 'channel name' },          // ~240M
+  { key: 'twitch',    label: 'Twitch',     abbr: 'TV',  url: 'https://twitch.tv/{h}',         proof: 'og',  counts: true,  hint: 'channel name' },          // ~240M
   { key: 'github',    label: 'GitHub',     abbr: 'GH',  url: 'https://github.com/{h}',        proof: 'api', counts: true,  hint: 'username' },              // ~100M
   { key: 'bluesky',   label: 'Bluesky',    abbr: 'BS',  url: 'https://bsky.app/profile/{h}',  proof: 'api', counts: true,  hint: 'e.g. alice.bsky.social' },// ~40M
   // ⏹️ Mastodon removed 2026-08-30 (the user's call: ~1M actives does not earn a row). It was one of only
@@ -1111,9 +1111,16 @@ const SOCIAL_KEYS = SOCIAL_PLATFORMS.map(p => p.key);
 // `sticky` = the code has to STAY in your bio, because this platform publishes no permanent account id to
 // pin the proof to. It is exactly the 'og' set, but the client should be told it rather than infer it from
 // `proof` — that is the same "second copy of the rule" the platform table was moved here to avoid.
-const socialPublicTable = () => SOCIAL_PLATFORMS.map(p =>
-  ({ key: p.key, label: p.label, abbr: p.abbr, proof: p.proof, counts: p.counts, hint: p.hint,
-     sticky: p.proof === 'og' }));
+// `sticky` = the code has to STAY in your bio. True only when the bio is the ONLY route and the platform
+// publishes no permanent account id to pin the proof to — so a provider with OAuth configured is never
+// sticky, because you never have to touch the bio at all.
+// ⚠️ `oauthReady` is declared further down (the OAuth block reads things this one defines, so one of them
+// had to come second). This is a function, not a value, so it is only ever called after both exist.
+const socialPublicTable = () => SOCIAL_PLATFORMS.map(p => {
+  const oauth = typeof oauthReady === 'function' && oauthReady(p.key);
+  return { key: p.key, label: p.label, abbr: p.abbr, proof: p.proof, counts: p.counts, hint: p.hint,
+           oauth, sticky: p.proof === 'og' && !oauth };
+});
 
 try {
   db.exec(`CREATE TABLE IF NOT EXISTS social_verifications (
@@ -1388,6 +1395,161 @@ async function socialRecheckSweep() {
   }
 }
 setInterval(() => { socialRecheckSweep().catch(() => {}); }, 30 * 60 * 1000).unref?.();
+
+// ============================ PROVING IT WITHOUT TOUCHING YOUR BIO (OAuth) ============================
+// ⭐⭐ THE COMPLAINT THIS CLOSES: "nobody wants to leave a verification stub in their bio permanently". Right —
+// and account-pinning only half-fixed it, because you still had to put the code there ONCE, on a platform
+// that may not even have a bio worth editing. A one-shot OAuth handshake asks the platform itself who you
+// are: two clicks, nothing typed, nothing edited, nothing left behind.
+//
+// 🟥 THIS IS STILL NOT A LOGIN, AND THE DISTINCTION IS THE WHOLE REASON IT IS CHEAP. We ask the platform to
+// confirm an identity ONCE, write down the answer, and throw the token away. We never store a refresh token,
+// never act on anybody's behalf, and no session is created — so there is no second front door to keep secure,
+// no account merging, and no recovery path to design. Discord remains the only way IN.
+//
+// ⚠️ IT SHIPS INERT. A provider with no credentials in the environment is simply not offered — `oauth` comes
+// back false for it, the client draws no button, and the bio route stays. Nothing here can half-work.
+const OAUTH_BASE = process.env.OAUTH_BASE || 'http://localhost:3000';
+const oauthRedirect = key => OAUTH_BASE + '/social/oauth/' + key + '/callback';
+
+// Adding a provider is one entry. `me` returns the three things a proof is made of: the platform's PERMANENT
+// id for the account, the handle to display, and the follower count where the platform will give us one.
+const SOCIAL_OAUTH = {
+  github: {
+    id: process.env.GITHUB_CLIENT_ID, secret: process.env.GITHUB_CLIENT_SECRET,
+    auth: 'https://github.com/login/oauth/authorize',
+    token: 'https://github.com/login/oauth/access_token',
+    scope: 'read:user',
+    me: async (tok) => {
+      const j = await (await socialGet('https://api.github.com/user',
+        { authorization: 'Bearer ' + tok, accept: 'application/vnd.github+json' })).json();
+      return { acct: j.id != null ? 'gh:' + j.id : null, handle: j.login, followers: j.followers };
+    },
+  },
+  reddit: {
+    id: process.env.REDDIT_CLIENT_ID, secret: process.env.REDDIT_CLIENT_SECRET,
+    auth: 'https://www.reddit.com/api/v1/authorize',
+    token: 'https://www.reddit.com/api/v1/access_token',
+    scope: 'identity', extraAuth: { duration: 'temporary' }, basicAuth: true,
+    me: async (tok) => {
+      const j = await (await socialGet('https://oauth.reddit.com/api/v1/me', { authorization: 'Bearer ' + tok })).json();
+      // Reddit publishes karma, not a follower count, and karma is not the same quantity — so no number.
+      return { acct: j.id ? 'rd:' + j.id : null, handle: j.name, followers: null };
+    },
+  },
+  twitch: {
+    id: process.env.TWITCH_CLIENT_ID, secret: process.env.TWITCH_CLIENT_SECRET,
+    auth: 'https://id.twitch.tv/oauth2/authorize',
+    token: 'https://id.twitch.tv/oauth2/token',
+    // ⭐ `moderator:read:followers` is what makes a Twitch follower count possible at all: the number is
+    // readable by the broadcaster themselves and nobody else, which is exactly who is standing here.
+    scope: 'moderator:read:followers',
+    me: async (tok, p) => {
+      const h = { authorization: 'Bearer ' + tok, 'client-id': p.id };
+      const u = (await (await socialGet('https://api.twitch.tv/helix/users', h)).json()).data?.[0];
+      if (!u) return { acct: null, handle: null, followers: null };
+      let followers = null;
+      try {
+        const f = await (await socialGet('https://api.twitch.tv/helix/channels/followers?first=1&broadcaster_id=' + u.id, h)).json();
+        if (Number.isFinite(f.total)) followers = f.total;
+      } catch {}
+      return { acct: 'tw:' + u.id, handle: u.login, followers };
+    },
+  },
+  youtube: {
+    id: process.env.GOOGLE_CLIENT_ID, secret: process.env.GOOGLE_CLIENT_SECRET,
+    auth: 'https://accounts.google.com/o/oauth2/v2/auth',
+    token: 'https://oauth2.googleapis.com/token',
+    scope: 'https://www.googleapis.com/auth/youtube.readonly',
+    extraAuth: { access_type: 'online', prompt: 'consent' },
+    me: async (tok) => {
+      const j = await (await socialGet(
+        'https://www.googleapis.com/youtube/v3/channels?part=snippet,statistics&mine=true',
+        { authorization: 'Bearer ' + tok })).json();
+      const c = j.items?.[0];
+      if (!c) return { acct: null, handle: null, followers: null };
+      const n = Number(c.statistics?.subscriberCount);
+      // customUrl is "@handle"; the stored handle never carries the @, the same as every other platform.
+      return { acct: 'yt:' + c.id, handle: String(c.snippet?.customUrl || '').replace(/^@/, ''),
+               followers: Number.isFinite(n) ? n : null };
+    },
+  },
+};
+const oauthReady = key => {
+  const p = SOCIAL_OAUTH[key];
+  return !!(p && p.id && p.secret && SOCIAL_BY_KEY[key]);
+};
+
+// The round trip is stateless: `state` is a short-lived signed token carrying who asked and for what. Nothing
+// is written down until the platform answers, so an abandoned attempt leaves nothing behind to clean up.
+function oauthState(discordId, key) {
+  return jwt.sign({ sub: discordId, k: key, n: crypto.randomBytes(8).toString('hex') }, JWT_SECRET, { expiresIn: '10m' });
+}
+async function oauthExchange(p, code, key) {
+  const body = new URLSearchParams({ code, grant_type: 'authorization_code', redirect_uri: oauthRedirect(key) });
+  const headers = { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json', 'user-agent': SOCIAL_UA };
+  // Reddit wants the client credentials as HTTP Basic; everybody else takes them in the form.
+  if (p.basicAuth) headers.authorization = 'Basic ' + Buffer.from(p.id + ':' + p.secret).toString('base64');
+  else { body.set('client_id', p.id); body.set('client_secret', p.secret); }
+  const r = await fetch(p.token, { method: 'POST', headers, body, signal: AbortSignal.timeout(10000) });
+  const j = await r.json().catch(() => null);
+  if (!j || !j.access_token) throw new Error((j && (j.error_description || j.error)) || 'no access token');
+  return j.access_token;
+}
+
+// A tiny page for the popup to land on. It has to say what happened even if the opener has gone away.
+const oauthDone = (okMsg, detail) => `<!doctype html><meta charset="utf-8"><title>${okMsg}</title>
+<style>body{font:14px system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#12141c;color:#e8eaf2}
+div{text-align:center;max-width:30em;padding:2em}p{color:#9aa3b8;line-height:1.6}</style>
+<div><h2>${okMsg}</h2><p>${detail}</p></div>
+<script>try{window.opener&&window.opener.postMessage({mw:'social-oauth'},'*')}catch(e){}setTimeout(function(){window.close()},2500)</script>`;
+
+// ⚠️ START IS A POST, NOT A LINK. The signed state has to be minted for the SIGNED-IN user, and putting a
+// bearer token in a URL to achieve that would leave it in history, logs and the Referer header. The client
+// asks for the URL and then opens it.
+app.post('/social/oauth/:platform/start', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const key = String(req.params.platform || '');
+  if (!oauthReady(key)) return res.status(400).json({ error: 'That platform is not set up for one-click verification here.' });
+  const p = SOCIAL_OAUTH[key];
+  const q = new URLSearchParams({ client_id: p.id, response_type: 'code', redirect_uri: oauthRedirect(key),
+                                  scope: p.scope, state: oauthState(user.sub, key), ...(p.extraAuth || {}) });
+  res.json({ url: p.auth + '?' + q.toString() });
+});
+
+app.get('/social/oauth/:platform/callback', async (req, res) => {
+  const key = String(req.params.platform || '');
+  const fail = (why) => res.status(400).send(oauthDone('Could not verify', why));
+  if (!oauthReady(key)) return fail('That platform is not set up here.');
+  const p = SOCIAL_OAUTH[key];
+  if (req.query.error) return fail('The platform said: ' + String(req.query.error).slice(0, 120));
+  let who;
+  try { who = jwt.verify(String(req.query.state || ''), JWT_SECRET); } catch { return fail('That link has expired — start again from your settings.'); }
+  if (!who || who.k !== key) return fail('That link was for a different platform.');
+  let me;
+  try {
+    const tok = await oauthExchange(p, String(req.query.code || ''), key);
+    me = await p.me(tok, p);
+  } catch (e) { return fail('The handshake did not complete (' + String(e.message).slice(0, 120) + ').'); }
+  if (!me || !me.handle) return fail('The platform did not tell us which account that was.');
+
+  const label = SOCIAL_BY_KEY[key].label;
+  const sec = Math.floor(Date.now() / 1000);
+  try {
+    // ⭐ THE HANDLE COMES FROM THE PLATFORM, NOT FROM A TEXT BOX — so it cannot disagree with what was proved,
+    // and there is nothing for the user to type or to get wrong.
+    const row = db.prepare('SELECT social_links FROM users WHERE discord_id = ?').get(who.sub);
+    const links = (() => { try { return JSON.parse(row?.social_links || '{}') || {}; } catch { return {}; } })();
+    links[key] = me.handle;
+    db.prepare('UPDATE users SET social_links = ?, updated_at = unixepoch() WHERE discord_id = ?')
+      .run(JSON.stringify(links), who.sub);
+    _svPut.run(who.sub, key, me.handle, sec, sec,
+               Number.isFinite(me.followers) ? me.followers : null,
+               null, me.acct || null);
+  } catch (e) { return fail('Could not save that (' + String(e.message).slice(0, 80) + ').'); }
+  res.send(oauthDone('Verified', label + ' confirmed you are <b>' + String(me.handle).replace(/[<>&]/g, '') + '</b>. You can close this window.'));
+});
 
 // ---- Profile endpoints ----
 app.get('/profile/:discordId', (req, res) => {
@@ -15072,7 +15234,10 @@ io.on('connection', (socket) => {
   });
 });
 
-server.listen(3000, () => console.log('Server running on port 3000'));
+// PORT so a second instance can be stood up beside the real one (a guard needs its own, with its own
+// throwaway OAuth credentials, rather than reconfiguring the server somebody is using).
+const PORT = Number(process.env.PORT) || 3000;
+server.listen(PORT, () => console.log('Server running on port ' + PORT));
 
 // ⚠️ A BEST EFFORT, NOT THE MECHANISM. `restart-server.ps1` force-kills the process on Windows, where there is no
 // signal to catch at all — so the periodic flush is what actually protects recent work, and this only helps a
