@@ -1074,16 +1074,35 @@ app.delete('/followers/:discordId', (req, res) => {
 // the token CAN be found there. What they do not serve is a machine-readable follower count. Instagram serves
 // neither. That is why `proof` and `counts` are two separate columns below rather than one "supported" flag —
 // they turned out to be independent, and assuming they were the same would have cost X its verification.
+// ⭐ ORDERED BY HOW MANY PEOPLE USE THEM (the user's call, 2026-08-30), Western-weighted — so the row you are
+// most likely to want is the one nearest the top. Figures are 2026 monthly actives, rounded, and they are a
+// RANKING not a fact the code depends on; nothing breaks if they drift.
+// ⚠️ ORDER AND CAPABILITY PULL IN OPPOSITE DIRECTIONS AND THAT IS FINE: the four biggest cannot be proved at
+// all, and the three that give exact numbers are the three smallest. Sorting by capability instead would bury
+// Instagram under Mastodon, which is not the list anybody wants to read.
+// ⚠️ Left out deliberately: WhatsApp / Messenger / Telegram (messaging, no public profile to link) · WeChat,
+// Douyin, Weibo (not Western) · Snapchat (no dependable public profile URL) · Discord (it is the login here,
+// and has no public profile page).
+//
+// `proof`: 'api' = a documented JSON endpoint (exact, cheap, and it returns the follower count in the same
+//          request) · 'og' = read the public profile page's description meta (works, brittle by nature)
+//          · null = no way to check it at all, so the link stays a claim and says so.
+// 🟥 MEASURED, NOT ASSUMED — twice now the assumption was wrong in both directions. X/YouTube/Twitch/LinkedIn
+// /Pinterest DO serve a readable bio; TikTok, Threads, Reddit, Facebook and Instagram do not.
 const SOCIAL_PLATFORMS = [
-  // `proof`: 'api' = a documented JSON endpoint (exact, cheap, gives the count too) · 'og' = read the public
-  // profile page's description meta (works, but brittle by nature) · null = no way to check, claim only.
-  { key: 'twitter',   label: 'Twitter/X',  abbr: '\u{1D54F}', url: 'https://x.com/{h}',            proof: 'og',  counts: false, hint: 'handle, without the @' },
-  { key: 'bluesky',   label: 'Bluesky',    abbr: 'BS', url: 'https://bsky.app/profile/{h}', proof: 'api', counts: true,  hint: 'e.g. alice.bsky.social' },
-  { key: 'mastodon',  label: 'Mastodon',   abbr: 'MA', url: 'https://{host}/@{user}',       proof: 'api', counts: true,  hint: 'e.g. alice@mastodon.social' },
-  { key: 'github',    label: 'GitHub',     abbr: 'GH', url: 'https://github.com/{h}',       proof: 'api', counts: true,  hint: 'username' },
-  { key: 'twitch',    label: 'Twitch',     abbr: 'TV', url: 'https://twitch.tv/{h}',        proof: 'og',  counts: false, hint: 'channel name' },
-  { key: 'youtube',   label: 'YouTube',    abbr: 'YT', url: 'https://youtube.com/@{h}',     proof: 'og',  counts: false, hint: 'handle, without the @' },
-  { key: 'instagram', label: 'Instagram',  abbr: 'IG', url: 'https://instagram.com/{h}',    proof: null,  counts: false, hint: 'username' },
+  { key: 'facebook',  label: 'Facebook',   abbr: 'FB',  url: 'https://facebook.com/{h}',      proof: null,  counts: false, hint: 'username' },              // ~3.1B
+  { key: 'instagram', label: 'Instagram',  abbr: 'IG',  url: 'https://instagram.com/{h}',     proof: null,  counts: false, hint: 'username' },              // ~3.0B
+  { key: 'youtube',   label: 'YouTube',    abbr: 'YT',  url: 'https://youtube.com/@{h}',      proof: 'og',  counts: false, hint: 'handle, without the @' }, // ~2.5B
+  { key: 'tiktok',    label: 'TikTok',     abbr: 'TT',  url: 'https://tiktok.com/@{h}',       proof: null,  counts: false, hint: 'handle, without the @' }, // ~2.0B
+  { key: 'reddit',    label: 'Reddit',     abbr: 'RD',  url: 'https://reddit.com/user/{h}',   proof: null,  counts: false, hint: 'username' },              // ~850M
+  { key: 'twitter',   label: 'X (Twitter)', abbr: '\u{1D54F}', url: 'https://x.com/{h}',      proof: 'og',  counts: false, hint: 'handle, without the @' }, // ~650M
+  { key: 'pinterest', label: 'Pinterest',  abbr: 'PIN', url: 'https://pinterest.com/{h}',     proof: 'og',  counts: false, hint: 'username' },              // ~578M
+  { key: 'threads',   label: 'Threads',    abbr: 'TH',  url: 'https://threads.net/@{h}',      proof: null,  counts: false, hint: 'handle, without the @' }, // ~400M
+  { key: 'linkedin',  label: 'LinkedIn',   abbr: 'IN',  url: 'https://linkedin.com/in/{h}',   proof: 'og',  counts: false, hint: 'the bit after /in/' },    // ~310M
+  { key: 'twitch',    label: 'Twitch',     abbr: 'TV',  url: 'https://twitch.tv/{h}',         proof: 'og',  counts: false, hint: 'channel name' },          // ~240M
+  { key: 'github',    label: 'GitHub',     abbr: 'GH',  url: 'https://github.com/{h}',        proof: 'api', counts: true,  hint: 'username' },              // ~100M
+  { key: 'bluesky',   label: 'Bluesky',    abbr: 'BS',  url: 'https://bsky.app/profile/{h}',  proof: 'api', counts: true,  hint: 'e.g. alice.bsky.social' },// ~40M
+  { key: 'mastodon',  label: 'Mastodon',   abbr: 'MA',  url: 'https://{host}/@{user}',        proof: 'api', counts: true,  hint: 'e.g. alice@mastodon.social' },
 ];
 const SOCIAL_BY_KEY = Object.fromEntries(SOCIAL_PLATFORMS.map(p => [p.key, p]));
 const SOCIAL_KEYS = SOCIAL_PLATFORMS.map(p => p.key);
@@ -1118,7 +1137,8 @@ function validHandle(key, h) {
   if (typeof h !== 'string' || !h || h.length > 64) return false;
   if (key === 'mastodon') return /^[A-Za-z0-9._-]{1,40}@[A-Za-z0-9-]{1,60}(\.[A-Za-z0-9-]{1,60})+$/.test(h);
   if (key === 'bluesky')  return /^[A-Za-z0-9-]{1,60}(\.[A-Za-z0-9-]{1,60})+$/.test(h) || /^did:[A-Za-z0-9:._-]{5,60}$/.test(h);
-  return /^[A-Za-z0-9._-]{1,40}$/.test(h);
+  // 60, not 40: a LinkedIn slug is often a name plus a disambiguating suffix and runs long.
+  return /^[A-Za-z0-9._-]{1,60}$/.test(h);
 }
 function socialUrl(key, h) {
   const p = SOCIAL_BY_KEY[key];
@@ -1202,12 +1222,15 @@ function socialLinksOf(discordId, opts) {
   const out = [];
   for (const p of SOCIAL_PLATFORMS) {
     const handle = links[p.key];
-    if (!handle) continue;
+    // ⚠️ FOR YOUR OWN EYES, EVERY PLATFORM IS A ROW — including the empty ones, which is what lets the panel
+    // hand you the code the moment you type a handle rather than only after you remember to press Save.
+    // For anybody else, only what you have actually filled in.
+    if (!handle && !(opts && opts.own)) continue;
     const v = ver[p.key];
     // Verified only while the stored row still names the handle on show — belt and braces with the PUT that
     // drops it, because this is the one comparison that must never be skipped.
-    const good = !!(v && v.verified_at && String(v.handle).toLowerCase() === String(handle).toLowerCase());
-    const item = { key: p.key, label: p.label, abbr: p.abbr, handle, url: socialUrl(p.key, handle),
+    const good = !!(handle && v && v.verified_at && String(v.handle).toLowerCase() === String(handle).toLowerCase());
+    const item = { key: p.key, label: p.label, abbr: p.abbr, handle: handle || '', url: handle ? socialUrl(p.key, handle) : null,
                    verified: good, followers: good ? v.followers : null };
     if (opts && opts.own) {
       item.proof = p.proof; item.counts = p.counts; item.hint = p.hint;
@@ -1285,6 +1308,8 @@ function ownsPage(key, handle, u) {
     // A YouTube VIDEO page cannot be resolved to a channel without a second fetch, so only channel pages
     // match. Claiming ownership of a video we have not checked is the one mistake this must not make.
     case 'youtube':  return host === 'youtube.com' && seg[0] === '@' + h;
+    case 'linkedin': return host === 'linkedin.com' && seg[0] === 'in' && seg[1] === h;
+    case 'pinterest':return host === 'pinterest.com' && seg[0] === h;
     case 'bluesky':  return host === 'bsky.app' && seg[0] === 'profile' && seg[1] === h;
     case 'mastodon': { const [user, mhost] = h.split('@'); return !!mhost && host === mhost && seg[0] === '@' + user; }
     default: return false;    // instagram is never verifiable, so it can never get here anyway
