@@ -1111,15 +1111,19 @@ const SOCIAL_KEYS = SOCIAL_PLATFORMS.map(p => p.key);
 // `sticky` = the code has to STAY in your bio, because this platform publishes no permanent account id to
 // pin the proof to. It is exactly the 'og' set, but the client should be told it rather than infer it from
 // `proof` — that is the same "second copy of the rule" the platform table was moved here to avoid.
-// `sticky` = the code has to STAY in your bio. True only when the bio is the ONLY route and the platform
-// publishes no permanent account id to pin the proof to — so a provider with OAuth configured is never
-// sticky, because you never have to touch the bio at all.
-// ⚠️ `oauthReady` is declared further down (the OAuth block reads things this one defines, so one of them
-// had to come second). This is a function, not a value, so it is only ever called after both exist.
+// `sticky` = expect to have to LEAVE the code in your bio, because this platform offers no other way to tell
+// the account apart. A provider with OAuth is never sticky (you never touch the bio), and nor is one whose
+// page carries a permanent account id.
+// ⚠️ IT IS A FORECAST, NOT THE ANSWER. Whether a given proof actually got pinned is per-ACCOUNT — an X user
+// with no profile banner publishes no id, so the same platform pins for one person and not the next. The
+// authoritative per-link answer is `pinned` in `socialLinksOf`; this only decides what to say BEFOREHAND.
+// ⚠️ `oauthReady` and `OG_ACCT` are declared further down (each block reads things the other defines, so one
+// had to come second). This is a function, not a value, so it only ever runs once both exist.
 const socialPublicTable = () => SOCIAL_PLATFORMS.map(p => {
   const oauth = typeof oauthReady === 'function' && oauthReady(p.key);
+  const pinnable = p.proof === 'api' || (typeof OG_ACCT === 'object' && !!OG_ACCT[p.key]);
   return { key: p.key, label: p.label, abbr: p.abbr, proof: p.proof, counts: p.counts, hint: p.hint,
-           oauth, sticky: p.proof === 'og' && !oauth };
+           oauth, sticky: !!p.proof && !oauth && !pinnable };
 });
 
 try {
@@ -1193,13 +1197,33 @@ async function fetchSocial(key, handle) {
     return { bio: [j.description, j.displayName].filter(Boolean).join(' \n '), followers: j.followersCount,
              acct: j.did || null };
   }
-  // 'og': read the public profile page and take the description meta. No count — none of these three publish
-  // one anywhere a parser could trust, and rule 1 says a guessed number is worse than no number.
+  // 'og': read the public profile page and take the description meta. No count — none of these publish one
+  // anywhere a parser could trust, and rule 1 says a guessed number is worse than no number.
   const body = await (await socialGet(socialUrl(key, handle))).text();
   const m = body.match(/<meta[^>]+(?:property|name)=["'](?:og:description|description)["'][^>]*content=["']([^"']{0,400})/i)
          || body.match(/content=["']([^"']{0,400})["'][^>]*(?:property|name)=["'](?:og:description|description)["']/i);
-  return { bio: m ? m[1] : '', followers: null };
+  return { bio: m ? m[1] : '', followers: null, acct: OG_ACCT[key] ? OG_ACCT[key](body) : null };
 }
+
+// ⭐⭐ SOME 'og' PLATFORMS DO PUBLISH A PERMANENT ACCOUNT ID — just nowhere a JSON-shaped search would look.
+// 🟥 I SAID X HAD NONE. That was wrong, and it was wrong in the way the search-found-nothing rule warns about:
+// I grepped for `rest_id` / `user_id` / `"id":` keys, found nothing, and reported the id as absent — when it is
+// sitting in the profile BANNER URL. Verified against five accounts whose ids are independently known
+// (jack=12, x=783214, elonmusk=44196397, nasa=11348282, github=13334762) and stable across fetches.
+// A found-nothing is evidence about the search.
+//
+// ⚠️ WHY THESE THREE AND NOT THE OTHER TWO, measured rather than assumed:
+//   · LinkedIn publishes exactly ONE distinct `urn:li:` on the page, so the "is it the subject or a suggested
+//     profile?" worry is simply not a worry — there is nothing else it could be.
+//   · Pinterest's only long id CHANGED BETWEEN TWO FETCHES of the same profile, so it identifies something
+//     other than the account. Unusable, and it stays on the code.
+//   · Twitch's stable value is the AVATAR uuid. It would revoke anybody who changed their profile picture,
+//     which is a false accusation rather than a detection. It stays on the code (and has OAuth anyway).
+const OG_ACCT = {
+  twitter:  b => { const m = b.match(/profile_banners\/(\d+)\//);                    return m ? 'x:' + m[1] : null; },
+  linkedin: b => { const m = b.match(/urn:li:(?:fsd_profile|member):([A-Za-z0-9_-]{4,})/); return m ? 'li:' + m[1] : null; },
+  youtube:  b => { const m = b.match(/"externalId"\s*:\s*"(UC[\w-]{10,})"/);          return m ? 'yt:' + m[1] : null; },
+};
 
 // 🟥 THE SOFT/HARD DISTINCTION IS THE WHOLE CORRECTNESS OF THE RE-CHECK. A fetch that FAILED tells us nothing
 // about whether the proof is still there — the platform was rate-limiting us, or the network blinked. Only a
@@ -1271,6 +1295,11 @@ function socialLinksOf(discordId, opts) {
       item.token = proofToken(discordId, p.key);
       item.checked_at = v ? v.checked_at : null;
       item.fail = good ? null : (v ? v.fail : null);
+      // ⭐ THE AUTHORITATIVE, PER-ACCOUNT ANSWER to "may I take the code out of my bio now?". The platform's
+      // `sticky` is only a forecast: an X account with no profile banner publishes no id, so it pins for one
+      // person and not the next, and promising on the platform's behalf would revoke somebody who did as they
+      // were told.
+      item.pinned = !!(good && v.acct);
     }
     out.push(item);
   }
