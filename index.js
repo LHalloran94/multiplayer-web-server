@@ -3039,6 +3039,47 @@ const roomUsers = {};       // roomId → { socketId: { username, verified, avat
 const pageUsers = {};       // bareUrlRoom → { socketId: { username, discord_id } }
 const roomHistory = {};
 const roomMsgReactions = {}; // roomId → { msgId → { emoji → [username] } }
+// ---- #71 · the avatar environment's own chat ----------------------------------------------------------
+// ⭐⭐ THE WORLD YOU ARE STANDING IN OWNS A CONVERSATION, AND IT IS NOT THE PAGE'S. Until now Layer 2 borrowed
+// the page's: the client listened to the ordinary `message` event and put a speech bubble over any blob whose
+// USERNAME matched the sender. That is passable on a page world — the chat room and the world happen to hold
+// the same people — and it is nonsense in the Overworld, where two players standing next to each other arrived
+// through different sites and therefore sit in DIFFERENT chat rooms. They can see each other, punch each other,
+// and cannot say a word to each other. It also bubbled by display name, so two people called the same thing
+// both spoke.
+// ⭐ KEYED ON THE AVATAR ROOM, which is what makes every other case fall out with no special handling: a page's
+// Sandbox and its Life Level are ALREADY separate worlds under separate keys, so they get separate chats for
+// free (which is what "sandboxes get their own" asks for); and switching Level, entering a context Room or
+// leaving the world all re-join a world, so the chat follows without any bookkeeping of its own.
+const worldHistory = {};    // avRoom → recent messages. ⚠️ NEVER FILLED FOR THE OVERWORLD — see below.
+const sayCfg = {
+  // How far your voice carries in the OVERWORLD, in world pixels. Page worlds and sandboxes have no radius at
+  // all — they are one conversation, as decided.
+  // ⭐ THE NUMBER IS ANCHORED TO WHAT YOU CAN SEE, not guessed: at the default zoom a screen shows 1,280 x 720
+  // world pixels, so 1,536 (three 512px chunks) is a little wider than one screen. Anything you can see, you
+  // can hear, plus a margin — and speech from just off-screen arrives in the panel with no bubble over
+  // anybody, which reads as "someone is just over there" rather than as a glitch.
+  radius: 1536,
+  // 🟥 DELIBERATELY 0 FOR THE OVERWORLD (the user's call), and the reason is that scrollback and proximity are
+  // contradictory: "the last 60 things said" in a shared world means the last 60 things said ANYWHERE in it,
+  // by people you were nowhere near, which is both the wrong content and a quiet leak of a conversation you
+  // were not present for. In a proximity chat you hear what is said while you are there. Page worlds keep a
+  // scrollback because they have no radius, so "what was said here" is well defined.
+  history: 60,
+  max: 500,     // characters; matches what the page chat will carry in one line
+};
+// Where a player IS, in world PIXELS, for deciding who hears them. `roomWhere` keeps chunk coordinates for
+// interest and residency (that is all those ever needed) and the pixel position beside them for exactly this
+// kind of question.
+// ⚠️ CURSOR MODE HAS NO BODY, so it has no `apx`; fall back to the middle of the viewport, which is the same
+// answer `anchorOf` gives the relay for the same reason.
+function saySpeakerAt(room, sid) {
+  const w = roomWhere[room] && roomWhere[room].get(sid);
+  if (!w) return null;
+  if (w.apx >= 0) return [w.apx, w.apy];
+  const span = CHUNK_SIDE * TERRAIN_CELL;
+  return [((w.cx0 + w.cx1) / 2 + 0.5) * span, ((w.cy0 + w.cy1) / 2 + 0.5) * span];
+}
 // ---- Polls (#65) ----
 // ⭐⭐ MANY POLLS AT ONCE IS THE PREMISE, NOT AN EDGE CASE. The user's point was that a room will have several
 // running together, so the list is RANKED rather than chronological.
@@ -13434,6 +13475,47 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('message', msg);
   });
 
+  // #71 — speak in the WORLD you are standing in. See `worldHistory` / `sayCfg` at module scope for why this
+  // is keyed on the avatar room rather than on the URL.
+  socket.on('world-say', ({ text, username }) => {
+    const room = currentAvatarRoom;
+    if (!room) return;                                   // not in a world — nothing to speak into
+    const t = String(text == null ? '' : text).slice(0, sayCfg.max).trim();
+    if (!t) return;
+    // ⭐ `sid` IS THE POINT. The bubble over a blob used to be matched by display NAME, which put words over
+    // the wrong person the moment two people shared one. The connection is the identity here; the name is
+    // only a label, and is taken from the client exactly as the page chat takes it.
+    const msg = { id: Date.now() + '-' + Math.random().toString(36).slice(2, 6), sid: socket.id,
+                  username, text: t, timestamp: Date.now() };
+    if (!overworldRooms.has(room)) {
+      // A page world or a sandbox: one conversation, everybody in it, with a scrollback.
+      const h = worldHistory[room] || (worldHistory[room] = []);
+      h.push(msg);
+      if (h.length > sayCfg.history) h.shift();
+      io.to(room).emit('world-message', msg);
+      return;
+    }
+    // The Overworld: whoever is within earshot OF THE SPEAKER. One distance, computed once, from one place —
+    // which is what makes this symmetric, and is why it is deliberately NOT the relay's rule. `peerCost` ranks
+    // ("the nearest 32") with a discount for friends and stickiness on top, so A can be in B's set while B is
+    // not in A's; over a mesh that is fine and is made symmetric by both ends connecting anyway, but a chat
+    // whose recipients disagree about who heard what is unusable, and a friend hearing you from across the
+    // world while the stranger beside you does not is a strange rule for speech.
+    const a = saySpeakerAt(room, socket.id);
+    const r2 = sayCfg.radius * sayCfg.radius;
+    for (const other of roomAvt[room] || []) {
+      const b = saySpeakerAt(room, other);
+      // ⚠️ UNKNOWN POSITION ⇒ INCLUDE, never exclude — the same rule, for the same reason, as `peerCost`.
+      // Somebody who has joined but whose first beacon has not landed yet has no anchor, and dropping them
+      // would make a new arrival unable to hear or be heard until they happened to move.
+      if (a && b) {
+        const dx = a[0] - b[0], dy = a[1] - b[1];
+        if (dx * dx + dy * dy > r2) continue;
+      }
+      io.to(other).emit('world-message', msg);
+    }
+  });
+
   // Live name-colour change — update this socket's presence entry and re-broadcast so peers recolour.
   // Appearance changed mid-session. Mirrors `set-name-color` exactly, and for the same reason: a change has to
   // reach people who are not going to receive a cursor packet from you any time soon.
@@ -13939,7 +14021,16 @@ io.on('connection', (socket) => {
       // ⭐ THE SHARED CLOCK, on the same server-decided seam as `spawn` / `dims` / `relay`. The sky (and now the
       // lighting) was per-browser; a sun that casts shadows has to be the same sun for everyone in the room.
       clock: worldClockWire(),
+      // ⭐ #71 — THE WORLD'S OWN KEY, on the same server-decided seam as `spawn` / `dims` / `clock`, and for
+      // the same reason: the client needs a name for "the world I am in" that everybody in it agrees on, and
+      // re-deriving it there would be a second copy of a routing rule that is already subtle. The chat does
+      // not need it (the server knows which world a socket is in), but the world's VOICE channel does — voice
+      // scopes are opaque strings, so this is what makes "the world has its own voice" a client-side change.
+      worldKey: avRoom,
       overworld: _isOver ? 1 : 0 });
+    // #71 — the world's scrollback. ⚠️ EMPTY BY CONSTRUCTION IN THE OVERWORLD: nothing ever writes
+    // `worldHistory` for an Overworld room, so this replays nothing there rather than being suppressed here.
+    if (worldHistory[avRoom] && worldHistory[avRoom].length) socket.emit('world-history', worldHistory[avRoom]);
     // ⭐ WHAT YOU ARE CARRYING, on the same server-decided seam as `spawn` / `dims` / `clock`. The pouch was
     // browser-local until the Prima economy, so a client arrived believing whatever its own storage said; now it
     // is TOLD, on every join, and its own copy is a display of this one rather than a second source of truth.
