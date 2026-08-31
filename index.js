@@ -492,8 +492,58 @@ function normalizeRoomSocial(r) {
   // below but resolve at request time. Lets the browser show "🌐 on-page · 👤 in-room" before you join.
   out.players_now = identityCount(roomUsers['pg:' + r.id]);
   if (r.url) out.page_now = identityCount(pageUsers[r.url]);
+  out.trend = trendScore(r.id, out.players_now);
   return out;
 }
+
+// ---- TRENDING (list 07 #76) — rooms GAINING people, not rooms that HAVE people ------------------
+// "Popular" is a level; "trending" is a slope. The only thing needed to tell them apart is a memory of what
+// the head-count used to be, which nothing kept — presence is in-memory and dies with the process.
+// ⭐ DELIBERATELY IN MEMORY AND DELIBERATELY SMALL. One ring of `TREND_SLOTS` head-counts per room that has
+// ever had anybody in it, sampled on a timer. No schema, no table, no migration. It resets on restart and
+// simply reports 0 until the ring fills, which is the honest answer rather than a fabricated slope.
+// ⚠️ TOLD TO THE USER BEFORE THIS WAS BUILT, AND ACCEPTED: this measures CHANGE, so at low concurrency it is
+// noise — two people joining an empty room is an enormous rise. It can be shown to WORK; it cannot be judged
+// GOOD until there is real traffic. A strange-looking trending list on a quiet server is not a bug.
+const TREND_BUCKET_MS = 120000;   // one sample every 2 minutes
+const TREND_SLOTS = 15;           // …so the baseline is the last ~30 minutes
+const _roomTrend = new Map();     // roomId → { buf:number[], i:number, filled:number }
+// Score = how far above its own recent baseline the room is now. Positive = gaining. Rooms with no history
+// score 0 rather than +currentHeads, or every brand-new room would out-rank a genuinely surging one.
+function trendScore(roomId, now) {
+  const t = _roomTrend.get(roomId);
+  if (!t || t.filled < 2) return 0;
+  let sum = 0;
+  for (let k = 0; k < t.filled; k++) sum += t.buf[k];
+  return +((now || 0) - sum / t.filled).toFixed(2);
+}
+function sampleRoomTrends() {
+  // Walk the live presence buckets, not the rooms table: a room nobody has ever entered has no slope to
+  // measure and does not deserve a ring buffer held for the life of the process.
+  const seen = new Set();
+  for (const key in roomUsers) {
+    if (!key.startsWith('pg:')) continue;
+    const roomId = key.slice(3);
+    const heads = identityCount(roomUsers[key]);
+    seen.add(roomId);
+    let t = _roomTrend.get(roomId);
+    if (!t) { t = { buf: new Array(TREND_SLOTS).fill(0), i: 0, filled: 0 }; _roomTrend.set(roomId, t); }
+    t.buf[t.i] = heads;
+    t.i = (t.i + 1) % TREND_SLOTS;
+    if (t.filled < TREND_SLOTS) t.filled++;
+  }
+  // A room that has emptied out keeps decaying towards zero rather than freezing at its last busy reading —
+  // otherwise a room that died an hour ago still reports the surge it had on the way up.
+  for (const [roomId, t] of _roomTrend) {
+    if (seen.has(roomId)) continue;
+    t.buf[t.i] = 0;
+    t.i = (t.i + 1) % TREND_SLOTS;
+    if (t.filled < TREND_SLOTS) t.filled++;
+    let sum = 0; for (let k = 0; k < t.filled; k++) sum += t.buf[k];
+    if (sum === 0) _roomTrend.delete(roomId);   // fully cold — stop holding it
+  }
+}
+setInterval(sampleRoomTrends, TREND_BUCKET_MS).unref?.();
 
 // True if a and b are accepted friends (either direction). Used to gate friends-only room access.
 const _friendStmt = db.prepare(`SELECT 1 FROM friends WHERE ((from_id=? AND to_id=?) OR (from_id=? AND to_id=?)) AND status='accepted'`);
@@ -1918,9 +1968,21 @@ app.post('/rooms/site', (req, res) => {
 // 🔥 Popular: public rooms across ALL pages/sites, ranked by who's in them RIGHT NOW. Lets you discover
 // where on the web is active without visiting each URL (the binding URL/site comes back so the client
 // shows where each room lives). Live counts come from the socket adapter, so we sort in JS after the query.
+// 🌐 Web tab (list 07 #76, formerly "Popular"): public rooms tied to OTHER pages and sites — deliberately NOT
+// the ones you are standing on, and deliberately NOT the untethered ones.
+// ⭐ THE FOUR BINDINGS ARE NOW A PARTITION, NOT THREE OVERLAPPING LISTS. A room is bound to this page (URL
+// tab), this site (URL tab), some other page/site (here), or to nothing at all (Lobbies tab). Every public
+// room appears in exactly one of them. Before this, "Popular" held all four while being the ONLY route to the
+// third — which is why it looked redundant and was not.
+// 🟥 THE EXCLUSION HAPPENS IN SQL, BEFORE THE LIMIT, AND THAT IS THE WHOLE POINT. Filtering the current site
+// out of the response AFTER the cap would let one busy site eat the list and leave this tab silently short
+// for no visible reason. `url`/`hostname` come from the caller for exactly this.
 app.get('/rooms/popular', (req, res) => {
   const caller = verifyToken(req);                       // optional — lets us include the caller's own state
   const me = caller ? caller.sub : '\x00';
+  // '\x00' can never equal a real url/hostname, so an absent parameter excludes nothing rather than everything.
+  const hereUrl  = (req.query.url || '').trim() || '\x00';
+  const hereHost = (req.query.hostname || '').trim().toLowerCase() || '\x00';
   try {
     const rows = db.prepare(`
       SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
@@ -1934,8 +1996,11 @@ app.get('/rooms/popular', (req, res) => {
              (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
       FROM rooms r
       WHERE r.public = 1 AND (r.kind IS NULL OR r.kind != 'published')
+        AND (r.url IS NOT NULL OR r.scope IS NOT NULL)          -- bound to somewhere (untethered → Lobbies)
+        AND COALESCE(r.url, '') != ?                            -- …but not to the page you are on
+        AND (r.url IS NOT NULL OR COALESCE(r.scope, '') != ?)   -- …nor the site you are on
       ORDER BY r.created_at DESC LIMIT 300
-    `).all(me, me, me);
+    `).all(me, me, me, hereUrl, hereHost);
     const out = rows.map(normalizeRoomSocial);   // players_now/page_now attached centrally (identity-deduped)
     // Busiest first; ties broken by likes then membership. (Live presence is the headline signal.)
     out.sort((a, b) => (b.players_now - a.players_now) || (b.like_count - a.like_count) || (b.member_count - a.member_count));
