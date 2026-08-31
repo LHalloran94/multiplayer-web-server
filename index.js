@@ -2221,7 +2221,7 @@ app.post('/worlds', (req, res) => {
   const trimmedName = name.trim().slice(0, 40);
   const trimmedDesc = (description || '').trim().slice(0, 200) || null;
   const trimmedAuthor = (author || '').trim().slice(0, 40) || null;
-  const thumbStr = (typeof thumb === 'string' && thumb.length <= PUBLISHED_THUMB_MAX) ? thumb : null;
+  const thumbStr = sanitizeWorldThumbs(thumb);
   const remix = allow_remix ? 1 : 0;
   const dura = (durability === 'persistent') ? 'persistent' : 'showcase';
   try {
@@ -9693,6 +9693,31 @@ db.exec(`CREATE TABLE IF NOT EXISTS published_worlds (
 const PUBLISHED_MAX_BYTES = 2_000_000;                // content blob cap per World (~2 MB)
 const PUBLISHED_PER_USER = 12;                        // how many Worlds one user may have published at once
 const PUBLISHED_THUMB_MAX = 60_000;                   // thumbnail data-URI cap (chars)
+// #81 level previews. The column holds a JSON ARRAY — one picture per Level, so a multi-Level World can be
+// flicked through — and legacy rows hold a bare data URL, which is read as a one-Level array.
+// ⚠️ OVER THE CAP, KEEP THE FIRST ONES RATHER THAN DROPPING ALL OF THEM. The old line was
+// `length <= MAX ? thumb : null`, so one Level too many would have silently left a World with NO preview at
+// all — the failure would look like the feature not working rather than like a limit being reached.
+// 🟥 ONLY `data:image/...` IS ACCEPTED. A thumbnail is rendered into an <img>; letting an arbitrary string
+// through would let a publisher point every browser that lists their World at a URL of their choosing.
+const THUMB_OK = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/;
+function sanitizeWorldThumbs(thumb) {
+  if (typeof thumb !== 'string' || !thumb) return null;
+  let arr;
+  if (thumb[0] === '[') { try { arr = JSON.parse(thumb); } catch { return null; } }
+  else arr = [thumb];
+  if (!Array.isArray(arr)) return null;
+  const out = [];
+  let budget = PUBLISHED_THUMB_MAX - 2;                // the brackets
+  for (const t of arr) {
+    const ok = (typeof t === 'string' && t.length <= PUBLISHED_THUMB_MAX && THUMB_OK.test(t)) ? t : null;
+    const cost = (ok ? ok.length + 2 : 4) + 1;         // quotes or `null`, plus a comma
+    if (cost > budget) break;
+    budget -= cost; out.push(ok);
+  }
+  while (out.length && out[out.length - 1] === null) out.pop();   // trailing blanks carry no information
+  return out.some(Boolean) ? JSON.stringify(out) : null;
+}
 function genWorldId() {
   let id;
   do { id = 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
