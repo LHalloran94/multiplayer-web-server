@@ -465,9 +465,14 @@ function roomFeatureAvail(permsStr) {
   if (!permsStr) return out;
   try {
     const p = JSON.parse(permsStr);
-    if (p && p.build === 'host') out.build = 'host';
-    const modes = p && p.features && p.features.modes;
-    if (modes && typeof modes === 'object') for (const k in modes) if (modes[k] === 'host') out.restricted.push(k);
+    // ⚠️ ANY rung above 'all' is a restriction (#77) — testing for 'host' alone would report a friends-only
+    // feature to the room list as open to everybody.
+    if (p && p.build && p.build !== 'all') out.build = p.build;
+    // 🟥 PRE-EXISTING BUG, fixed here: this read `p.features.modes`, but `persistRoomPerms` writes the modes
+    // FLAT under `features` (`{chat:'host'}`). The nested key never existed, so `restricted` came back empty
+    // for every room and the "Features for non-hosts" summary has never shown a single restriction.
+    const modes = p && p.features;
+    if (modes && typeof modes === 'object') for (const k in modes) if (modes[k] && modes[k] !== 'all') out.restricted.push(k);
   } catch {}
   return out;
 }
@@ -9239,7 +9244,7 @@ function getRoomBuild(roomId) {
   if (!rb) {
     let mode = 'all'; const locked = new Set();
     try { const row = _roomPermsGet.get(roomId); if (row && row.perms) { const p = JSON.parse(row.perms);
-      if (p && p.build === 'host') mode = 'host';
+      if (p && isRoomAud(p.build) && p.build !== 'all') mode = p.build;
       if (p && Array.isArray(p.levelLock)) for (const i of p.levelLock) if (Number.isInteger(i) && i >= 0) locked.add(i);
     } } catch {}
     rb = { mode, over: new Map(), locked };
@@ -9252,7 +9257,7 @@ function persistRoomPerms(roomId) {                   // write build mode + leve
   const rf = getRoomFeatures(roomId);
   const out = { build: rb.mode, levelLock: [...rb.locked] };
   const features = {};
-  for (const k of FEATURE_KEYS) if (rf.modes[k] === 'host') features[k] = 'host';   // store only non-default (host-only)
+  for (const k of FEATURE_KEYS) if (rf.modes[k] && rf.modes[k] !== 'all') features[k] = rf.modes[k];   // store only non-default rungs
   if (Object.keys(features).length) out.features = features;
   const featureLevelLock = {};
   for (const k of FEATURE_KEYS) { const s = rf.levelLock.get(k); if (s && s.size) featureLevelLock[k] = [...s]; }
@@ -9281,8 +9286,8 @@ function getRoomFeatures(roomId) {
     for (const k of FEATURE_KEYS) { modes[k] = 'all'; over.set(k, new Map()); levelLock.set(k, new Set()); }
     try { const row = _roomPermsGet.get(roomId); if (row && row.perms) { const p = JSON.parse(row.perms);
       if (p && p.features) {
-        for (const k of FEATURE_KEYS) if (p.features[k] === 'host') modes[k] = 'host';
-        if (p.features.markup === 'host') for (const k of MARKUP_KEYS) modes[k] = 'host';   // legacy single markup perm
+        for (const k of FEATURE_KEYS) if (isRoomAud(p.features[k]) && p.features[k] !== 'all') modes[k] = p.features[k];
+        if (isRoomAud(p.features.markup) && p.features.markup !== 'all') for (const k of MARKUP_KEYS) modes[k] = p.features.markup;   // legacy single markup perm
       }
       if (p && p.featureLevelLock) for (const k in p.featureLevelLock) if (levelLock.has(k) && Array.isArray(p.featureLevelLock[k]))
         for (const i of p.featureLevelLock[k]) if (Number.isInteger(i) && i >= 0) levelLock.get(k).add(i);
@@ -9299,13 +9304,38 @@ function featurePermsPayload(roomId) {                 // wire shape sent to cli
   for (const k of FEATURE_KEYS) { over[k] = [...rf.over.get(k).entries()]; levelLock[k] = [...rf.levelLock.get(k)]; }
   return { roomId, modes: { ...rf.modes }, over, levelLock };
 }
+// ---- ROOM AUDIENCES (list 07 #77) ---------------------------------------------------------------
+// The card: "options to only allow features from certain people, like friends or verified users or something,
+// so that popular rooms don't get overwhelmed and spammed by users". The hub already answered WHO in the only
+// two ways it could — everyone, or the host — and the missing middle is the whole point of the card.
+// ⭐ THE LADDER IS THE ONE FROM THE AUDIENCES WORK (#46/#47), NOT A NEW VOCABULARY. `relationTo` already
+// answers everyone / followers / friends against a person, and here that person is the ROOM'S OWNER, which is
+// what makes "only my friends may build in my room" mean something without inventing per-room membership.
+// ⚠️ 'account' is the one rung that is NOT a relation — it is "signed in at all", and it is the rung the
+// card's anti-spam intent actually needs, since an anonymous visitor is the thing being kept out.
+// ⚠️ "Verified" was deliberately NOT used as a name: since the social-verification work it means "proved they
+// own a Twitter", which is a much narrower and rarer thing than the card intends.
+const ROOM_AUD = ['all', 'account', 'followers', 'friends', 'host'];
+const isRoomAud = m => ROOM_AUD.includes(m);
+// One resolver, used by every gate. The owner is checked by the CALLER before this runs — 'host' returning
+// false here is what makes "only host" mean only the host.
+function audienceAllows(mode, ownerId, did) {
+  if (!mode || mode === 'all') return true;
+  if (mode === 'host') return false;
+  if (!did) return false;                       // every rung above 'all' needs an account
+  if (mode === 'account') return true;
+  const need = AUD_RANK[mode];
+  if (need === undefined) return true;          // an unknown mode is not a lock; it was never a real rule
+  return AUD_RANK[relationTo(ownerId, did)] >= need;
+}
 function featureAllowedFor(roomId, feature, did) {     // server-side hard check (used for chat); page room → open
   if (!roomId) return true;
-  if (did && roomOwnerId(roomId) === did) return true;
+  const owner = roomOwnerId(roomId);
+  if (did && owner === did) return true;
   const rf = getRoomFeatures(roomId);
   const o = rf.over.get(feature);
   if (o && did && o.has(did)) return o.get(did);
-  return rf.modes[feature] === 'all';
+  return audienceAllows(rf.modes[feature], owner, did);
 }
 // Combined build+feature snapshot for the Rooms-tab perms hub, where the owner may edit a room they are NOT
 // currently in (so they are not in that room's presence bucket and won't receive the bucket broadcasts). This
@@ -13476,7 +13506,7 @@ io.on('connection', (socket) => {
     const rb = getRoomBuild(currentAvBuildRoomId);
     if (rb.locked.has(currentAvLevelIndex)) return false;          // this Level is build-locked for non-owners
     if (did && rb.over.has(did)) return rb.over.get(did);
-    return rb.mode === 'all';
+    return audienceAllows(rb.mode, currentAvOwnerId, did);
   }
 
   // ⭐ A QUIET PAGE STILL JOINS. The client decides, per site, whether this page's address may leave the
@@ -15413,7 +15443,7 @@ io.on('connection', (socket) => {
     socket.emit('room-perms', roomPermsPayload(roomId));
   });
   socket.on('build-mode-set', ({ roomId, mode }) => {
-    if (!roomId || (mode !== 'all' && mode !== 'host')) return;
+    if (!roomId || !isRoomAud(mode)) return;
     const did = socketToDiscordId[socket.id];
     if (!did || roomOwnerId(roomId) !== did) return;     // owner only
     const rb = getRoomBuild(roomId); rb.mode = mode;
@@ -15446,7 +15476,7 @@ io.on('connection', (socket) => {
   });
   // Phase 4: owner sets a feature's room-wide mode ('all'|'host'). Persists in perms.features.
   socket.on('feature-mode-set', ({ roomId, feature, mode }) => {
-    if (!roomId || !FEATURE_KEYS.includes(feature) || (mode !== 'all' && mode !== 'host')) return;
+    if (!roomId || !FEATURE_KEYS.includes(feature) || !isRoomAud(mode)) return;
     const did = socketToDiscordId[socket.id];
     if (!did || roomOwnerId(roomId) !== did) return;     // owner only
     getRoomFeatures(roomId).modes[feature] = mode;
