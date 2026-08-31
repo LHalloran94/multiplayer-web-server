@@ -11539,6 +11539,106 @@ function removeSimAvatar(room, id) {
   if (Object.keys(rs.avatars).length === 0) stopRoomTick(room);
 }
 const socketVoiceScope = {}; // socketId → voice scope ('page' uses currentRoom; else 'dm:X', 'room:X', 'group:X')
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// #73 · PROXIMITY VOICE — who you are CONNECTED to follows where you are standing.
+//
+// ⭐ IT APPLIES ONLY TO A 'world:' SCOPE. A DM call, a Room call and page voice are all deliberate acts
+// between people who chose each other; only the world has the "everyone everywhere at once" problem.
+//
+// ⭐⭐ THE POOL IS PEOPLE IN VOICE, NOT PEOPLE IN THE WORLD, and that is what makes this cheap. Voice stays
+// opt-in — you press the button once — so this loop is O(participants²) over a handful of sockets at 2Hz,
+// not over everyone in a shared world. A hundred players with six of them talking costs six.
+//
+// 🟥 PAIRS, NOT PER-SOCKET SETS, AND THAT IS THE WHOLE DESIGN. A voice link is inherently two-sided: if A
+// wants B while B (at its cap, or just further down its own ranking) does not want A, the result is ONE-WAY
+// AUDIO — you can hear someone who cannot hear you, which is worse than not being connected. The avatar mesh
+// has the same asymmetry and resolves it by connecting anyway (`updatePeers`, "the safe direction"); here the
+// decision itself is made per PAIR, and a pair is live only when it fits inside BOTH ends' cap. Symmetric by
+// construction rather than by patching afterwards.
+//
+// ⚠️ HYSTERESIS AND LINGER EXIST BECAUSE RENEGOTIATION IS SLOW, NOT TO SAVE CPU. Opening a peer connection is
+// an ICE/DTLS handshake — roughly a second or two before audio flows — so two people walking past each other
+// would finish passing before they connected. Hence: connect at `connectR`, only drop past the wider `dropR`,
+// and then only after `lingerMs`. Combined with the client's distance fade this means you are already
+// connected and SILENT before you are close enough to be heard, and the walk-up is seamless.
+// ⚠️ NO TURN, deliberately — voice has never had one, so this inherits that limit rather than introducing it.
+// ==VOICE_PROX_BLOCK_START==
+const voiceProxCfg = {
+  on: 1,
+  hz: 2,             // how often the pass runs. Positions move slowly next to a handshake; 2Hz is plenty.
+  connectR: 2400,    // px — open a connection at this range. MUST exceed the client's fade radius (see 17_voice).
+  dropR: 3200,       // px — only drop beyond this. The gap between the two is the hysteresis band.
+  lingerMs: 8000,    // hold an out-of-range connection this long before tearing it down
+  cap: 8,            // most simultaneous voice peers. A full audio mesh is comfortable to roughly this.
+};
+// scope → Map('a|b' → { a, b, dropAt }) for the pairs currently connected.
+const voicePairs = new Map();
+const pairKey = (a, b) => (a < b ? a + '|' + b : b + '|' + a);
+
+function runVoiceProxTick() {
+  if (!voiceProxCfg.on) return;
+  const now = Date.now();
+  for (const scope of Object.keys(roomVoice)) {
+    if (!scope.startsWith('world:')) continue;
+    const avRoom = scope.slice(6);
+    const ids = Object.keys(roomVoice[scope]);
+    const held = voicePairs.get(scope) || new Map();
+    if (ids.length < 2) { if (held.size) voicePairs.delete(scope); continue; }
+
+    const pos = new Map();
+    for (const id of ids) pos.set(id, saySpeakerAt(avRoom, id));
+
+    // 1. Every candidate pair, with hysteresis: a pair already up is judged against the WIDER radius.
+    const cand = [];
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        const a = ids[i], b = ids[j], pa = pos.get(a), pb = pos.get(b);
+        // ⚠️ UNKNOWN POSITION ⇒ IN RANGE, the same rule the chat radius and `peerCost` both use: somebody
+        // who has not beaconed yet must not be silently unreachable.
+        const d = (pa && pb) ? Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) : 0;
+        const up = held.has(pairKey(a, b));
+        if (d <= (up ? voiceProxCfg.dropR : voiceProxCfg.connectR)) cand.push({ a, b, d });
+      }
+    }
+    // 2. The cap, applied per socket over its own nearest candidates. A pair survives only if BOTH ends kept
+    //    it — see the note above on one-way audio.
+    cand.sort((x, y) => x.d - y.d);
+    const kept = new Map();          // sid → count
+    const ok = new Set();
+    for (const c of cand) {
+      const ka = kept.get(c.a) || 0, kb = kept.get(c.b) || 0;
+      if (ka >= voiceProxCfg.cap || kb >= voiceProxCfg.cap) continue;
+      kept.set(c.a, ka + 1); kept.set(c.b, kb + 1);
+      ok.add(pairKey(c.a, c.b));
+    }
+    // 3. Diff. New pairs connect at once; lapsed ones are given the linger before being torn down.
+    const next = new Map();
+    for (const key of ok) {
+      const e = held.get(key);
+      const [a, b] = key.split('|');
+      if (!e) { next.set(key, { a, b, dropAt: 0 }); io.to(a).emit('voice-near', { add: [b] }); io.to(b).emit('voice-near', { add: [a] }); }
+      else { e.dropAt = 0; next.set(key, e); }                            // back in range → cancel any pending drop
+    }
+    for (const [key, e] of held) {
+      if (ok.has(key)) continue;
+      if (!ids.includes(e.a) || !ids.includes(e.b)) continue;             // left voice entirely: voice-leave already told them
+      if (!e.dropAt) { e.dropAt = now + voiceProxCfg.lingerMs; next.set(key, e); continue; }
+      if (now < e.dropAt) { next.set(key, e); continue; }
+      io.to(e.a).emit('voice-near', { drop: [e.b] });
+      io.to(e.b).emit('voice-near', { drop: [e.a] });
+    }
+    if (next.size) voicePairs.set(scope, next); else voicePairs.delete(scope);
+  }
+}
+let voiceProxTimer = setInterval(runVoiceProxTick, Math.max(100, Math.round(1000 / voiceProxCfg.hz)));
+// Forget a socket's pairs when it leaves voice, so a reconnect is not judged against a stale set.
+function dropVoicePairs(scope, sid) {
+  const m = voicePairs.get(scope); if (!m) return;
+  for (const [key, e] of [...m]) if (e.a === sid || e.b === sid) m.delete(key);
+  if (!m.size) voicePairs.delete(scope);
+}
+// ==VOICE_PROX_BLOCK_END==
 const userCurrentFullUrl = {};
 const socketDmRooms = {};      // socketId → Set of DM roomIds
 const socketToDiscordId = {};  // socketId → discordId
@@ -15257,23 +15357,33 @@ io.on('connection', (socket) => {
         delete roomVoice[oldScope][socket.id];
         const oldTarget = oldScope === currentRoom ? currentRoom : 'voice:' + oldScope;
         io.to(oldTarget).emit('voice-peer-left', { id: socket.id });
+        dropVoicePairs(oldScope, socket.id);        // #73
       }
       socket.leave('voice:' + oldScope);
     }
 
     socketVoiceScope[socket.id] = voiceScope;
     if (!roomVoice[voiceScope]) roomVoice[voiceScope] = {};
-    const existingPeers = Object.keys(roomVoice[voiceScope]);
+    // ⭐ #73 — IN A WORLD, JOINING VOICE CONNECTS YOU TO NOBODY. Every other scope meshes everyone with
+    // everyone on the way in, which is right for a call between people who chose each other and wrong for a
+    // shared world. Here `voice-near` connects you to whoever you are standing near, and the flag says so
+    // rather than leaving the client to infer it from the scope string — the same reason `avt-joined` carries
+    // `relay`: which transport shape is in use is a decision the server makes and states.
+    const _prox = voiceProxCfg.on && voiceScope.startsWith('world:');
+    const existingPeers = _prox ? [] : Object.keys(roomVoice[voiceScope]);
     roomVoice[voiceScope][socket.id] = username;
     socket.join('voice:' + voiceScope);
-    socket.emit('voice-joined', { existingPeers });
+    socket.emit('voice-joined', { existingPeers, prox: _prox ? 1 : 0 });
 
     // Page-scope: broadcast to all room members (who's-here speaking indicators)
     // Other scopes: broadcast only to voice-scope members (private call)
     if (voiceScope === currentRoom) {
       io.to(currentRoom).emit('voice-peer-joined', { id: socket.id, username });
     } else {
-      socket.to('voice:' + voiceScope).emit('voice-peer-joined', { id: socket.id, username });
+      // ⚠️ STILL BROADCAST UNDER PROXIMITY — this is what keeps the who-list and the speaking indicators
+      // right. Being in the world's voice and being audible from where you stand are different facts, and
+      // only the second one is about peer connections. `prox` tells the client not to dial.
+      socket.to('voice:' + voiceScope).emit('voice-peer-joined', { id: socket.id, username, prox: _prox ? 1 : 0 });
     }
   });
 
@@ -15286,6 +15396,7 @@ io.on('connection', (socket) => {
       io.to(target).emit('voice-peer-left', { id: socket.id });
     }
     socket.leave('voice:' + voiceScope);
+    dropVoicePairs(voiceScope, socket.id);        // #73 — don't judge a re-join against a stale pair set
     delete socketVoiceScope[socket.id];
   });
 
@@ -15689,6 +15800,7 @@ io.on('connection', (socket) => {
         const voiceTarget = voiceScope === currentRoom ? currentRoom : 'voice:' + voiceScope;
         io.to(voiceTarget).emit('voice-peer-left', { id: socket.id });
         socket.leave('voice:' + voiceScope);
+        dropVoicePairs(voiceScope, socket.id);      // #73
       }
       delete socketVoiceScope[socket.id];
       if (currentAvatarRoom && roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) {
