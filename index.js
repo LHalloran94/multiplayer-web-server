@@ -2395,6 +2395,179 @@ app.delete('/face-images/:id', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ---- Chat images (pasted pictures) ----
+// ⭐⭐ THE OFF-SWITCH IS THE FIRST THING IN THIS BLOCK BECAUSE IT IS THE CONDITION THE FEATURE WAS AGREED ON.
+// Hosting pictures people paste means agreeing to moderate them, and that is a commitment that might one day
+// stop being worth making. One flag ends ingestion everywhere: the route refuses, and — the half that is easy
+// to forget — the client is TOLD, so it stops offering paste at all.
+// 🟥 THE CLIENT IS TOLD, NOT LEFT TO WORK IT OUT. The Discord Connect button drifted exactly this way: the
+// client decided for itself whether a server feature existed, the two disagreed, and a control appeared that
+// could not work. `/chat-images/config` is the single answer, read at request time, so flipping this needs a
+// server restart and NOT a rebuilt extension in everybody's browser.
+// ⚠️ TURNING THIS OFF DOES NOT DELETE ANYTHING. Pictures already sent keep resolving, because silently
+// blanking the pictures out of everybody's old conversations is a different and much larger decision. The
+// sweep below and `DELETE /chat-images/:id` are how bytes actually leave.
+const CHAT_IMG_ENABLED = true;
+
+// ⭐ THE BUDGET IS IN BYTES AND IT IS ITS OWN, separate from FACE_IMG_BUDGET on purpose: a busy afternoon in
+// chat must not be able to crowd out everybody's avatars, and the two want very different numbers.
+const CHAT_IMG_BUDGET     = 256 * 1024 * 1024;  // every pasted picture on this server, all users together
+// ⚠️ THE CLIENT SHRINKS THE PICTURE BEFORE IT GETS HERE — 1280px, WebP q0.75, which took a 12MB phone photo
+// to 224KB when this was measured. This cap is the backstop for a client that did not, not the size a
+// well-behaved one aims at. Base64 costs a third on top, hence the headroom over the 224KB figure.
+const CHAT_IMG_MAX_BYTES  = 400_000;            // length of one data: URL
+const CHAT_IMG_PER_DAY    = 60;                 // pictures one signed-in user may add per day — the rate limit
+// ⭐⭐ EXPIRY IS WHAT MAKES THE STORAGE A FIXED NUMBER RATHER THAN A GROWTH RATE, and 30 days is chosen to
+// match how long the MESSAGES are meant to live, not picked for its own sake: a picture that outlives the
+// message pointing at it is bytes nobody can ever see again. (Page chat is in-memory and goes at restart;
+// Rooms and DMs are intended to clear messages older than about a month.) At 10k daily actives this is the
+// difference between 32GB a year and about 2.7GB standing.
+const CHAT_IMG_TTL_DAYS   = 30;
+// 🟥 TRUE, UNLIKE THE FACE STORE'S. A face picture is worn on your own head and the worst case is a silly
+// eye; a chat picture is pushed in front of everyone in a room, so it needs an author — an upload with no
+// author has no handle for a takedown, which is the whole of moderation in one sentence.
+const CHAT_IMG_REQUIRE_AUTH = true;
+
+db.exec(`CREATE TABLE IF NOT EXISTS chat_images (
+  id TEXT PRIMARY KEY,
+  author_id TEXT,
+  data TEXT NOT NULL,
+  bytes INTEGER,
+  created_at INTEGER DEFAULT (unixepoch())
+)`);
+// ⭐ THE PAYOFF OF CONTENT ADDRESSING: ban a hash and that exact picture can never be uploaded again, by
+// anyone, ever — and because the id IS the hash, one row removes every copy at once rather than one per
+// sender. ⚠️ A re-encode changes the hash, so this catches the same file and not a screenshot of it;
+// perceptual hashing is deliberately out of scope.
+db.exec(`CREATE TABLE IF NOT EXISTS chat_image_blocks (
+  id TEXT PRIMARY KEY,
+  reason TEXT,
+  blocked_at INTEGER DEFAULT (unixepoch())
+)`);
+db.exec(`CREATE TABLE IF NOT EXISTS chat_image_reports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  image_id TEXT NOT NULL,
+  reporter_id TEXT,
+  note TEXT,
+  created_at INTEGER DEFAULT (unixepoch())
+)`);
+db.exec('CREATE INDEX IF NOT EXISTS idx_chat_images_created ON chat_images (created_at)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_chat_images_author ON chat_images (author_id, created_at)');
+
+// The sweep that makes the expiry real. Runs at boot and then daily — an expiry nobody enforces is a comment.
+function chatImgSweep() {
+  try {
+    const cutoff = Math.floor(Date.now() / 1000) - CHAT_IMG_TTL_DAYS * 86400;
+    const n = db.prepare('DELETE FROM chat_images WHERE created_at < ?').run(cutoff).changes;
+    if (n) console.log('[chat-images] swept ' + n + ' expired');
+  } catch (e) {}
+}
+chatImgSweep();
+setInterval(chatImgSweep, 24 * 60 * 60 * 1000).unref?.();
+
+// ⭐ WHAT THE CLIENT IS ALLOWED TO OFFER, answered by the server. Also carries the encode settings, so the
+// size a picture is shrunk to is a server decision rather than a number frozen into everybody's extension.
+app.get('/chat-images/config', (req, res) => {
+  res.json({
+    enabled: !!CHAT_IMG_ENABLED,
+    requireAuth: !!CHAT_IMG_REQUIRE_AUTH,
+    maxBytes: CHAT_IMG_MAX_BYTES,
+    maxDim: 1280,
+    quality: 0.75,
+    ttlDays: CHAT_IMG_TTL_DAYS,
+  });
+});
+
+// Store one pasted picture and return the reference to put in the message. Idempotent by construction.
+app.post('/chat-images', (req, res) => {
+  if (!CHAT_IMG_ENABLED) return res.status(403).json({ error: 'Image pasting is switched off' });
+  const user = verifyToken(req);
+  if (!user && CHAT_IMG_REQUIRE_AUTH) return res.status(401).json({ error: 'Sign in to paste images' });
+  const data = (req.body && req.body.data) || '';
+  // ⚠️ THE PREFIX IS CHECKED, NOT JUST THE LENGTH — these bytes are handed straight to other people's browsers
+  // and assigned to an <img>, so "it is an image data URL" has to be TRUE of it and not merely likely.
+  if (typeof data !== 'string' || !/^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/=]+$/.test(data)) {
+    return res.status(400).json({ error: 'Not an image' });
+  }
+  if (data.length > CHAT_IMG_MAX_BYTES) return res.status(413).json({ error: 'Picture too large' });
+  try {
+    const id = crypto.createHash('sha256').update(data).digest('hex').slice(0, 16);
+    if (db.prepare('SELECT id FROM chat_image_blocks WHERE id = ?').get(id)) {
+      return res.status(403).json({ error: 'That image is blocked' });
+    }
+    if (db.prepare('SELECT id FROM chat_images WHERE id = ?').get(id)) return res.json({ id, deduped: true });
+    const used = db.prepare('SELECT COALESCE(SUM(bytes), 0) AS b FROM chat_images').get().b;
+    if (used + data.length > CHAT_IMG_BUDGET) return res.status(507).json({ error: 'Image store full' });
+    if (user) {
+      const since = Math.floor(Date.now() / 1000) - 86400;
+      const mine = db.prepare('SELECT COUNT(*) AS c FROM chat_images WHERE author_id = ? AND created_at > ?')
+        .get(user.sub, since).c;
+      if (mine >= CHAT_IMG_PER_DAY) return res.status(429).json({ error: 'Daily image limit reached (' + CHAT_IMG_PER_DAY + ')' });
+    }
+    db.prepare('INSERT INTO chat_images (id, author_id, data, bytes) VALUES (?,?,?,?)')
+      .run(id, user ? user.sub : null, data, data.length);
+    res.json({ id });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Fetch one, by the reference carried in a message.
+// ⚠️ TEXT, NOT BINARY, and forced rather than chosen — the extension cannot reach this server from the page,
+// so every response comes back through the background broker, which relays a body as TEXT. A data URL is a
+// picture that survives that trip, which is also why a message can never carry a plain <img src> URL.
+// ⚠️ PUBLIC, LIKE THE FACE STORE: a picture has to be visible to everyone who can see the message it is in,
+// and the message surfaces already do their own access control.
+// 🟥 THIS ROUTE DOES NOT CONSULT THE OFF-SWITCH. Turning ingestion off must not blank out the pictures in
+// everybody's existing conversations — see the note on CHAT_IMG_ENABLED.
+app.get('/chat-images/:id', (req, res) => {
+  try {
+    const row = db.prepare('SELECT id, data FROM chat_images WHERE id = ?').get(String(req.params.id || '').slice(0, 32));
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');   // the id is the hash, so this can never go stale
+    res.json({ id: row.id, data: row.data });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Take one of your own pictures back. Everyone looking at that message stops seeing it, which is the point.
+app.delete('/chat-images/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const row = db.prepare('SELECT author_id FROM chat_images WHERE id = ?').get(req.params.id);
+    if (!row) return res.status(404).json({ error: 'Not found' });
+    if (row.author_id !== user.sub) return res.status(403).json({ error: 'Not author' });
+    db.prepare('DELETE FROM chat_images WHERE id = ?').run(req.params.id);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Report a picture. Deliberately does NOT delete: a report is somebody's opinion and a deletion is a decision.
+app.post('/chat-images/:id/report', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const id = String(req.params.id || '').slice(0, 32);
+    if (!db.prepare('SELECT id FROM chat_images WHERE id = ?').get(id)) return res.status(404).json({ error: 'Not found' });
+    db.prepare('INSERT INTO chat_image_reports (image_id, reporter_id, note) VALUES (?,?,?)')
+      .run(id, user.sub, String((req.body && req.body.note) || '').slice(0, 300));
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ⭐ THE OPERATOR DOOR. This project has no admin role, so inventing one for this would be inventing a whole
+// permissions model — the key is an environment variable instead, and with MW_ADMIN_KEY unset the route
+// refuses outright rather than falling open.
+app.post('/chat-images/:id/block', (req, res) => {
+  const key = process.env.MW_ADMIN_KEY;
+  if (!key || req.headers['x-admin-key'] !== key) return res.status(403).json({ error: 'Forbidden' });
+  try {
+    const id = String(req.params.id || '').slice(0, 32);
+    db.prepare('INSERT OR IGNORE INTO chat_image_blocks (id, reason) VALUES (?,?)')
+      .run(id, String((req.body && req.body.reason) || '').slice(0, 300));
+    const gone = db.prepare('DELETE FROM chat_images WHERE id = ?').run(id).changes;
+    res.json({ ok: true, deleted: gone });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 app.get('/rooms/:id/messages', (req, res) => {
   const { id } = req.params;
   try {
