@@ -823,6 +823,13 @@ function startCpuProfile(ms, done) {
   }));
   return null;
 }
+// #73 — how much work the proximity pass is doing. `reset=1` zeroes the counters so a caller can measure one
+// window rather than everything since boot.
+app.get('/debug/voice-prox', (req, res) => {
+  const out = { ...voiceProxStats, cfg: voiceProxCfg };
+  if (req.query.reset) { voiceProxStats.passes = 0; voiceProxStats.compared = 0; }
+  res.json(out);
+});
 app.get('/debug/cpu-profile', (req, res) => {
   const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
   if (ip !== '127.0.0.1' && ip !== '::1') return res.status(403).json({ error: 'localhost only' });
@@ -11605,19 +11612,54 @@ function runVoiceProxTick() {
     for (const id of ids) pos.set(id, saySpeakerAt(avRoom, id));
 
     // 1. Every candidate pair, with hysteresis: a pair already up is judged against the WIDER radius.
+    //
+    // ⭐⭐ SPATIALLY BUCKETED, SO TWO PLAYERS ON OPPOSITE SIDES OF THE WORLD ARE NEVER COMPARED AT ALL.
+    // Comparing every participant with every other was O(n²) over the whole world twice a second — fine for
+    // a handful of people in a call, wrong the moment "everyone in the world" became eligible, because the
+    // overwhelming majority of those comparisons are between people who could not possibly hear each other.
+    // ⚠️ THE BUCKET IS SIZED TO THE RADIUS, NOT TO A CHUNK, and that is the only reason this is cheap. A
+    // terrain chunk is 512px while `dropR` is 3,200, so a chunk-sized bucket would need a 13×13 = 169-cell
+    // neighbourhood scanned per player; at one bucket per radius, any pair close enough to hear each other is
+    // in the same bucket or one of the 8 around it, so the neighbourhood is 9. Same idea as the chunk grid,
+    // one size up.
+    // ⚠️ Each neighbour pair is visited ONCE — four "forward" offsets, not eight — or every pair between two
+    // buckets would be built twice.
+    const CELL = voiceProxCfg.dropR;
+    const buckets = new Map();
+    const unplaced = [];        // no beacon yet: compared against everyone, and there are never many
+    for (const id of ids) {
+      const p = pos.get(id);
+      if (!p) { unplaced.push(id); continue; }
+      const k = Math.floor(p[0] / CELL) + ',' + Math.floor(p[1] / CELL);
+      const list = buckets.get(k); if (list) list.push(id); else buckets.set(k, [id]);
+    }
     const cand = [];
-    for (let i = 0; i < ids.length; i++) {
-      for (let j = i + 1; j < ids.length; j++) {
-        const a = ids[i], b = ids[j];
-        if (!speakers.has(a) && !speakers.has(b)) continue;   // two listeners: no audio either way
-        const pa = pos.get(a), pb = pos.get(b);
-        // ⚠️ UNKNOWN POSITION ⇒ IN RANGE, the same rule the chat radius and `peerCost` both use: somebody
-        // who has not beaconed yet must not be silently unreachable.
-        const d = (pa && pb) ? Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) : 0;
-        const up = held.has(pairKey(a, b));
-        if (d <= (up ? voiceProxCfg.dropR : voiceProxCfg.connectR)) cand.push({ a, b, d });
+    voiceProxStats.passes++; voiceProxStats.participants = ids.length; voiceProxStats.buckets = buckets.size;
+    const consider = (a, b) => {
+      voiceProxStats.compared++;
+      if (!speakers.has(a) && !speakers.has(b)) return;      // two listeners: no audio either way
+      const pa = pos.get(a), pb = pos.get(b);
+      // ⚠️ UNKNOWN POSITION ⇒ IN RANGE, the same rule the chat radius and `peerCost` both use: somebody
+      // who has not beaconed yet must not be silently unreachable.
+      const d = (pa && pb) ? Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) : 0;
+      const up = held.has(pairKey(a, b));
+      if (d <= (up ? voiceProxCfg.dropR : voiceProxCfg.connectR)) cand.push({ a, b, d });
+    };
+    const FWD = [[1, 0], [0, 1], [1, 1], [-1, 1]];
+    for (const [key, list] of buckets) {
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) consider(list[i], list[j]);   // within the bucket
+        for (const id of unplaced) consider(list[i], id);
+      }
+      const c = key.indexOf(','), bx = +key.slice(0, c), by = +key.slice(c + 1);
+      for (const [dx, dy] of FWD) {
+        const other = buckets.get((bx + dx) + ',' + (by + dy));
+        if (!other) continue;
+        for (const a of list) for (const b of other) consider(a, b);
       }
     }
+    for (let i = 0; i < unplaced.length; i++)
+      for (let j = i + 1; j < unplaced.length; j++) consider(unplaced[i], unplaced[j]);
     // 2. The cap, applied per socket over its own nearest candidates. A pair survives only if BOTH ends kept
     //    it — see the note above on one-way audio.
     cand.sort((x, y) => x.d - y.d);
@@ -11648,6 +11690,10 @@ function runVoiceProxTick() {
     if (next.size) voicePairs.set(scope, next); else voicePairs.delete(scope);
   }
 }
+// ⭐ WHAT THE PASS ACTUALLY DID, so "distant players are never compared" is a NUMBER rather than a claim.
+// `probe`/e2e reads it over /debug/voice-prox; without it the bucketing and the old all-pairs loop produce
+// identical connections and are indistinguishable from outside.
+const voiceProxStats = { passes: 0, participants: 0, compared: 0, buckets: 0 };
 let voiceProxTimer = setInterval(runVoiceProxTick, Math.max(100, Math.round(1000 / voiceProxCfg.hz)));
 // Forget a socket's pairs when it leaves voice, so a reconnect is not judged against a stale set.
 // ⚠️ TELL THE OTHER END. Without this the person still there keeps a peer connection to somebody who has
