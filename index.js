@@ -11576,15 +11576,30 @@ const voiceProxCfg = {
 const voicePairs = new Map();
 const pairKey = (a, b) => (a < b ? a + '|' + b : b + '|' + a);
 
+// ⭐⭐ HEARING IS NOT SPEAKING. Standing near someone who is talking should let you hear them without opening
+// your own microphone — being in the world is enough. `roomVoice[scope]` stays exactly what it always was,
+// the people who are TALKING (it is what the who-list and the speaking dots read), and these are the people
+// who are only receiving.
+// 🟥 A PAIR IS ONLY WORTH CONNECTING IF AT LEAST ONE END HAS A MICROPHONE. Two listeners carry no audio in
+// either direction, so connecting them would be pure cost — and it is what keeps this affordable once the
+// pool stops being "people who opted in" and becomes "everyone in the world": the pair count is bounded by
+// SPEAKERS × their cap, and speakers are the scarce thing.
+// ⚠️ THE COST THIS DOES NOT SOLVE, stated plainly: a speaker in a crowd still reaches only `cap` people,
+// because a mesh gives every listener their own connection. Fixing that means an SFU, i.e. server
+// infrastructure and a bill; the cap is a dial until then.
+const voiceListeners = {};   // scope → Set(socketId)
+
 function runVoiceProxTick() {
   if (!voiceProxCfg.on) return;
   const now = Date.now();
   for (const scope of Object.keys(roomVoice)) {
     if (!scope.startsWith('world:')) continue;
     const avRoom = scope.slice(6);
-    const ids = Object.keys(roomVoice[scope]);
+    const speakers = new Set(Object.keys(roomVoice[scope]));
+    // Everyone who could be in a pair: the people talking, plus the people merely listening.
+    const ids = [...new Set([...speakers, ...(voiceListeners[scope] || [])])];
     const held = voicePairs.get(scope) || new Map();
-    if (ids.length < 2) { if (held.size) voicePairs.delete(scope); continue; }
+    if (ids.length < 2 || !speakers.size) { if (held.size) voicePairs.delete(scope); continue; }
 
     const pos = new Map();
     for (const id of ids) pos.set(id, saySpeakerAt(avRoom, id));
@@ -11593,7 +11608,9 @@ function runVoiceProxTick() {
     const cand = [];
     for (let i = 0; i < ids.length; i++) {
       for (let j = i + 1; j < ids.length; j++) {
-        const a = ids[i], b = ids[j], pa = pos.get(a), pb = pos.get(b);
+        const a = ids[i], b = ids[j];
+        if (!speakers.has(a) && !speakers.has(b)) continue;   // two listeners: no audio either way
+        const pa = pos.get(a), pb = pos.get(b);
         // ⚠️ UNKNOWN POSITION ⇒ IN RANGE, the same rule the chat radius and `peerCost` both use: somebody
         // who has not beaconed yet must not be silently unreachable.
         const d = (pa && pb) ? Math.hypot(pa[0] - pb[0], pa[1] - pb[1]) : 0;
@@ -11622,7 +11639,7 @@ function runVoiceProxTick() {
     }
     for (const [key, e] of held) {
       if (ok.has(key)) continue;
-      if (!ids.includes(e.a) || !ids.includes(e.b)) continue;             // left voice entirely: voice-leave already told them
+      if (!ids.includes(e.a) || !ids.includes(e.b)) continue;             // left entirely: voice-leave/unlisten told them
       if (!e.dropAt) { e.dropAt = now + voiceProxCfg.lingerMs; next.set(key, e); continue; }
       if (now < e.dropAt) { next.set(key, e); continue; }
       io.to(e.a).emit('voice-near', { drop: [e.b] });
@@ -11633,10 +11650,30 @@ function runVoiceProxTick() {
 }
 let voiceProxTimer = setInterval(runVoiceProxTick, Math.max(100, Math.round(1000 / voiceProxCfg.hz)));
 // Forget a socket's pairs when it leaves voice, so a reconnect is not judged against a stale set.
+// ⚠️ TELL THE OTHER END. Without this the person still there keeps a peer connection to somebody who has
+// gone, and — because the pair is no longer in `held` — nothing will ever tell them to close it.
 function dropVoicePairs(scope, sid) {
   const m = voicePairs.get(scope); if (!m) return;
-  for (const [key, e] of [...m]) if (e.a === sid || e.b === sid) m.delete(key);
+  for (const [key, e] of [...m]) {
+    if (e.a !== sid && e.b !== sid) continue;
+    const other = e.a === sid ? e.b : e.a;
+    io.to(other).emit('voice-near', { drop: [sid] });
+    m.delete(key);
+  }
   if (!m.size) voicePairs.delete(scope);
+}
+// Listening in on a world without joining it as a speaker.
+function addVoiceListener(scope, sid) {
+  if (!scope || !scope.startsWith('world:')) return;
+  (voiceListeners[scope] || (voiceListeners[scope] = new Set())).add(sid);
+}
+function removeVoiceListener(sid, scope) {
+  for (const k of (scope ? [scope] : Object.keys(voiceListeners))) {
+    const set = voiceListeners[k];
+    if (!set || !set.delete(sid)) continue;
+    dropVoicePairs(k, sid);
+    if (!set.size) delete voiceListeners[k];
+  }
 }
 // ==VOICE_PROX_BLOCK_END==
 const userCurrentFullUrl = {};
@@ -15400,6 +15437,16 @@ io.on('connection', (socket) => {
     delete socketVoiceScope[socket.id];
   });
 
+  // #73 — "I am in this world and would like to hear the people in it", without a microphone. Not a voice
+  // JOIN: it puts nothing in `roomVoice`, so a listener never appears in the who-list as being in a call and
+  // never shows a speaking dot. It only makes them eligible to be paired with somebody who IS talking.
+  socket.on('voice-listen', ({ scope }) => {
+    if (!scope || typeof scope !== 'string' || !scope.startsWith('world:')) return;
+    removeVoiceListener(socket.id);            // one world at a time
+    addVoiceListener(scope, socket.id);
+  });
+  socket.on('voice-unlisten', () => { removeVoiceListener(socket.id); });
+
   socket.on('voice-offer',      ({ to, sdp })       => { socket.to(to).emit('voice-offer',    { from: socket.id, sdp }); });
   socket.on('voice-answer',     ({ to, sdp })       => { socket.to(to).emit('voice-answer',   { from: socket.id, sdp }); });
   socket.on('voice-ice',        ({ to, candidate }) => { socket.to(to).emit('voice-ice',      { from: socket.id, candidate }); });
@@ -15802,6 +15849,7 @@ io.on('connection', (socket) => {
         socket.leave('voice:' + voiceScope);
         dropVoicePairs(voiceScope, socket.id);      // #73
       }
+      removeVoiceListener(socket.id);               // #73 — a listener leaves no roomVoice entry to clean up
       delete socketVoiceScope[socket.id];
       if (currentAvatarRoom && roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) {
         socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
