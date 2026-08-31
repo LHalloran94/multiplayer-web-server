@@ -3041,9 +3041,13 @@ const roomHistory = {};
 const roomMsgReactions = {}; // roomId → { msgId → { emoji → [username] } }
 // ---- Polls (#65) ----
 // ⭐⭐ MANY POLLS AT ONCE IS THE PREMISE, NOT AN EDGE CASE. The user's point was that a room will have several
-// running together, so the list is RANKED rather than chronological: anyone can upvote a poll, and the ones
-// people want to answer rise. That is why an upvote is a separate thing from a vote — one says "this is worth
-// asking", the other answers it.
+// running together, so the list is RANKED rather than chronological.
+// 🟥 RANKED BY HOW MANY PEOPLE HAVE ANSWERED, and this was changed after it first shipped ranking by a
+// separate upvote. The user's call, and it is the better one: "polls should be weighted based on how many
+// votes they have, probably not on being liked or not." Answering a poll is the real signal that it is worth
+// answering — it costs a click either way, and it cannot be spent on a poll you have not engaged with. The
+// upvote was a second currency for the same judgement, so it was removed rather than left as a control that
+// no longer decided anything.
 // ⚠️ IN MEMORY, keyed by room, exactly like `roomHistory` and `roomMsgReactions` above. A poll belongs to a
 // live conversation in a room, and the whole of that conversation is already ephemeral; persisting the polls
 // but not the messages they are about would be the odd choice, not this one.
@@ -3065,22 +3069,22 @@ const pollLastCreate = {};   // username → when they last started one, for the
 let pollSeq = 1;
 
 // What one client is allowed to know: the totals, and its own choices.
+function pollTotal(p) { return p.opts.reduce((a, o) => a + o.votes.size, 0); }
 function pollWire(p, username) {
   return {
     id: p.id, q: p.q, by: p.by, at: p.at, closed: p.closed,
     opts: p.opts.map(o => ({ text: o.text, n: o.votes.size })),
-    votes: p.opts.reduce((a, o) => a + o.votes.size, 0),
-    up: p.up.size,
+    votes: pollTotal(p),
     myVote: p.opts.findIndex(o => o.votes.has(username)),
-    myUp: p.up.has(username),
     mine: p.by === username,
   };
 }
-// ⭐ RANKED BY UPVOTES, then by age. Open polls always sit above closed ones — a finished poll is a result to
-// look at, not a thing to do, so it must not outrank a live question however popular it was.
+// ⭐ RANKED BY VOTES CAST, then by age. Open polls always sit above closed ones — a finished poll is a result
+// to look at, not a thing to do, so it must not outrank a live question however popular it was.
 function pollRank(a, b) {
   if (!a.closed !== !b.closed) return a.closed ? 1 : -1;
-  if (b.up.size !== a.up.size) return b.up.size - a.up.size;
+  const ta = pollTotal(a), tb = pollTotal(b);
+  if (tb !== ta) return tb - ta;
   return b.at - a.at;
 }
 // ⚠️ PER SOCKET, because `myVote` differs for every reader — see the secrecy note above. Everyone in the room
@@ -13472,7 +13476,7 @@ io.on('connection', (socket) => {
     }
     const poll = {
       id: 'p' + (pollSeq++), q: question, by: who, at: Date.now(), closed: false,
-      opts: options.map(t => ({ text: t, votes: new Set() })), up: new Set(),
+      opts: options.map(t => ({ text: t, votes: new Set() })),
     };
     list.push(poll);
     pollLastCreate[who] = Date.now();
@@ -13504,16 +13508,6 @@ io.on('connection', (socket) => {
     const had = poll.opts.findIndex(o => o.votes.has(who));
     poll.opts.forEach(o => o.votes.delete(who));
     if (i >= 0 && i < poll.opts.length && i !== had) poll.opts[i].votes.add(who);
-    broadcastPolls(currentRoom);
-  });
-
-  socket.on('poll-upvote', ({ id }) => {
-    if (!currentRoom) return;
-    const who = currentUsername || socketToUsername[socket.id];
-    if (!who) return;
-    const poll = (roomPolls[currentRoom] || []).find(p => p.id === id);
-    if (!poll) return;
-    if (poll.up.has(who)) poll.up.delete(who); else poll.up.add(who);
     broadcastPolls(currentRoom);
   });
 
