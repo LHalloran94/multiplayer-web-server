@@ -2568,6 +2568,65 @@ app.post('/chat-images/:id/block', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ---- How long messages live, and how far back you can look ----
+// ⭐⭐ THESE ARE TWO DIFFERENT NUMBERS AND EVERY CHAT TREATS THEM SEPARATELY. Retention is how long the server
+// keeps a message; scrollback is how much of it anyone is ever handed. Even the products that keep everything
+// for ever only load the last few dozen, because nobody reads further back than that.
+// ⭐ THE SHAPE OF THIS PRODUCT DECIDES THE NUMBERS: page chat is a live rolling thing tied to being on a page
+// (it is in memory, capped, and goes at restart — closer to IRC than to Discord), a Room is a place you come
+// back to but not an archive, and DMs are the exception people expect to persist.
+// ⚠️ AND THE COST IS INVERTED FROM THE INTUITION: DMs feel like the important ones to keep, and they are also
+// the CHEAPEST — one pair, low volume, small text rows. Rooms are the expensive surface. So the short window
+// goes on Rooms and DMs are bounded by a count alone, with no clock on them at all.
+const MSG_SCROLLBACK   = 100;    // Room / group messages handed over on open — the NEWEST hundred
+const DM_SCROLLBACK    = 200;    // …and DMs, which are the ones worth looking back through
+const ROOM_MSG_TTL_DAYS = 30;    // a Room is a place, not a record. Older than this and it goes
+const ROOM_MSG_CAP      = 500;   // …and a busy Room stays bounded even INSIDE those 30 days
+// ⚠️ NO CLOCK ON DMs, DELIBERATELY, and there is a second reason beyond cost: a DM is only written down at all
+// when the people in it chose to save it (the client's per-conversation save toggle). Sweeping saved messages
+// by age would be overruling that decision on their behalf. A count still bounds it, so nothing is unbounded.
+const DM_MSG_CAP        = 1000;  // per conversation
+
+// Indexes for the newest-N window and for the sweep below. Both scan by conversation, then by time.
+db.exec('CREATE INDEX IF NOT EXISTS idx_room_messages_room ON room_messages (room_id, sent_at)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_group_messages_group ON group_messages (group_id, sent_at)');
+db.exec('CREATE INDEX IF NOT EXISTS idx_dm_messages_pair ON dm_messages (from_discord_id, to_discord_id, sent_at)');
+
+// Trim one conversation to its newest `cap` messages. ⚠️ Expressed as "keep the newest N" rather than "delete
+// the oldest N" on purpose — the two differ every time a message arrives mid-sweep, and only the first one is
+// self-correcting.
+function trimToCap(table, whereSql, params, cap) {
+  return db.prepare(
+    'DELETE FROM ' + table + ' WHERE (' + whereSql + ') AND id NOT IN (' +
+    'SELECT id FROM ' + table + ' WHERE (' + whereSql + ') ORDER BY sent_at DESC, id DESC LIMIT ' + cap + ')'
+  ).run(...params, ...params).changes;
+}
+
+function messageSweep() {
+  try {
+    const cutoff = Date.now() - ROOM_MSG_TTL_DAYS * 86400 * 1000;   // sent_at is milliseconds here
+    let n = db.prepare('DELETE FROM room_messages WHERE sent_at < ?').run(cutoff).changes;
+    n += db.prepare('DELETE FROM group_messages WHERE sent_at < ?').run(cutoff).changes;
+
+    for (const r of db.prepare('SELECT room_id FROM room_messages GROUP BY room_id HAVING COUNT(*) > ?').all(ROOM_MSG_CAP))
+      n += trimToCap('room_messages', 'room_id = ?', [r.room_id], ROOM_MSG_CAP);
+    for (const g of db.prepare('SELECT group_id FROM group_messages GROUP BY group_id HAVING COUNT(*) > ?').all(ROOM_MSG_CAP))
+      n += trimToCap('group_messages', 'group_id = ?', [g.group_id], ROOM_MSG_CAP);
+
+    // ⚠️ A CONVERSATION IS AN UNORDERED PAIR — grouping by (from, to) would treat each direction as its own
+    // conversation and let a pair hold twice the cap while each half looked compliant.
+    const pairs = db.prepare(`SELECT MIN(from_discord_id, to_discord_id) AS a, MAX(from_discord_id, to_discord_id) AS b
+      FROM dm_messages GROUP BY a, b HAVING COUNT(*) > ?`).all(DM_MSG_CAP);
+    for (const p of pairs)
+      n += trimToCap('dm_messages', '(from_discord_id=? AND to_discord_id=?) OR (from_discord_id=? AND to_discord_id=?)',
+        [p.a, p.b, p.b, p.a], DM_MSG_CAP);
+
+    if (n) console.log('[messages] swept ' + n + ' past retention');
+  } catch (e) { console.log('[messages] sweep failed: ' + e.message); }
+}
+messageSweep();
+setInterval(messageSweep, 24 * 60 * 60 * 1000).unref?.();
+
 app.get('/rooms/:id/messages', (req, res) => {
   const { id } = req.params;
   try {
@@ -2579,13 +2638,18 @@ app.get('/rooms/:id/messages', (req, res) => {
       const member = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?').get(id, user.sub);
       if (!member) return res.status(403).json({ error: 'Not a member' });
     }
+    // 🟥 DESC THEN REVERSED — the window is the NEWEST hundred, not the first hundred ever sent. Read with
+    // ASC this took the oldest rows, so a room that had ever passed a hundred messages opened on its first
+    // night for ever and the actual conversation was unreachable. Verified against a room of 250 before it
+    // was changed: it handed back "message 1" … "message 100".
+    // ⚠️ `id` breaks ties, because sent_at is a millisecond stamp and two messages can share one.
     const rows = db.prepare(`
       SELECT rm.id, rm.from_discord_id, u.username, rm.text, rm.sent_at
       FROM room_messages rm
       LEFT JOIN users u ON u.discord_id = rm.from_discord_id
       WHERE rm.room_id = ?
-      ORDER BY rm.sent_at ASC LIMIT 100
-    `).all(id);
+      ORDER BY rm.sent_at DESC, rm.id DESC LIMIT ${MSG_SCROLLBACK}
+    `).all(id).reverse();                                   // back into reading order for the panel
     res.json(rows.map(r => ({ id: r.id, fromDiscordId: r.from_discord_id, username: r.username || 'Unknown', text: r.text, ts: r.sent_at })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -2726,8 +2790,8 @@ app.get('/groups/:id/messages', (req, res) => {
       SELECT gm.from_discord_id, u.username, gm.text, gm.sent_at
       FROM group_messages gm
       LEFT JOIN users u ON u.discord_id = gm.from_discord_id
-      WHERE gm.group_id = ? ORDER BY gm.sent_at ASC LIMIT 100
-    `).all(id);
+      WHERE gm.group_id = ? ORDER BY gm.sent_at DESC, gm.id DESC LIMIT ${MSG_SCROLLBACK}
+    `).all(id).reverse();                                   // newest window, read the right way round
     res.json(rows.map(r => ({ fromDiscordId: r.from_discord_id, username: r.username || 'Unknown', text: r.text, ts: r.sent_at })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -2962,8 +3026,8 @@ app.get('/dms', (req, res) => {
     const rows = db.prepare(`
       SELECT from_discord_id, text, sent_at FROM dm_messages
       WHERE (from_discord_id=? AND to_discord_id=?) OR (from_discord_id=? AND to_discord_id=?)
-      ORDER BY sent_at ASC LIMIT 200
-    `).all(user.sub, withId, withId, user.sub);
+      ORDER BY sent_at DESC, id DESC LIMIT ${DM_SCROLLBACK}
+    `).all(user.sub, withId, withId, user.sub).reverse();   // newest window, read the right way round
     res.json(rows.map(r => ({ fromDiscordId: r.from_discord_id, text: r.text, ts: r.sent_at })));
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -11382,7 +11446,11 @@ const socketToUsername = {};   // socketId → username (identity key for unveri
 const discordIdToSocket = {};       // discordId → socketId (latest socket, for DMs/invites/etc.)
 const discordIdToStalkSockets = {}; // discordId → Set<socketId> (all active tabs, for stalkee-nav)
 const discordIdToFullUrl = {}; // discordId → current full URL (active tab)
-const MAX_HISTORY = 50;
+// ⭐ PAGE CHAT IS THE LIVE, ROLLING ONE — in memory, oldest pushed off the end, gone at restart. It is the
+// IRC/Twitch shape rather than the Discord one, and deliberately: it belongs to being on the page, not to a
+// record of the page. 50 was tight enough that a busy page burned through it in a couple of minutes; a few
+// hundred lines of text costs nothing.
+const MAX_HISTORY = 200;
 const MAX_SPRAYS = 50;
 const MAX_MEDIA = 30;
 
