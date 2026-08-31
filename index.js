@@ -3039,6 +3039,61 @@ const roomUsers = {};       // roomId → { socketId: { username, verified, avat
 const pageUsers = {};       // bareUrlRoom → { socketId: { username, discord_id } }
 const roomHistory = {};
 const roomMsgReactions = {}; // roomId → { msgId → { emoji → [username] } }
+// ---- Polls (#65) ----
+// ⭐⭐ MANY POLLS AT ONCE IS THE PREMISE, NOT AN EDGE CASE. The user's point was that a room will have several
+// running together, so the list is RANKED rather than chronological: anyone can upvote a poll, and the ones
+// people want to answer rise. That is why an upvote is a separate thing from a vote — one says "this is worth
+// asking", the other answers it.
+// ⚠️ IN MEMORY, keyed by room, exactly like `roomHistory` and `roomMsgReactions` above. A poll belongs to a
+// live conversation in a room, and the whole of that conversation is already ephemeral; persisting the polls
+// but not the messages they are about would be the odd choice, not this one.
+// 🟥 VOTES ARE SECRET. Reactions are public here — deliberately, and #67 even shows whose they are — but a
+// vote is not a reaction: people answer differently when the room can see what they picked. So the payload
+// carries COUNTS plus your own choice and never anybody else's, and that is the whole reason the broadcast
+// below is assembled per socket instead of being sent once to the room.
+// 🟥 AND IT LIVES OUT HERE, at module scope, beside the other per-room state. Declared inside the connection
+// handler it would compile, run, and give every socket its own private set of polls — the fourth instance of
+// that mistake on this project, and the one that does not announce itself.
+const POLL_MAX_OPEN_PER_USER = 2;      // open polls one person may have running in a room at once
+const POLL_COOLDOWN_MS       = 45_000; // …and how soon after one they may start another
+const POLL_MAX_PER_ROOM      = 40;     // oldest CLOSED polls fall off the end past this
+const POLL_MAX_OPTIONS       = 6;
+const POLL_Q_MAX             = 140;
+const POLL_OPT_MAX           = 60;
+const roomPolls = {};        // roomKey → [poll]
+const pollLastCreate = {};   // username → when they last started one, for the cooldown
+let pollSeq = 1;
+
+// What one client is allowed to know: the totals, and its own choices.
+function pollWire(p, username) {
+  return {
+    id: p.id, q: p.q, by: p.by, at: p.at, closed: p.closed,
+    opts: p.opts.map(o => ({ text: o.text, n: o.votes.size })),
+    votes: p.opts.reduce((a, o) => a + o.votes.size, 0),
+    up: p.up.size,
+    myVote: p.opts.findIndex(o => o.votes.has(username)),
+    myUp: p.up.has(username),
+    mine: p.by === username,
+  };
+}
+// ⭐ RANKED BY UPVOTES, then by age. Open polls always sit above closed ones — a finished poll is a result to
+// look at, not a thing to do, so it must not outrank a live question however popular it was.
+function pollRank(a, b) {
+  if (!a.closed !== !b.closed) return a.closed ? 1 : -1;
+  if (b.up.size !== a.up.size) return b.up.size - a.up.size;
+  return b.at - a.at;
+}
+// ⚠️ PER SOCKET, because `myVote` differs for every reader — see the secrecy note above. Everyone in the room
+// gets the same counts in the same order; only their own marks differ.
+function broadcastPolls(room) {
+  if (!room) return;
+  const list = (roomPolls[room] || []).slice().sort(pollRank);
+  for (const s of io.sockets.sockets.values()) {
+    if (!s.rooms.has(room)) continue;
+    const who = socketToUsername[s.id] || '';
+    s.emit('polls', list.map(p => pollWire(p, who)));
+  }
+}
 const roomAnnotations = {};
 const roomSprays = {};
 const roomMedia = {};
@@ -13245,6 +13300,7 @@ io.on('connection', (socket) => {
     pageUsers[currentRoom][socket.id] = { username, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
+    if (roomPolls[currentRoom]) broadcastPolls(currentRoom);   // #65 — the polls running in here
     if (roomAnnotations[currentPageRoom]) socket.emit('annotations-init', roomAnnotations[currentPageRoom]);
     if (roomSprays[currentPageRoom]) socket.emit('sprays-init', roomSprays[currentPageRoom]);
     if (roomMedia[currentRoom]) socket.emit('media-init', roomMedia[currentRoom]);
@@ -13385,6 +13441,100 @@ io.on('connection', (socket) => {
     if (!entry) return;                       // remembered above, so a later enter still carries it
     entry.blob = currentBlob;
     broadcastPresence(currentPresenceRoom);
+  });
+
+
+  // ---- Polls (#65) — the handlers. The state and the reasoning live at module scope, beside roomHistory. ----
+  socket.on('polls-get', () => { if (currentRoom) broadcastPolls(currentRoom); });
+
+  socket.on('poll-create', ({ q, opts }) => {
+    if (!currentRoom) return;
+    const who = currentUsername || socketToUsername[socket.id];
+    if (!who) return;
+    const question = String(q || '').trim().slice(0, POLL_Q_MAX);
+    const options = (Array.isArray(opts) ? opts : [])
+      .map(o => String(o || '').trim().slice(0, POLL_OPT_MAX))
+      .filter(Boolean)
+      .slice(0, POLL_MAX_OPTIONS);
+    if (!question || options.length < 2) {
+      return socket.emit('poll-refused', { error: 'A poll needs a question and at least two options' });
+    }
+    const list = roomPolls[currentRoom] || (roomPolls[currentRoom] = []);
+    // 🟥 BOTH LIMITS ARE ENFORCED HERE AND NOT ONLY IN THE CLIENT. The client's copies exist to refuse
+    // instantly and say why; a limit that lives only there is a suggestion.
+    const open = list.filter(p => p.by === who && !p.closed).length;
+    if (open >= POLL_MAX_OPEN_PER_USER) {
+      return socket.emit('poll-refused', { error: 'You already have ' + POLL_MAX_OPEN_PER_USER + ' polls running — close one first' });
+    }
+    const since = Date.now() - (pollLastCreate[who] || 0);
+    if (since < POLL_COOLDOWN_MS) {
+      return socket.emit('poll-refused', { error: 'Wait ' + Math.ceil((POLL_COOLDOWN_MS - since) / 1000) + 's before starting another poll' });
+    }
+    const poll = {
+      id: 'p' + (pollSeq++), q: question, by: who, at: Date.now(), closed: false,
+      opts: options.map(t => ({ text: t, votes: new Set() })), up: new Set(),
+    };
+    list.push(poll);
+    pollLastCreate[who] = Date.now();
+    // Oldest CLOSED poll goes first: a room at the cap must not lose a live question to make room.
+    while (list.length > POLL_MAX_PER_ROOM) {
+      const i = list.findIndex(p => p.closed);
+      list.splice(i >= 0 ? i : 0, 1);
+    }
+    broadcastPolls(currentRoom);
+    // ⭐ AND IT IS ANNOUNCED IN THE CHAT (the user asked for this): a panel nobody has open is a poll nobody
+    // knows about. It goes out as an ordinary system message so it lands in history like anything else.
+    const msg = { from: 'system', text: who + ' started a poll — "' + question + '"', system: true, ts: Date.now() };
+    if (roomHistory[currentRoom]) {
+      roomHistory[currentRoom].push(msg);
+      if (roomHistory[currentRoom].length > MAX_HISTORY) roomHistory[currentRoom].shift();
+    }
+    io.to(currentRoom).emit('message', msg);
+  });
+
+  socket.on('poll-vote', ({ id, opt }) => {
+    if (!currentRoom) return;
+    const who = currentUsername || socketToUsername[socket.id];
+    if (!who) return;
+    const poll = (roomPolls[currentRoom] || []).find(p => p.id === id);
+    if (!poll || poll.closed) return;
+    const i = Number(opt);
+    // ⚠️ ONE VOTE, AND IT IS CHANGEABLE. Clearing every option first is what makes a second click a CHANGE of
+    // mind rather than a second vote; clicking the option you already picked takes it back.
+    const had = poll.opts.findIndex(o => o.votes.has(who));
+    poll.opts.forEach(o => o.votes.delete(who));
+    if (i >= 0 && i < poll.opts.length && i !== had) poll.opts[i].votes.add(who);
+    broadcastPolls(currentRoom);
+  });
+
+  socket.on('poll-upvote', ({ id }) => {
+    if (!currentRoom) return;
+    const who = currentUsername || socketToUsername[socket.id];
+    if (!who) return;
+    const poll = (roomPolls[currentRoom] || []).find(p => p.id === id);
+    if (!poll) return;
+    if (poll.up.has(who)) poll.up.delete(who); else poll.up.add(who);
+    broadcastPolls(currentRoom);
+  });
+
+  // Closing keeps the poll and its result; deleting takes it away. Both are the author's alone.
+  socket.on('poll-close', ({ id }) => {
+    if (!currentRoom) return;
+    const who = currentUsername || socketToUsername[socket.id];
+    const poll = (roomPolls[currentRoom] || []).find(p => p.id === id);
+    if (!poll || poll.by !== who) return;
+    poll.closed = true;
+    broadcastPolls(currentRoom);
+  });
+
+  socket.on('poll-delete', ({ id }) => {
+    if (!currentRoom) return;
+    const who = currentUsername || socketToUsername[socket.id];
+    const list = roomPolls[currentRoom] || [];
+    const i = list.findIndex(p => p.id === id);
+    if (i < 0 || list[i].by !== who) return;
+    list.splice(i, 1);
+    broadcastPolls(currentRoom);
   });
 
   // #64 — the chat font, carried on presence exactly as the name colour is.
