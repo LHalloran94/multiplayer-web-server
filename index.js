@@ -1656,6 +1656,41 @@ app.get('/profile/:discordId', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// #75: what somebody has MADE — the public Rooms they host and the Worlds they published. Its own route
+// rather than more fields on /profile, because the little hover card does not need any of it and would pay
+// two extra queries on every hover.
+// 🟥 "PUBLICLY VISIBLE" IS THE WHOLE POINT OF THE CARD, so this lists only rooms that are actually public:
+// a private room, a friends-only room, or an invite-code room is not somebody else's business, and listing
+// one here would route around the audiences work rather than honouring it.
+app.get('/profile/:discordId/creations', (req, res) => {
+  const caller = verifyToken(req);
+  const me = caller ? caller.sub : '\x00';
+  const target = String(req.params.discordId || '');
+  try {
+    // A block hides a person's work in both directions, the same as it hides everything else about them.
+    if (caller && blockedEitherWay(me, target)) return res.json({ rooms: [], worlds: [] });
+    const rooms = db.prepare(`
+      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+             (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
+             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
+             (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
+             (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_count,
+             (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = r.id) as rating_avg,
+             (SELECT 1 FROM room_favourites rf WHERE rf.room_id = r.id AND rf.discord_id = ?) as favourited,
+             (SELECT 1 FROM room_likes rl2 WHERE rl2.room_id = r.id AND rl2.discord_id = ?) as liked,
+             (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
+      FROM rooms r
+      WHERE r.owner_id = ? AND r.public = 1 AND (r.kind IS NULL OR r.kind != 'published')
+      ORDER BY r.created_at DESC LIMIT 40
+    `).all(me, me, me, target).map(normalizeRoomSocial);
+    const worlds = db.prepare(`SELECT ${WORLD_SOCIAL_COLS},
+        (SELECT 1 FROM room_favourites rf WHERE rf.room_id = w.room_id AND rf.discord_id = ?) as favourited
+      FROM published_worlds w LEFT JOIN rooms r ON r.id = w.room_id
+      WHERE w.owner_id = ? ORDER BY w.updated_at DESC LIMIT 40`).all(me, me, me, target).map(mapWorldRow);
+    res.json({ rooms, worlds });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 app.put('/profile', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
