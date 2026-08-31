@@ -9707,7 +9707,9 @@ db.exec(`CREATE TABLE IF NOT EXISTS published_worlds (
 )`);
 const PUBLISHED_MAX_BYTES = 2_000_000;                // content blob cap per World (~2 MB)
 const PUBLISHED_PER_USER = 12;                        // how many Worlds one user may have published at once
-const PUBLISHED_THUMB_MAX = 60_000;                   // thumbnail data-URI cap (chars)
+// ⚠️ 400k, not 60k. The previews render at 480x270 now (192 was upscaled into a blur by the card), and this
+// is the budget for EVERY Level's picture in one World, so a four-Level World needs room for four.
+const PUBLISHED_THUMB_MAX = 400_000;                  // thumbnail data-URI cap (chars, whole array)
 // #81: a World published with a CANVAS backdrop carries the picture that was on the shared canvas when it was
 // published, so the creator's drawing IS the Level's background instead of whatever happens to be drawn in the
 // room right now. Bigger than a thumbnail because it is artwork people will look at, but still one image per
