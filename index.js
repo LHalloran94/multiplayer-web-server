@@ -12724,6 +12724,7 @@ io.on('connection', (socket) => {
   // page-default Room a user browses un-entered (observes counts only) until a deliberate action; a
   // custom/locked context Room is always entered. Drives whether we add to roomUsers + announce.
   let currentEntered = false;
+  let currentFont = null;         // #64 — this socket's chosen chat font, tracked beside the colour and for the same reason
   let currentColor = null;        // this socket's chosen name colour — tracked separately so every roomUsers entry we (re)build (join, room-presence, ctx-room) carries it
   // 🟥 AND THE SAME FOR THE BLOB, WHICH USED TO RIDE ONLY ON CURSOR PACKETS (Trello #59). Appearance was
   // learned from the live `cursor` stream and nowhere else, so anyone who had not moved their mouse since you
@@ -13137,7 +13138,7 @@ io.on('connection', (socket) => {
   // ⚠️ `tabSession` still arrives on a private join, and that is the point: it lets us REMOVE this tab from
   // the set the user's followers mirror. Sending nothing would have left the tab's previous, public URL
   // sitting in the snapshot — followers would keep opening the page you just navigated away from.
-  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId, color, blob, entered, priv }) => {
+  socket.on('join', ({ url, fullUrl, username, token, visible, tabSession, ctxRoomId, color, font, blob, entered, priv }) => {
     let verified = false;
     let avatar = null;
     let discordId = null;
@@ -13237,9 +13238,10 @@ io.on('connection', (socket) => {
     // in roomUsers and announces nothing — general browsing isn't broadcast.
     currentEntered = (currentPresenceRoom !== currentRoom) || !!entered;
     currentColor = color || null;
+    currentFont = /^[a-z]{0,12}$/.test(String(font || '')) ? (font || null) : null;
     currentBlob = sanitizeBlob(blob) || currentBlob;
     socketVisible[socket.id] = visible !== false;
-    if (currentEntered) roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId, color: currentColor, blob: currentBlob };
+    if (currentEntered) roomUsers[currentPresenceRoom][socket.id] = { username, verified, avatar, discord_id: discordId, color: currentColor, font: currentFont, blob: currentBlob };
     pageUsers[currentRoom][socket.id] = { username, discord_id: discordId };
     if (roomHistory[currentRoom]) socket.emit('history', roomHistory[currentRoom]);
     if (roomMsgReactions[currentRoom]) socket.emit('reactions-init', roomMsgReactions[currentRoom]);
@@ -13382,6 +13384,19 @@ io.on('connection', (socket) => {
     const entry = roomUsers[currentPresenceRoom] && roomUsers[currentPresenceRoom][socket.id];
     if (!entry) return;                       // remembered above, so a later enter still carries it
     entry.blob = currentBlob;
+    broadcastPresence(currentPresenceRoom);
+  });
+
+  // #64 — the chat font, carried on presence exactly as the name colour is.
+  // ⭐ THE SERVER TREATS IT AS AN OPAQUE SHORT WORD AND DOES NOT KNOW THE LIST. That is the safe split: the
+  // list of fonts, and the size correction each one needs, are a client concern, and every client resolves an
+  // unknown key to its own default. So the worst a hostile client can put here is a word that renders as the
+  // ordinary font — it cannot nominate a typeface, or a size, on anybody else's screen.
+  socket.on('set-chat-font', ({ font }) => {
+    currentFont = /^[a-z]{0,12}$/.test(String(font || '')) ? (font || null) : null;
+    const entry = roomUsers[currentPresenceRoom] && roomUsers[currentPresenceRoom][socket.id];
+    if (!entry) return;                       // remembered above, so a later enter still carries it
+    entry.font = currentFont;
     broadcastPresence(currentPresenceRoom);
   });
 
@@ -15318,13 +15333,13 @@ io.on('connection', (socket) => {
       currentPresenceRoom = next;
       if (next !== currentRoom) socket.join(next);
       if (!roomUsers[next]) roomUsers[next] = {};
-      if (nextEntered) roomUsers[next][socket.id] = info || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor, blob: currentBlob };
+      if (nextEntered) roomUsers[next][socket.id] = info || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor, font: currentFont, blob: currentBlob };
       currentEntered = nextEntered;
       broadcastPresence(next);
     } else if (nextEntered !== currentEntered) {
       // Same bucket, entered intent changed (e.g. explicit Leave/Enter on the page-default Room without
       // a bucket switch) — fall through to room-presence semantics inline.
-      if (nextEntered) roomUsers[next][socket.id] = (roomUsers[next] && roomUsers[next][socket.id]) || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor, blob: currentBlob };
+      if (nextEntered) roomUsers[next][socket.id] = (roomUsers[next] && roomUsers[next][socket.id]) || { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor, font: currentFont, blob: currentBlob };
       else if (roomUsers[next]) delete roomUsers[next][socket.id];
       currentEntered = nextEntered;
       broadcastPresence(next);
@@ -15376,7 +15391,7 @@ io.on('connection', (socket) => {
     if (active) {
       if (currentEntered) return;                 // already in — idempotent
       if (!roomUsers[currentPresenceRoom]) roomUsers[currentPresenceRoom] = {};
-      roomUsers[currentPresenceRoom][socket.id] = { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor, blob: currentBlob };
+      roomUsers[currentPresenceRoom][socket.id] = { username: currentUsername, verified: !!socketToDiscordId[socket.id], avatar: null, discord_id: socketToDiscordId[socket.id] || null, color: currentColor, font: currentFont, blob: currentBlob };
       currentEntered = true;
       broadcastPresence(currentPresenceRoom);
     } else {
