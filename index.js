@@ -2212,7 +2212,7 @@ app.delete('/rooms/:id/rating', (req, res) => {
 app.post('/worlds', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { worldId, name, description, author, content, thumb, allow_remix, durability } = req.body || {};
+  const { worldId, name, description, author, content, thumb, bg_image, allow_remix, durability } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   const levels = validatePublishContent(content);
   if (!levels) return res.status(400).json({ error: 'Invalid World content' });
@@ -2222,6 +2222,9 @@ app.post('/worlds', (req, res) => {
   const trimmedDesc = (description || '').trim().slice(0, 200) || null;
   const trimmedAuthor = (author || '').trim().slice(0, 40) || null;
   const thumbStr = sanitizeWorldThumbs(thumb);
+  // The canvas backdrop, frozen at publish. Same rule as a thumbnail: it ends up in an <img>, so only a
+  // data: image is accepted. `null` clears a previously stored one when the creator switches away from canvas.
+  const bgStr = (typeof bg_image === 'string' && bg_image.length <= PUBLISHED_BG_MAX && THUMB_OK.test(bg_image)) ? bg_image : null;
   const remix = allow_remix ? 1 : 0;
   const dura = (durability === 'persistent') ? 'persistent' : 'showcase';
   try {
@@ -2229,8 +2232,8 @@ app.post('/worlds', (req, res) => {
     if (existing) {                                                  // ---- update / re-publish ----
       if (existing.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
       const spec = derivePubEnvSpec(levels, existing.id);
-      db.prepare(`UPDATE published_worlds SET name=?, author=?, description=?, thumb=?, content=?, level_count=?, size_bytes=?, allow_remix=?, durability=?, live_state=NULL, updated_at=unixepoch() WHERE id=?`)
-        .run(trimmedName, trimmedAuthor, trimmedDesc, thumbStr, contentStr, levels.length, contentStr.length, remix, dura, existing.id);
+      db.prepare(`UPDATE published_worlds SET name=?, author=?, description=?, thumb=?, bg_image=?, content=?, level_count=?, size_bytes=?, allow_remix=?, durability=?, live_state=NULL, updated_at=unixepoch() WHERE id=?`)
+        .run(trimmedName, trimmedAuthor, trimmedDesc, thumbStr, bgStr, contentStr, levels.length, contentStr.length, remix, dura, existing.id);
       db.prepare('UPDATE rooms SET name=?, env_spec=? WHERE id=?').run(trimmedName, JSON.stringify(spec), existing.room_id);
       return res.json({ worldId: existing.id, roomId: existing.room_id, level_count: levels.length, env_spec: spec });
     }
@@ -2242,8 +2245,8 @@ app.post('/worlds', (req, res) => {
     const spec = derivePubEnvSpec(levels, id);
     db.prepare('INSERT INTO rooms (id, name, owner_id, public, kind, env_spec) VALUES (?, ?, ?, 1, \'published\', ?)').run(roomId, trimmedName, user.sub, JSON.stringify(spec));
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(roomId, user.sub);
-    db.prepare(`INSERT INTO published_worlds (id, owner_id, room_id, name, author, description, thumb, content, level_count, size_bytes, allow_remix, durability) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id, user.sub, roomId, trimmedName, trimmedAuthor, trimmedDesc, thumbStr, contentStr, levels.length, contentStr.length, remix, dura);
+    db.prepare(`INSERT INTO published_worlds (id, owner_id, room_id, name, author, description, thumb, bg_image, content, level_count, size_bytes, allow_remix, durability) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, user.sub, roomId, trimmedName, trimmedAuthor, trimmedDesc, thumbStr, bgStr, contentStr, levels.length, contentStr.length, remix, dura);
     res.json({ worldId: id, roomId, level_count: levels.length, env_spec: spec });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
@@ -2265,6 +2268,18 @@ app.get('/worlds', (req, res) => {
 });
 
 // Lifetime enter counter — public (entering a World needs no login). Best-effort; ignores unknown ids.
+// #81: the frozen canvas backdrop for one published World. Its own route, and NOT part of the /worlds listing,
+// because it is a few hundred KB of artwork that only matters once you are actually standing in the World —
+// putting it in the list would make browsing pay for every World's background.
+// ⚠️ Keyed by ROOM id as well as World id, because the client knows which room it is in, not which World.
+app.get('/worlds/:id/bg', (req, res) => {
+  try {
+    const id = String(req.params.id || '');
+    const row = db.prepare('SELECT bg_image FROM published_worlds WHERE id = ? OR room_id = ?').get(id, id);
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json({ bg: (row && row.bg_image) || null });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
 app.post('/worlds/:id/play', (req, res) => {
   try { db.prepare('UPDATE published_worlds SET play_count = play_count + 1 WHERE id = ?').run(req.params.id); } catch (e) {}
   res.json({ ok: true });
@@ -9693,6 +9708,12 @@ db.exec(`CREATE TABLE IF NOT EXISTS published_worlds (
 const PUBLISHED_MAX_BYTES = 2_000_000;                // content blob cap per World (~2 MB)
 const PUBLISHED_PER_USER = 12;                        // how many Worlds one user may have published at once
 const PUBLISHED_THUMB_MAX = 60_000;                   // thumbnail data-URI cap (chars)
+// #81: a World published with a CANVAS backdrop carries the picture that was on the shared canvas when it was
+// published, so the creator's drawing IS the Level's background instead of whatever happens to be drawn in the
+// room right now. Bigger than a thumbnail because it is artwork people will look at, but still one image per
+// World, fetched once on entry rather than shipped in every room listing.
+const PUBLISHED_BG_MAX = 400_000;
+try { db.exec('ALTER TABLE published_worlds ADD COLUMN bg_image TEXT'); } catch {}
 // #81 level previews. The column holds a JSON ARRAY — one picture per Level, so a multi-Level World can be
 // flicked through — and legacy rows hold a bare data URL, which is read as a one-Level array.
 // ⚠️ OVER THE CAP, KEEP THE FIRST ONES RATHER THAN DROPPING ALL OF THEM. The old line was
