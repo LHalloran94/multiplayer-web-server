@@ -1866,7 +1866,7 @@ function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { retu
 app.post('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, description, public: isPublic, friendsOnly, scope, url, env_spec, levelLock, features, icon, no_host } = req.body;
+  const { name, description, public: isPublic, friendsOnly, scope, url, env_spec, levelLock, features, icon, no_host, creator } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   try {
     const id = generateRoomCode();
@@ -1876,14 +1876,22 @@ app.post('/rooms', (req, res) => {
     let roomIcon = (typeof icon === 'string' ? icon.trim() : '');
     if (/^data:/i.test(roomIcon)) roomIcon = '';        // reject inline data URLs (too big)
     roomIcon = roomIcon.slice(0, 512) || null;
-    const pub = isPublic ? 1 : 0;
+    // ⭐ A CREATOR room is a workspace, not a place: it is where "＋ New World" drops you to build. It is
+    // PRIVATE BY CONSTRUCTION (the flag overrides whatever visibility was asked for) and it is kept out of
+    // every room listing the same way a published World's backing room is — see the `kind NOT IN` filters
+    // below. It is still an ordinary room in every other respect, which is what makes inviting someone in
+    // to co-build free later. Reached through `GET /rooms/drafts`.
+    const isCreator = !!creator;
+    const pub = (isPublic && !isCreator) ? 1 : 0;
     // Friends-only is a non-public mode: visible/joinable to the owner's accepted friends, never listed publicly.
-    const fr = (!isPublic && friendsOnly) ? 1 : 0;
+    const fr = (!isPublic && friendsOnly && !isCreator) ? 1 : 0;
     // A public room is bound to EITHER a page URL OR a site scope OR nothing (global) — mutually exclusive.
     const roomUrl = (isPublic && url) ? url.trim().slice(0, 500) : null;
     const roomScope = (isPublic && !roomUrl && scope) ? scope.trim().slice(0, 253) : null;
     const spec = sanitizeEnvSpec(env_spec);                // null = a plain chat room (no World)
-    const kind = spec ? 'world' : null;
+    // ⚠️ A creator room without a World would be a chat room you cannot find — the flag only means anything
+    // alongside a spec, so it is ignored without one rather than producing an unreachable row.
+    const kind = spec ? (isCreator ? 'creator' : 'world') : null;
     // Phase 3: a World room sets per-Level build access at creation via `levelLock` (array of level
     // indices where building is disabled for non-owners; default = every Level buildable). The room-wide
     // `build` mode stays 'all' and the host can still flip it / grant individuals later. Stored in perms.
@@ -2070,10 +2078,51 @@ app.get('/rooms', (req, res) => {
              (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
       FROM rooms r
       JOIN room_members rm ON rm.room_id = r.id AND rm.discord_id = ?
-      WHERE r.kind IS NULL OR r.kind != 'published'
+      WHERE r.kind IS NULL OR r.kind NOT IN ('published', 'creator')
       ORDER BY r.created_at ASC
     `).all(user.sub, user.sub, user.sub, user.sub);
     res.json(rows.map(normalizeRoomSocial));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ---- "Your Worlds": the caller's own unfinished Worlds (creator rooms) ----
+// These are deliberately absent from every other listing, so this is their ONLY discovery path — the same
+// arrangement a published World's backing room already has, and the reason `findRoom` has to be told about
+// them client-side or entering one silently does nothing.
+// ⚠️ Owner, not membership: a creator room you were invited into to co-build is someone else's draft and
+// belongs under their name, not in your list.
+app.get('/rooms/drafts', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = db.prepare(`
+      SELECT r.id, r.name, r.owner_id, r.public, r.friends_only, r.scope, r.url, r.description, r.kind,
+             r.env_spec, r.icon, r.perms, r.no_host, r.created_at,
+             (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
+             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count
+      FROM rooms r
+      WHERE r.owner_id = ? AND r.kind = 'creator'
+      ORDER BY r.created_at DESC
+    `).all(user.sub);
+    res.json(rows.map(normalizeRoomSocial));
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// Rename a room you own. ⭐ Exists for the drafts list: "＋ New World" names a World for you so it can drop
+// you straight in without a form, which is only acceptable if the name is changeable afterwards.
+app.patch('/rooms/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id } = req.params;
+  const { name } = req.body || {};
+  if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'Name required' });
+  try {
+    const room = db.prepare('SELECT owner_id FROM rooms WHERE id = ?').get(id);
+    if (!room) return res.status(404).json({ error: 'Not found' });
+    if (room.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+    const trimmed = name.trim().slice(0, 40);
+    db.prepare('UPDATE rooms SET name = ? WHERE id = ?').run(trimmed, id);
+    res.json({ id, name: trimmed });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -2095,7 +2144,7 @@ app.get('/rooms/favourites', (req, res) => {
              (SELECT stars FROM room_ratings rr2 WHERE rr2.room_id = r.id AND rr2.discord_id = ?) as my_rating
       FROM rooms r
       JOIN room_favourites fav ON fav.room_id = r.id AND fav.discord_id = ?
-      WHERE r.kind IS NULL OR r.kind != 'published'
+      WHERE r.kind IS NULL OR r.kind NOT IN ('published', 'creator')
       ORDER BY fav.created_at DESC
     `).all(user.sub, user.sub, user.sub);
     // Favourited published Worlds (kind='published') are excluded above; fetch them in gallery shape so
