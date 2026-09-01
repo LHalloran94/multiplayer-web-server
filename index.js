@@ -2139,8 +2139,13 @@ app.put('/rooms/:id/levels', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   const { id } = req.params;
   try {
-    const room = db.prepare('SELECT id, owner_id, kind, env_spec, perms FROM rooms WHERE id = ?').get(id);
+    const room = db.prepare('SELECT id, owner_id, kind, env_spec, perms, no_host FROM rooms WHERE id = ?').get(id);
     if (!room) return res.status(404).json({ error: 'Not found' });
+    // 🟥 `no_host` FIRST, and it is not the same test as ownership. #83's whole design is that
+    // `roomOwnerId()` answers null for a hostless room so every owner-only power is disarmed BY CONSTRUCTION
+    // rather than by each one remembering. Comparing `owner_id` directly — which is still recorded, because it
+    // is identity, not authority — would have quietly made this the tenth power that escaped that.
+    if (room.no_host) return res.status(403).json({ error: 'Nobody runs this room' });
     if (room.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
     if (room.kind === 'published') return res.status(409).json({ error: 'A published World\'s Levels come from its published content' });
     if (!room.env_spec) return res.status(409).json({ error: 'This room has no World' });
