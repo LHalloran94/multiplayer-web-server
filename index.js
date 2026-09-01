@@ -244,6 +244,9 @@ try { db.exec('ALTER TABLE users ADD COLUMN status TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN public INTEGER DEFAULT 0'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN scope TEXT'); } catch {}
 try { db.exec('ALTER TABLE rooms ADD COLUMN description TEXT'); } catch {}
+// #83: a room where the creator keeps NO authority. Chosen once, at creation, and never changeable — a host
+// who could switch it back off would still be a host, just a polite one.
+try { db.exec('ALTER TABLE rooms ADD COLUMN no_host INTEGER DEFAULT 0'); } catch {}
 // 🟥 THESE TWO SAID "follow" AND MEANT "stalk". The product renamed follow → stalk in the UI long ago and the
 // storage was never renamed, so the old name now describes a DIFFERENT feature (real social following, which
 // does not exist yet and is about to be built beside it). The stale name is not cosmetic: it produced a
@@ -486,6 +489,7 @@ function normalizeRoomSocial(r) {
     like_count: r.like_count || 0,
     rating_count: r.rating_count || 0,
     rating_avg: r.rating_avg ? +(+r.rating_avg).toFixed(2) : 0,
+    no_host: !!r.no_host,          // #83 — the client shows it, and #84's Apply gate reads it
     favourited: !!r.favourited,
     liked: !!r.liked,
     my_rating: r.my_rating || 0,
@@ -1670,7 +1674,7 @@ app.get('/profile/:discordId/creations', (req, res) => {
     // A block hides a person's work in both directions, the same as it hides everything else about them.
     if (caller && blockedEitherWay(me, target)) return res.json({ rooms: [], worlds: [] });
     const rooms = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms, r.no_host,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -1862,7 +1866,7 @@ function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { retu
 app.post('/rooms', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { name, description, public: isPublic, friendsOnly, scope, url, env_spec, levelLock, features, icon } = req.body;
+  const { name, description, public: isPublic, friendsOnly, scope, url, env_spec, levelLock, features, icon, no_host } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   try {
     const id = generateRoomCode();
@@ -1899,7 +1903,9 @@ app.post('/rooms', (req, res) => {
       if (Object.keys(feats).length) { permsObj = permsObj || {}; permsObj.features = feats; }
     }
     const perms = permsObj ? JSON.stringify(permsObj) : null;
-    db.prepare('INSERT INTO rooms (id, name, owner_id, public, friends_only, scope, url, description, kind, env_spec, perms, icon) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, fr, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null, perms, roomIcon);
+    // #83: irrevocable, and only settable HERE. There is deliberately no route that turns it off later.
+    const noHost = no_host ? 1 : 0;
+    db.prepare('INSERT INTO rooms (id, name, owner_id, public, friends_only, scope, url, description, kind, env_spec, perms, icon, no_host) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(id, trimmedName, user.sub, pub, fr, roomScope, roomUrl, trimmedDesc, kind, spec ? JSON.stringify(spec) : null, perms, roomIcon, noHost);
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(id, user.sub);
     res.json({ id, name: trimmedName, owner_id: user.sub, member_count: 1, public: pub, friends_only: fr, scope: roomScope, url: roomUrl, description: trimmedDesc, kind, env_spec: spec, icon: roomIcon });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
@@ -1957,7 +1963,7 @@ app.get('/rooms/public', (req, res) => {
     // launcher's "This page" / "This site" / "Public" sub-tabs. (The default Site room isn't provisioned
     // here — it's created lazily on first ENTER via POST /rooms/site, so unused sites cost no storage.)
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms, r.no_host,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -1989,7 +1995,7 @@ app.post('/rooms/site', (req, res) => {
     ensureSiteRoom(hostname);
     bumpRoomActive(siteRoomId(hostname));   // entering counts as activity → resets the idle-prune clock
     const row = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms, r.no_host,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -2025,7 +2031,7 @@ app.get('/rooms/popular', (req, res) => {
   const hereHost = (req.query.hostname || '').trim().toLowerCase() || '\x00';
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+      SELECT r.id, r.name, r.owner_id, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms, r.no_host,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -2053,7 +2059,7 @@ app.get('/rooms', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.friends_only, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+      SELECT r.id, r.name, r.owner_id, r.public, r.friends_only, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms, r.no_host,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm2 WHERE rm2.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -2078,7 +2084,7 @@ app.get('/rooms/favourites', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+      SELECT r.id, r.name, r.owner_id, r.public, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms, r.no_host,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -2110,7 +2116,7 @@ app.get('/rooms/friends', (req, res) => {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
     const rows = db.prepare(`
-      SELECT r.id, r.name, r.owner_id, r.public, r.friends_only, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms,
+      SELECT r.id, r.name, r.owner_id, r.public, r.friends_only, r.scope, r.url, r.description, r.kind, r.env_spec, r.icon, r.perms, r.no_host,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
              (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
              (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = r.id) as like_count,
@@ -9277,7 +9283,7 @@ function sameUserAvSockets(avRoom, sid) {
 // ⚠️ `env_spec` rides along because the join needs the Level's real KIND to decide whether the economy applies
 // there (see `gatedRooms`). Widening the existing lookup rather than adding a second one: it is read once per
 // join, and two statements against the same row would be two chances to ask about different rooms.
-const _avRoomLookup = db.prepare('SELECT public, owner_id, env_spec FROM rooms WHERE id = ?');
+const _avRoomLookup = db.prepare('SELECT public, owner_id, env_spec, no_host FROM rooms WHERE id = ?');
 const _avRoomMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?');
 // Stage 6 Phase 3 — L2 build permissions, PER-ROOM (covers every Level in the room's World). A role
 // default `mode` ('all' = anyone present can build, today's behavior; 'host' = only the owner + granted
@@ -9319,7 +9325,12 @@ function buildPermsPayload(roomId) {                  // wire shape sent to clie
   const rb = getRoomBuild(roomId);
   return { roomId, mode: rb.mode, over: [...rb.over.entries()], locked: [...rb.locked] };
 }
-function roomOwnerId(roomId) { const r = _avRoomLookup.get(roomId); return r ? r.owner_id : null; }
+// ⭐⭐ #83 LIVES HERE, IN ONE LINE. Every owner-only power in the server asks this question — the perms hub,
+// build mode, feature modes, per-user overrides, level locks, nav — so a room that reports NO OWNER has no
+// host privileges by construction, rather than by nine separate checks remembering to ask.
+// ⚠️ This is AUTHORITY, not identity: `rooms.owner_id` still records who made it, so the room still appears
+// under their profile and they can still delete the room record. What they cannot do is rule it.
+function roomOwnerId(roomId) { const r = _avRoomLookup.get(roomId); return (r && !r.no_host) ? r.owner_id : null; }
 // Stage 6 Phase 4 — L1 feature + combat/ghost permissions, PER-ROOM, mirroring the build model. Each feature
 // carries a role default `mode` ('all' = anyone, today's behavior; 'host' = only owner + granted users) plus
 // per-user boolean overrides (in-memory, ephemeral, broadcast on change). Modes persist in perms.features.
@@ -14266,10 +14277,10 @@ io.on('connection', (socket) => {
     const roomId = resolveAvRoomId(data && data.roomId, currentRoom, socket.id);
     // Owner-of-a-real-user-room? (the URL page room has no DB row / owner → never hydrates)
     const rinfo = (roomId !== currentRoom) ? _avRoomLookup.get(roomId) : null;
-    const isRoomOwner = !!(rinfo && socketToDiscordId[socket.id] && rinfo.owner_id === socketToDiscordId[socket.id]);
+    const isRoomOwner = !!(rinfo && !rinfo.no_host && socketToDiscordId[socket.id] && rinfo.owner_id === socketToDiscordId[socket.id]);
     // Phase 3: only a real user-room is build-permission-gated; the page/URL room (no DB row) stays open.
     currentAvBuildRoomId = rinfo ? roomId : null;
-    currentAvOwnerId = rinfo ? rinfo.owner_id : null;
+    currentAvOwnerId = (rinfo && !rinfo.no_host) ? rinfo.owner_id : null;   // #83: no host → no owner bypass on build
     // levelIndex selects the Level within the room's World; default the per-URL room's [sandbox=0, life=1].
     const levelIndex = (data && Number.isInteger(data.levelIndex) && data.levelIndex >= 0) ? data.levelIndex : (type === 'world' ? 1 : 0);
     // ⭐⭐ INCREMENT 7 — THE OVERWORLD. A 'world' join goes to ONE shared room instead of a per-page one. The page
