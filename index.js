@@ -1863,6 +1863,11 @@ function sanitizeEnvSpec(raw) {
     // ⚠️ THIS ALLOWLIST IS THE WHOLE PER-LEVEL SCHEMA — a field it does not name is silently dropped on save,
     // which looks exactly like "the setting won't stick". Add here FIRST when adding a per-Level option.
     if (l && l.reset) out.reset = 1;
+    // #101a — NO CONTACT. Everyone in this Level can see everyone else and none of them can touch: no hits
+    // dealt or received, and no bodies to collide with. A Level PROPERTY, not a permission — contact is
+    // symmetric, so "the host may touch and others may not" is not a state that means anything, and it
+    // applies to the host too.
+    if (l && l.solo) out.solo = 1;
     return out;
   });
   return { levels, nav: (raw.nav === 'series') ? 'series' : 'free' };
@@ -13941,6 +13946,10 @@ io.on('connection', (socket) => {
   let currentAvBuildRoomId = null; // Phase 3: real roomId for L2 build-perm checks (null = page/URL room → open build)
   let currentAvOwnerId = null;     // owner_id of that room (null for the page/URL room)
   let currentAvLevelIndex = 0;     // this socket's current Level index within the room's World (for per-Level locks)
+  // #101a — is the Level this socket is standing in a no-contact one? Resolved ONCE per Level join, not per
+  // event: every effect of the lock is already applied by the receiving client (it refuses incoming hits and
+  // builds no collision bodies), so this exists to stop a MODIFIED client relaying hits at honest ones.
+  let currentAvLevelSolo = false;
   let currentAvRoomId = null;      // Phase 6 inc 4: the roomId the avatar room was keyed on (= the URL for a page room).
                                    // `currentAvBuildRoomId` is NOT this — it is null for a page room by design — and the
                                    // world SEED is keyed on the roomId, so a regenerate needs the real one.
@@ -14699,6 +14708,15 @@ io.on('connection', (socket) => {
     }
     currentAvLevelIndex = levelIndex;                              // Phase 3: per-Level build lock keys on this
     currentAvRoomId = roomId;                                      // Phase 6 inc 4: the seed key, for a world regenerate
+    // #101a — one lookup per Level join, so the hit relay below is a boolean test rather than a DB read per punch.
+    currentAvLevelSolo = false;
+    if (rinfo) {
+      try {
+        const _spec = JSON.parse(_roomKindSpec.get(roomId).env_spec || 'null');
+        const _lvl = (_spec && Array.isArray(_spec.levels)) ? _spec.levels[levelIndex] : null;
+        currentAvLevelSolo = !!(_lvl && _lvl.solo);
+      } catch { currentAvLevelSolo = false; }
+    }
     // Phase 6: clamp this socket's object placement to the Level's band. The Overworld has no band — a Level
     // size preset is a page-world idea, and the whole width is the point.
     currentAvBand = _isOver ? null : playBand(roomId, levelIndex);
@@ -15239,6 +15257,9 @@ io.on('connection', (socket) => {
   // you cannot see is an event about a blob you do not have.
   socket.on('avt-evt', (msg) => {
     if (!relayCfg.on || !currentAvatarRoom || !msg) return;
+    // #101a — a no-contact Level relays no hits. Honest clients already refuse them on arrival and build no
+    // collision bodies, so this is the belt to that braces: it stops a modified client from reaching one.
+    if (currentAvLevelSolo) return;
     const out = Object.assign({}, msg, { from: socket.id });
     // A directed hit goes to its target even if the target ranked outside the sender's visible set —
     // being punched by someone you cannot see is strange, but silently dropping the hit desyncs the
