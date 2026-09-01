@@ -156,16 +156,77 @@ function makeDomains(cfg) {
     return true;
   }
 
+  // ⭐⭐ WHERE A BAND ACTUALLY HAS GROUND (list 08 #93). The surface band has ground almost everywhere, so any
+  // column will do. The SKY band does not: it is empty air with floating islands in it, and the measurement
+  // that drove this is the whole point — **54% of sky-band columns have standable ground, but only 10% of those
+  // are an island.** The other 90% is mountain tops poking up into the band. So a site sent to the sky by the
+  // crowding fallback below would land on a peak nine times in ten, which is not what "domains could spawn on
+  // floating islands" asks for. Islands are 6.13% of the world's columns and 92.9% of the columns inside one
+  // are standable ⇒ **islands are reliable once you AIM at one, and essentially never found by an unaimed walk.
+  // The work is aiming.**
+  // ⚠️ SUPPLIED BY THE HOST, NEVER READ FROM THE GENERATOR HERE. This module is pure allocation — that is what
+  // lets `probe_domains` build whole layouts in memory with no world behind them — so it takes a function and
+  // knows nothing about what produced the answer. Same discipline as the `onPlace`/`onRelease` hooks.
+  // ⚠️ CALLED LAZILY AND CACHED, not at construction: the registry is instantiated near the top of index.js and
+  // the generator does not exist until far below it. Asking at construction time is the module-ordering trap
+  // this project has hit five times; asking on first use is not.
+  const _spans = new Map();                                 // band name -> sorted [c0, c1] pairs, or null
+  function spansOf(band) {
+    if (_spans.has(band)) return _spans.get(band);
+    let out = null;
+    try {
+      const raw = cfg.bandSpansFor ? cfg.bandSpansFor(band) : null;
+      if (Array.isArray(raw) && raw.length) {
+        out = raw.map(s => [Math.min(s[0] | 0, s[1] | 0), Math.max(s[0] | 0, s[1] | 0)])
+                 .filter(s => s[1] >= s[0]).sort((a, b) => a[0] - b[0]);
+        if (!out.length) out = null;
+      }
+    } catch { out = null; }                                 // no generator, no islands: fall back to "anywhere"
+    _spans.set(band, out);
+    return out;
+  }
+  // May a site stand at this column of this band? True when the band has no span list at all — an absent list
+  // means "unconstrained", which is what keeps the surface band exactly as it was.
+  function spanOk(band, col) {
+    const sp = spansOf(band); if (!sp) return true;
+    let lo = 0, hi = sp.length - 1;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1;
+      if (col < sp[m][0]) hi = m - 1; else if (col > sp[m][1]) lo = m + 1; else return true;
+    }
+    return false;
+  }
+  // The nearest column this band will accept — the middle of the closest span, or the target itself if it is
+  // already inside one. Aiming here first is what turns the walk below from a search into a confirmation.
+  function nearestInSpan(band, col) {
+    const sp = spansOf(band); if (!sp) return col;
+    let best = col, bd = Infinity;
+    for (const [c0, c1] of sp) {                            // linear: there are ~98 islands in the whole world
+      const inside = col >= c0 && col <= c1;
+      const c = inside ? col : ((c0 + c1) >> 1);
+      const d = inside ? 0 : Math.abs(c - col);
+      if (d < bd) { bd = d; best = c; if (!d) break; }
+    }
+    return best;
+  }
+
   const clamp = (c) => Math.max(LO, Math.min(HI, c));
   // Walk outward from a target in quarter-radius steps, alternating sides. Quarter steps rather than whole ones
   // so a site can nestle into a gap; a lattice would be invisible in play but is wrong the moment radii differ.
+  // ⚠️ `spanOk` is tested here rather than inside `fits` on purpose: `fits` answers "is this far enough from the
+  // neighbours", which is about the REGISTRY, while a span is about the WORLD. Keeping them separate means the
+  // separation rule stays testable with no world behind it, and every rung of the ladder below inherits the
+  // span rule for free by going through this one function.
+  function ok(band, col, sep, family, tight) {
+    return spanOk(band, col) && fits(band, col, sep, family, tight);
+  }
   function walk(band, target, sep, family, tight) {
     const t = clamp(target);
-    if (fits(band, t, sep, family, tight)) return t;
+    if (ok(band, t, sep, family, tight)) return t;
     const step = Math.max(1, sep >> 2);
     for (let k = 1; k <= 65536; k++) {
-      const a = clamp(t + k * step); if (a !== t && fits(band, a, sep, family, tight)) return a;
-      const b = clamp(t - k * step); if (b !== t && fits(band, b, sep, family, tight)) return b;
+      const a = clamp(t + k * step); if (a !== t && ok(band, a, sep, family, tight)) return a;
+      const b = clamp(t - k * step); if (b !== t && ok(band, b, sep, family, tight)) return b;
       if (a === HI && b === LO) break;
     }
     return -1;
@@ -296,17 +357,26 @@ function makeDomains(cfg) {
         }
       }
       // rung 3 — the other depth bands
+      // ⭐ AIMED AT THE NEAREST STANDABLE PLACE IN THAT BAND, not at the raw hash target (#93). In the sky that
+      // is the nearest floating island; in a band with no span list `nearestInSpan` returns the target unchanged,
+      // so the surface and underground are exactly as they were.
+      // ⚠️ THIS IS AN EFFICIENCY MEASURE, NOT THE MECHANISM, and the comment here said otherwise until a
+      // mutation test disproved it. `walk` only ACCEPTS a column the band allows, so landing on an island is
+      // guaranteed by `spanOk` whatever we aim at — removing this line changes how long the search takes and
+      // not where anybody ends up. It stays because islands are ~6% of the world's columns, so an unaimed walk
+      // steps a quarter-radius at a time through thousands of columns of open air first.
       if (col < 0) {
         for (const b of BANDS) {
           if (b.name === band0) continue;
-          col = walk(b.name, targetOf(id, null, seed), Math.max(MIN_SPACING, full >> 1), family, true);
-          if (col >= 0) { band = b.name; sep = Math.max(MIN_SPACING, full >> 1); rung = 3; break; }
+          const s3 = Math.max(MIN_SPACING, full >> 1);
+          col = walk(b.name, nearestInSpan(b.name, targetOf(id, null, seed)), s3, family, true);
+          if (col >= 0) { band = b.name; sep = s3; rung = 3; break; }
         }
       }
       // rung 4 — anywhere at all, at the floor radius, in any band
       if (col < 0) {
         for (const b of BANDS) {
-          col = walk(b.name, ORIGIN, MIN_SPACING, family, true);
+          col = walk(b.name, nearestInSpan(b.name, ORIGIN), MIN_SPACING, family, true);   // #93, as rung 3
           if (col >= 0) { band = b.name; sep = MIN_SPACING; rung = 4; break; }
         }
       }

@@ -4734,9 +4734,38 @@ const domainCfg = { spacingPx: 10240 };
 // its own section far below, and a `db.prepare` evaluated up here would run before that section has decided what
 // the tables are. Declared as no-ops and reassigned down there (search `domainRowWrite =`).
 let domainRowWrite = () => {}, domainRowDrop = () => {};
+// ⭐⭐ WHERE THE SKY HAS GROUND (list 08 #93 — "domains could also spawn on floating islands").
+// The registry's crowding fallback has always been able to send a site to the sky band; what it could not do
+// is land it on an ISLAND. MEASURED: 54% of sky-band columns have standable ground and only 10% of those are
+// an island — the rest is mountain tops reaching up into the band — so an unaimed placement lands on a peak
+// nine times in ten. Islands are 6.13% of columns, and 92.9% of the columns inside one are standable.
+// ⚠️ ASKED LAZILY, WHICH IS THE ONLY REASON THIS WORKS FROM HERE. `genFor` is declared ~6,000 lines below and
+// the Overworld's dimensions are only correct once its room key is in `overworldRooms` — which the join handler
+// does immediately before it calls `place()`, and `place()` is the only caller of this. Asking at construction
+// time would be the module-ordering trap that has bitten this file five times.
+// ⚠️ `genFor`, NOT A HAND-BUILT CONFIG. Reconstructing the generator's cfg here would be the by-name rebuild
+// that has silently dropped a field three times on this track — and getting it wrong would aim at islands in a
+// DIFFERENT world than the one the player lands in, which is exactly the class of bug nobody would spot.
+// ⭐ Each registry asks about its OWN Overworld: the `.test` harnesses have a separate room key and so a
+// separate world, and aiming test placements at the real world's islands would be wrong in both directions.
+const SKY_SPAN_INSET = 0.75;          // aim at the body of an island, not its rim, where clearance runs out
+function overworldSkySpans(room, band) {
+  if (band !== 'sky') return null;    // the surface and underground have ground broadly; only the sky is islands
+  if (!worldCfg.gen2) return null;    // the rollback generator has no islands — unconstrained, as before
+  let g;
+  try { g = genFor(room, OVERWORLD_SEED, null); } catch (e) { return null; }
+  if (!g || typeof g.skyIsles !== 'function') return null;
+  try {
+    return g.skyIsles().map((i) => {
+      const hw = Math.max(1, Math.round((i.hw * SKY_SPAN_INSET) / TERRAIN_CELL));   // `hw` is PIXELS, cols here
+      return [i.at - hw, i.at + hw];
+    });
+  } catch (e) { return null; }
+}
 const domains = DOMAINS.makeDomains({
   cols: OVERWORLD_DIMS.cols, rows: OVERWORLD_DIMS.rows, cell: TERRAIN_CELL, spacingPx: domainCfg.spacingPx,
   onPlace: (rec) => domainRowWrite(rec), onRelease: (rec) => domainRowDrop(rec),
+  bandSpansFor: (band) => overworldSkySpans(OVERWORLD_ROOM, band),
 });
 // ⭐ AND ITS TWIN FOR `.test` HOSTS (see OVERWORLD_TEST_ROOM). Same geometry and the same ladder, so a harness
 // exercises the identical allocation code — but NO persistence hooks, deliberately: a test identity is used once
@@ -4744,6 +4773,7 @@ const domains = DOMAINS.makeDomains({
 // holding columns beside the player's own site. A registry that forgets on restart is the right lifetime here.
 const domainsTest = DOMAINS.makeDomains({
   cols: OVERWORLD_DIMS.cols, rows: OVERWORLD_DIMS.rows, cell: TERRAIN_CELL, spacingPx: domainCfg.spacingPx,
+  bandSpansFor: (band) => overworldSkySpans(OVERWORLD_TEST_ROOM, band),
 });
 // ⭐ THE PRIMA LEDGER, instantiated HERE for the same reason `domains` is: `probe_domains` B asserts that a
 // module-level require is not USED inside the sliced cell-store block, because instantiating one in there is a
