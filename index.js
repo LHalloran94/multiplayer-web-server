@@ -2099,7 +2099,11 @@ app.get('/rooms/drafts', (req, res) => {
       SELECT r.id, r.name, r.owner_id, r.public, r.friends_only, r.scope, r.url, r.description, r.kind,
              r.env_spec, r.icon, r.perms, r.no_host, r.created_at,
              (SELECT username FROM users u WHERE u.discord_id = r.owner_id) as owner_name,
-             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count
+             (SELECT COUNT(*) FROM room_members rm WHERE rm.room_id = r.id) as member_count,
+             -- Has this draft been published, and as what? Lets Studio say "Update" instead of minting a
+             -- second World every press. MAX() so an old duplicate cannot make the row ambiguous.
+             (SELECT MAX(w.id) FROM published_worlds w WHERE w.source_room = r.id) as published_world,
+             (SELECT MAX(w.updated_at) FROM published_worlds w WHERE w.source_room = r.id) as published_at
       FROM rooms r
       WHERE r.owner_id = ? AND r.kind = 'creator'
       ORDER BY r.created_at DESC
@@ -2354,10 +2358,19 @@ function countLiveLevels(liveStateStr) {
 app.post('/worlds', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { worldId, name, description, author, content, thumb, bg_image, allow_remix, durability, reset_live } = req.body || {};
-  if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
-  const levels = validatePublishContent(content);
+  const levels = validatePublishContent((req.body || {}).content);
   if (!levels) return res.status(400).json({ error: 'Invalid World content' });
+  return publishLevels(user, req.body || {}, levels, res);
+});
+
+// ⭐⭐ THE SHARED HALF OF PUBLISHING — everything after "here are the Levels". Extracted so the room exporter
+// below can publish through exactly this code rather than a second copy of it: the per-user cap, the id
+// minting, the backing room, the Persistent guard and the update path are all decisions that must not exist
+// twice. (Hand-rebuilt duplicates are this repo's most-repeated bug, and a publish path that drifts would
+// silently produce Worlds nobody can enter.)
+function publishLevels(user, body, levels, res) {
+  const { worldId, name, description, author, thumb, bg_image, allow_remix, durability, reset_live, source_room } = body;
+  if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   const contentStr = JSON.stringify(levels);
   if (contentStr.length > PUBLISHED_MAX_BYTES) return res.status(413).json({ error: 'World too large to publish' });
   const trimmedName = name.trim().slice(0, 40);
@@ -2404,11 +2417,67 @@ app.post('/worlds', (req, res) => {
     const spec = derivePubEnvSpec(levels, id);
     db.prepare('INSERT INTO rooms (id, name, owner_id, public, kind, env_spec) VALUES (?, ?, ?, 1, \'published\', ?)').run(roomId, trimmedName, user.sub, JSON.stringify(spec));
     db.prepare('INSERT INTO room_members (room_id, discord_id) VALUES (?, ?)').run(roomId, user.sub);
-    db.prepare(`INSERT INTO published_worlds (id, owner_id, room_id, name, author, description, thumb, bg_image, content, level_count, size_bytes, allow_remix, durability) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(id, user.sub, roomId, trimmedName, trimmedAuthor, trimmedDesc, thumbStr, bgStr, contentStr, levels.length, contentStr.length, remix, dura);
+    // `source_room` remembers WHICH draft this came from, so Studio can offer "Update" instead of quietly
+    // minting a second World every time the same draft is published. Null for the local-content path, which
+    // has no room behind it.
+    db.prepare(`INSERT INTO published_worlds (id, owner_id, room_id, source_room, name, author, description, thumb, bg_image, content, level_count, size_bytes, allow_remix, durability) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(id, user.sub, roomId, (typeof source_room === 'string' && source_room) ? source_room : null,
+           trimmedName, trimmedAuthor, trimmedDesc, thumbStr, bgStr, contentStr, levels.length, contentStr.length, remix, dura);
     res.json({ worldId: id, roomId, level_count: levels.length, env_spec: spec });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
+}
+
+// ---- ⭐⭐ PUBLISH A WORLD STRAIGHT FROM THE ROOM IT WAS BUILT IN ----
+// Until now the only way to publish was to upload content the CLIENT had snapshotted into its own local store,
+// so making a World public meant: build it → 🗺 Save this Level → Publish, with a browser-local copy as the
+// only bridge. The room's world already lives here, so the bridge is unnecessary — and it was the last piece
+// of "you have to know the secret order of operations" that this whole track set out to remove.
+// ⭐ It reuses `captureRoomBlob`, which is what the 30s persistent-World autosave already runs, and produces
+// exactly what `hydrateRoomFromBlob` consumes. Producer and consumer are both here, so there is no encoder to
+// agree with — the shape is the one the server already round-trips.
+app.post('/worlds/from-room', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const roomId = String((req.body && req.body.roomId) || '');
+  if (!roomId) return res.status(400).json({ error: 'roomId required' });
+  let room;
+  try { room = db.prepare('SELECT id, name, owner_id, kind, env_spec, no_host FROM rooms WHERE id = ?').get(roomId); }
+  catch { return res.status(500).json({ error: 'DB error' }); }
+  if (!room) return res.status(404).json({ error: 'Not found' });
+  if (room.no_host) return res.status(403).json({ error: 'Nobody runs this room' });     // #83, as everywhere else
+  if (room.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+  if (room.kind === 'published') return res.status(409).json({ error: 'That is already a published World' });
+  const spec = parseEnvSpec(room.env_spec);
+  if (!spec || !Array.isArray(spec.levels) || !spec.levels.length) return res.status(409).json({ error: 'This room has no World' });
+  const levels = spec.levels.slice(0, ROOM_LEVEL_CAP).map((lv, li) => exportLevelBlob(roomId, li, lv));
+  const ok = validatePublishContent(levels);
+  if (!ok) return res.status(500).json({ error: 'Could not read this World' });
+  const body = Object.assign({}, req.body, { name: (req.body && req.body.name) || room.name, source_room: roomId });
+  return publishLevels(user, body, ok, res);
 });
+
+// One Level of a room → a publishable Lvl blob. `captureRoomBlob` supplies terrain/mats/objects; the rest is
+// the Level's own metadata, which lives in `env_spec` rather than in the cells.
+// ⚠️ AN EMPTY LEVEL MUST STILL PRODUCE A BLOB. `captureRoomBlob` answers null for a room with no terrain and
+// no objects — correct for the autosave that calls it, wrong here, where null would fail validation and the
+// person would be told their World "could not be read" when the truth is that they have not built in it yet.
+function exportLevelBlob(roomId, levelIndex, lvl) {
+  const avRoom = avatarRoomKey(roomId, levelIndex);
+  const blob = captureRoomBlob(avRoom) || { terrain: null, mats: {}, objects: [] };
+  const life = !!(lvl && (lvl.type === 'life' || lvl.type === 'world'));
+  return {
+    // 'world', not 'life': this is the CONTENT shape, and the client's own capture writes `avWorldMode` here.
+    type: life ? 'world' : 'sandbox',
+    name: (lvl && typeof lvl.name === 'string') ? lvl.name.slice(0, 40) : '',
+    bg: Number.isInteger(lvl && lvl.bg) ? lvl.bg : (life ? 3 : 0),     // matches the client's applyLevelBackground default
+    size: (lvl && LEVEL_SIZES.has(lvl.size)) ? lvl.size : 'large',
+    bounds: { w: MWSim.C.WORLD_W, h: MWSim.C.WORLD_H },
+    spawn: null,                                                       // a page-shaped Level has no stored world spawn
+    terrain: blob.terrain || { cols: PAGE_DIMS.cols, rows: PAGE_DIMS.rows, cell: TERRAIN_CELL, runs: [[0, PAGE_DIMS.cols * PAGE_DIMS.rows]] },
+    mats: blob.mats || {},
+    objects: blob.objects || [],
+  };
+}
 
 // Gallery list (public): metadata only, no content blob. play_count is the lifetime enter count;
 // players_now is the live presence in the backing room (its 'pg:'+roomId bucket — see resolvePresenceRoom).
@@ -9890,6 +9959,9 @@ const PUBLISHED_THUMB_MAX = 400_000;                  // thumbnail data-URI cap 
 // World, fetched once on entry rather than shipped in every room listing.
 const PUBLISHED_BG_MAX = 400_000;
 try { db.exec('ALTER TABLE published_worlds ADD COLUMN bg_image TEXT'); } catch {}
+// Which draft room this World was published FROM, so Studio can offer "Update" rather than minting a second
+// World each time. Null on every existing row and on the local-content path, which has no room behind it.
+try { db.exec('ALTER TABLE published_worlds ADD COLUMN source_room TEXT'); } catch {}
 // #81 level previews. The column holds a JSON ARRAY — one picture per Level, so a multi-Level World can be
 // flicked through — and legacy rows hold a bare data URL, which is read as a one-Level array.
 // ⚠️ OVER THE CAP, KEEP THE FIRST ONES RATHER THAN DROPPING ALL OF THEM. The old line was
@@ -9938,7 +10010,15 @@ function validatePublishContent(levels) {
 function derivePubEnvSpec(content, worldId) {
   const levels = content.map((l, i) => {
     const type = (l && (l.type === 'world' || l.type === 'life')) ? 'life' : 'sandbox';
-    const o = { type, name: 'Level ' + (i + 1), size: 'large', pub: { world: worldId, lvl: i } };
+    // ⭐ Carry the Level's own name and size when the content has them. The client's `captureLevel` records
+    // neither, so the local-content path still lands on "Level N" at full size exactly as before — this only
+    // adds meaning where the room exporter had it to give.
+    const o = {
+      type,
+      name: (l && typeof l.name === 'string' && l.name.trim()) ? l.name.trim().slice(0, 40) : ('Level ' + (i + 1)),
+      size: (l && LEVEL_SIZES.has(l.size)) ? l.size : 'large',
+      pub: { world: worldId, lvl: i },
+    };
     if (Number.isInteger(l && l.bg) && l.bg >= 0 && l.bg <= 3) o.bg = l.bg;
     return o;
   });
