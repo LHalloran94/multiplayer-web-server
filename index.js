@@ -2342,12 +2342,19 @@ app.delete('/rooms/:id/rating', (req, res) => {
 });
 
 // ---- Phase 7: published Worlds (gallery + publish/update/remix/unpublish) ----
+// How many Levels of a published World have building saved against them. Used only to decide whether an
+// update needs confirming, and to say something concrete in the prompt rather than a bare warning.
+function countLiveLevels(liveStateStr) {
+  if (!liveStateStr) return 0;
+  try { const o = JSON.parse(liveStateStr); return (o && typeof o === 'object') ? Object.keys(o).length : 0; }
+  catch { return 0; }
+}
 // Publish a new World or update an existing one (re-publish). Backed by a public room (kind='published')
 // that's hidden from the launcher and surfaced only in the gallery.
 app.post('/worlds', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  const { worldId, name, description, author, content, thumb, bg_image, allow_remix, durability } = req.body || {};
+  const { worldId, name, description, author, content, thumb, bg_image, allow_remix, durability, reset_live } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   const levels = validatePublishContent(content);
   if (!levels) return res.status(400).json({ error: 'Invalid World content' });
@@ -2366,6 +2373,23 @@ app.post('/worlds', (req, res) => {
     const existing = worldId ? db.prepare('SELECT * FROM published_worlds WHERE id = ?').get(worldId) : null;
     if (existing) {                                                  // ---- update / re-publish ----
       if (existing.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+      // 🟥 RE-PUBLISHING SETS `live_state = NULL` A FEW LINES BELOW, AND THAT IS EVERYTHING PEOPLE HAVE BUILT
+      // SINCE THE WORLD WENT UP. For a Showcase World that is exactly right — it is a snapshot, and visitors
+      // are not invited to keep anything. For a PERSISTENT one they were invited to build and told it would
+      // last, so the same keystroke quietly destroys other people's work. It now takes an explicit
+      // `reset_live`, which the client only sends after saying so in as many words.
+      // ⚠️ DELIBERATELY BLUNT: `live_state` is written whenever the room has been VISITED, not only when
+      // somebody built something, and the server cannot cheaply tell those apart (a hydrated Level is never
+      // "empty", and comparing the stored blob against the published one compares two encoders). So this can
+      // ask about a World nobody has touched. That is the right direction to be wrong in — the cost of a
+      // false prompt is one click; the cost of a missed one is somebody's building.
+      const liveLevels = countLiveLevels(existing.live_state);
+      if (existing.durability === 'persistent' && liveLevels && !reset_live) {
+        return res.status(409).json({
+          error: 'This World is Persistent and has building saved in it. Updating it replaces that.',
+          needs_reset: true, live_levels: liveLevels,
+        });
+      }
       const spec = derivePubEnvSpec(levels, existing.id);
       db.prepare(`UPDATE published_worlds SET name=?, author=?, description=?, thumb=?, bg_image=?, content=?, level_count=?, size_bytes=?, allow_remix=?, durability=?, live_state=NULL, updated_at=unixepoch() WHERE id=?`)
         .run(trimmedName, trimmedAuthor, trimmedDesc, thumbStr, bgStr, contentStr, levels.length, contentStr.length, remix, dura, existing.id);
@@ -2426,13 +2450,23 @@ app.post('/worlds/:id/flags', (req, res) => {
   const user = verifyToken(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
   try {
-    const w = db.prepare('SELECT owner_id FROM published_worlds WHERE id = ?').get(req.params.id);
+    const w = db.prepare('SELECT owner_id, durability, live_state FROM published_worlds WHERE id = ?').get(req.params.id);
     if (!w) return res.status(404).json({ error: 'Not found' });
     if (w.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
-    const { allow_remix, durability } = req.body || {};
+    const { allow_remix, durability, reset_live } = req.body || {};
     if (allow_remix !== undefined) db.prepare('UPDATE published_worlds SET allow_remix = ? WHERE id = ?').run(allow_remix ? 1 : 0, req.params.id);
     if (durability !== undefined) {
       const dura = (durability === 'persistent') ? 'persistent' : 'showcase';
+      // 🟥 THE SAME LOSS THROUGH A DIFFERENT DOOR. Flipping Persistent → Showcase also clears `live_state`,
+      // and here it is a ONE-CLICK toggle in the gallery with no content upload to make you think twice.
+      // Guarded identically, or the confirmation on the publish path is just a detour round the outside.
+      const liveLevels = countLiveLevels(w.live_state);
+      if (dura === 'showcase' && w.durability === 'persistent' && liveLevels && !reset_live) {
+        return res.status(409).json({
+          error: 'Switching to Showcase discards the building saved in this World.',
+          needs_reset: true, live_levels: liveLevels,
+        });
+      }
       db.prepare('UPDATE published_worlds SET durability = ?' + (dura === 'showcase' ? ', live_state = NULL' : '') + ' WHERE id = ?').run(dura, req.params.id);
     }
     res.json({ ok: true });
