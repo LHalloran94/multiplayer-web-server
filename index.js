@@ -2126,6 +2126,46 @@ app.patch('/rooms/:id', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
+// ---- Edit an existing room's Level list ----
+// 🟥 THE GAP THIS CLOSES: `env_spec` was written once at room creation and nothing else ever touched it, so a
+// World's SHAPE was decided at the moment you knew least — before you had built anything — and could never be
+// changed. The permissions hub even advised "Add Levels to its World", which was advice with no route behind it.
+// ⚠️ NOT for a published World: its backing room's spec is derived from the published CONTENT by POST /worlds,
+// so editing it here would describe Levels the content does not have.
+// ⚠️ And not a way to GIVE a room a World — that also decides `kind`, and a room that silently grew a World
+// would surprise everyone already in it. Refused with a reason rather than ignored.
+app.put('/rooms/:id/levels', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const { id } = req.params;
+  try {
+    const room = db.prepare('SELECT id, owner_id, kind, env_spec, perms FROM rooms WHERE id = ?').get(id);
+    if (!room) return res.status(404).json({ error: 'Not found' });
+    if (room.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+    if (room.kind === 'published') return res.status(409).json({ error: 'A published World\'s Levels come from its published content' });
+    if (!room.env_spec) return res.status(409).json({ error: 'This room has no World' });
+    const spec = sanitizeEnvSpec(req.body && req.body.env_spec);
+    if (!spec) return res.status(400).json({ error: 'A World needs at least one Level' });
+    // 🟥 PER-LEVEL BUILD LOCKS ARE STORED AS INDICES, and reordering or deleting a Level silently re-points
+    // every one of them at a different Level. There is no mapping to remap them by — the client sends the new
+    // list, not what moved where — so they are CLEARED rather than left to apply to the wrong Level. Cheap in
+    // practice (a World being edited is usually a private draft with no locks) and re-settable in the perms hub.
+    let perms = null;
+    try { perms = room.perms ? JSON.parse(room.perms) : null; } catch { perms = null; }
+    let clearedLocks = 0;
+    if (perms && Array.isArray(perms.levelLock) && perms.levelLock.length) {
+      clearedLocks = perms.levelLock.length;
+      delete perms.levelLock;
+    }
+    db.prepare('UPDATE rooms SET env_spec = ?, perms = ? WHERE id = ?')
+      .run(JSON.stringify(spec), perms && Object.keys(perms).length ? JSON.stringify(perms) : null, id);
+    // Anyone standing in it finds out now rather than on their next reload — the Level they are on may have
+    // just been renamed, moved or removed out from under them.
+    io.to('pg:' + id).emit('world-levels', { roomId: id, env_spec: spec });
+    res.json({ id, env_spec: spec, cleared_level_locks: clearedLocks });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
 // Phase 3 — the caller's favourited rooms (full room objects, so the Favourites sub-tab can show rooms
 // even when the user hasn't joined them). Same social columns as the other list reads.
 app.get('/rooms/favourites', (req, res) => {
