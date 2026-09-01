@@ -1856,6 +1856,13 @@ function sanitizeEnvSpec(raw) {
     // Optional saved background mode (0=Page,1=Canvas,2=Canvas-clear,3=Sky): travels in the public spec so
     // NON-host viewers of a saved Level get the right bg too (the host-local blob bg never reaches them).
     if (l && Number.isInteger(l.bg) && l.bg >= 0 && l.bg <= 3) out.bg = l.bg;
+    // #102 — RESET ON RESPAWN. When set, any respawn in this Level restores its authored state for everyone
+    // in it: terrain + hp + materials + objects from the Level's blob, and the liquid re-derived from the
+    // restored fluid cells. A Level with a running hazard (the card's volcano with lava trickling down) is
+    // unplayable on the second attempt without it.
+    // ⚠️ THIS ALLOWLIST IS THE WHOLE PER-LEVEL SCHEMA — a field it does not name is silently dropped on save,
+    // which looks exactly like "the setting won't stick". Add here FIRST when adding a per-Level option.
+    if (l && l.reset) out.reset = 1;
     return out;
   });
   return { levels, nav: (raw.nav === 'series') ? 'series' : 'free' };
@@ -12615,6 +12622,20 @@ function hydrateRoomFromBlob(avRoom, blob) {
     if (obj) { map.set(id, obj); placed++; }
   }
 }
+// #102 — replay a restored Level to EVERYONE standing in it. The same three events the join path sends to a
+// single socket, aimed at the room instead. Terrain first, then the liquid that was re-derived from it, then
+// the objects; a client applies them in arrival order and `terrain-init` is what clears the old cells.
+// ⚠️ Level rooms only — the Overworld's whole-world replay is what hung this server (see the avt-join note).
+function broadcastLevelRestore(avRoom, levelIndex) {
+  const cs = cellsOf(avRoom), tg = cs.terrain;
+  if (!tg) return;
+  io.to(avRoom).emit('terrain-init', { levelIndex: levelIndex | 0, cell: TERRAIN_CELL, cols: tg.geom.cols, rows: tg.geom.rows,
+    ...terrainRLE(tg), hpRuns: cs.terrainHp ? terrainRLE(cs.terrainHp).runs : undefined });
+  const fi = buildFineInit(avRoom); if (fi) io.to(avRoom).emit('liquid-fine-init', fi);
+  const mm = roomMats[avRoom];
+  if (mm && Object.keys(mm).length) io.to(avRoom).emit('mats-init', { levelIndex: levelIndex | 0, mats: mm });
+  io.to(avRoom).emit('avatar-objects-init', { levelIndex: levelIndex | 0, objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
+}
 const _roomKindSpec = db.prepare('SELECT kind, env_spec FROM rooms WHERE id = ?');
 const _pubWorldGet  = db.prepare('SELECT content, durability, live_state FROM published_worlds WHERE id = ?');
 // Resolve a published room+Level → the Lvl blob to hydrate from (durability-aware). null if not a published
@@ -14827,6 +14848,45 @@ io.on('connection', (socket) => {
     if (currentAvatarRoom && roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);   // Phase 3: stop holding chunks resident for someone who left
     if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); dropRelay(currentAvatarRoom, socket.id); }   // Phase 4: stop tracking what they were subscribed/meshed to · Phase 5a: and stop relaying them
     delete socketToAvatarRoom[socket.id];
+  });
+  // ── #102 · RESET THE LEVEL STATE ON RESPAWN ──────────────────────────────────────────────────────────────
+  // The client asks; the SERVER decides. `reset` is a property of the authored Level (env_spec), so a client
+  // that asks for a Level that does not carry the flag is ignored — the request is a nudge, never an
+  // instruction. Rate-limited per socket: a respawn loop must not become a restore loop.
+  // ⚠️ ROOM-WIDE, not per-player. There is ONE instance of a Level (per-player world states were considered
+  // and rejected on cost), so a reset restores it for everyone standing in it. That is why this option pairs
+  // with the no-contact lock rather than standing alone.
+  let lastLevelResetAt = 0;
+  socket.on('avt-level-reset', () => {
+    const avRoom = currentAvatarRoom;
+    if (!avRoom || !currentAvBuildRoomId) return;          // page/URL rooms have no authored Level to restore
+    if (overworldRooms.has(avRoom)) return;                // the shared world has no author and no blob (see applyLevel's window refusal)
+    const now = Date.now();
+    if (now - lastLevelResetAt < 3000) return;
+    const levelIndex = currentAvLevelIndex | 0;            // the server's own record of where this socket is
+    let row; try { row = _roomKindSpec.get(currentAvBuildRoomId); } catch { return; }
+    if (!row || !row.env_spec) return;
+    let spec; try { spec = JSON.parse(row.env_spec); } catch { return; }
+    const lvl = (spec && Array.isArray(spec.levels)) ? spec.levels[levelIndex] : null;
+    if (!lvl || !lvl.reset) return;                        // this Level was not authored to reset — ignore
+    lastLevelResetAt = now;
+    // Two restore routes, because a Level's content lives in two different places.
+    const h = publishedHydrationFor(currentAvBuildRoomId, levelIndex);
+    if (h && h.blob) {
+      // PUBLISHED: no host is present, so the server restores from the stored blob itself.
+      hydrateRoomFromBlob(avRoom, h.blob);
+      // ⚠️ `hydrateRoomFromBlob` refills the TERRAIN and says nothing about liquid. Leaving the fine arrays
+      // populated floats the previous run's lava in the restored world — the same hazard the world-rebuild
+      // path records. `seedLiquidActivity` re-derives every fluid cell from the restored grid AND clears the
+      // arrays first, so a painted lake comes back and anything that flowed out of it does not.
+      seedLiquidActivity(avRoom);
+      broadcastLevelRestore(avRoom, levelIndex);
+    } else {
+      // HOST-HELD: the content only exists in the owner's own browser, so ask them to re-apply it. Their
+      // `applyLevel` broadcasts to the room exactly as it does on first hydration.
+      const ownerSock = currentAvOwnerId && discordIdToSocket[currentAvOwnerId];
+      if (ownerSock) io.to(ownerSock).emit('avt-hydrate', { levelIndex });
+    }
   });
   // ── CHUNK RESIDENCY BEACON (SHARED-WORLD.md §7, Phase 3). A coarse, low-rate position so the server knows which
   // chunks to keep resident. Avatar positions otherwise travel P2P and never reach the server at all (see the
