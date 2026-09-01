@@ -9659,8 +9659,26 @@ const SPAWN_CLEAR_H = 96;                             // headroom kept clear abo
 // restart (generation is deterministic from the seed). Player EDITS to a world stay in-memory
 // (ephemeral, clear on restart) — same durability Sandbox has always had.
 db.exec('CREATE TABLE IF NOT EXISTS avatar_worlds (url TEXT PRIMARY KEY, seed INTEGER NOT NULL)');
+// ⭐ LAST VISIT, not last write — the clock the idle prune below runs on. It has to be the VISIT: a page world
+// people come back to and enjoy without digging would look abandoned by any edit-based measure (`world_chunks`
+// already carries an `updated`, and it is the wrong signal for exactly this reason).
+try { db.exec('ALTER TABLE avatar_worlds ADD COLUMN last_seen INTEGER'); } catch {}
+// 🟥 BACKFILL, AND IT IS NOT COSMETIC. Every pre-existing row has `last_seen` NULL, and NULL against a cutoff
+// reads as "idle since the epoch" — so without this the FIRST sweep after deploying would delete the edits in
+// every page world ever made. The clock starts now for worlds that predate it, which is the conservative
+// reading and the only safe one: we do not know when they were last visited, so we must not assume it was long
+// ago. (Same shape as `INSERT OR REPLACE` wiping columns it does not name — an absent value is not a zero.)
+try { db.prepare('UPDATE avatar_worlds SET last_seen = ? WHERE last_seen IS NULL').run(Date.now()); } catch {}
 const _getWorldSeed = db.prepare('SELECT seed FROM avatar_worlds WHERE url = ?');
 const _insWorldSeed = db.prepare('INSERT OR IGNORE INTO avatar_worlds (url, seed) VALUES (?, ?)');
+const _bumpWorldSeen = db.prepare('UPDATE avatar_worlds SET last_seen = ? WHERE url = ?');
+// Mark a page world visited now, so the idle sweep's clock resets. Mirrors `bumpRoomActive` for `rooms`.
+// ⚠️ Called on every avatar JOIN, not on generation: `worldSeedFor` runs once per server lifetime, so a world
+// that has been live since boot would never bump and would age out while people were standing in it.
+function bumpPageWorldSeen(url) {
+  if (!url) return;
+  try { _bumpWorldSeen.run(Date.now(), String(url)); } catch {}
+}
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //  WORLD PERSISTENCE — what players have BUILT survives a restart. See `scratchpad/kickoff_persistence.md`.
@@ -9763,6 +9781,77 @@ const _putObjRow = db.prepare(`INSERT INTO world_objects (room, chunk, items, up
 const _delObjRow = db.prepare('DELETE FROM world_objects WHERE room = ? AND chunk = ?');
 const _listObjRows = db.prepare('SELECT chunk, items FROM world_objects WHERE room = ?');
 const _countObjRows = db.prepare('SELECT COUNT(*) AS n FROM world_objects');
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  ⭐⭐ PRUNING IDLE PAGE WORLDS (list 08 #88). A page world is created by ANYBODY loading the overlay on ANY
+//  url — most are visited once and never again — and until now everything built in one was kept for ever.
+//  ⭐ THE CARD'S OWN WORDING IS THE RIGHT RULE: *"reset to the URL seed"*. We drop the EDITS and KEEP THE SEED.
+//  That matters for correctness, not just for kindness: a stored chunk is a DIFF against generated ground, so
+//  dropping the seed row would re-roll the landscape and leave any surviving diff to be applied to terrain it
+//  was never cut from. (`ver` catches a GENERATOR change; nothing catches a SEED change.) Keeping the seed also
+//  recovers essentially all of the bytes — the seed is ~50 of them — and the page looks exactly as it did when
+//  the first visitor arrived.
+//  ⚠️ MEASURED BEFORE BUILDING, because the size of the problem decides the size of the answer: 692 page worlds
+//  had produced ONE room's worth of stored terrain (10 KB) between them, and 98.9% of all world storage was the
+//  Overworld. That is increments 4c/4d working — a pristine chunk is never stored — so this is a bound on future
+//  growth, NOT a fix for a bill we are already paying. Do not be surprised when it deletes almost nothing.
+//  ⚠️ ONLY NON-RESIDENT ROOMS, and that is the coherent rule rather than a compromise: a resident room's edits
+//  live in memory and the 30-second flush would simply write them back within half a minute. `roomCells` is
+//  never released during a process, so in practice this sweeps what the CURRENT process has not touched —
+//  which after any restart is everything eligible.
+//  🟥 A USER-CREATED ROOM ALSO HAS AN `avatar_worlds` ROW. `worldSeedFor` is keyed on the join's `roomId`,
+//  which is a URL for a page world but a ROOM ID for a Room somebody made — one such row is in the database
+//  right now ("NE75MD", a Level Creator test room). Without the `rooms` check below this would delete a
+//  person's own built world. It is checked by ID against `rooms`, so published Worlds are covered by the same
+//  test. The Overworld never reaches here at all (it uses `OVERWORLD_SEED`, not `worldSeedFor`).
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+const PAGE_WORLD_TTL_MS = 30 * 24 * 60 * 60 * 1000;   // 30 days — the same clock as chat images and room messages
+const WORLD_ROOM_TABLES = ['world_chunks', 'world_builds', 'world_objects', 'world_drops'];
+// `av:<url>:<levelIndex>` → the url, or null if this room key is not a page world's.
+// ⚠️ Parsed rather than matched with LIKE: a url may contain `%` (percent-encoding) and `_`, both of which are
+// LIKE wildcards, so `room LIKE 'av:' || url || ':%'` would match rooms belonging to OTHER urls.
+function pageWorldUrlOf(room) {
+  const s = String(room || '');
+  if (s.slice(0, 3) !== 'av:') return null;
+  const b = s.lastIndexOf(':');
+  if (b <= 2) return null;
+  const url = s.slice(3, b);
+  return url && url[0] !== '@' ? url : null;          // '@over' / '@over-test' are the Overworld, not page worlds
+}
+let pageWorldsPruned = 0;
+function pruneIdlePageWorlds() {
+  try {
+    const cutoff = Date.now() - PAGE_WORLD_TTL_MS;
+    if (!(PAGE_WORLD_TTL_MS > 0)) return;                                   // 0 disables the sweep entirely
+    const idle = new Set();
+    for (const { url } of db.prepare('SELECT url FROM avatar_worlds WHERE COALESCE(last_seen, 0) < ?').all(cutoff)) {
+      if (db.prepare('SELECT 1 FROM rooms WHERE id = ?').get(url)) continue; // somebody's own Room, not a page
+      idle.add(url);
+    }
+    if (!idle.size) return;
+    const rooms = new Set();
+    for (const t of WORLD_ROOM_TABLES) {
+      try { for (const r of db.prepare(`SELECT DISTINCT room FROM ${t}`).all()) rooms.add(r.room); } catch {}
+    }
+    let dropped = 0, roomsHit = 0;
+    for (const room of rooms) {
+      if (roomCells.has(room)) continue;                                    // resident: the flush would rewrite it
+      const url = pageWorldUrlOf(room);
+      if (!url || !idle.has(url)) continue;
+      let n = 0;
+      for (const t of WORLD_ROOM_TABLES) {
+        try { n += db.prepare(`DELETE FROM ${t} WHERE room = ?`).run(room).changes | 0; } catch {}
+      }
+      if (n) { dropped += n; roomsHit++; }
+    }
+    if (roomsHit) {
+      pageWorldsPruned += roomsHit;
+      console.log(`[prune] reset ${roomsHit} idle page world(s) to their seed — ${dropped} stored chunk row(s) dropped`);
+    }
+  } catch (e) { console.error('[prune] page worlds', e); }
+}
+setInterval(pruneIdlePageWorlds, 6 * 60 * 60 * 1000);   // every 6h, alongside pruneIdleSiteRooms
+setTimeout(pruneIdlePageWorlds, 90 * 1000);             // once shortly after boot, after the site-room sweep
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //  🟥🟥 WHERE EACH SITE LIVES, ON DISK. THE ONE THING ABOVE IS MEANINGLESS WITHOUT.
@@ -14532,6 +14621,10 @@ io.on('connection', (socket) => {
     const _isTestOver = _isOver && isTestIdentity(roomId);
     const avRoom = _isOver ? (_isTestOver ? OVERWORLD_TEST_ROOM : OVERWORLD_ROOM) : avatarRoomKey(roomId, levelIndex);
     if (_isOver) overworldRooms.add(avRoom);
+    // Arriving is what resets the idle clock (see PAGE_WORLD_TTL_MS). Keyed on `roomId` because that is what
+    // `worldSeedFor` keys the row on — the same identity, so the bump and the sweep cannot disagree about which
+    // world was visited. The Overworld has no such row and needs none.
+    else bumpPageWorldSeen(roomId);
     // ⭐ …and whether the economy applies here, recorded on the room at the one moment the Level's kind is known.
     if (levelIsGated(rinfo, levelIndex, _isOver)) gatedRooms.add(avRoom);
     // Where in the Overworld THIS socket arrives: an allocation against the page's permanent identity, which is
