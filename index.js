@@ -238,6 +238,23 @@ db.exec(`
     sent_at INTEGER DEFAULT (unixepoch() * 1000)
   );
   CREATE INDEX IF NOT EXISTS idx_room_msgs ON room_messages(room_id, sent_at);
+  -- #101b — how long it took somebody to finish a Level, best attempt only.
+  -- ⭐ ONE ROW PER (room, Level, player), holding their BEST: a leaderboard is a ranking of people, not a log
+  -- of attempts, so keeping every run would mean one person's twenty tries filling the board. The upsert
+  -- below only writes when the new time is faster, which is also what makes "personal best" answerable
+  -- without a second query.
+  -- ⚠️ Keyed on discord_id, so only a signed-in player is recorded — there is no identity to attribute an
+  -- anonymous run to. Anonymous players still SEE the board.
+  CREATE TABLE IF NOT EXISTS level_times (
+    room_id TEXT NOT NULL,
+    level_index INTEGER NOT NULL,
+    discord_id TEXT NOT NULL,
+    username TEXT,
+    ms INTEGER NOT NULL,
+    set_at INTEGER DEFAULT (unixepoch() * 1000),
+    PRIMARY KEY (room_id, level_index, discord_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_level_times ON level_times(room_id, level_index, ms);
 `);
 try { db.exec('ALTER TABLE users ADD COLUMN bio TEXT'); } catch {}
 try { db.exec('ALTER TABLE users ADD COLUMN status TEXT'); } catch {}
@@ -12641,6 +12658,25 @@ function broadcastLevelRestore(avRoom, levelIndex) {
   if (mm && Object.keys(mm).length) io.to(avRoom).emit('mats-init', { levelIndex: levelIndex | 0, mats: mm });
   io.to(avRoom).emit('avatar-objects-init', { levelIndex: levelIndex | 0, objects: roomObjects[avRoom] ? [...roomObjects[avRoom].values()] : [] });
 }
+// ---- #101b: Level completion times ----
+// ⭐ THE DURATION IS THE SERVER'S, NOT THE CLIENT'S. The client says "I touched the goal"; the server owns
+// both ends of the clock. A client that reports its own time can post 0.4s, and a leaderboard is the first
+// thing here anyone has had a reason to forge. This does not stop someone reaching a goal by a route the
+// author did not intend — that is level design, not netcode.
+const _ltBest = db.prepare('SELECT ms FROM level_times WHERE room_id = ? AND level_index = ? AND discord_id = ?');
+const _ltPut  = db.prepare(`INSERT INTO level_times (room_id, level_index, discord_id, username, ms, set_at)
+  VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(room_id, level_index, discord_id) DO UPDATE SET
+    ms = excluded.ms, username = excluded.username, set_at = excluded.set_at
+  WHERE excluded.ms < level_times.ms`);
+const _ltTop  = db.prepare('SELECT discord_id, username, ms, set_at FROM level_times WHERE room_id = ? AND level_index = ? ORDER BY ms ASC LIMIT ?');
+const LEVEL_TIME_MIN_MS = 500;                      // below this it is a spawn sitting on the goal, not a run
+const LEVEL_TIME_MAX_MS = 6 * 60 * 60 * 1000;       // above it the session was idle, not slow
+function levelBoard(roomId, levelIndex, meId) {
+  let rows = [];
+  try { rows = _ltTop.all(roomId, levelIndex | 0, 10); } catch { rows = []; }
+  return rows.map((r, i) => ({ rank: i + 1, name: r.username || 'Someone', ms: r.ms, me: !!(meId && r.discord_id === meId) }));
+}
 const _roomKindSpec = db.prepare('SELECT kind, env_spec FROM rooms WHERE id = ?');
 const _pubWorldGet  = db.prepare('SELECT content, durability, live_state FROM published_worlds WHERE id = ?');
 // Resolve a published room+Level → the Lvl blob to hydrate from (durability-aware). null if not a published
@@ -13950,6 +13986,10 @@ io.on('connection', (socket) => {
   // event: every effect of the lock is already applied by the receiving client (it refuses incoming hits and
   // builds no collision bodies), so this exists to stop a MODIFIED client relaying hits at honest ones.
   let currentAvLevelSolo = false;
+  // #101b — when this socket's current run of the Level began, by the SERVER's clock. Set on entering a Level
+  // and restarted by a #102 reset (which puts the world back to the start, so the attempt starts over too).
+  // ⚠️ A respawn to a checkpoint deliberately does NOT restart it — in a timed Level, dying costs you time.
+  let levelRunStart = 0;
   let currentAvRoomId = null;      // Phase 6 inc 4: the roomId the avatar room was keyed on (= the URL for a page room).
                                    // `currentAvBuildRoomId` is NOT this — it is null for a page room by design — and the
                                    // world SEED is keyed on the roomId, so a regenerate needs the real one.
@@ -14708,6 +14748,7 @@ io.on('connection', (socket) => {
     }
     currentAvLevelIndex = levelIndex;                              // Phase 3: per-Level build lock keys on this
     currentAvRoomId = roomId;                                      // Phase 6 inc 4: the seed key, for a world regenerate
+    levelRunStart = Date.now();                                    // #101b: entering a Level starts the clock
     // #101a — one lookup per Level join, so the hit relay below is a boolean test rather than a DB read per punch.
     currentAvLevelSolo = false;
     if (rinfo) {
@@ -14888,6 +14929,7 @@ io.on('connection', (socket) => {
     const lvl = (spec && Array.isArray(spec.levels)) ? spec.levels[levelIndex] : null;
     if (!lvl || !lvl.reset) return;                        // this Level was not authored to reset — ignore
     lastLevelResetAt = now;
+    levelRunStart = now;                                   // #101b: the world goes back to the start, so does the attempt
     // Two restore routes, because a Level's content lives in two different places.
     const h = publishedHydrationFor(currentAvBuildRoomId, levelIndex);
     if (h && h.blob) {
@@ -14905,6 +14947,42 @@ io.on('connection', (socket) => {
       const ownerSock = currentAvOwnerId && discordIdToSocket[currentAvOwnerId];
       if (ownerSock) io.to(ownerSock).emit('avt-hydrate', { levelIndex });
     }
+  });
+  // ── #101b · LEVEL COMPLETION TIMES ───────────────────────────────────────────────────────────────────────
+  // The client says only "I touched the goal". Everything else — how long that took, whether it beats your
+  // own best, and where it sits against everyone else's — is the server's, from its own clock.
+  let lastDoneAt = 0;
+  socket.on('avt-level-done', () => {
+    const roomId = currentAvBuildRoomId;
+    if (!roomId || !currentAvatarRoom || overworldRooms.has(currentAvatarRoom)) return;
+    const now = Date.now();
+    if (now - lastDoneAt < 1000) return;                   // the client already has a goal cooldown; this is the server's
+    lastDoneAt = now;
+    const levelIndex = currentAvLevelIndex | 0;
+    const did = socketToDiscordId[socket.id];
+    const ms = levelRunStart ? (now - levelRunStart) : 0;
+    // A run that is impossibly short is a spawn sitting on the goal; one that is impossibly long is an idle
+    // session, not a slow player. Neither is a time worth ranking, but BOTH still get the board back — you
+    // finished, you should see where you stand.
+    const valid = !!(did && ms >= LEVEL_TIME_MIN_MS && ms <= LEVEL_TIME_MAX_MS);
+    let best = false, prev = null;
+    if (valid) {
+      try {
+        const row = _ltBest.get(roomId, levelIndex, did);
+        prev = row ? row.ms : null;
+        _ltPut.run(roomId, levelIndex, did, socketToUsername[socket.id] || null, ms, now);
+        best = (prev === null || ms < prev);
+      } catch { best = false; }
+    }
+    levelRunStart = now;                                   // a new attempt begins where the last one ended
+    socket.emit('avt-level-time', { levelIndex, ms, recorded: valid, best, prev, board: levelBoard(roomId, levelIndex, did) });
+  });
+  // Read the board without finishing — for the Level list. Anyone may ask, signed in or not.
+  socket.on('avt-level-board', ({ levelIndex } = {}) => {
+    const roomId = currentAvBuildRoomId;
+    if (!roomId) return;
+    const li = Number.isInteger(levelIndex) ? levelIndex : (currentAvLevelIndex | 0);
+    socket.emit('avt-level-board', { levelIndex: li, board: levelBoard(roomId, li, socketToDiscordId[socket.id]) });
   });
   // ── CHUNK RESIDENCY BEACON (SHARED-WORLD.md §7, Phase 3). A coarse, low-rate position so the server knows which
   // chunks to keep resident. Avatar positions otherwise travel P2P and never reach the server at all (see the
