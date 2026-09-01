@@ -2522,8 +2522,15 @@ app.post('/worlds/:id/flags', (req, res) => {
     const w = db.prepare('SELECT owner_id, durability, live_state FROM published_worlds WHERE id = ?').get(req.params.id);
     if (!w) return res.status(404).json({ error: 'Not found' });
     if (w.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
-    const { allow_remix, durability, reset_live } = req.body || {};
+    const { allow_remix, durability, reset_live, thumb } = req.body || {};
     if (allow_remix !== undefined) db.prepare('UPDATE published_worlds SET allow_remix = ? WHERE id = ?').run(allow_remix ? 1 : 0, req.params.id);
+    // ⭐ Previews arrive HERE rather than with the content, because the room exporter has no pictures to send:
+    // a thumbnail is rendered from a Level blob by the CLIENT, and on that path the client never held one. So
+    // it publishes first, reads its own World back, draws the previews and posts them separately.
+    // ⚠️ `null` clears them — that is the creator's opt-out, and it must stay expressible.
+    if (thumb !== undefined) {
+      db.prepare('UPDATE published_worlds SET thumb = ? WHERE id = ?').run(sanitizeWorldThumbs(thumb), req.params.id);
+    }
     if (durability !== undefined) {
       const dura = (durability === 'persistent') ? 'persistent' : 'showcase';
       // 🟥 THE SAME LOSS THROUGH A DIFFERENT DOOR. Flipping Persistent → Showcase also clears `live_state`,
