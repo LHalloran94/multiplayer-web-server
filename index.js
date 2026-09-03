@@ -16079,6 +16079,23 @@ io.on('connection', (socket) => {
     }
   });
 
+  // #98 — RENAME SOMETHING ALREADY PLACED. The first version could only name a thing BEFORE dropping it, which
+  // is the wrong way round: you build the Level first and think about the game afterwards, so the natural move
+  // is to point at the crown you already put down and say "that one is the crown".
+  // ⚠️ Broadcast on `avatar-object-add`, which every client already treats as "overwrite this id in place" —
+  // no new inbound wire, and the rename reaches everyone standing in the Level.
+  // ⚠️ Authoring Levels only, like `rules-set`: a name is only meaningful to a rule, and rules do not run in
+  // the shared worlds. That also keeps this off the chunked-object path, which broadcasts differently.
+  socket.on('avatar-object-tag', ({ id, tag }) => {
+    if (!currentAvatarRoom || !currentAvBuildRoomId || overworldRooms.has(currentAvatarRoom)) return;
+    if (!canBuild()) return;
+    const map = roomObjects[currentAvatarRoom]; if (!map) return;
+    const o = map.get(id); if (!o) return;
+    const t = (typeof tag === 'string') ? tag.trim().slice(0, 24) : '';
+    if (t) o.tag = t; else delete o.tag;
+    io.to(currentAvatarRoom).emit('avatar-object-add', o);
+  });
+
   // ---- Avatar world objects (Stage 6) — server-authoritative existence over reliable
   // socket.io; physics response is applied locally on each client. Persist till restart.
   socket.on('avatar-object-spawn', (data) => {
