@@ -1885,6 +1885,9 @@ function sanitizeEnvSpec(raw) {
     // symmetric, so "the host may touch and others may not" is not a state that means anything, and it
     // applies to the host too.
     if (l && l.solo) out.solo = 1;
+    // The backing layer ("what is behind the terrain"). Absent = decided by the Level's kind, which is right
+    // almost always; stored only when the author overrides it. 0 is meaningful, so this tests for undefined.
+    if (l && l.back != null) out.back = l.back ? 1 : 0;
     return out;
   });
   return { levels, nav: (raw.nav === 'series') ? 'series' : 'free' };
