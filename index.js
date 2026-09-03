@@ -12705,7 +12705,14 @@ function maybeHydratePublished(avRoom, roomId, levelIndex) {
   const h = publishedHydrationFor(roomId, levelIndex);
   if (!h) return false;
   hydratedAvRooms.add(avRoom);
-  if (h.blob) hydrateRoomFromBlob(avRoom, h.blob);
+  if (h.blob) {
+    hydrateRoomFromBlob(avRoom, h.blob);
+    // 🟥 A SAVED BLOB HAS NO LIQUID IN IT — only terrain, and a fluid is a terrain cell id. Without this the
+    // lava in a published Level arrives as fluid CELLS with no liquid state: it kills you and draws its
+    // surface effects, but it has no body to render and never flows. Reported from play as "the lava is
+    // invisible except for the surface fx". Same one-line omission as the #102 reset path, which had it.
+    seedLiquidActivity(avRoom);
+  }
   return true;
 }
 // ---- Phase 7b: Persistent durability — periodically snapshot a published room's live state back to the DB
@@ -14960,7 +14967,14 @@ io.on('connection', (socket) => {
     lastDoneAt = now;
     const levelIndex = currentAvLevelIndex | 0;
     const did = socketToDiscordId[socket.id];
-    const ms = levelRunStart ? (now - levelRunStart) : 0;
+    // 🟥 A FINISH CONSUMES THE RUN. Reaching a goal does not move you off it and the Finish branch does not
+    // switch Level, so you can stand on the flag and re-trigger for ever — and because only a FASTER time is
+    // kept, each re-touch posted a near-zero one and took the record. Reported from play as "you can finish
+    // as fast as possible by just standing on the goal flag". A new attempt needs a new START: re-enter the
+    // Level, or reset it. Until then this is a request to SEE the board, which is the honest reading of
+    // touching a goal you have already reached.
+    if (!levelRunStart) { socket.emit('avt-level-board', { levelIndex, board: levelBoard(roomId, levelIndex, did) }); return; }
+    const ms = now - levelRunStart;
     // A run that is impossibly short is a spawn sitting on the goal; one that is impossibly long is an idle
     // session, not a slow player. Neither is a time worth ranking, but BOTH still get the board back — you
     // finished, you should see where you stand.
@@ -14974,7 +14988,7 @@ io.on('connection', (socket) => {
         best = (prev === null || ms < prev);
       } catch { best = false; }
     }
-    levelRunStart = now;                                   // a new attempt begins where the last one ended
+    levelRunStart = 0;                                     // the run is spent; only re-entering or resetting starts another
     socket.emit('avt-level-time', { levelIndex, ms, recorded: valid, best, prev, board: levelBoard(roomId, levelIndex, did) });
   });
   // Read the board without finishing — for the Level list. Anyone may ask, signed in or not.
