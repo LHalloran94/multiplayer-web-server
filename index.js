@@ -12700,6 +12700,27 @@ function publishedHydrationFor(roomId, levelIndex) {
 }
 // One-shot hydration on avt-join. Marks the av-room as hydrated (shares `hydratedAvRooms` with the host
 // path, so the owner's avt-hydrate won't double-fire). No-op for non-published rooms.
+// 🟥 A SHOWCASE LEVEL HAD NO WAY BACK TO ITS AUTHORED STATE. `hydratedAvRooms` is marked once and never
+// cleared, so a published Level was built from its blob the FIRST time anyone entered it after a server start
+// and then kept whatever state it drifted into for ever. Reported from play: "the lava … only flows once upon
+// the first time entering and then after that it is permanently where it settled."
+// ⚠️ THIS IS NOT THE SHOWCASE/PERSISTENT DISTINCTION, which is about surviving a RESTART. It is what
+// "showcase" has to mean between visits: the next person sees the Level as its author made it.
+// ⚠️ Only when the room is EMPTY — resetting under someone standing in it is the #102 reset, which is
+// opt-in and author-chosen. And only SHOWCASE: a persistent world's whole point is that it keeps what
+// happened to it.
+// ⚠️ Objects must be dropped explicitly: `hydrateRoomFromBlob` ADDS to the object map without clearing it, so
+// a second hydration would leave two of everything.
+function maybeResetShowcase(avRoom) {
+  if (!avRoom || !hydratedAvRooms.has(avRoom) || !avRoomIsEmpty(avRoom)) return;
+  const b = String(avRoom).lastIndexOf(':');
+  if (b <= 2) return;
+  const roomId = String(avRoom).slice(3, b), levelIndex = parseInt(String(avRoom).slice(b + 1), 10) | 0;
+  let h = null; try { h = publishedHydrationFor(roomId, levelIndex); } catch { return; }
+  if (!h || h.durability === 'persistent') return;
+  if (roomObjects[avRoom]) roomObjects[avRoom].clear();
+  hydratedAvRooms.delete(avRoom);                  // the next joiner rebuilds it from the blob
+}
 function maybeHydratePublished(avRoom, roomId, levelIndex) {
   if (hydratedAvRooms.has(avRoom)) return false;
   const h = publishedHydrationFor(roomId, levelIndex);
@@ -14913,6 +14934,7 @@ io.on('connection', (socket) => {
     if (currentAvatarRoom) socket.leave(currentAvatarRoom);
     if (currentAvatarRoom && roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);   // Phase 3: stop holding chunks resident for someone who left
     if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); dropRelay(currentAvatarRoom, socket.id); }   // Phase 4: stop tracking what they were subscribed/meshed to · Phase 5a: and stop relaying them
+    maybeResetShowcase(currentAvatarRoom);   // last one out of a showcase Level → it goes back to how its author made it
     delete socketToAvatarRoom[socket.id];
   });
   // ── #102 · RESET THE LEVEL STATE ON RESPAWN ──────────────────────────────────────────────────────────────
@@ -16600,6 +16622,7 @@ io.on('connection', (socket) => {
       if (currentAvatarRoom && roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) {
         socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
       }
+      maybeResetShowcase(currentAvatarRoom);   // closing the tab is leaving too — the other half of the same rule
       delete socketToAvatarRoom[socket.id];
       if (pageUsers[currentRoom]) delete pageUsers[currentRoom][socket.id];
       broadcastPresence(currentPresenceRoom);
