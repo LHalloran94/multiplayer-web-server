@@ -12989,9 +12989,17 @@ setInterval(autosavePersistentWorlds, 30000);
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // ==RULES_BLOCK_START==
 const RULE_EVENTS = new Set(['take', 'touch', 'enter', 'leave', 'respawn', 'goal', 'break', 'timer', 'reach', 'roundstart', 'roundend']);
-const RULE_COND   = new Set(['tag', 'notag', 'in', 'num', 'count']);
+// ⭐ `done`/`notdone` — "you cannot trigger this unless something else has been triggered" (user, 2026-09-04).
+// A per-LEVEL fact that something happened, set by `remember`. Several must-haves = several conditions, since
+// conditions are already ANDed; several names in ONE box means any of them, like every other box.
+const RULE_COND   = new Set(['tag', 'notag', 'in', 'num', 'count', 'done', 'notdone']);
 const RULE_ACTS   = new Set(['give', 'take', 'add', 'set', 'hide', 'show', 'moveto', 'say', 'mark', 'unmark',
-                             'badge', 'unbadge', 'tp', 'respawn', 'win', 'endround', 'resetscores', 'restore', 'group']);
+                             'badge', 'unbadge', 'tp', 'respawn', 'win', 'endround', 'resetscores', 'restore', 'group',
+                             // ⭐ `wait` is not an effect, it is a SEAM: everything after it in the same rule runs
+                             // later, with the same player. That is what makes "spawn something five seconds after
+                             // this" one rule rather than a rule plus a timer plus a flag to link them.
+                             'wait', 'spawn', 'despawn', 'remember', 'forget']);
+const SAY_WHERE   = ['top', 'mid', 'low'];
 const RULE_OPS    = ['>=', '<=', '>', '<', '==', '!='];
 const RULES_PER_LEVEL = 64;          // a rule set is authored by hand; this is a clutter bound, not a budget
 const ACTS_PER_RULE   = 16;
@@ -13051,7 +13059,7 @@ function sanitizeRule(raw) {
     // ⇒ THE EDITOR'S JOB IS TO LET YOU WRITE AN UNFINISHED RULE; THE ENGINE'S JOB IS TO IGNORE WHAT IS NOT
     // FINISHED. So the shape survives here, and `condHolds`/`doRuleAct` treat an empty name list as "not
     // configured yet" — the rule simply does not fire until you fill it in.
-    if (c.kind === 'tag' || c.kind === 'notag' || c.kind === 'in') o.tag = ruleTags(c.tag);
+    if (c.kind === 'tag' || c.kind === 'notag' || c.kind === 'in' || c.kind === 'done' || c.kind === 'notdone') o.tag = ruleTags(c.tag);
     if (c.kind === 'num') { o.num = ruleTag(c.num) || 'score'; o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, -1e9, 1e9, 0); if (c.sh) o.sh = 1; }
     if (c.kind === 'count') { o.tag = ruleTags(c.tag); o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, 0, 999, 1); }
     r.ifs.push(o);
@@ -13063,10 +13071,19 @@ function sanitizeRule(raw) {
     const o = { do: a.do };
     // …and the same for actions: a verb you have chosen but not yet aimed is kept, and does nothing. See the
     // note on conditions above — dropping it here is what made a half-written rule undo itself as you typed.
-    if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp') o.tag = ruleTags(a.tag);
+    if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp'
+     || a.do === 'despawn' || a.do === 'remember' || a.do === 'forget') o.tag = ruleTags(a.tag);
     if (a.do === 'moveto') { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); }   // …`to` is one place, deliberately
+    if (a.do === 'spawn')  { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); o.n = clampRuleNum(a.n, 1, 8, 1); }
+    if (a.do === 'wait')   o.secs = clampRuleNum(a.secs, 0.1, 600, 1);
     if (a.do === 'add' || a.do === 'set') { o.num = ruleTag(a.num) || 'score'; o.v = clampRuleNum(a.v, -1e9, 1e9, 1); if (a.sh) o.sh = 1; }
-    if (a.do === 'say') o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 120);
+    // ⭐ Where on screen it lands and how long it stays — the author's call, because a line of instructions and
+    // a scoreline want completely different treatment (user, 2026-09-04).
+    if (a.do === 'say') {
+      o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 120);
+      if (SAY_WHERE.includes(a.where)) o.where = a.where;
+      o.secs = clampRuleNum(a.secs, 1, 60, 5);
+    }
     if (a.do === 'badge') o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 8);
     if (a.do === 'group') { o.tag = ruleTag(a.tag); o.on = a.on ? 1 : 0; if (!o.tag) continue; }
     r.then.push(o);
@@ -13113,6 +13130,9 @@ function gameOf(avRoom) {
       // their rules out"*). Per ROOM, not per person — one simulation, everyone in it, the same call the author's
       // pause already makes.
       off: false,
+      flags: new Set(),     // per-LEVEL facts: "the bomb was planted", "the door was opened" — see `remember`
+      pending: [],          // parked continuations from `wait` — see runActions
+      epoch: 0,             // bumped by a reset, so parked work under old rules is dropped rather than landing late
       dirty: false,
     };
     for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);   // phases that start closed
@@ -13180,6 +13200,10 @@ function condHolds(avRoom, g, c, sid, key) {
     case 'tag':   return !!key && names.some(n => { const s = g.tags.get(n); return s && s.has(key); });
     case 'notag': return !key || names.every(n => { const s = g.tags.get(n); return !s || !s.has(key); });
     case 'in':    { const s = insideOf(avRoom, sid); return !!s && names.some(n => s.has(n)); }
+    // ⚠️ Like `notag`, `notdone` is its own walk rather than the negation of `done`: "the bomb has not been
+    // planted or defused" has to mean NEITHER.
+    case 'done':    return names.some(n => g.flags.has(n));
+    case 'notdone': return names.every(n => !g.flags.has(n));
     case 'num':   return (key || c.sh) ? cmpRule(numOf(g, key, c.num, c.sh), c.op, c.v) : false;
     case 'count': {
       let n = 0;
@@ -13225,9 +13249,28 @@ function runRule(avRoom, g, r, idx, ctx, out, depth) {
     if (ok) matched.push([sid, key]);
   }
   if (!matched.length) return;
-  for (const [sid, key] of matched) for (const a of r.then) if (PER_PLAYER_ACTS.has(a.do)) doRuleAct(avRoom, g, a, sid, key, ctx, out, depth);
-  const [s0, k0] = matched[0];
-  for (const a of r.then) if (!PER_PLAYER_ACTS.has(a.do)) doRuleAct(avRoom, g, a, s0, k0, ctx, out, depth);
+  runActions(avRoom, g, r, 0, matched, ctx, out, depth);
+}
+// ⭐⭐ THE ACTIONS RUN IN THE ORDER THEY ARE WRITTEN, top to bottom, and `wait` cuts the list in half.
+// ⚠️ This used to be two passes — every per-player action for every matched player, THEN every world action
+// once. Same result for a rule with no `wait` in it (and the crown starter is unchanged by the switch), but
+// ordering has to be real before a delay can mean anything: "give them the crown, wait 3 seconds, say who has
+// it" is a sentence about time, and two passes would have run the saying before the waiting.
+function runActions(avRoom, g, r, from, matched, ctx, out, depth) {
+  for (let i = from; i < r.then.length; i++) {
+    const a = r.then[i];
+    if (a.do === 'wait') {
+      // ⚠️ The rest of the rule is parked with the players it had matched, so a delayed action still happens to
+      // the right person — and with the game's `epoch`, so a reset or a rule edit throws away work that was
+      // queued under rules that no longer exist.
+      g.pending.push({ at: Date.now() + Math.round((a.secs || 1) * 1000), epoch: g.epoch, rule: r, idx: i + 1,
+                       matched: matched.map(m => [m[0], m[1]]),
+                       ctx: ctx ? { sid: ctx.sid, tag: ctx.tag, num: ctx.num } : null, depth });
+      return;
+    }
+    if (PER_PLAYER_ACTS.has(a.do)) { for (const [sid, key] of matched) doRuleAct(avRoom, g, a, sid, key, ctx, out, depth); }
+    else doRuleAct(avRoom, g, a, matched[0][0], matched[0][1], ctx, out, depth);
+  }
 }
 function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
   const names = ruleTagList(a.tag);       // every name-taking verb applies to EACH name in the box
@@ -13253,7 +13296,25 @@ function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
     // show a role, and it needs no new art — the name label is already drawn over every player.
     case 'badge': if (key) { g.badges.set(key, String(a.text || '').slice(0, 8)); g.dirty = true; } break;
     case 'unbadge': if (key) { g.badges.delete(key); g.dirty = true; } break;
-    case 'say':  out.say.push({ text: a.text, who: key ? (g.names.get(key) || '') : '' }); break;
+    case 'say':  out.say.push({ text: a.text, who: key ? (g.names.get(key) || '') : '', where: a.where || 'mid', secs: a.secs || 5 }); break;
+    // ⭐ REMEMBER / FORGET — a per-LEVEL fact, which is what "you cannot trigger this unless something else has
+    // been triggered" needs. Deliberately NOT a mark on a player: "the bomb was planted" is true of the Level,
+    // not of whoever planted it, and storing it on the person would lose it the moment they left.
+    case 'remember': for (const n of names) g.flags.add(n); g.dirty = true; break;
+    case 'forget':   for (const n of names) g.flags.delete(n); g.dirty = true; break;
+    case 'spawn':    doRuleSpawn(avRoom, g, a, names, sid); break;
+    // ⚠️ ONLY THE COPIES RULES MADE, never the author's original. `hide` is what makes an authored thing go
+    // away; if this removed everything with the name, a `spawn` after a `despawn` would have no template left
+    // to copy and the second round of any game using it would quietly stop working.
+    case 'despawn': {
+      const map = roomObjects[avRoom]; if (!map) break;
+      for (const [id, o] of [...map]) {
+        if (!o.tag || !names.includes(o.tag)) continue;
+        if (typeof id !== 'string' || !id.startsWith('rule-')) continue;
+        map.delete(id); io.to(avRoom).emit('avatar-objects-removed', { ids: [id] });
+      }
+      break;
+    }
     case 'mark': if (key) { let s = g.tags.get('~mark'); if (!s) g.tags.set('~mark', s = new Set()); s.add(key); g.dirty = true; } break;
     case 'unmark': if (key) { const s = g.tags.get('~mark'); if (s) { s.delete(key); g.dirty = true; } } break;
     case 'tp':   if (sid) (out.tp = out.tp || []).push({ sid, tag: names[0] || '' }); break;   // one destination; the first named
@@ -13269,13 +13330,38 @@ function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
 // run, so a rule that both moves the crown and ends the round produces one message in one order, and a round
 // cannot be ended twice by two rules in the same pass.
 function flushRuleOut(avRoom, g, out, depth) {
-  for (const m of out.say) io.to(avRoom).emit('rule-say', { text: String(m.text).replace(/\{player\}/g, m.who || 'Someone') });
+  for (const m of out.say) io.to(avRoom).emit('rule-say', { text: String(m.text).replace(/\{player\}/g, m.who || 'Someone'),
+                                                            where: m.where || 'mid', secs: m.secs || 5 });
   if (out.tp) for (const t of out.tp) { const o = findTaggedObj(avRoom, t.tag); if (o) io.to(t.sid).emit('rule-move-me', { x: o.x, y: o.y }); }
   if (out.kill) for (const sid of out.kill) io.to(sid).emit('rule-respawn-me', {});
   if (out.move) for (const m of out.move) applyRuleMove(avRoom, m);
   if (out.end) endRuleRound(avRoom, g, out.win, out.restore, depth);
   else if (out.restore) restoreRuleWorld(avRoom);
   if (g.dirty) broadcastRuleState(avRoom);
+}
+// ⭐ SPAWN — make more of a named thing, somewhere named. The author places one (often hidden) and it becomes
+// the template; the copies carry the SAME name, so every rule about it already applies to all of them.
+// ⚠️ Bounded by the room's ordinary object cap, because a rule with a short timer is a machine for making
+// objects and nothing else here would stop it.
+function doRuleSpawn(avRoom, g, a, names, sid) {
+  const map = roomObjects[avRoom]; if (!map) return;
+  let dx = null, dy = null;
+  if (a.to) { const d = findTaggedObj(avRoom, a.to); if (d) { dx = d.x; dy = d.y; } }
+  else if (sid) { const w = roomWhere[avRoom] && roomWhere[avRoom].get(sid); if (w && w.apx >= 0) { dx = w.apx; dy = w.apy; } }
+  if (dx === null) return;                       // nowhere named to put it, and nobody to put it beside
+  const n = Math.max(1, Math.min(8, a.n | 0 || 1));
+  for (const name of names) {
+    const src = findTaggedObj(avRoom, name); if (!src) continue;
+    for (let k = 0; k < n; k++) {
+      if (map.size >= MAX_OBJECTS_PER_ROOM) return;
+      const id = 'rule-' + (++objSeq);
+      // …spread a batch out rather than stacking them all on one pixel.
+      const at = Object.assign(snapshotObjSrv(src), { x: dx + (k - (n - 1) / 2) * 28, y: dy, tag: name });
+      const copy = buildWorldObject(src.type, at, id, id, 'world', avRoom);
+      if (copy) { map.set(id, copy); io.to(avRoom).emit('avatar-object-add', copy); }
+    }
+  }
+  g.dirty = true;
 }
 function findTaggedObj(avRoom, tag) {
   const map = roomObjects[avRoom]; if (!map || !tag) return null;
@@ -13370,6 +13456,20 @@ function rulesTick() {
     const g = gameOf(avRoom);
     if (g.off) continue;
     const now = Date.now();
+    // ⭐ Work parked by `wait`, now due. ⚠️ Dropped rather than run if the game has been reset or its rules
+    // edited since (the epoch), so a five-second delay from a deleted rule cannot land on the next round.
+    if (g.pending.length) {
+      const due = g.pending.filter(p => p.at <= now);
+      if (due.length) {
+        g.pending = g.pending.filter(p => p.at > now);
+        for (const p of due) {
+          if (p.epoch !== g.epoch) continue;
+          const out = { say: [], win: null, end: false };
+          runActions(avRoom, g, p.rule, p.idx, p.matched, p.ctx, out, (p.depth | 0));
+          flushRuleOut(avRoom, g, out, (p.depth | 0));
+        }
+      }
+    }
     for (let i = 0; i < rules.length; i++) {
       const r = rules[i];
       if (r.when !== 'timer') continue;
@@ -16123,7 +16223,8 @@ io.on('connection', (socket) => {
       // author writes (`put the world back`), and doing it here as well would make this button destructive in a
       // way its name does not admit to.
       g.nums.clear(); g.shared.clear(); g.tags.clear(); g.badges.clear();
-      g.hidden.clear(); g.taken.clear(); g.groups.clear(); g.timers.clear();
+      g.hidden.clear(); g.taken.clear(); g.groups.clear(); g.timers.clear(); g.flags.clear();
+      g.pending.length = 0; g.epoch++;          // …and anything a `wait` had parked, so it cannot land after the reset
       for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);
       g.roundStart = Date.now(); g.lastRound = 0;
     }
