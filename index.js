@@ -13044,9 +13044,16 @@ function sanitizeRule(raw) {
     if (r.ifs.length >= CONDS_PER_RULE) break;
     if (!c || !RULE_COND.has(c.kind)) continue;
     const o = { kind: c.kind };
-    if (c.kind === 'tag' || c.kind === 'notag' || c.kind === 'in') { o.tag = ruleTags(c.tag); if (!o.tag) continue; }
+    // 🟥🟥 AN UNFINISHED ENTRY IS KEPT, NOT DROPPED — and this was a real bug reported from play: pressing
+    // "+ condition" appeared to add a row that then vanished. It did. The new row starts with an empty name,
+    // the sanitiser refused it, and the server's echo replaced the list without it. The same would have
+    // happened the moment anyone picked an action that takes a name.
+    // ⇒ THE EDITOR'S JOB IS TO LET YOU WRITE AN UNFINISHED RULE; THE ENGINE'S JOB IS TO IGNORE WHAT IS NOT
+    // FINISHED. So the shape survives here, and `condHolds`/`doRuleAct` treat an empty name list as "not
+    // configured yet" — the rule simply does not fire until you fill it in.
+    if (c.kind === 'tag' || c.kind === 'notag' || c.kind === 'in') o.tag = ruleTags(c.tag);
     if (c.kind === 'num') { o.num = ruleTag(c.num) || 'score'; o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, -1e9, 1e9, 0); if (c.sh) o.sh = 1; }
-    if (c.kind === 'count') { o.tag = ruleTags(c.tag); o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, 0, 999, 1); if (!o.tag) continue; }
+    if (c.kind === 'count') { o.tag = ruleTags(c.tag); o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, 0, 999, 1); }
     r.ifs.push(o);
   }
   r.then = [];
@@ -13054,11 +13061,13 @@ function sanitizeRule(raw) {
     if (r.then.length >= ACTS_PER_RULE) break;
     if (!a || !RULE_ACTS.has(a.do)) continue;
     const o = { do: a.do };
-    if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp') { o.tag = ruleTags(a.tag); if (!o.tag) continue; }
-    if (a.do === 'moveto') { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); if (!o.tag) continue; }   // …`to` is one place, deliberately
+    // …and the same for actions: a verb you have chosen but not yet aimed is kept, and does nothing. See the
+    // note on conditions above — dropping it here is what made a half-written rule undo itself as you typed.
+    if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp') o.tag = ruleTags(a.tag);
+    if (a.do === 'moveto') { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); }   // …`to` is one place, deliberately
     if (a.do === 'add' || a.do === 'set') { o.num = ruleTag(a.num) || 'score'; o.v = clampRuleNum(a.v, -1e9, 1e9, 1); if (a.sh) o.sh = 1; }
     if (a.do === 'say') o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 120);
-    if (a.do === 'badge') { o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 8); if (!o.text) continue; }
+    if (a.do === 'badge') o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 8);
     if (a.do === 'group') { o.tag = ruleTag(a.tag); o.on = a.on ? 1 : 0; if (!o.tag) continue; }
     r.then.push(o);
   }
@@ -13099,6 +13108,11 @@ function gameOf(avRoom) {
       timers: new Map(),    // rule index → ms of the last fire
       roundStart: Date.now(),
       lastRound: 0,
+      // ⭐ AN OFF SWITCH, because you cannot build a Level while its own game keeps respawning you (user, 2026-09-04:
+      // *"we probably want a rules on/off toggle, and a reset button, in the rules panel, so that users can test
+      // their rules out"*). Per ROOM, not per person — one simulation, everyone in it, the same call the author's
+      // pause already makes.
+      off: false,
       dirty: false,
     };
     for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);   // phases that start closed
@@ -13158,6 +13172,10 @@ function rulePerPlayer(r) {
 // negating an any-test would quietly give it the opposite meaning for a two-name box.
 function condHolds(avRoom, g, c, sid, key) {
   const names = ruleTagList(c.tag);
+  // ⚠️ AN UNFINISHED CONDITION IS NOT SATISFIED — including `notag`, where "they do not have <nothing>" would
+  // otherwise be vacuously TRUE and a half-written rule would start firing at everybody. Blocking is the safe
+  // reading of "you have not said what you mean yet"; the editor marks the empty box so you can see why.
+  if (c.kind !== 'num' && !names.length) return false;
   switch (c.kind) {
     case 'tag':   return !!key && names.some(n => { const s = g.tags.get(n); return s && s.has(key); });
     case 'notag': return !key || names.every(n => { const s = g.tags.get(n); return !s || !s.has(key); });
@@ -13179,6 +13197,7 @@ function fireRuleEvent(avRoom, when, ctx, depth) {
   if (!rules || !rules.length) return;
   if ((depth | 0) > 2) return;
   const g = gameOf(avRoom);
+  if (g.off) return;                       // the game is switched off while its author works on it
   const out = { say: [], win: null, end: false };
   for (let i = 0; i < rules.length; i++) {
     const r = rules[i];
@@ -13212,6 +13231,9 @@ function runRule(avRoom, g, r, idx, ctx, out, depth) {
 }
 function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
   const names = ruleTagList(a.tag);       // every name-taking verb applies to EACH name in the box
+  // …and a verb you have chosen but not yet aimed does nothing, rather than being deleted as you type.
+  if (!names.length && ['give', 'take', 'hide', 'show', 'tp', 'moveto'].includes(a.do)) return;
+  if (a.do === 'badge' && !a.text) return;
   switch (a.do) {
     case 'give': if (key) for (const n of names) { let s = g.tags.get(n); if (!s) g.tags.set(n, s = new Set()); s.add(key); g.dirty = true; } break;
     case 'take': if (key) for (const n of names) { const s = g.tags.get(n); if (s) { s.delete(key); g.dirty = true; } } break;
@@ -13325,7 +13347,7 @@ function ruleStateFor(avRoom, sid) {
   const board = [];
   for (const [k, mm] of g.nums) { const v = mm.get('score'); if (v) board.push({ name: g.names.get(k) || '…', v, me: k === key }); }
   board.sort((a, b) => b.v - a.v);
-  return { mine, shared, tags: mytags, marked, badges, hidden: [...g.hidden], board: board.slice(0, 8),
+  return { mine, shared, tags: mytags, marked, badges, off: g.off ? 1 : 0, hidden: [...g.hidden], board: board.slice(0, 8),
            round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)) };
 }
 function broadcastRuleState(avRoom) {
@@ -13346,6 +13368,7 @@ function rulesTick() {
     if (!rules || !rules.length) continue;
     if (!(roomAvt[avRoom] && roomAvt[avRoom].size)) continue;      // nobody here — a game with no players does not run
     const g = gameOf(avRoom);
+    if (g.off) continue;
     const now = Date.now();
     for (let i = 0; i < rules.length; i++) {
       const r = rules[i];
@@ -16077,10 +16100,38 @@ io.on('connection', (socket) => {
     // ⚠️ THE LIVE GAME IS THROWN AWAY WHEN THE RULES CHANGE, deliberately: scores and tags earned under the old
     // rules mean nothing under the new ones, and keeping them is how an author ends up debugging a game that is
     // half one version and half another.
+    // ⚠️ …EXCEPT WHETHER IT IS PAUSED, which is a statement about what the AUTHOR is doing, not about the game.
+    // You pause the rules in order to edit them, so having an edit switch them back on would undo the button
+    // every time it was used for the thing it exists for.
+    const _wasOff = roomGame[avRoom] ? roomGame[avRoom].off : false;
     delete roomGame[avRoom];
-    if (rules.length) { ruleRoomMeta[avRoom] = { roomId: currentAvBuildRoomId, levelIndex: currentAvLevelIndex | 0, ownerId: currentAvOwnerId || null }; gameOf(avRoom); }
+    if (rules.length) { ruleRoomMeta[avRoom] = { roomId: currentAvBuildRoomId, levelIndex: currentAvLevelIndex | 0, ownerId: currentAvOwnerId || null }; gameOf(avRoom).off = _wasOff; }
     io.to(avRoom).emit('rules-init', { levelIndex: currentAvLevelIndex | 0, rules });
     if (rules.length) { fireRuleEvent(avRoom, 'roundstart', {}, 0); broadcastRuleState(avRoom); }
+  });
+  // ⭐ TESTING CONTROLS. Switching a game off and putting it back to the start are what make a rule set
+  // something you can iterate on rather than something you write blind — you cannot build a Level while its own
+  // rules keep respawning you. Both are per ROOM and broadcast, like the author's pause, because one player
+  // silently playing a different game from everyone else in the room is not a state worth having.
+  socket.on('rules-run', ({ on, reset }) => {
+    const avRoom = currentAvatarRoom;
+    if (!avRoom || !currentAvBuildRoomId || overworldRooms.has(avRoom)) return;
+    if (!canBuild() || !hasRules(avRoom)) return;
+    const g = gameOf(avRoom);
+    if (reset) {
+      // ⚠️ Everything the RULES own goes back; the WORLD is untouched. Putting the terrain back is a rule the
+      // author writes (`put the world back`), and doing it here as well would make this button destructive in a
+      // way its name does not admit to.
+      g.nums.clear(); g.shared.clear(); g.tags.clear(); g.badges.clear();
+      g.hidden.clear(); g.taken.clear(); g.groups.clear(); g.timers.clear();
+      for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);
+      g.roundStart = Date.now(); g.lastRound = 0;
+    }
+    if (on !== undefined) g.off = !on;
+    g.dirty = true;
+    io.to(avRoom).emit('rule-say', { text: reset ? 'Game reset.' : (g.off ? 'Rules paused.' : 'Rules running.') });
+    if (!g.off && reset) fireRuleEvent(avRoom, 'roundstart', {}, 0);
+    broadcastRuleState(avRoom);
   });
   // What this browser saw. ⚠️ NOTHING HERE IS AN EFFECT — a claim is turned into an event and the engine decides
   // what follows, so a modified client can lie about where it is standing and still cannot award itself a point.
