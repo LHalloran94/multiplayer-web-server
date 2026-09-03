@@ -13077,12 +13077,26 @@ function sanitizeRule(raw) {
     if (a.do === 'spawn')  { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); o.n = clampRuleNum(a.n, 1, 8, 1); }
     if (a.do === 'wait')   o.secs = clampRuleNum(a.secs, 0.1, 600, 1);
     if (a.do === 'add' || a.do === 'set') { o.num = ruleTag(a.num) || 'score'; o.v = clampRuleNum(a.v, -1e9, 1e9, 1); if (a.sh) o.sh = 1; }
-    // ⭐ Where on screen it lands and how long it stays — the author's call, because a line of instructions and
-    // a scoreline want completely different treatment (user, 2026-09-04).
+    // ⭐⭐ SAYING SOMETHING HAS THREE INDEPENDENT QUESTIONS, and the first version only answered half of one.
+    // WHERE — on the player's screen, or as a sign standing IN THE WORLD (`at` names a thing or an area, so the
+    //         area you dragged out doubles as the text box; nothing new to place).
+    // WHO    — everyone, just the player the rule is about, or only people carrying certain marks. The last is
+    //         what "display text to only certain players, such as a particular team" needs, and it already
+    //         works, because a team will be a mark like any other.
+    // HOW    — size, font, bold, italic, colour. ⚠️ `font` is stored as an OPAQUE short string and resolved
+    //         against the client's own measured table — the same rule chat fonts follow, and what stops a
+    //         rule nominating an arbitrary font or size on somebody's screen.
     if (a.do === 'say') {
-      o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 120);
+      o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 200);
       if (SAY_WHERE.includes(a.where)) o.where = a.where;
-      o.secs = clampRuleNum(a.secs, 1, 60, 5);
+      o.secs = clampRuleNum(a.secs, 1, 600, 5);
+      const at = ruleTag(a.at); if (at) o.at = at;                       // '' = the screen; otherwise a thing to stand beside
+      const to = (a.to === 'them') ? 'them' : ruleTags(a.to); if (to) o.to = to;
+      o.size = clampRuleNum(a.size, 8, 96, 14);
+      const f = ruleTag(a.font); if (f) o.font = f.slice(0, 16);
+      if (a.bold) o.bold = 1;
+      if (a.italic) o.italic = 1;
+      if (isFinite(a.hue)) o.hue = clampRuleNum(a.hue, -1, 360, -1);
     }
     if (a.do === 'badge') o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 8);
     if (a.do === 'group') { o.tag = ruleTag(a.tag); o.on = a.on ? 1 : 0; if (!o.tag) continue; }
@@ -13184,8 +13198,12 @@ function insideOf(avRoom, sid) {
 // scoping rule, and it is what lets "EVERY 1s / IF a player has [holder] / THEN add 1 to their score" mean what
 // it reads as, without the author having to choose a scope from a menu.
 const PER_PLAYER_ACTS = new Set(['give', 'take', 'add', 'set', 'mark', 'unmark', 'tp', 'respawn', 'win']);
+// ⚠️ `say` is normally ONE announcement however many players matched — but "say this to THEM" is a different
+// verb wearing the same word, and it has to run once per matched player or only the first would be told.
+// Hence a function rather than a set lookup: the audience is part of what the action IS.
+function actIsPerPlayer(a) { return PER_PLAYER_ACTS.has(a.do) || (a.do === 'say' && a.to === 'them'); }
 function rulePerPlayer(r) {
-  return r.ifs.some(c => c.kind !== 'count') || r.then.some(a => PER_PLAYER_ACTS.has(a.do));
+  return r.ifs.some(c => c.kind !== 'count') || r.then.some(a => actIsPerPlayer(a));
 }
 // ⚠️ A LIST IN A BOX MEANS "ANY OF THESE", and its negation means "none of them" — which is why `notag` is
 // written as its own walk rather than as `!hasAny`: "they do not have red or blue" has to mean neither, and
@@ -13268,7 +13286,7 @@ function runActions(avRoom, g, r, from, matched, ctx, out, depth) {
                        ctx: ctx ? { sid: ctx.sid, tag: ctx.tag, num: ctx.num } : null, depth });
       return;
     }
-    if (PER_PLAYER_ACTS.has(a.do)) { for (const [sid, key] of matched) doRuleAct(avRoom, g, a, sid, key, ctx, out, depth); }
+    if (actIsPerPlayer(a)) { for (const [sid, key] of matched) doRuleAct(avRoom, g, a, sid, key, ctx, out, depth); }
     else doRuleAct(avRoom, g, a, matched[0][0], matched[0][1], ctx, out, depth);
   }
 }
@@ -13296,7 +13314,7 @@ function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
     // show a role, and it needs no new art — the name label is already drawn over every player.
     case 'badge': if (key) { g.badges.set(key, String(a.text || '').slice(0, 8)); g.dirty = true; } break;
     case 'unbadge': if (key) { g.badges.delete(key); g.dirty = true; } break;
-    case 'say':  out.say.push({ text: a.text, who: key ? (g.names.get(key) || '') : '', where: a.where || 'mid', secs: a.secs || 5 }); break;
+    case 'say':  out.say.push({ a, sid, who: key ? (g.names.get(key) || '') : '' }); break;
     // ⭐ REMEMBER / FORGET — a per-LEVEL fact, which is what "you cannot trigger this unless something else has
     // been triggered" needs. Deliberately NOT a mark on a player: "the bomb was planted" is true of the Level,
     // not of whoever planted it, and storing it on the person would lose it the moment they left.
@@ -13330,8 +13348,22 @@ function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
 // run, so a rule that both moves the crown and ends the round produces one message in one order, and a round
 // cannot be ended twice by two rules in the same pass.
 function flushRuleOut(avRoom, g, out, depth) {
-  for (const m of out.say) io.to(avRoom).emit('rule-say', { text: String(m.text).replace(/\{player\}/g, m.who || 'Someone'),
-                                                            where: m.where || 'mid', secs: m.secs || 5 });
+  for (const m of out.say) {
+    const a = m.a;
+    const msg = { text: String(a.text).replace(/\{player\}/g, m.who || 'Someone'),
+                  where: a.where || 'mid', secs: a.secs || 5, at: a.at || '',
+                  size: a.size || 14, font: a.font || '', bold: a.bold ? 1 : 0, italic: a.italic ? 1 : 0,
+                  hue: (a.hue == null) ? -1 : a.hue };
+    // ⭐ WHO HEARS IT. Everyone by default; just the player the rule is about; or only the people carrying
+    // certain marks — which is how a message to one team is written today and will keep working unchanged when
+    // teams arrive, because a team is a mark.
+    if (!a.to) { io.to(avRoom).emit('rule-say', msg); continue; }
+    if (a.to === 'them') { if (m.sid) io.to(m.sid).emit('rule-say', msg); continue; }
+    const want = ruleTagList(a.to);
+    for (const [sid2, key2] of rulePlayers(avRoom)) {
+      if (want.some(n => { const s = g.tags.get(n); return s && s.has(key2); })) io.to(sid2).emit('rule-say', msg);
+    }
+  }
   if (out.tp) for (const t of out.tp) { const o = findTaggedObj(avRoom, t.tag); if (o) io.to(t.sid).emit('rule-move-me', { x: o.x, y: o.y }); }
   if (out.kill) for (const sid of out.kill) io.to(sid).emit('rule-respawn-me', {});
   if (out.move) for (const m of out.move) applyRuleMove(avRoom, m);
