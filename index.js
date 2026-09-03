@@ -12991,7 +12991,7 @@ setInterval(autosavePersistentWorlds, 30000);
 const RULE_EVENTS = new Set(['take', 'touch', 'enter', 'leave', 'respawn', 'goal', 'break', 'timer', 'reach', 'roundstart', 'roundend']);
 const RULE_COND   = new Set(['tag', 'notag', 'in', 'num', 'count']);
 const RULE_ACTS   = new Set(['give', 'take', 'add', 'set', 'hide', 'show', 'moveto', 'say', 'mark', 'unmark',
-                             'tp', 'respawn', 'win', 'endround', 'resetscores', 'restore', 'group']);
+                             'badge', 'unbadge', 'tp', 'respawn', 'win', 'endround', 'resetscores', 'restore', 'group']);
 const RULE_OPS    = ['>=', '<=', '>', '<', '==', '!='];
 const RULES_PER_LEVEL = 64;          // a rule set is authored by hand; this is a clutter bound, not a budget
 const ACTS_PER_RULE   = 16;
@@ -13000,8 +13000,32 @@ const RULE_TAG_MAX    = 24;
 const RULE_TICK_MS    = 100;         // 10Hz — timers and "how many players are in this region"
 const ROUND_MIN_MS    = 3000;        // the floor `avt-level-reset` already carries, for the same reason
 
+const RULE_NAMES_MAX  = 8;           // how many names one box may hold
 const clampRuleNum = (v, lo, hi, d) => (isFinite(v) ? Math.max(lo, Math.min(hi, +v)) : d);
 const ruleTag = s => (typeof s === 'string' ? s.trim().slice(0, RULE_TAG_MAX) : '');
+// ⭐⭐ A NAME BOX HOLDS A LIST, NOT ONE NAME (user, 2026-09-04): *"you should be able to select multiple
+// objects, or type multiple names, in the same box, to avoid having to create the same rule multiple times for
+// different objects"*. So every field that names things in the world is a comma-separated list, normalised
+// once here and split once at the point of use. Singular by nature and therefore NOT lists: a score's name, a
+// rule-group's name, and `moveto`'s destination (moving one thing to several places is not a thing).
+function ruleTags(s) {
+  if (typeof s !== 'string') return '';
+  const out = [];
+  for (const part of s.split(',')) {
+    const t = part.trim().slice(0, RULE_TAG_MAX);
+    if (t && !out.includes(t)) out.push(t);
+    if (out.length >= RULE_NAMES_MAX) break;
+  }
+  return out.join(', ');
+}
+const ruleTagList = s => (typeof s === 'string' && s ? s.split(',').map(x => x.trim()).filter(Boolean) : []);
+// Does this list name that thing? An EMPTY list means "anything", which is what makes a rule with a blank box
+// a rule about everything rather than a rule about nothing.
+function ruleTagsHas(list, name) {
+  if (!list) return true;
+  if (!name) return false;
+  return ruleTagList(list).includes(name);
+}
 
 // One rule, rebuilt field by field — the same discipline `sanitizeMatDef` applies to a creator's material.
 // ⚠️ An unknown verb is DROPPED, not passed through: a rule set from a future version must degrade to the part
@@ -13010,7 +13034,7 @@ function sanitizeRule(raw) {
   if (!raw || typeof raw !== 'object') return null;
   if (!RULE_EVENTS.has(raw.when)) return null;
   const r = { when: raw.when };
-  const what = ruleTag(raw.what); if (what) r.what = what;
+  const what = ruleTags(raw.what); if (what) r.what = what;
   if (raw.when === 'timer') r.every = clampRuleNum(raw.every, 0.1, 3600, 1);
   if (raw.when === 'reach') { r.num = ruleTag(raw.num) || 'score'; r.at = clampRuleNum(raw.at, -1e9, 1e9, 1); if (raw.sh) r.sh = 1; }
   const grp = ruleTag(raw.group); if (grp) r.group = grp;
@@ -13020,9 +13044,9 @@ function sanitizeRule(raw) {
     if (r.ifs.length >= CONDS_PER_RULE) break;
     if (!c || !RULE_COND.has(c.kind)) continue;
     const o = { kind: c.kind };
-    if (c.kind === 'tag' || c.kind === 'notag' || c.kind === 'in') { o.tag = ruleTag(c.tag); if (!o.tag) continue; }
+    if (c.kind === 'tag' || c.kind === 'notag' || c.kind === 'in') { o.tag = ruleTags(c.tag); if (!o.tag) continue; }
     if (c.kind === 'num') { o.num = ruleTag(c.num) || 'score'; o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, -1e9, 1e9, 0); if (c.sh) o.sh = 1; }
-    if (c.kind === 'count') { o.tag = ruleTag(c.tag); o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, 0, 999, 1); if (!o.tag) continue; }
+    if (c.kind === 'count') { o.tag = ruleTags(c.tag); o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, 0, 999, 1); if (!o.tag) continue; }
     r.ifs.push(o);
   }
   r.then = [];
@@ -13030,10 +13054,11 @@ function sanitizeRule(raw) {
     if (r.then.length >= ACTS_PER_RULE) break;
     if (!a || !RULE_ACTS.has(a.do)) continue;
     const o = { do: a.do };
-    if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp') { o.tag = ruleTag(a.tag); if (!o.tag) continue; }
-    if (a.do === 'moveto') { o.tag = ruleTag(a.tag); o.to = ruleTag(a.to); if (!o.tag) continue; }
+    if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp') { o.tag = ruleTags(a.tag); if (!o.tag) continue; }
+    if (a.do === 'moveto') { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); if (!o.tag) continue; }   // …`to` is one place, deliberately
     if (a.do === 'add' || a.do === 'set') { o.num = ruleTag(a.num) || 'score'; o.v = clampRuleNum(a.v, -1e9, 1e9, 1); if (a.sh) o.sh = 1; }
     if (a.do === 'say') o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 120);
+    if (a.do === 'badge') { o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 8); if (!o.text) continue; }
     if (a.do === 'group') { o.tag = ruleTag(a.tag); o.on = a.on ? 1 : 0; if (!o.tag) continue; }
     r.then.push(o);
   }
@@ -13069,6 +13094,7 @@ function gameOf(avRoom) {
       // the winner is whoever's message the server read first. Same property `drop-take` already enforces for a
       // pile of material, and the reason the crown needs no carry physics or attachment of any kind.
       taken: new Set(),     // object tags already claimed this round
+      badges: new Map(),    // playerKey → a short mark shown beside their name (👑, 🚩…)
       groups: new Set(),    // rule groups switched OFF
       timers: new Map(),    // rule index → ms of the last fire
       roundStart: Date.now(),
@@ -13127,15 +13153,19 @@ const PER_PLAYER_ACTS = new Set(['give', 'take', 'add', 'set', 'mark', 'unmark',
 function rulePerPlayer(r) {
   return r.ifs.some(c => c.kind !== 'count') || r.then.some(a => PER_PLAYER_ACTS.has(a.do));
 }
+// ⚠️ A LIST IN A BOX MEANS "ANY OF THESE", and its negation means "none of them" — which is why `notag` is
+// written as its own walk rather than as `!hasAny`: "they do not have red or blue" has to mean neither, and
+// negating an any-test would quietly give it the opposite meaning for a two-name box.
 function condHolds(avRoom, g, c, sid, key) {
+  const names = ruleTagList(c.tag);
   switch (c.kind) {
-    case 'tag':   return !!(key && g.tags.get(c.tag) && g.tags.get(c.tag).has(key));
-    case 'notag': return !(key && g.tags.get(c.tag) && g.tags.get(c.tag).has(key));
-    case 'in':    { const s = insideOf(avRoom, sid); return !!(s && s.has(c.tag)); }
+    case 'tag':   return !!key && names.some(n => { const s = g.tags.get(n); return s && s.has(key); });
+    case 'notag': return !key || names.every(n => { const s = g.tags.get(n); return !s || !s.has(key); });
+    case 'in':    { const s = insideOf(avRoom, sid); return !!s && names.some(n => s.has(n)); }
     case 'num':   return (key || c.sh) ? cmpRule(numOf(g, key, c.num, c.sh), c.op, c.v) : false;
     case 'count': {
       let n = 0;
-      for (const [s2] of rulePlayers(avRoom)) { const st = insideOf(avRoom, s2); if (st && st.has(c.tag)) n++; }
+      for (const [s2] of rulePlayers(avRoom)) { const st = insideOf(avRoom, s2); if (st && names.some(t => st.has(t))) n++; }
       return cmpRule(n, c.op, c.v);
     }
   }
@@ -13154,8 +13184,8 @@ function fireRuleEvent(avRoom, when, ctx, depth) {
     const r = rules[i];
     if (r.when !== when) continue;
     if (r.group && g.groups.has(r.group)) continue;                   // this phase is switched off
-    if (r.what && ctx && ctx.tag && r.what !== ctx.tag) continue;     // a rule about [crown] ignores other things
-    if (r.what && when === 'reach' && ctx && ctx.num && r.num !== ctx.num) continue;
+    // A rule about [crown] ignores other things — and a rule about [red flag, blue flag] answers to either.
+    if (r.what && ctx && ctx.tag && !ruleTagsHas(r.what, ctx.tag)) continue;
     if (when === 'reach' && ctx && ctx.num && r.num !== ctx.num) continue;
     if (when === 'reach') { const key = ctx && ctx.sid ? playerKeyFor(ctx.sid) : null;
       if (!cmpRule(numOf(g, key, r.num, r.sh), '>=', r.at)) continue; }
@@ -13181,24 +13211,30 @@ function runRule(avRoom, g, r, idx, ctx, out, depth) {
   for (const a of r.then) if (!PER_PLAYER_ACTS.has(a.do)) doRuleAct(avRoom, g, a, s0, k0, ctx, out, depth);
 }
 function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
+  const names = ruleTagList(a.tag);       // every name-taking verb applies to EACH name in the box
   switch (a.do) {
-    case 'give': if (key) { let s = g.tags.get(a.tag); if (!s) g.tags.set(a.tag, s = new Set()); s.add(key); g.dirty = true; } break;
-    case 'take': if (key) { const s = g.tags.get(a.tag); if (s) { s.delete(key); g.dirty = true; } } break;
+    case 'give': if (key) for (const n of names) { let s = g.tags.get(n); if (!s) g.tags.set(n, s = new Set()); s.add(key); g.dirty = true; } break;
+    case 'take': if (key) for (const n of names) { const s = g.tags.get(n); if (s) { s.delete(key); g.dirty = true; } } break;
     // ⭐ A NUMBER CHANGING IS ITSELF AN EVENT, which is what makes "when someone's score reaches 60" a rule
     // rather than a poll. Fired from the write that caused it so the two cannot drift apart.
     case 'add':  setNum(g, key, a.num, a.sh, numOf(g, key, a.num, a.sh) + a.v);
                  fireRuleEvent(avRoom, 'reach', { sid, num: a.num }, depth + 1); break;
     case 'set':  setNum(g, key, a.num, a.sh, a.v);
                  fireRuleEvent(avRoom, 'reach', { sid, num: a.num }, depth + 1); break;
-    case 'hide': g.hidden.add(a.tag); g.dirty = true; break;
+    case 'hide': for (const n of names) g.hidden.add(n); g.dirty = true; break;
     // ⚠️ Showing something again also makes it TAKEABLE again. Those are one fact, not two: a crown you can see
     // and cannot pick up is a bug nobody would be able to diagnose from inside the game.
-    case 'show': g.hidden.delete(a.tag); g.taken.delete(a.tag); g.dirty = true; break;
-    case 'moveto': (out.move = out.move || []).push({ tag: a.tag, to: a.to || '', sid }); g.dirty = true; break;
+    case 'show': for (const n of names) { g.hidden.delete(n); g.taken.delete(n); } g.dirty = true; break;
+    case 'moveto': for (const n of names) (out.move = out.move || []).push({ tag: n, to: a.to || '', sid }); g.dirty = true; break;
+    // ⭐ A MARK ON THE PERSON'S NAME (user, 2026-09-04): *"allow them to append something to the players name,
+    // such as a crown emoji to signal they are the current king of the hill"*. The cheapest possible way to
+    // show a role, and it needs no new art — the name label is already drawn over every player.
+    case 'badge': if (key) { g.badges.set(key, String(a.text || '').slice(0, 8)); g.dirty = true; } break;
+    case 'unbadge': if (key) { g.badges.delete(key); g.dirty = true; } break;
     case 'say':  out.say.push({ text: a.text, who: key ? (g.names.get(key) || '') : '' }); break;
     case 'mark': if (key) { let s = g.tags.get('~mark'); if (!s) g.tags.set('~mark', s = new Set()); s.add(key); g.dirty = true; } break;
     case 'unmark': if (key) { const s = g.tags.get('~mark'); if (s) { s.delete(key); g.dirty = true; } } break;
-    case 'tp':   if (sid) (out.tp = out.tp || []).push({ sid, tag: a.tag }); break;
+    case 'tp':   if (sid) (out.tp = out.tp || []).push({ sid, tag: names[0] || '' }); break;   // one destination; the first named
     case 'respawn': if (sid) (out.kill = out.kill || []).push(sid); break;
     case 'win':  if (key) out.win = key; out.end = true; break;
     case 'endround': out.end = true; break;
@@ -13280,12 +13316,16 @@ function ruleStateFor(avRoom, sid) {
   const shared = {}; for (const [k, v] of g.shared) shared[k] = v;
   const mytags = []; for (const [t, s] of g.tags) if (t[0] !== '~' && s.has(key)) mytags.push(t);
   const marked = []; { const s = g.tags.get('~mark'); if (s) for (const [s2, k2] of rulePlayers(avRoom)) if (s.has(k2)) marked.push(s2); }
+  // ⚠️ Keyed by DISPLAY NAME, not by socket id or player key — because the thing that draws it is the nameplate,
+  // and the nameplate only knows the name. (`marked` stays socket-keyed for the opposite reason: the minimap
+  // draws from the peer map, which is keyed by socket.) The player key never leaves the server.
+  const badges = {}; for (const [, k2] of rulePlayers(avRoom)) { const b = g.badges.get(k2); const nm = g.names.get(k2); if (b && nm) badges[nm] = b; }
   // The board: everyone with a score, best first. It is what a game most often wants on screen, and it cannot
   // be built client-side because a client only ever knows its own number.
   const board = [];
   for (const [k, mm] of g.nums) { const v = mm.get('score'); if (v) board.push({ name: g.names.get(k) || '…', v, me: k === key }); }
   board.sort((a, b) => b.v - a.v);
-  return { mine, shared, tags: mytags, marked, hidden: [...g.hidden], board: board.slice(0, 8),
+  return { mine, shared, tags: mytags, marked, badges, hidden: [...g.hidden], board: board.slice(0, 8),
            round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)) };
 }
 function broadcastRuleState(avRoom) {
