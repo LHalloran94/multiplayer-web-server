@@ -13698,6 +13698,13 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom;
     if (!room || !Array.isArray(cells) || cells.length > 4096) return;
     if (!canBuild()) return;
+    // ⭐ NEVER IN THE OVERWORLD. A source is invisible in the terrain data, so one left running in a corner of
+    // a shared, permanent world is genuinely hard to find and turn off — which is the whole reason these were
+    // admin-only before there was a level creator to put them in.
+    // ⚠️ Page worlds are deliberately NOT blocked here: they are per-URL, low-stakes and already pruned, and
+    // blocking them server-side would take away the testing workflow the admin gate exists for. The UI keeps
+    // ordinary players out of them; this stops the one case that cannot be undone.
+    if (overworldRooms.has(room)) return;
     const grid = cellsOf(room).terrain; if (!grid) return;
     const rank = LIQ_RANK[id | 0];
     if (on && rank === undefined) return;                    // sources are built-in liquids only (custom liquids have no rank)
