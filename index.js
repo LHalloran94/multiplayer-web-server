@@ -757,7 +757,9 @@ function mapWorldRow(r) {
 // SELECT column list shared by the two World reads (GET /worlds + favourited Worlds). `?` placeholders:
 // favourited, liked, my_rating (each binds the caller's id). For the favourites query the favourited
 // subquery is replaced by a literal `1` (the JOIN already restricts to the caller's favourites).
-const WORLD_SOCIAL_COLS = `w.id, w.owner_id, w.room_id, w.name, w.author, w.description, w.thumb, w.level_count, w.allow_remix, w.durability, w.play_count, w.updated_at, r.env_spec, r.perms,
+// ⚠️ ADDING A COLUMN HERE IS HALF THE JOB — `mapGalleryWorld` on the client is a HAND-WRITTEN projection and
+// silently drops anything it does not name. #81's preview pictures reached the browser and died there.
+const WORLD_SOCIAL_COLS = `w.id, w.owner_id, w.room_id, w.name, w.author, w.description, w.thumb, w.level_count, w.allow_remix, w.durability, w.play_count, w.updated_at, w.remix_of, w.remix_of_name, w.remix_of_author, r.env_spec, r.perms,
     (SELECT COUNT(*) FROM room_likes rl WHERE rl.room_id = w.room_id) as like_count,
     (SELECT COUNT(*) FROM room_ratings rr WHERE rr.room_id = w.room_id) as rating_count,
     (SELECT COALESCE(AVG(stars), 0) FROM room_ratings rr WHERE rr.room_id = w.room_id) as rating_avg,
@@ -2407,7 +2409,8 @@ app.post('/worlds', (req, res) => {
 // twice. (Hand-rebuilt duplicates are this repo's most-repeated bug, and a publish path that drifts would
 // silently produce Worlds nobody can enter.)
 function publishLevels(user, body, levels, res) {
-  const { worldId, name, description, author, thumb, bg_image, allow_remix, durability, reset_live, source_room } = body;
+  const { worldId, name, description, author, thumb, bg_image, allow_remix, durability, reset_live, source_room,
+          remix_of, remix_of_name, remix_of_author } = body;
   if (!name || !name.trim()) return res.status(400).json({ error: 'Name required' });
   const contentStr = JSON.stringify(levels);
   if (contentStr.length > PUBLISHED_MAX_BYTES) return res.status(413).json({ error: 'World too large to publish' });
@@ -2418,8 +2421,18 @@ function publishLevels(user, body, levels, res) {
   // The canvas backdrop, frozen at publish. Same rule as a thumbnail: it ends up in an <img>, so only a
   // data: image is accepted. `null` clears a previously stored one when the creator switches away from canvas.
   const bgStr = (typeof bg_image === 'string' && bg_image.length <= PUBLISHED_BG_MAX && THUMB_OK.test(bg_image)) ? bg_image : null;
+  // ⚠️ VESTIGIAL BUT STILL STORED. `allow_remix` no longer gates anything (see GET /worlds/:id) — it is kept
+  // accepted and written so that nothing on the wire or in the DB moved when remixing became unconditional.
   const remix = allow_remix ? 1 : 0;
   const dura = (durability === 'persistent') ? 'persistent' : 'showcase';
+  // Where this was remixed from. ⚠️ TRUSTED FROM THE CLIENT, KNOWINGLY: a publisher could omit it and pass a
+  // remix off as original, or invent one. Neither is worth a server-side derivation — the content blob has no
+  // fingerprint to match against, and the honest majority is who the credit line is for. What it must not do
+  // is let someone forge a link into a page they do not own, so the id is length-bounded like every other id
+  // and the names are trimmed like every other display string.
+  const rmxOf = (typeof remix_of === 'string' && remix_of) ? remix_of.slice(0, 40) : null;
+  const rmxName = rmxOf ? ((remix_of_name || '').trim().slice(0, 40) || null) : null;
+  const rmxAuthor = rmxOf ? ((remix_of_author || '').trim().slice(0, 40) || null) : null;
   try {
     const existing = worldId ? db.prepare('SELECT * FROM published_worlds WHERE id = ?').get(worldId) : null;
     if (existing) {                                                  // ---- update / re-publish ----
@@ -2442,8 +2455,16 @@ function publishLevels(user, body, levels, res) {
         });
       }
       const spec = derivePubEnvSpec(levels, existing.id);
-      db.prepare(`UPDATE published_worlds SET name=?, author=?, description=?, thumb=?, bg_image=?, content=?, level_count=?, size_bytes=?, allow_remix=?, durability=?, live_state=NULL, updated_at=unixepoch() WHERE id=?`)
-        .run(trimmedName, trimmedAuthor, trimmedDesc, thumbStr, bgStr, contentStr, levels.length, contentStr.length, remix, dura, existing.id);
+      // 🟥 LINEAGE IS SET, NEVER CLEARED, ON AN UPDATE. A re-publish sends whatever the client currently holds,
+      // and an older client (or the publish-from-room path, which has no local draft to read an origin off)
+      // sends nothing at all — so writing `rmxOf` unconditionally would let an ordinary "Update" silently strip
+      // the credit line off a remix. Credit is not something a later save should be able to quietly drop.
+      const keepOf = rmxOf || existing.remix_of || null;
+      const keepName = rmxOf ? rmxName : (existing.remix_of_name || null);
+      const keepAuthor = rmxOf ? rmxAuthor : (existing.remix_of_author || null);
+      db.prepare(`UPDATE published_worlds SET name=?, author=?, description=?, thumb=?, bg_image=?, content=?, level_count=?, size_bytes=?, allow_remix=?, durability=?, remix_of=?, remix_of_name=?, remix_of_author=?, live_state=NULL, updated_at=unixepoch() WHERE id=?`)
+        .run(trimmedName, trimmedAuthor, trimmedDesc, thumbStr, bgStr, contentStr, levels.length, contentStr.length, remix, dura,
+             keepOf, keepName, keepAuthor, existing.id);
       db.prepare('UPDATE rooms SET name=?, env_spec=? WHERE id=?').run(trimmedName, JSON.stringify(spec), existing.room_id);
       return res.json({ worldId: existing.id, roomId: existing.room_id, level_count: levels.length, env_spec: spec });
     }
@@ -2458,9 +2479,10 @@ function publishLevels(user, body, levels, res) {
     // `source_room` remembers WHICH draft this came from, so Studio can offer "Update" instead of quietly
     // minting a second World every time the same draft is published. Null for the local-content path, which
     // has no room behind it.
-    db.prepare(`INSERT INTO published_worlds (id, owner_id, room_id, source_room, name, author, description, thumb, bg_image, content, level_count, size_bytes, allow_remix, durability) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    db.prepare(`INSERT INTO published_worlds (id, owner_id, room_id, source_room, name, author, description, thumb, bg_image, content, level_count, size_bytes, allow_remix, durability, remix_of, remix_of_name, remix_of_author) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
       .run(id, user.sub, roomId, (typeof source_room === 'string' && source_room) ? source_room : null,
-           trimmedName, trimmedAuthor, trimmedDesc, thumbStr, bgStr, contentStr, levels.length, contentStr.length, remix, dura);
+           trimmedName, trimmedAuthor, trimmedDesc, thumbStr, bgStr, contentStr, levels.length, contentStr.length, remix, dura,
+           rmxOf, rmxName, rmxAuthor);
     res.json({ worldId: id, roomId, level_count: levels.length, env_spec: spec });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 }
@@ -2587,14 +2609,19 @@ app.post('/worlds/:id/flags', (req, res) => {
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
-// Full content for a remix download — gated by allow_remix unless the requester owns it.
+// Full content for a remix download. ⭐⭐ REMIXING IS ALWAYS ALLOWED (user, 2026-09-03) — this used to answer
+// 403 unless `allow_remix` was set, which was the wrong half of a pair: #626's original design is that you
+// remix by *walking into a room and saving the state*, and "Save this Level" never had a permission check at
+// all. Same intent, two doors, one locked — so a Level with remix off was copied anyway, just less visibly.
+// 🟥 AND THE LOCK WAS NEVER ENFORCEABLE. The client has to hold a Level's terrain in order to DRAW it, so the
+// content is already in the browser of everyone who visits. What replaces the flag is CREDIT (`remix_of`):
+// the answer to copying is that a remix says where it came from, not a door that only stops honest people.
+// ⚠️ `allow_remix` is still stored and still returned — nothing on the wire or in the DB moved — it simply no
+// longer decides anything. Do not re-introduce a gate on it without re-reading the above.
 app.get('/worlds/:id', (req, res) => {
   try {
     const w = db.prepare('SELECT * FROM published_worlds WHERE id = ?').get(req.params.id);
     if (!w) return res.status(404).json({ error: 'Not found' });
-    const user = verifyToken(req);
-    const isOwner = !!(user && user.sub === w.owner_id);
-    if (!w.allow_remix && !isOwner) return res.status(403).json({ error: 'Remix not allowed' });
     res.json({ id: w.id, name: w.name, author: w.author, description: w.description, level_count: w.level_count,
                allow_remix: !!w.allow_remix, durability: w.durability, content: JSON.parse(w.content) });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
@@ -9589,6 +9616,20 @@ function sameUserAvSockets(avRoom, sid) {
 // it belongs there only if the Level is one people build in (see `avt-pause-sim`).
 const _avRoomLookup = db.prepare('SELECT public, owner_id, env_spec, no_host, kind FROM rooms WHERE id = ?');
 const _avRoomMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?');
+// ⭐ WHICH PUBLISHED LEVEL AM I STANDING IN? Asked at join so that saving a copy of somebody's Level can record
+// where it came from without the Rooms panel ever having been opened. The client cannot work this out for
+// itself: it knows the room code, and the mapping from that to a published World lives only here.
+// 🟥 PREPARED LAZILY, NOT HERE. `published_worlds` is CREATEd ~600 lines BELOW this point, so a `db.prepare`
+// at this line throws "no such table" the moment the file loads — and `node -c` cannot see it, because it is
+// perfectly valid syntax. Same class as the declared-after-use traps this file keeps springing.
+let _pubByRoomStmt = null;
+function pubLevelForRoom(roomId) {
+  if (!roomId) return null;
+  try {
+    if (!_pubByRoomStmt) _pubByRoomStmt = db.prepare('SELECT id, name, author, owner_id FROM published_worlds WHERE room_id = ?');
+    return _pubByRoomStmt.get(roomId) || null;
+  } catch { return null; }
+}
 // Stage 6 Phase 3 — L2 build permissions, PER-ROOM (covers every Level in the room's World). A role
 // default `mode` ('all' = anyone present can build, today's behavior; 'host' = only the owner + granted
 // users) plus per-user boolean overrides. Overrides are in-memory (authoritative, ephemeral, broadcast
@@ -10180,6 +10221,20 @@ try { db.exec('ALTER TABLE published_worlds ADD COLUMN bg_image TEXT'); } catch 
 // Which draft room this World was published FROM, so Studio can offer "Update" rather than minting a second
 // World each time. Null on every existing row and on the local-content path, which has no room behind it.
 try { db.exec('ALTER TABLE published_worlds ADD COLUMN source_room TEXT'); } catch {}
+// ⭐⭐ WHERE A REMIX CAME FROM (user, 2026-09-03): *"you should be able to tell that a level is remixed and it
+// should link to the original level, so that the original creator is given credit; otherwise people could
+// just steal levels immediately without it being clear."* Remixing is now always allowed, so credit is what
+// carries the author's stake instead of a permission — the answer to copying is attribution, not a lock.
+// 🟥 THE NAME AND AUTHOR ARE STORED, NOT JOINED, AND THAT IS THE WHOLE POINT. A join would erase the credit
+// at exactly the moment it matters most — when the original has been unpublished or deleted — and would let
+// somebody publish, be remixed, then delete the original to launder the lineage away. Credit is a historical
+// fact about the act of remixing, not a live pointer at a row.
+// ⚠️ `remix_of` is kept as well, so the card can LINK to the original while it still exists.
+// ⚠️ The IMMEDIATE parent only. A remix of a remix credits the one it was taken from, and that one's own card
+// credits its parent in turn, so the chain is walkable without any row having to know the whole history.
+try { db.exec('ALTER TABLE published_worlds ADD COLUMN remix_of TEXT'); } catch {}
+try { db.exec('ALTER TABLE published_worlds ADD COLUMN remix_of_name TEXT'); } catch {}
+try { db.exec('ALTER TABLE published_worlds ADD COLUMN remix_of_author TEXT'); } catch {}
 // #81 level previews. The column holds a JSON ARRAY — one picture per Level, so a multi-Level World can be
 // flicked through — and legacy rows hold a bare data URL, which is read as a one-Level array.
 // ⚠️ OVER THE CAP, KEEP THE FIRST ONES RATHER THAN DROPPING ALL OF THEM. The old line was
@@ -14911,6 +14966,9 @@ io.on('connection', (socket) => {
     // `roomDims` returns the page shape for every room today, so this is the value the client already had.
     const _rd = roomDims(avRoom);
     const _spawn = (type === 'world') ? worldSpawnFor(avRoom, _overCol) : null;
+    // Only a published room can BE a published Level, so the lookup is skipped everywhere else rather than
+    // run once per join against a table that will not have the row.
+    const _pubLevel = (rinfo && rinfo.kind === 'published') ? pubLevelForRoom(currentAvBuildRoomId) : null;
     socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: _spawn,
       dims: { w: _rd.cols * TERRAIN_CELL, h: _rd.rows * TERRAIN_CELL, cell: TERRAIN_CELL },
       // ⭐ WHERE YOU CAME FROM, said by the SERVER rather than re-derived on the client. The routing rule
@@ -14937,6 +14995,11 @@ io.on('connection', (socket) => {
       // locks, neither of which the client has, and a second copy of it here would drift into showing a
       // control the server then refuses.
       pauseOk: levelPauseOk(rinfo, currentAvBuildRoomId, levelIndex) ? 1 : 0,
+      // ⭐ #626/#629 — the published Level this room IS, if it is one, so that taking a copy can credit it.
+      // ⚠️ `mine` rides along because saving your OWN Level is not a remix and must not credit you to yourself
+      // — the button says something different in the two cases, and only the server knows which this is.
+      pubLevel: _pubLevel ? { worldId: _pubLevel.id, name: _pubLevel.name, author: _pubLevel.author,
+                              mine: (socketToDiscordId[socket.id] && _pubLevel.owner_id === socketToDiscordId[socket.id]) ? 1 : 0 } : null,
       overworld: _isOver ? 1 : 0 });
     // #71 — the world's scrollback. ⚠️ EMPTY BY CONSTRUCTION IN THE OVERWORLD: nothing ever writes
     // `worldHistory` for an Overworld room, so this replays nothing there rather than being suppressed here.
