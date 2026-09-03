@@ -5023,6 +5023,11 @@ let wireFanout = (room, ev, payload) => io.to(room).emit(ev, payload);
 // Between these two calls the diffs are collected and delivered as ONE packet each. Same no-op-by-default trick as
 // wireFanout: the sliced sim batches nothing, so the probes still see the wire they have always seen.
 let beginWireBatch = () => {}, endWireBatch = () => {};
+// #102b THE AUTHOR'S PAUSE, on the SAME SEAM and for the same reason — the fifth time on this file. The set of
+// paused rooms lives outside this block (it is socket state), and a bare reference to it in the tick threw
+// ReferenceError in probe_budget and nowhere else. False by default, so a sliced sim pauses nothing and every
+// existing rig measures exactly the tick it always did. Reassigned at load, beside `pausedRooms`.
+let roomIsPaused = () => false;
 // PHASE 6 INCREMENT 4b: same seam, same reason. `runLiquidTick` drains the queue of chunks produced on demand
 // since the last tick, but the real implementation lives outside this block (it needs the cell store, the fine
 // arrays and the chunk records). Declared as a no-op HERE so the sliced sim still runs — probe_budget slices
@@ -7851,6 +7856,14 @@ const runLiquidTick = () => {
   // entirely this, and it sent an investigation after a starvation bug that was not there.
   let _idle = 0;
   for (const r of cellRooms.fine) if (!roomOccupied(r)) { _deferred.add(r); liqIdleSkips++; _idle++; }
+  // ⭐⭐ AUTHOR'S PAUSE. Placing liquid while it is running means fighting it: it flows out of the shape you are
+  // drawing before you have finished drawing it. So the author of a Level can stop the world's clock while they
+  // build, and it starts again for whoever plays it.
+  // ⭐ IT GOES HERE, AND THAT IS THE WHOLE IMPLEMENTATION: `_deferred` already reaches sources, reactions, flow,
+  // powder and soil in one place, so pausing freezes SAND as well as liquid — which it must, or grains keep
+  // sliding out from under what you are placing. And the existing contract is exactly a pause's: a deferred
+  // room's active set is never read and never cleared, so it resumes where it stopped rather than resetting.
+  for (const r of cellRooms.fine) if (roomIsPaused(r)) _deferred.add(r);
   if (liquidCfg.perfLog && _idle > liqPerf.idleRooms) liqPerf.idleRooms = _idle;
   // ⭐⭐ SECTORS ARE PLANNED **BEFORE** THE ROSTER NOW, AND THAT MOVE IS THE WHOLE POINT OF THIS CHANGE.
   // Tier 3 rate-limits a room by skipping it for whole ticks. With one shared Overworld that is every drop of
@@ -9700,7 +9713,13 @@ function resolvePageRoom(clientCtxRoomId, currentRoom, socketId) {
 }
 const socketToAvatarRoom = {};                       // socketId → its current avatar-world room key (for cross-socket cleanup)
 const worldGenerated = new Set();                    // avatarRoom keys whose 'world' terrain has been generated this server lifetime
-const hydratedAvRooms = new Set();                   // avatarRoom keys the host has already auto-hydrated this server lifetime (one-shot, never re-clobber)
+// #102b — av-rooms whose sim the author has stopped while they build. See the note in the liquid tick.
+// ⚠️ Declared HERE, beside the other per-room registries, and NOT inside the tick block: the scratchpad rigs
+// slice that block out by text and run it, so a name introduced inside it is a ReferenceError in every rig and
+// nowhere else. That has bitten this project four times.
+const pausedRooms = new Set();
+roomIsPaused = r => pausedRooms.has(r);   // the real implementation for the tick's no-op seam above
+const hydratedAvRooms = new Set();                 // avatarRoom keys the host has already auto-hydrated this server lifetime (one-shot, never re-clobber)
 // A blank (un-built, un-generated) av-room: nothing for hydration to overwrite. (A 'world'/life Level
 // is seed-generated on join → non-empty → skipped, which is correct: only host-saved Levels hydrate.)
 function avRoomIsEmpty(avRoom) {
@@ -12715,7 +12734,11 @@ function publishedHydrationFor(roomId, levelIndex) {
 // ⚠️ Objects must be dropped explicitly: `hydrateRoomFromBlob` ADDS to the object map without clearing it, so
 // a second hydration would leave two of everything.
 function maybeResetShowcase(avRoom) {
-  if (!avRoom || !hydratedAvRooms.has(avRoom) || !avRoomIsEmpty(avRoom)) return;
+  if (!avRoom || !avRoomIsEmpty(avRoom)) return;
+  // #102b — an empty room is nobody's editor. Leaving the pause set would hand the next visitor a Level with
+  // its clock stopped and no way to tell why, and for a published Level there may be no author to unset it.
+  pausedRooms.delete(avRoom);
+  if (!hydratedAvRooms.has(avRoom)) return;
   const b = String(avRoom).lastIndexOf(':');
   if (b <= 2) return;
   const roomId = String(avRoom).slice(3, b), levelIndex = parseInt(String(avRoom).slice(b + 1), 10) | 0;
@@ -14929,6 +14952,9 @@ io.on('connection', (socket) => {
     }
     // Phase 3: seed the joiner with this room's build permissions (page/URL room → open).
     socket.emit('build-perms', buildPermsPayload(currentAvBuildRoomId));
+    // #102b — and whether its clock is stopped. Only when it IS: the client starts each Level unpaused, so
+    // saying nothing is already the right answer for the overwhelmingly common case.
+    if (pausedRooms.has(avRoom)) socket.emit('avt-sim-paused', { on: true });
   });
   socket.on('avt-leave', () => {
     if (currentAvatarRoom && roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) {
@@ -15022,6 +15048,22 @@ io.on('connection', (socket) => {
     if (!roomId) return;
     const li = Number.isInteger(levelIndex) ? levelIndex : (currentAvLevelIndex | 0);
     socket.emit('avt-level-board', { levelIndex: li, board: levelBoard(roomId, li, socketToDiscordId[socket.id]) });
+  });
+  // ── #102b · THE AUTHOR'S PAUSE ───────────────────────────────────────────────────────────────────────────
+  // Stop the world's clock while you build in it. Placing liquid while it runs means fighting it — it flows
+  // out of the shape before you have finished drawing it — and sand slides out from under whatever you put
+  // above it. The pause freezes both, because the seam it hangs on covers the whole cell sim.
+  // ⚠️ PER ROOM, NOT PER PERSON, and it has to be: there is ONE simulation and everyone in the room is inside
+  // it. So it is gated on being allowed to BUILD here, and everyone present is told, or the people who did not
+  // press it are left watching a frozen world with no explanation.
+  // ⚠️ NEVER THE OVERWORLD OR A PAGE WORLD: those are shared places with no author, and one person stopping
+  // time in them is not an editing aid, it is a denial of service.
+  socket.on('avt-pause-sim', ({ on } = {}) => {
+    const room = currentAvatarRoom;
+    if (!room || !currentAvBuildRoomId || overworldRooms.has(room)) return;
+    if (!canBuild()) return;                               // the same permission that lets you edit the world
+    if (on) pausedRooms.add(room); else pausedRooms.delete(room);
+    io.to(room).emit('avt-sim-paused', { on: !!on });
   });
   // ── CHUNK RESIDENCY BEACON (SHARED-WORLD.md §7, Phase 3). A coarse, low-rate position so the server knows which
   // chunks to keep resident. Avatar positions otherwise travel P2P and never reach the server at all (see the
