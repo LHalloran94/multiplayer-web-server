@@ -2536,6 +2536,7 @@ function exportLevelBlob(roomId, levelIndex, lvl) {
     terrain: blob.terrain || { cols: PAGE_DIMS.cols, rows: PAGE_DIMS.rows, cell: TERRAIN_CELL, runs: [[0, PAGE_DIMS.cols * PAGE_DIMS.rows]] },
     mats: blob.mats || {},
     objects: blob.objects || [],
+    rules: (blob.rules && blob.rules.length) ? blob.rules : undefined,   // #98 — see captureRoomBlob
   };
 }
 
@@ -3593,7 +3594,11 @@ const _buildsDirty = new Map();
 // the expiry sweep was. Both destroyed matter; merging and per-chunk indexing replace them.
 const DROP_FALL_MAX_CELLS = 96;    // how far down the resting scan looks — bounded because the scan can FAULT PAGES IN (see dropRestY)
 const MAX_OBJECTS_PER_ROOM = 150;  // Phase 6: per-Level cap on USER-placed objects (generated 'world-' scatter exempt); mirrors client OBJECT_CAP. Over-cap spawns are rejected.
-const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter)
+// ⭐ 'region' (#98) — AN AUTHOR-DRAWN RECTANGLE, invisible in play and drawn only while building. It is an
+// OBJECT rather than a new kind of thing so that it inherits saving, publishing, hydration, the playable-band
+// clamp and a build-options panel for nothing. It is never solid and never collides; its whole content is
+// "am I inside it", which the client reports and the rule engine consumes.
+const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal', 'region']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter); region = a named area rules can ask about
 const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
@@ -10275,6 +10280,9 @@ function validatePublishContent(levels) {
     // Publishing is a page-room/Level operation, so the page shape is the right yardstick here — deliberately
     // PAGE_DIMS rather than a per-room lookup, since a published World is replayed into page rooms.
     if ((l.terrain.cols | 0) !== PAGE_DIMS.cols || (l.terrain.rows | 0) !== PAGE_DIMS.rows) return null;  // foreign world size
+    // #98 — a Level's game is uploaded content like everything else here, so it is rebuilt field by field
+    // rather than stored as whatever the client sent. An empty result drops the key entirely.
+    if (l.rules !== undefined) { const r = sanitizeRules(l.rules); if (r.length) l.rules = r; else delete l.rules; }
   }
   return levels;
 }
@@ -12682,6 +12690,14 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // scroll-set base rotation (round-trips like stamps)
             hp: data.breakable === false ? null : 2 };  // erasable/destructible like other props
     if (type === 'goal' && isFinite(data.target)) obj.target = Math.max(-1, Math.min(63, data.target | 0));  // series destination Level (-1 = next; Phase 5b)
+  } else if (type === 'region') {
+    // #98 — a named area. No hp (it is not a thing you can hit), no surface, no modifier: a rectangle and a name.
+    if (!isFinite(data.x) || !isFinite(data.y)) return null;
+    obj = { id, type, ownerId, owner: ownerName,
+            x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+            w: clampN(data.w, 16, 4000, 240), h: clampN(data.h, 16, 4000, 160),
+            hue: clampN(data.hue, 0, 360, 190),
+            hp: null };                                    // never breakable — there is nothing there to break
   } else if (type === 'portal') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
@@ -12725,6 +12741,18 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
         speed: clampN(data.path.speed, 0.02, 1.2, 0.18), phase: clampN(data.path.phase, 0, 1, 0) };
     }
   }
+  // 🟥🟥 #98 — THE AUTHOR'S NAME FOR THIS THING, AND IT MUST BE SET HERE OR IT DOES NOT EXIST.
+  // Everything above rebuilds an object FIELD BY FIELD, which is why a tag placed by an author would survive
+  // `snapshotObj` (which copies unknown keys), survive publishing, survive a remix — and then vanish the moment
+  // the Level was re-entered, through BOTH routes, because both come back through this function. That is the
+  // ninth instance of the by-name-rebuild bug shape on this project, and a lost tag looks exactly like "my rule
+  // stopped working after I published". Rules address things by tag and by nothing else (an object's id is
+  // re-minted on every hydrate), so this one line is what makes the whole system storable.
+  // ⚠️ Trimmed INLINE rather than through the rules block's `ruleTag`. The probe rigs slice blocks of this file
+  // into a `new Function`, and a bare reference across a slice boundary throws ReferenceError in a guard and
+  // nowhere else — the trap this track has now hit six times (`wireFanout`, `chunkDroppable`, the domain
+  // registry, the pause…). One expression is cheaper than another seam.
+  if (obj) { const t = (typeof data.tag === 'string') ? data.tag.trim().slice(0, 24) : ''; if (t) obj.tag = t; }
   return obj;
 }
 // ---- Phase 7b: server-side hydration of a PUBLISHED World room (no host present) ----
@@ -12761,6 +12789,14 @@ function hydrateRoomFromBlob(avRoom, blob) {
     const obj = buildWorldObject(src.type, src, id, id, 'world', avRoom);   // server-owned (ownerId = its own id → not user-evictable)
     if (obj) { map.set(id, obj); placed++; }
   }
+  // #98 — the Level's game comes back with it. ⚠️ Re-sanitised rather than trusted: a stored blob may predate
+  // this version's vocabulary, and the same allowlist that accepted it on the way in is what decides which of
+  // its rules this server still understands.
+  // ⚠️ The LIVE game is dropped, not carried: a hydration is the Level going back to how it was authored, and
+  // last round's scores are not part of that.
+  const _rl = sanitizeRules(blob.rules);
+  if (_rl.length) roomRules[avRoom] = _rl; else delete roomRules[avRoom];
+  delete roomGame[avRoom];
 }
 // #102 — replay a restored Level to EVERYONE standing in it. The same three events the join path sends to a
 // single socket, aimed at the room instead. Terrain first, then the liquid that was re-derived from it, then
@@ -12902,6 +12938,9 @@ function captureRoomBlob(avRoom) {                      // → a Lvl blob (terra
     terrain: cached.terrain,
     mats: cached.mats,
     objects: objs ? [...objs.values()].filter(o => !(typeof o.id === 'string' && o.id.startsWith('world-'))).map(snapshotObjSrv) : [],
+    // #98 — the Level's game travels with its content, because that is what it is part of. Absent when there
+    // is none, so nothing about a Level without rules changes shape.
+    rules: (roomRules[avRoom] && roomRules[avRoom].length) ? roomRules[avRoom] : undefined,
   };
 }
 const _persistentWorlds = db.prepare("SELECT id, room_id, content FROM published_worlds WHERE durability = 'persistent'");
@@ -12923,6 +12962,369 @@ function autosavePersistentWorlds() {
   }
 }
 setInterval(autosavePersistentWorlds, 30000);
+
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+//  #98 — THE CREATOR RULE SYSTEM.  Design + the seven decisions: scratchpad/kickoff_rules_system.md
+//
+//  A creator's game is DATA, not code. Rules are rows of `WHEN <event> / IF <conditions> / THEN <actions>`,
+//  stored with the Level's content, validated field by field here, and interpreted by this file. Nothing a
+//  creator writes ever becomes JavaScript.
+//
+//  🟥 WHY NOT A SANDBOX, since the card names Garry's Mod: this process is single-threaded and its tick is
+//  already liquid-bound with three throttling tiers (`probe_budget`). An untrusted loop here is not a crashed
+//  Level — it is everybody's world stopping. Data can grow toward code later; shipped code cannot be
+//  un-shipped, which is why the door is opened in only one direction.
+//
+//  ── THINGS ARE ADDRESSED BY TAG, NEVER BY ID, AND THAT IS FORCED ────────────────────────────────────────────
+//  🟥 An object's identity does NOT survive a save. `applyLevel` does `delete obj.id … obj.id = socket.id+'-'+n`
+//  and `hydrateRoomFromBlob` mints `'pub-'+(++objSeq)`, so "open THAT gate" is unexpressible by identity. An
+//  author types a TAG on an object and rules name the tag. Player tags are the same mechanism at runtime, which
+//  is what makes "wearing the crown" cost no carry physics: holding is a tag, not an attachment.
+//  ⚠️ `snapshotObj`/`snapshotObjSrv` copy every unknown field, so a tag SAVES for free — but `buildWorldObject`
+//  is a by-name rebuild and would silently drop it on BOTH re-entry routes. See the `tag` line there.
+//
+//  ── WHAT THIS COSTS WHEN NOBODY HAS WRITTEN A RULE ──────────────────────────────────────────────────────────
+//  ⭐ Nothing. `rulesTick` iterates `roomRules`, which is empty until an author writes one, and every event hook
+//  is one `roomRules[room]` lookup. Deliberately NOT on the liquid tick — that is the budgeted one.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// ==RULES_BLOCK_START==
+const RULE_EVENTS = new Set(['take', 'touch', 'enter', 'leave', 'respawn', 'goal', 'break', 'timer', 'reach', 'roundstart', 'roundend']);
+const RULE_COND   = new Set(['tag', 'notag', 'in', 'num', 'count']);
+const RULE_ACTS   = new Set(['give', 'take', 'add', 'set', 'hide', 'show', 'moveto', 'say', 'mark', 'unmark',
+                             'tp', 'respawn', 'win', 'endround', 'resetscores', 'restore', 'group']);
+const RULE_OPS    = ['>=', '<=', '>', '<', '==', '!='];
+const RULES_PER_LEVEL = 64;          // a rule set is authored by hand; this is a clutter bound, not a budget
+const ACTS_PER_RULE   = 16;
+const CONDS_PER_RULE  = 6;
+const RULE_TAG_MAX    = 24;
+const RULE_TICK_MS    = 100;         // 10Hz — timers and "how many players are in this region"
+const ROUND_MIN_MS    = 3000;        // the floor `avt-level-reset` already carries, for the same reason
+
+const clampRuleNum = (v, lo, hi, d) => (isFinite(v) ? Math.max(lo, Math.min(hi, +v)) : d);
+const ruleTag = s => (typeof s === 'string' ? s.trim().slice(0, RULE_TAG_MAX) : '');
+
+// One rule, rebuilt field by field — the same discipline `sanitizeMatDef` applies to a creator's material.
+// ⚠️ An unknown verb is DROPPED, not passed through: a rule set from a future version must degrade to the part
+// this server understands rather than being stored as an opaque blob nothing can check.
+function sanitizeRule(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (!RULE_EVENTS.has(raw.when)) return null;
+  const r = { when: raw.when };
+  const what = ruleTag(raw.what); if (what) r.what = what;
+  if (raw.when === 'timer') r.every = clampRuleNum(raw.every, 0.1, 3600, 1);
+  if (raw.when === 'reach') { r.num = ruleTag(raw.num) || 'score'; r.at = clampRuleNum(raw.at, -1e9, 1e9, 1); if (raw.sh) r.sh = 1; }
+  const grp = ruleTag(raw.group); if (grp) r.group = grp;
+  if (raw.off) r.off = 1;                                  // authored as starting switched OFF (a later phase)
+  r.ifs = [];
+  for (const c of (Array.isArray(raw.ifs) ? raw.ifs : [])) {
+    if (r.ifs.length >= CONDS_PER_RULE) break;
+    if (!c || !RULE_COND.has(c.kind)) continue;
+    const o = { kind: c.kind };
+    if (c.kind === 'tag' || c.kind === 'notag' || c.kind === 'in') { o.tag = ruleTag(c.tag); if (!o.tag) continue; }
+    if (c.kind === 'num') { o.num = ruleTag(c.num) || 'score'; o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, -1e9, 1e9, 0); if (c.sh) o.sh = 1; }
+    if (c.kind === 'count') { o.tag = ruleTag(c.tag); o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, 0, 999, 1); if (!o.tag) continue; }
+    r.ifs.push(o);
+  }
+  r.then = [];
+  for (const a of (Array.isArray(raw.then) ? raw.then : [])) {
+    if (r.then.length >= ACTS_PER_RULE) break;
+    if (!a || !RULE_ACTS.has(a.do)) continue;
+    const o = { do: a.do };
+    if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp') { o.tag = ruleTag(a.tag); if (!o.tag) continue; }
+    if (a.do === 'moveto') { o.tag = ruleTag(a.tag); o.to = ruleTag(a.to); if (!o.tag) continue; }
+    if (a.do === 'add' || a.do === 'set') { o.num = ruleTag(a.num) || 'score'; o.v = clampRuleNum(a.v, -1e9, 1e9, 1); if (a.sh) o.sh = 1; }
+    if (a.do === 'say') o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 120);
+    if (a.do === 'group') { o.tag = ruleTag(a.tag); o.on = a.on ? 1 : 0; if (!o.tag) continue; }
+    r.then.push(o);
+  }
+  if (!r.then.length) return null;                         // a rule that does nothing is not a rule
+  return r;
+}
+function sanitizeRules(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const x of raw) { if (out.length >= RULES_PER_LEVEL) break; const r = sanitizeRule(x); if (r) out.push(r); }
+  return out;
+}
+
+const roomRules = {};                // avRoom → [rule]        the authored list (empty/absent = no game here)
+const roomGame  = {};                // avRoom → live state (below); only exists while a room has rules
+const ruleRoomMeta = {};             // avRoom → { roomId, levelIndex, ownerId }   recorded at join, for `restore`
+const roomInside = {};               // avRoom → Map(socketId → Set(regionTag))    who is standing in what
+
+// ⭐ Per-player state is keyed by `playerKeyFor`, the ledger's own key, so a signed-in player keeps their score
+// across a reconnect and two anonymous sockets are two players. Names are kept beside it because a message
+// saying who won has to name somebody, and `roomProfile` only exists when the relay is on.
+function gameOf(avRoom) {
+  let g = roomGame[avRoom];
+  if (!g) {
+    g = roomGame[avRoom] = {
+      nums: new Map(),      // playerKey → Map(name → number)
+      shared: new Map(),    // name → number                    (a round counter, a target, a shared clock)
+      tags: new Map(),      // tagName → Set(playerKey)
+      names: new Map(),     // playerKey → display name
+      hidden: new Set(),    // object tags currently hidden by a rule
+      // ⭐⭐ WHO WON THE RACE FOR IT. "One hidden object, whoever holds it" needs exactly one taker, and this is
+      // where that is decided — a `take` claim succeeds only if the tag is neither hidden nor already taken, and
+      // the winner is whoever's message the server read first. Same property `drop-take` already enforces for a
+      // pile of material, and the reason the crown needs no carry physics or attachment of any kind.
+      taken: new Set(),     // object tags already claimed this round
+      groups: new Set(),    // rule groups switched OFF
+      timers: new Map(),    // rule index → ms of the last fire
+      roundStart: Date.now(),
+      lastRound: 0,
+      dirty: false,
+    };
+    for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);   // phases that start closed
+  }
+  return g;
+}
+function hasRules(avRoom) { const r = roomRules[avRoom]; return !!(r && r.length); }
+// 🟥 A SOCKET THAT LEAVES MUST FORGET WHICH REGIONS IT WAS STANDING IN, and this is not only tidiness. `enter`
+// is EDGE-TRIGGERED — it is ignored if the set already holds the tag — so a stale entry means that walking out
+// of a Level and back in while standing on the hill would never fire the rule again, which is a fault nobody
+// could diagnose from inside the game. Called beside every `dropRelay`, deliberately as its own function rather
+// than inside one: `dropRelay` lives in the relay's sliced block and a reference across that boundary throws in
+// a guard and nowhere else.
+function forgetRuleSocket(avRoom, sid) {
+  const m = roomInside[avRoom];
+  if (m) { m.delete(sid); if (!m.size) delete roomInside[avRoom]; }
+}
+
+function numOf(g, key, name, shared) {
+  if (shared) return g.shared.get(name) || 0;
+  const m = g.nums.get(key); return (m && m.get(name)) || 0;
+}
+function setNum(g, key, name, shared, v) {
+  if (shared) { g.shared.set(name, v); g.dirty = true; return; }
+  if (!key) return;
+  let m = g.nums.get(key); if (!m) g.nums.set(key, m = new Map());
+  m.set(name, v); g.dirty = true;
+}
+function cmpRule(a, op, b) {
+  switch (op) { case '>=': return a >= b; case '<=': return a <= b; case '>': return a > b;
+                case '<': return a < b; case '==': return a === b; case '!=': return a !== b; }
+  return false;
+}
+// Everyone standing in this Level, as [socketId, playerKey]. `roomAvt` is the set the join path maintains.
+function rulePlayers(avRoom) {
+  const out = [];
+  for (const sid of (roomAvt[avRoom] || [])) if (io.sockets.sockets.has(sid)) out.push([sid, playerKeyFor(sid)]);
+  return out;
+}
+// Which region tags is this socket standing in? Reported by the client (see `rule-event`), because only it
+// knows to the frame — the server's own position beacon is a 500ms heartbeat. Decision 7 of the design.
+function insideOf(avRoom, sid) {
+  const m = roomInside[avRoom]; const s = m && m.get(sid);
+  return s || null;
+}
+
+// ── EVALUATION ──────────────────────────────────────────────────────────────────────────────────────────────
+// ⭐ A rule runs FOR EACH PLAYER IT IS ABOUT, and things that affect the world happen ONCE. That is the whole
+// scoping rule, and it is what lets "EVERY 1s / IF a player has [holder] / THEN add 1 to their score" mean what
+// it reads as, without the author having to choose a scope from a menu.
+const PER_PLAYER_ACTS = new Set(['give', 'take', 'add', 'set', 'mark', 'unmark', 'tp', 'respawn', 'win']);
+function rulePerPlayer(r) {
+  return r.ifs.some(c => c.kind !== 'count') || r.then.some(a => PER_PLAYER_ACTS.has(a.do));
+}
+function condHolds(avRoom, g, c, sid, key) {
+  switch (c.kind) {
+    case 'tag':   return !!(key && g.tags.get(c.tag) && g.tags.get(c.tag).has(key));
+    case 'notag': return !(key && g.tags.get(c.tag) && g.tags.get(c.tag).has(key));
+    case 'in':    { const s = insideOf(avRoom, sid); return !!(s && s.has(c.tag)); }
+    case 'num':   return (key || c.sh) ? cmpRule(numOf(g, key, c.num, c.sh), c.op, c.v) : false;
+    case 'count': {
+      let n = 0;
+      for (const [s2] of rulePlayers(avRoom)) { const st = insideOf(avRoom, s2); if (st && st.has(c.tag)) n++; }
+      return cmpRule(n, c.op, c.v);
+    }
+  }
+  return false;
+}
+// Fire one event. `ctx` carries the actor (sid) and, where the event has one, the tag it is about.
+// ⚠️ Re-entrancy is bounded by `depth`: a rule can end a round, ending a round fires `roundend`, and that may
+// end it again. Two levels is enough for every sane game and stops a cycle costing the tick.
+function fireRuleEvent(avRoom, when, ctx, depth) {
+  const rules = roomRules[avRoom];
+  if (!rules || !rules.length) return;
+  if ((depth | 0) > 2) return;
+  const g = gameOf(avRoom);
+  const out = { say: [], win: null, end: false };
+  for (let i = 0; i < rules.length; i++) {
+    const r = rules[i];
+    if (r.when !== when) continue;
+    if (r.group && g.groups.has(r.group)) continue;                   // this phase is switched off
+    if (r.what && ctx && ctx.tag && r.what !== ctx.tag) continue;     // a rule about [crown] ignores other things
+    if (r.what && when === 'reach' && ctx && ctx.num && r.num !== ctx.num) continue;
+    if (when === 'reach' && ctx && ctx.num && r.num !== ctx.num) continue;
+    if (when === 'reach') { const key = ctx && ctx.sid ? playerKeyFor(ctx.sid) : null;
+      if (!cmpRule(numOf(g, key, r.num, r.sh), '>=', r.at)) continue; }
+    runRule(avRoom, g, r, i, ctx, out, depth | 0);
+  }
+  flushRuleOut(avRoom, g, out, depth | 0);
+}
+function runRule(avRoom, g, r, idx, ctx, out, depth) {
+  const perP = rulePerPlayer(r);
+  let actors;
+  if (ctx && ctx.sid) actors = [[ctx.sid, playerKeyFor(ctx.sid)]];
+  else if (perP) actors = rulePlayers(avRoom);
+  else actors = [[null, null]];
+  const matched = [];
+  for (const [sid, key] of actors) {
+    let ok = true;
+    for (const c of r.ifs) if (!condHolds(avRoom, g, c, sid, key)) { ok = false; break; }
+    if (ok) matched.push([sid, key]);
+  }
+  if (!matched.length) return;
+  for (const [sid, key] of matched) for (const a of r.then) if (PER_PLAYER_ACTS.has(a.do)) doRuleAct(avRoom, g, a, sid, key, ctx, out, depth);
+  const [s0, k0] = matched[0];
+  for (const a of r.then) if (!PER_PLAYER_ACTS.has(a.do)) doRuleAct(avRoom, g, a, s0, k0, ctx, out, depth);
+}
+function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
+  switch (a.do) {
+    case 'give': if (key) { let s = g.tags.get(a.tag); if (!s) g.tags.set(a.tag, s = new Set()); s.add(key); g.dirty = true; } break;
+    case 'take': if (key) { const s = g.tags.get(a.tag); if (s) { s.delete(key); g.dirty = true; } } break;
+    // ⭐ A NUMBER CHANGING IS ITSELF AN EVENT, which is what makes "when someone's score reaches 60" a rule
+    // rather than a poll. Fired from the write that caused it so the two cannot drift apart.
+    case 'add':  setNum(g, key, a.num, a.sh, numOf(g, key, a.num, a.sh) + a.v);
+                 fireRuleEvent(avRoom, 'reach', { sid, num: a.num }, depth + 1); break;
+    case 'set':  setNum(g, key, a.num, a.sh, a.v);
+                 fireRuleEvent(avRoom, 'reach', { sid, num: a.num }, depth + 1); break;
+    case 'hide': g.hidden.add(a.tag); g.dirty = true; break;
+    // ⚠️ Showing something again also makes it TAKEABLE again. Those are one fact, not two: a crown you can see
+    // and cannot pick up is a bug nobody would be able to diagnose from inside the game.
+    case 'show': g.hidden.delete(a.tag); g.taken.delete(a.tag); g.dirty = true; break;
+    case 'moveto': (out.move = out.move || []).push({ tag: a.tag, to: a.to || '', sid }); g.dirty = true; break;
+    case 'say':  out.say.push({ text: a.text, who: key ? (g.names.get(key) || '') : '' }); break;
+    case 'mark': if (key) { let s = g.tags.get('~mark'); if (!s) g.tags.set('~mark', s = new Set()); s.add(key); g.dirty = true; } break;
+    case 'unmark': if (key) { const s = g.tags.get('~mark'); if (s) { s.delete(key); g.dirty = true; } } break;
+    case 'tp':   if (sid) (out.tp = out.tp || []).push({ sid, tag: a.tag }); break;
+    case 'respawn': if (sid) (out.kill = out.kill || []).push(sid); break;
+    case 'win':  if (key) out.win = key; out.end = true; break;
+    case 'endround': out.end = true; break;
+    case 'resetscores': g.nums.clear(); g.dirty = true; break;
+    case 'restore': out.restore = true; break;
+    case 'group': if (a.on) g.groups.delete(a.tag); else g.groups.add(a.tag); g.dirty = true; break;
+  }
+}
+// Everything a pass DECIDED, applied once at the end. Actions collect into `out` rather than emitting as they
+// run, so a rule that both moves the crown and ends the round produces one message in one order, and a round
+// cannot be ended twice by two rules in the same pass.
+function flushRuleOut(avRoom, g, out, depth) {
+  for (const m of out.say) io.to(avRoom).emit('rule-say', { text: String(m.text).replace(/\{player\}/g, m.who || 'Someone') });
+  if (out.tp) for (const t of out.tp) { const o = findTaggedObj(avRoom, t.tag); if (o) io.to(t.sid).emit('rule-move-me', { x: o.x, y: o.y }); }
+  if (out.kill) for (const sid of out.kill) io.to(sid).emit('rule-respawn-me', {});
+  if (out.move) for (const m of out.move) applyRuleMove(avRoom, m);
+  if (out.end) endRuleRound(avRoom, g, out.win, out.restore, depth);
+  else if (out.restore) restoreRuleWorld(avRoom);
+  if (g.dirty) broadcastRuleState(avRoom);
+}
+function findTaggedObj(avRoom, tag) {
+  const map = roomObjects[avRoom]; if (!map || !tag) return null;
+  for (const o of map.values()) if (o.tag === tag) return o;
+  return null;
+}
+// "put [crown] at [hill]" / "…where the player is". A tagged object is MOVED, not respawned, so its identity in
+// this room survives — which is what lets a rule move the same crown every round.
+function applyRuleMove(avRoom, m) {
+  const map = roomObjects[avRoom]; if (!map) return;
+  let dx = null, dy = null;
+  if (m.to) { const d = findTaggedObj(avRoom, m.to); if (d) { dx = d.x; dy = d.y; } }
+  else if (m.sid) { const w = roomWhere[avRoom] && roomWhere[avRoom].get(m.sid); if (w && w.apx >= 0) { dx = w.apx; dy = w.apy; } }
+  if (dx === null) return;
+  for (const o of map.values()) {
+    if (o.tag !== m.tag) continue;
+    o.x = dx; o.y = dy;
+    io.to(avRoom).emit('avatar-object-add', o);          // the wire an edit already uses — clients overwrite in place by id
+  }
+}
+// A round ends. ⭐⭐ THERE IS NO BUILT-IN RESET — the user's call, 2026-09-04: the author decides what happens,
+// by writing `WHEN the round ends`. All this does is announce the result and re-arm, so a Level with no
+// roundend rule simply keeps playing, and one with them can restore, move things, or change which rules apply.
+function endRuleRound(avRoom, g, winKey, restore, depth) {
+  const now = Date.now();
+  if (now - g.lastRound < ROUND_MIN_MS) return;          // see ROUND_MIN_MS
+  g.lastRound = now;
+  io.to(avRoom).emit('rule-round', { over: 1, winner: winKey ? (g.names.get(winKey) || 'Someone') : null });
+  if (restore) restoreRuleWorld(avRoom);
+  fireRuleEvent(avRoom, 'roundend', {}, depth + 1);
+  g.roundStart = Date.now();
+  g.timers.clear();
+  fireRuleEvent(avRoom, 'roundstart', {}, depth + 1);
+  broadcastRuleState(avRoom);
+}
+// "put the world back" — #102's restore, verbatim.
+// 🟥 THE SERVER ROUTE, NOT THE CLIENT ONE. `applyLevel` begins with `avatar-objects-clear-all`, which
+// `invGatedRoom` refuses outright, so in a Level whose economy is switched on the client route would silently
+// do nothing at all. This one does not go through that door.
+// ⚠️ It is a full `terrain-init` to everyone present. That is why it is a row the author writes rather than
+// something a round does by default.
+function restoreRuleWorld(avRoom) {
+  const meta = ruleRoomMeta[avRoom];
+  if (!meta || !meta.roomId) return;
+  const h = publishedHydrationFor(meta.roomId, meta.levelIndex);
+  if (h && h.blob) {
+    hydrateRoomFromBlob(avRoom, h.blob);
+    seedLiquidActivity(avRoom);
+    broadcastLevelRestore(avRoom, meta.levelIndex);
+  } else if (meta.ownerId && discordIdToSocket[meta.ownerId]) {
+    io.to(discordIdToSocket[meta.ownerId]).emit('avt-hydrate', { levelIndex: meta.levelIndex });
+  }
+}
+// What a client needs to draw the game: its own numbers, who is marked, which object tags are hidden, and the
+// board. ⚠️ Sent per socket, because per-player numbers are per player; the shared parts ride along in each.
+function ruleStateFor(avRoom, sid) {
+  const g = roomGame[avRoom]; if (!g) return null;
+  const key = playerKeyFor(sid);
+  const mine = {}; const m = g.nums.get(key); if (m) for (const [k, v] of m) mine[k] = v;
+  const shared = {}; for (const [k, v] of g.shared) shared[k] = v;
+  const mytags = []; for (const [t, s] of g.tags) if (t[0] !== '~' && s.has(key)) mytags.push(t);
+  const marked = []; { const s = g.tags.get('~mark'); if (s) for (const [s2, k2] of rulePlayers(avRoom)) if (s.has(k2)) marked.push(s2); }
+  // The board: everyone with a score, best first. It is what a game most often wants on screen, and it cannot
+  // be built client-side because a client only ever knows its own number.
+  const board = [];
+  for (const [k, mm] of g.nums) { const v = mm.get('score'); if (v) board.push({ name: g.names.get(k) || '…', v, me: k === key }); }
+  board.sort((a, b) => b.v - a.v);
+  return { mine, shared, tags: mytags, marked, hidden: [...g.hidden], board: board.slice(0, 8),
+           round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)) };
+}
+function broadcastRuleState(avRoom) {
+  const g = roomGame[avRoom]; if (!g) return;
+  g.dirty = false;
+  for (const [sid] of rulePlayers(avRoom)) { const st = ruleStateFor(avRoom, sid); if (st) io.to(sid).emit('rule-state', st); }
+}
+// ── THE 10Hz PASS ───────────────────────────────────────────────────────────────────────────────────────────
+// ⭐ Only timers and region population need polling; everything else is event-driven. And it walks `roomRules`,
+// which is EMPTY until somebody authors a game — so this costs nothing at all in a world without one.
+// ⚠️ NOT on the liquid tick. That one is budgeted, throttled and sector-split, and things added to it have
+// broken `probe_budget` five times.
+let ruleTickCount = 0;
+function rulesTick() {
+  ruleTickCount++;
+  for (const avRoom of Object.keys(roomRules)) {
+    const rules = roomRules[avRoom];
+    if (!rules || !rules.length) continue;
+    if (!(roomAvt[avRoom] && roomAvt[avRoom].size)) continue;      // nobody here — a game with no players does not run
+    const g = gameOf(avRoom);
+    const now = Date.now();
+    for (let i = 0; i < rules.length; i++) {
+      const r = rules[i];
+      if (r.when !== 'timer') continue;
+      if (r.group && g.groups.has(r.group)) continue;
+      const period = Math.max(100, Math.round(r.every * 1000));
+      const last = g.timers.get(i) || g.roundStart;
+      if (now - last < period) continue;
+      g.timers.set(i, now);
+      const out = { say: [], win: null, end: false };
+      runRule(avRoom, g, r, i, null, out, 0);
+      flushRuleOut(avRoom, g, out, 0);
+    }
+    // The round clock ticks on screen even when nothing else changed, but only once a second.
+    if (g.dirty || ruleTickCount % 10 === 0) broadcastRuleState(avRoom);
+  }
+}
+setInterval(rulesTick, RULE_TICK_MS);
+// ==RULES_BLOCK_END==
 
 // ---- Dropped material: spawn / collect / expire ----
 // Where does a drop come to rest? Straight down from the cell it was dug out of, to the top of the first solid
@@ -14258,7 +14660,7 @@ io.on('connection', (socket) => {
         removeSimAvatar(currentRoom, oldSid);
         const oldAv = socketToAvatarRoom[oldSid];   // the evicted socket's avatar-world room (mode-scoped, may differ from this one)
         if (oldAv && roomAvt[oldAv] && roomAvt[oldAv].delete(oldSid)) { socket.to(oldAv).emit('avt-peer-left', { id: oldSid }); delete socketToAvatarRoom[oldSid]; }
-        if (oldAv) dropRelay(oldAv, oldSid);   // Phase 5a: and stop relaying a socket that is gone
+        if (oldAv) { dropRelay(oldAv, oldSid); forgetRuleSocket(oldAv, oldSid); }   // Phase 5a: and stop relaying a socket that is gone · #98: and forget the regions it was in
         io.to(currentPageRoom).emit('cursor-leave', { id: oldSid });
         io.to(currentRoom).emit('avatar-leave', { id: oldSid });
         const oldSock = io.sockets.sockets.get(oldSid);
@@ -14910,7 +15312,7 @@ io.on('connection', (socket) => {
     if (dupSockets.length) {
       for (const other of dupSockets) {
         if (roomAvt[avRoom] && roomAvt[avRoom].delete(other)) socket.to(avRoom).emit('avt-peer-left', { id: other });
-        dropRelay(avRoom, other);   // Phase 5a
+        dropRelay(avRoom, other); forgetRuleSocket(avRoom, other);   // Phase 5a · #98
         if (socketToAvatarRoom[other] === avRoom) delete socketToAvatarRoom[other];
         try { io.sockets.sockets.get(other)?.leave(avRoom); } catch {}
         io.to(other).emit('avt-evicted', { levelIndex });
@@ -14935,7 +15337,7 @@ io.on('connection', (socket) => {
     if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
       socket.leave(currentAvatarRoom);
       if (roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
-      dropRelay(currentAvatarRoom, socket.id);   // Phase 5a: a Level switch must not leave a ghost being relayed
+      dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id);   // Phase 5a: a Level switch must not leave a ghost being relayed · #98: switching Level also leaves every region
     }
     currentAvatarRoom = avRoom;
     socketToAvatarRoom[socket.id] = avRoom;
@@ -15038,6 +15440,23 @@ io.on('connection', (socket) => {
     // ⚠️ Still SENT, empty: it is what makes the client forget the previous room's props, and a Level switch does
     // not run `exitAvatarMode`. Props arrive per chunk, in `sendChunkContent`.
     socket.emit('avatar-objects-init', { levelIndex, objects: (roomObjects[avRoom] && !objChunked(avRoom)) ? [...roomObjects[avRoom].values()] : [] });
+    // ── #98: THE LEVEL'S GAME. Sent to every joiner whether or not there is one, for the same reason the two
+    // messages either side of it are: it is what makes the client forget the PREVIOUS Level's rules, and a
+    // Level switch does not run `exitAvatarMode`.
+    // ⭐ Remembering who this player is, and which room+Level this is, both belong here — the name so a message
+    // can say who won, and the room so `restore` does not have to re-derive a routing rule that already exists.
+    {
+      const _rl = roomRules[avRoom] || [];
+      if (_rl.length) {
+        ruleRoomMeta[avRoom] = { roomId: currentAvBuildRoomId || null, levelIndex, ownerId: currentAvOwnerId || null };
+        const _g = gameOf(avRoom);
+        _g.names.set(playerKeyFor(socket.id), currentUsername || socketToUsername[socket.id] || 'Someone');
+        socket.emit('rules-init', { levelIndex, rules: _rl });
+        const _st = ruleStateFor(avRoom, socket.id); if (_st) socket.emit('rule-state', _st);
+      } else {
+        socket.emit('rules-init', { levelIndex, rules: [] });
+      }
+    }
     // 🟥 THE WHOLE-LIST JOIN REPLAY IS GONE. It sent every pile in the room to every joiner — fine while a TTL
     // and a 300 cap kept the list small, and the same shape as the whole-world terrain replay that hung this
     // server once piles stopped expiring. Piles now arrive WITH THEIR CHUNK, in `sendChunkContent`, so a joiner
@@ -15091,7 +15510,7 @@ io.on('connection', (socket) => {
     }
     if (currentAvatarRoom) socket.leave(currentAvatarRoom);
     if (currentAvatarRoom && roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);   // Phase 3: stop holding chunks resident for someone who left
-    if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); dropRelay(currentAvatarRoom, socket.id); }   // Phase 4: stop tracking what they were subscribed/meshed to · Phase 5a: and stop relaying them
+    if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id); }   // Phase 4: stop tracking what they were subscribed/meshed to · Phase 5a: and stop relaying them · #98: and forget their regions
     maybeResetShowcase(currentAvatarRoom);   // last one out of a showcase Level → it goes back to how its author made it
     delete socketToAvatarRoom[socket.id];
     // Out of the world ⇒ back to the shared purse. The invariant this keeps is simply "a Level's scope is set
@@ -15601,6 +16020,65 @@ io.on('connection', (socket) => {
   socket.on('avt-answer', ({ to, sdp })       => { socket.to(to).emit('avt-answer', { from: socket.id, sdp }); });
   socket.on('avt-ice',    ({ to, candidate }) => { socket.to(to).emit('avt-ice',    { from: socket.id, candidate }); });
 
+  // ══ #98 · THE RULE SYSTEM'S TWO WIRES ═══════════════════════════════════════════════════════════════════
+  // `rules-set` writes the Level's game (authors only); `rule-event` reports what a player's own browser saw.
+  // Everything else — the numbers, the tags, who won, when a round ends — is decided in the engine above and
+  // pushed back on `rule-state`. Decision 7: the client detects, the server decides.
+  socket.on('rules-set', (data) => {
+    const avRoom = currentAvatarRoom;
+    if (!avRoom || !data) return;
+    // 🟥 AUTHORED LEVELS ONLY (decision 5). A room-backed Level has an author who answers for its rules; the
+    // Overworld has none, and a page world is shared with everyone who visits that URL. It is the same line
+    // liquid sources, the pause, reset-on-respawn and the no-contact lock already sit behind.
+    if (!currentAvBuildRoomId || overworldRooms.has(avRoom)) { socket.emit('build-refused', { why: 'Rules belong to a Level, and this is a shared world.' }); return; }
+    if (!canBuild()) return;                              // writing a Level's game IS a build op
+    const rules = sanitizeRules(data.rules);
+    if (rules.length) roomRules[avRoom] = rules; else delete roomRules[avRoom];
+    // ⚠️ THE LIVE GAME IS THROWN AWAY WHEN THE RULES CHANGE, deliberately: scores and tags earned under the old
+    // rules mean nothing under the new ones, and keeping them is how an author ends up debugging a game that is
+    // half one version and half another.
+    delete roomGame[avRoom];
+    if (rules.length) { ruleRoomMeta[avRoom] = { roomId: currentAvBuildRoomId, levelIndex: currentAvLevelIndex | 0, ownerId: currentAvOwnerId || null }; gameOf(avRoom); }
+    io.to(avRoom).emit('rules-init', { levelIndex: currentAvLevelIndex | 0, rules });
+    if (rules.length) { fireRuleEvent(avRoom, 'roundstart', {}, 0); broadcastRuleState(avRoom); }
+  });
+  // What this browser saw. ⚠️ NOTHING HERE IS AN EFFECT — a claim is turned into an event and the engine decides
+  // what follows, so a modified client can lie about where it is standing and still cannot award itself a point.
+  let _ruleEvtWindow = 0, _ruleEvtBudget = 240;
+  socket.on('rule-event', (msg) => {
+    const avRoom = currentAvatarRoom;
+    if (!avRoom || !msg || !hasRules(avRoom)) return;
+    const now = Date.now();
+    if (now - _ruleEvtWindow > 1000) { _ruleEvtWindow = now; _ruleEvtBudget = 240; }
+    if (_ruleEvtBudget-- <= 0) return;                    // a rule event is edge-triggered; this is a flood bound
+    const g = gameOf(avRoom);
+    g.names.set(playerKeyFor(socket.id), currentUsername || socketToUsername[socket.id] || 'Someone');
+    const tag = (typeof msg.tag === 'string') ? msg.tag.trim().slice(0, RULE_TAG_MAX) : '';
+    switch (msg.ev) {
+      case 'enter': case 'leave': {
+        if (!tag) return;
+        const m = roomInside[avRoom] || (roomInside[avRoom] = new Map());
+        let s = m.get(socket.id); if (!s) m.set(socket.id, s = new Set());
+        if (msg.ev === 'enter') { if (s.has(tag)) return; s.add(tag); } else { if (!s.delete(tag)) return; }
+        fireRuleEvent(avRoom, msg.ev, { sid: socket.id, tag }, 0);
+        break;
+      }
+      // ⭐⭐ THE CONTESTED ONE. `take` is where "one hidden object, whoever holds it" is decided, and it is the
+      // only client claim in this handler the server refuses on its own account: whoever's message arrives
+      // first wins, and every later claim is dropped until a rule shows the thing again.
+      case 'take': {
+        if (!tag || g.hidden.has(tag) || g.taken.has(tag)) return;
+        g.taken.add(tag);
+        fireRuleEvent(avRoom, 'take', { sid: socket.id, tag }, 0);
+        break;
+      }
+      case 'touch': { if (!tag || g.hidden.has(tag)) return; fireRuleEvent(avRoom, 'touch', { sid: socket.id, tag }, 0); break; }
+      case 'break': { if (!tag) return; fireRuleEvent(avRoom, 'break', { sid: socket.id, tag }, 0); break; }
+      case 'respawn': fireRuleEvent(avRoom, 'respawn', { sid: socket.id }, 0); break;
+      case 'goal':    fireRuleEvent(avRoom, 'goal', { sid: socket.id }, 0); break;
+    }
+  });
+
   // ---- Avatar world objects (Stage 6) — server-authoritative existence over reliable
   // socket.io; physics response is applied locally on each client. Persist till restart.
   socket.on('avatar-object-spawn', (data) => {
@@ -15627,7 +16105,7 @@ io.on('connection', (socket) => {
       if (Array.isArray(obj.pts)) for (const p of obj.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
       if (obj.path && Array.isArray(obj.path.pts)) for (const p of obj.path.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
     }
-    if (type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal') {  // no building solids on the spawn (world mode); non-solid flags → allowed
+    if (type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal' && type !== 'region') {  // no building solids on the spawn (world mode); non-solid flags + regions → allowed
       const clear = spawnClearRect(currentAvatarRoom);
       if (clear) {
         let bx0, by0, bx1, by1;
@@ -16822,7 +17300,7 @@ io.on('connection', (socket) => {
       if (roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);
       dropSubs(currentAvatarRoom, socket.id);
       dropPeers(currentAvatarRoom, socket.id);
-      dropRelay(currentAvatarRoom, socket.id);   // Phase 5a
+      dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id);   // Phase 5a · #98
     }
     wireBatchOk.delete(socket.id);
     if (socketDmRooms[socket.id]) {
