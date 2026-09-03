@@ -1888,6 +1888,12 @@ function sanitizeEnvSpec(raw) {
     // The backing layer ("what is behind the terrain"). Absent = decided by the Level's kind, which is right
     // almost always; stored only when the author overrides it. 0 is meaningful, so this tests for undefined.
     if (l && l.back != null) out.back = l.back ? 1 : 0;
+    // ⭐⭐ DOES THIS LEVEL HAVE AN ECONOMY? OFF unless the author says so — the (A)/(B) split from
+    // `kickoff_what_levels_are.md` §4.3: a Level is a WORK and scarcity is usually wrong for its author,
+    // while a WORLD (the Overworld, a page world) is a PLACE and scarcity is the whole design there.
+    // ⚠️ It is authored per Level and not derived from the Level's TYPE, because "a Level about mining" is a
+    // thing somebody should be able to build. The type only decides the default, and the default is off.
+    if (l && l.econ) out.econ = 1;
     return out;
   });
   return { levels, nav: (raw.nav === 'series') ? 'series' : 'free' };
@@ -4829,9 +4835,19 @@ const REFINE_TICK_MS = 1000;
 // (ephemeral, gone when they go). ⚠️ ONE definition, because the credit path, the spend path and the wire all
 // have to agree about whose balance they are touching, and a second copy of this rule is a way to pay one
 // player and charge another.
+// ⭐⭐ A LEVEL'S ECONOMY IS SELF-CONTAINED (user, 2026-09-03). Prima mined in the Overworld must not spend in
+// somebody's Level, and Prima earned inside a Level must not follow you out of it — otherwise an author can
+// mint currency for the shared world simply by publishing a Level made of gold, and every Level's difficulty
+// is decided by how rich you already were when you walked in.
+// ⭐ ONE MAP AND ONE FUNCTION, so all ~18 call sites are untouched: the purse is a property of WHERE a socket
+// is standing, and every one of them already asks this question by socket. Empty string = the shared purse
+// (the Overworld and page worlds, which are ONE economy between them — they are the same place).
+// ⚠️ Persisted keys grow a suffix, so a Level's holdings are their own rows and survive a restart like any
+// other. That is the intent: your progress in a Level is yours, and it stays in that Level.
+const socketEconScope = Object.create(null);           // socket.id → '' | '@' + avRoom
 function playerKeyFor(socketId) {
   const d = socketToDiscordId[socketId];
-  return d ? 'd:' + d : 's:' + socketId;
+  return (d ? 'd:' + d : 's:' + socketId) + (socketEconScope[socketId] || '');
 }
 // Where the economy applies. ⚠️ MUST MATCH THE CLIENT'S `invGated()`, which is `!!avOverworld` — the placer,
 // the preview, the material picker and now the server's debit all have to agree about which world they are in,
@@ -4839,16 +4855,23 @@ function playerKeyFor(socketId) {
 function invGatedRoom(room) { return !!room && gatedRooms.has(room); }
 // Does the economy apply to this Level? Decided ONCE, at join, and recorded in `gatedRooms` — see the note
 // there for why the join's `type` is the wrong input and `env_spec` is the right one.
-// ⚠️ `life` (generated) and `stage` (host-authored) are both non-sandbox and both gated. The vocabulary is
-// `LEVEL_TYPES`, so a new Level kind is gated unless it is literally called 'sandbox' — which is the safe
-// default: a kind nobody has taught this function about should not silently become free-build.
+// ⭐⭐ THE (A)/(B) LINE, AND IT IS THE ONLY TEST HERE: a ROOM-BACKED Level is somebody's WORK, and its economy
+// is off unless its author switched it on; a per-URL PAGE WORLD and the Overworld are PLACES, and scarcity is
+// what they are made of. `kickoff_what_levels_are.md` §3 is the table of why nearly every requirement of the
+// two is opposite, and this is the one line where they finally stop sharing an answer.
+// 🟥 THIS USED TO READ `lvl.type !== 'sandbox'`, i.e. every authored Level charged its own author for the
+// blocks of their own Level — which is exactly what "authoring is not mining" says must not happen. The type
+// is now irrelevant here: a generated Level and a hand-built one are both Levels.
 function levelIsGated(rinfo, levelIndex, isOver) {
   if (isOver) return true;                             // the Overworld, always
-  const spec = rinfo ? parseEnvSpec(rinfo.env_spec) : null;
-  const lvl = (spec && Array.isArray(spec.levels)) ? spec.levels[levelIndex | 0] : null;
-  if (lvl) return lvl.type !== 'sandbox';
-  // No DB row (a per-URL page room): the documented default pair is [sandbox = 0, life = 1] — the same
-  // assumption `levelIndex`'s own fallback above makes, written once more where it is acted on.
+  if (rinfo) {
+    // A room's Level. Absent `econ` (the common case, and every Level authored before this shipped) = free.
+    const spec = parseEnvSpec(rinfo.env_spec);
+    const lvl = (spec && Array.isArray(spec.levels)) ? spec.levels[levelIndex | 0] : null;
+    return !!(lvl && lvl.econ);
+  }
+  // No DB row (a per-URL page room) — DELIBERATELY UNCHANGED. The documented default pair is
+  // [sandbox = 0, life = 1]: the page's sandbox is a scratch space, and its world is a PLACE.
   return (levelIndex | 0) !== 0;
 }
 // ⚠️ The room is PASSED, not looked up: a socket's avatar room lives in the connection closure
@@ -9562,7 +9585,9 @@ function sameUserAvSockets(avRoom, sid) {
 // ⚠️ `env_spec` rides along because the join needs the Level's real KIND to decide whether the economy applies
 // there (see `gatedRooms`). Widening the existing lookup rather than adding a second one: it is read once per
 // join, and two statements against the same row would be two chances to ask about different rooms.
-const _avRoomLookup = db.prepare('SELECT public, owner_id, env_spec, no_host FROM rooms WHERE id = ?');
+// ⚠️ …and `kind` for the same reason: the author's pause is an EDITING control, so once a Level is published
+// it belongs there only if the Level is one people build in (see `avt-pause-sim`).
+const _avRoomLookup = db.prepare('SELECT public, owner_id, env_spec, no_host, kind FROM rooms WHERE id = ?');
 const _avRoomMember = db.prepare('SELECT 1 FROM room_members WHERE room_id = ? AND discord_id = ?');
 // Stage 6 Phase 3 — L2 build permissions, PER-ROOM (covers every Level in the room's World). A role
 // default `mode` ('all' = anyone present can build, today's behavior; 'host' = only the owner + granted
@@ -9586,6 +9611,22 @@ function getRoomBuild(roomId) {
     roomBuild.set(roomId, rb);
   }
   return rb;
+}
+// ⭐⭐ MAY THE AUTHOR'S PAUSE (#102b) BE OFFERED HERE? The user's rule, 2026-09-03: *"pause mode should only be
+// available during level creation or editing. Once a level is published, unless it is explicitly a level for
+// building or a sandbox or something, the control shouldn't be available."*
+// ⇒ a DRAFT is something you are still making, so the pause belongs in it; a PUBLISHED Level is something
+// people play, and stopping its clock is a player-facing power, not an authoring one — UNLESS the Level is
+// itself a place to build, which is precisely "open to everyone present".
+// 🟥 THE OWNER IS EXCLUDED TOO, and that is the point. `canBuild()` is true for the owner everywhere, so
+// gating on build permission alone would have left the control sitting in every published Level for the one
+// person whose Level it is — which is the state the rule exists to remove.
+// ⚠️ Read live rather than captured at join: a Level can be unlocked while somebody is standing in it.
+function levelPauseOk(rinfo, roomId, levelIndex) {
+  if (!rinfo || !roomId) return false;                 // a page world / the Overworld has no author — never
+  if (rinfo.kind !== 'published') return true;         // a draft: you are still making it
+  const rb = getRoomBuild(roomId);
+  return rb.mode === 'all' && !rb.locked.has(levelIndex | 0);   // published, but a Level people build in
 }
 function persistRoomPerms(roomId) {                   // write build mode + level locks + feature modes back to perms
   const rb = getRoomBuild(roomId);
@@ -14787,7 +14828,20 @@ io.on('connection', (socket) => {
     // world was visited. The Overworld has no such row and needs none.
     else bumpPageWorldSeen(roomId);
     // ⭐ …and whether the economy applies here, recorded on the room at the one moment the Level's kind is known.
-    if (levelIsGated(rinfo, levelIndex, _isOver)) gatedRooms.add(avRoom);
+    // 🟥 SET *OR* CLEAR — this used to be add-only, and that was correct only for as long as the answer could
+    // never change. It was the Level's TYPE, which is fixed for the life of the Level; it is now the author's
+    // `econ` flag, which is editable (PUT /rooms/:id/levels). Add-only would mean a Level whose economy was
+    // switched OFF went on charging until the server restarted, with nothing to show why.
+    // ⚠️ Safe to let any joiner decide for the whole room: every input here is a property of the ROOM (its
+    // spec, its Level index, whether it is the Overworld), so two sockets cannot compute different answers and
+    // fight over it.
+    if (levelIsGated(rinfo, levelIndex, _isOver)) gatedRooms.add(avRoom); else gatedRooms.delete(avRoom);
+    // ⭐⭐ …and WHICH PURSE this socket spends from while it is here. See `socketEconScope`.
+    // ⚠️ SET UNCONDITIONALLY, including to '', because this handler is also how you SWITCH Level: leaving a
+    // Level's economy for the Overworld has to put the shared purse back, and an `if` that only ever adds a
+    // scope would strand you spending a Level's holdings in the shared world.
+    // ⚠️ A room-backed Level only. The Overworld and every page world share one purse — they are one place.
+    socketEconScope[socket.id] = (rinfo && gatedRooms.has(avRoom)) ? '@' + avRoom : '';
     // Where in the Overworld THIS socket arrives: an allocation against the page's permanent identity, which is
     // the whole of `server/domains.js`. `place` (not `peek`) because arriving is what claims a column.
     // ⚠️ PER SOCKET, NOT PER ROOM. Everywhere else `spawn` is a property of the room; in a shared world every
@@ -14878,6 +14932,11 @@ io.on('connection', (socket) => {
       // not need it (the server knows which world a socket is in), but the world's VOICE channel does — voice
       // scopes are opaque strings, so this is what makes "the world has its own voice" a client-side change.
       worldKey: avRoom,
+      // ⭐ #102b — does the author's pause belong in this Level? On the same server-decided seam as `spawn` /
+      // `dims` / `clock`, and for the same reason: the rule reads the room's KIND and its per-Level build
+      // locks, neither of which the client has, and a second copy of it here would drift into showing a
+      // control the server then refuses.
+      pauseOk: levelPauseOk(rinfo, currentAvBuildRoomId, levelIndex) ? 1 : 0,
       overworld: _isOver ? 1 : 0 });
     // #71 — the world's scrollback. ⚠️ EMPTY BY CONSTRUCTION IN THE OVERWORLD: nothing ever writes
     // `worldHistory` for an Overworld room, so this replays nothing there rather than being suppressed here.
@@ -14972,6 +15031,9 @@ io.on('connection', (socket) => {
     if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); dropRelay(currentAvatarRoom, socket.id); }   // Phase 4: stop tracking what they were subscribed/meshed to · Phase 5a: and stop relaying them
     maybeResetShowcase(currentAvatarRoom);   // last one out of a showcase Level → it goes back to how its author made it
     delete socketToAvatarRoom[socket.id];
+    // Out of the world ⇒ back to the shared purse. The invariant this keeps is simply "a Level's scope is set
+    // only while you are standing in that Level", so nothing outside one can ever be charged to it.
+    socketEconScope[socket.id] = '';
   });
   // ── #102 · RESET THE LEVEL STATE ON RESPAWN ──────────────────────────────────────────────────────────────
   // The client asks; the SERVER decides. `reset` is a property of the authored Level (env_spec), so a client
@@ -15069,6 +15131,9 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom;
     if (!room || !currentAvBuildRoomId || overworldRooms.has(room)) return;
     if (!canBuild()) return;                               // the same permission that lets you edit the world
+    // ⚠️ …AND the control has to belong here at all. The client hides the button on the same answer (`pauseOk`
+    // on `avt-joined`), but hiding a button is not a rule — this is.
+    if (!levelPauseOk(_avRoomLookup.get(currentAvBuildRoomId), currentAvBuildRoomId, currentAvLevelIndex | 0)) return;
     if (on) pausedRooms.add(room); else pausedRooms.delete(room);
     io.to(room).emit('avt-sim-paused', { on: !!on });
   });
@@ -16657,6 +16722,11 @@ io.on('connection', (socket) => {
     // is a new socket every single time, and re-reading from disk on each one would make the common case the
     // slow one. `forgetEphemeral` is a no-op for a `d:` key by design.
     ledger.forgetEphemeral(playerKeyFor(socket.id));
+    // 🟥 AFTER `forgetEphemeral`, NEVER BEFORE. The scope is part of the key, so dropping it first would hand
+    // that call the SHARED purse's name and forget the wrong one — an anonymous player leaving a Level would
+    // wipe their page-world holdings instead of their Level ones. Same ordering trap as `releaseHoldings`
+    // above, which is why both sit at the end.
+    delete socketEconScope[socket.id];
     if (currentRoom) {
       if (roomUsers[currentPresenceRoom]) delete roomUsers[currentPresenceRoom][socket.id];
       if (roomAvatars[currentRoom]) delete roomAvatars[currentRoom][socket.id];
