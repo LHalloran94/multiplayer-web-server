@@ -12988,17 +12988,40 @@ setInterval(autosavePersistentWorlds, 30000);
 //  is one `roomRules[room]` lookup. Deliberately NOT on the liquid tick — that is the budgeted one.
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // ==RULES_BLOCK_START==
-const RULE_EVENTS = new Set(['take', 'touch', 'enter', 'leave', 'respawn', 'goal', 'break', 'timer', 'reach', 'roundstart', 'roundend']);
+// ⭐⭐ `ko` IS THE ONLY EVENT WITH TWO PEOPLE IN IT, AND THAT IS WHY IT UNLOCKS SO MUCH. Everything above it
+// concerns one player doing something to the WORLD; a knockout is one player doing something to ANOTHER, which
+// is the sentence deathmatch, free-for-all and zombies are all built out of. Its actor is the one who did it —
+// so "add to their score" credits the attacker, which is what a kill counter is — and the person it happened to
+// is reachable from every condition and every action through `who: 'other'`.
+const RULE_EVENTS = new Set(['take', 'touch', 'enter', 'leave', 'respawn', 'goal', 'break', 'timer', 'reach', 'roundstart', 'roundend', 'ko']);
+// Which events concern two people. A `who` picker is meaningless anywhere else, and the editor only offers it
+// here — but the ENGINE simply resolves to nobody, so a `who` left behind by an edited rule cannot misfire.
+const RULE_TWO_PERSON = new Set(['ko']);
 // ⭐ `done`/`notdone` — "you cannot trigger this unless something else has been triggered" (user, 2026-09-04).
 // A per-LEVEL fact that something happened, set by `remember`. Several must-haves = several conditions, since
 // conditions are already ANDed; several names in ONE box means any of them, like every other box.
-const RULE_COND   = new Set(['tag', 'notag', 'in', 'num', 'count', 'done', 'notdone']);
+// ⭐ `have` counts PEOPLE carrying a mark, where `count` counts people standing in a place. That is the
+// condition a team game is made of — "nobody is human any more", "the boss is down", "the red team is empty" —
+// and it is the same question `count` asks about a region, asked about a mark instead.
+// ⭐ `time` is the round clock, which is what makes "end the round after three minutes" an ordinary rule rather
+// than a setting: ending a round is a rule like any other (the author's call), so it needs something to test.
+const RULE_COND   = new Set(['tag', 'notag', 'in', 'num', 'count', 'done', 'notdone', 'have', 'time']);
 const RULE_ACTS   = new Set(['give', 'take', 'add', 'set', 'hide', 'show', 'moveto', 'say', 'mark', 'unmark',
                              'badge', 'unbadge', 'tp', 'respawn', 'win', 'endround', 'resetscores', 'restore', 'group',
                              // ⭐ `wait` is not an effect, it is a SEAM: everything after it in the same rule runs
                              // later, with the same player. That is what makes "spawn something five seconds after
                              // this" one rule rather than a rule plus a timer plus a flag to link them.
-                             'wait', 'spawn', 'despawn', 'remember', 'forget']);
+                             // ⭐⭐ A TEAM IS A MARK ON A PERSON — the mechanism `give`/`take` already provides —
+                             // so the only genuinely new thing teams need is DEALING them out. This is that one
+                             // verb, and everything else about a team (conditions, scores, messages to one side)
+                             // is written with the words that already existed.
+                             'wait', 'spawn', 'despawn', 'remember', 'forget', 'teams']);
+const RULE_TEAM_MODES = ['even', 'random', 'boss'];
+// The mark each team gets beside its players' names, by position in the list. ⚠️ Assigned by the verb rather
+// than authored per team: a team you cannot tell apart from another team is not a team, and making the author
+// write a badge rule per side before their game was playable would be a wall in front of the commonest case.
+// A later `put a mark on their name` still overrides it, so nothing is taken away.
+const RULE_TEAM_BADGES = ['🔴', '🔵', '🟢', '🟡', '🟣', '🟠', '⚪', '⚫'];
 const RULE_OPS    = ['>=', '<=', '>', '<', '==', '!='];
 const RULES_PER_LEVEL = 64;          // a rule set is authored by hand; this is a clutter bound, not a budget
 const ACTS_PER_RULE   = 16;
@@ -13051,6 +13074,7 @@ function sanitizeRule(raw) {
     if (r.ifs.length >= CONDS_PER_RULE) break;
     if (!c || !RULE_COND.has(c.kind)) continue;
     const o = { kind: c.kind };
+    if (c.who === 'other') o.who = 'other';                // …asked of the other person in a two-person event
     // 🟥🟥 AN UNFINISHED ENTRY IS KEPT, NOT DROPPED — and this was a real bug reported from play: pressing
     // "+ condition" appeared to add a row that then vanished. It did. The new row starts with an empty name,
     // the sanitiser refused it, and the server's echo replaced the list without it. The same would have
@@ -13060,7 +13084,8 @@ function sanitizeRule(raw) {
     // configured yet" — the rule simply does not fire until you fill it in.
     if (c.kind === 'tag' || c.kind === 'notag' || c.kind === 'in' || c.kind === 'done' || c.kind === 'notdone') o.tag = ruleTags(c.tag);
     if (c.kind === 'num') { o.num = ruleTag(c.num) || 'score'; o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, -1e9, 1e9, 0); if (c.sh) o.sh = 1; }
-    if (c.kind === 'count') { o.tag = ruleTags(c.tag); o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, 0, 999, 1); }
+    if (c.kind === 'count' || c.kind === 'have') { o.tag = ruleTags(c.tag); o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, 0, 999, 1); }
+    if (c.kind === 'time') { o.op = RULE_OPS.includes(c.op) ? c.op : '>='; o.v = clampRuleNum(c.v, 0, 86400, 60); }
     r.ifs.push(o);
   }
   r.then = [];
@@ -13068,6 +13093,7 @@ function sanitizeRule(raw) {
     if (r.then.length >= ACTS_PER_RULE) break;
     if (!a || !RULE_ACTS.has(a.do)) continue;
     const o = { do: a.do };
+    if (a.who === 'other') o.who = 'other';                // …done to the other person in a two-person event
     // …and the same for actions: a verb you have chosen but not yet aimed is kept, and does nothing. See the
     // note on conditions above — dropping it here is what made a half-written rule undo itself as you typed.
     if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp'
@@ -13075,6 +13101,7 @@ function sanitizeRule(raw) {
     if (a.do === 'moveto') { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); }   // …`to` is one place, deliberately
     if (a.do === 'spawn')  { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); o.n = clampRuleNum(a.n, 1, 8, 1); }
     if (a.do === 'wait')   o.secs = clampRuleNum(a.secs, 0.1, 600, 1);
+    if (a.do === 'teams')  { o.tag = ruleTags(a.tag); o.mode = RULE_TEAM_MODES.includes(a.mode) ? a.mode : 'even'; }
     if (a.do === 'add' || a.do === 'set') { o.num = ruleTag(a.num) || 'score'; o.v = clampRuleNum(a.v, -1e9, 1e9, 1); if (a.sh) o.sh = 1; }
     // ⭐⭐ SAYING SOMETHING HAS THREE INDEPENDENT QUESTIONS, and the first version only answered half of one.
     // WHERE — on the player's screen, or as a sign standing IN THE WORLD (`at` names a thing or an area, so the
@@ -13212,18 +13239,37 @@ const PER_PLAYER_ACTS = new Set(['give', 'take', 'add', 'set', 'mark', 'unmark',
 // verb wearing the same word, and it has to run once per matched player or only the first would be told.
 // Hence a function rather than a set lookup: the audience is part of what the action IS.
 function actIsPerPlayer(a) { return PER_PLAYER_ACTS.has(a.do) || (a.do === 'say' && a.aud === 'them'); }
+// ⚠️ `count`, `have` and `time` are facts about the ROOM, not about a person — a rule made only of those
+// concerns nobody in particular and runs once. Leaving `have`/`time` out of this list would have made
+// "when the round has run three minutes, end it" fire once per player standing there.
+const RULE_COND_IMPERSONAL = new Set(['count', 'have', 'time']);
 function rulePerPlayer(r) {
-  return r.ifs.some(c => c.kind !== 'count') || r.then.some(a => actIsPerPlayer(a));
+  return r.ifs.some(c => !RULE_COND_IMPERSONAL.has(c.kind)) || r.then.some(a => actIsPerPlayer(a));
 }
 // ⚠️ A LIST IN A BOX MEANS "ANY OF THESE", and its negation means "none of them" — which is why `notag` is
 // written as its own walk rather than as `!hasAny`: "they do not have red or blue" has to mean neither, and
 // negating an any-test would quietly give it the opposite meaning for a two-name box.
-function condHolds(avRoom, g, c, sid, key) {
+// ⭐⭐ WHICH OF THE TWO PEOPLE THIS ROW IS ABOUT. Every condition and every action asks it, and the answer is
+// the actor unless the author said otherwise — so nothing written before knockouts existed changes meaning.
+// ⚠️ "The other one" with nobody there resolves to NOBODY rather than falling back to the actor: a rule saying
+// "take the crown off the other one" must not take it off the person who did it just because the event turned
+// out to have one player in it. Conditions then fail and person-shaped actions do nothing, which is the same
+// answer an unfinished row already gives.
+function ruleSubj(row, ctx, sid, key) {
+  if (row && row.who === 'other') {
+    const s2 = ctx && ctx.sid2 ? ctx.sid2 : null;
+    return [s2, s2 ? playerKeyFor(s2) : null];
+  }
+  return [sid, key];
+}
+function condHolds(avRoom, g, c, sid0, key0, ctx) {
+  const [sid, key] = ruleSubj(c, ctx, sid0, key0);
+  if (c.who === 'other' && !sid) return false;             // asked about somebody this event does not have
   const names = ruleTagList(c.tag);
   // ⚠️ AN UNFINISHED CONDITION IS NOT SATISFIED — including `notag`, where "they do not have <nothing>" would
   // otherwise be vacuously TRUE and a half-written rule would start firing at everybody. Blocking is the safe
   // reading of "you have not said what you mean yet"; the editor marks the empty box so you can see why.
-  if (c.kind !== 'num' && !names.length) return false;
+  if (c.kind !== 'num' && c.kind !== 'time' && !names.length) return false;
   switch (c.kind) {
     case 'tag':   return !!key && names.some(n => { const s = g.tags.get(n); return s && s.has(key); });
     case 'notag': return !key || names.every(n => { const s = g.tags.get(n); return !s || !s.has(key); });
@@ -13238,6 +13284,17 @@ function condHolds(avRoom, g, c, sid, key) {
       for (const [s2] of rulePlayers(avRoom)) { const st = insideOf(avRoom, s2); if (st && names.some(t => st.has(t))) n++; }
       return cmpRule(n, c.op, c.v);
     }
+    // ⭐ The same question asked about a MARK instead of a place — "how many people are on the red team",
+    // "how many are still human". ⚠️ Counted over people PRESENT, not over the tag set, so somebody who left
+    // does not keep a team alive.
+    case 'have': {
+      let n = 0;
+      for (const [, k2] of rulePlayers(avRoom)) if (names.some(t => { const s = g.tags.get(t); return s && s.has(k2); })) n++;
+      return cmpRule(n, c.op, c.v);
+    }
+    // ⚠️ Read from the clock, not from a counter, for the same reason the day/night cycle is: there is no state
+    // to keep in step, and a round that was running while nobody looked has still been running.
+    case 'time': return cmpRule((Date.now() - g.roundStart) / 1000, c.op, c.v);
   }
   return false;
 }
@@ -13273,7 +13330,7 @@ function runRule(avRoom, g, r, idx, ctx, out, depth) {
   const matched = [];
   for (const [sid, key] of actors) {
     let ok = true;
-    for (const c of r.ifs) if (!condHolds(avRoom, g, c, sid, key)) { ok = false; break; }
+    for (const c of r.ifs) if (!condHolds(avRoom, g, c, sid, key, ctx)) { ok = false; break; }
     if (ok) matched.push([sid, key]);
   }
   if (!matched.length) return;
@@ -13300,7 +13357,9 @@ function runActions(avRoom, g, r, from, matched, ctx, out, depth) {
     else doRuleAct(avRoom, g, a, matched[0][0], matched[0][1], ctx, out, depth);
   }
 }
-function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
+function doRuleAct(avRoom, g, a, sid0, key0, ctx, out, depth) {
+  const [sid, key] = ruleSubj(a, ctx, sid0, key0);
+  if (a.who === 'other' && !sid) return;                   // aimed at somebody this event does not have
   const names = ruleTagList(a.tag);       // every name-taking verb applies to EACH name in the box
   // …and a verb you have chosen but not yet aimed does nothing, rather than being deleted as you type.
   if (!names.length && ['give', 'take', 'hide', 'show', 'tp', 'moveto'].includes(a.do)) return;
@@ -13324,12 +13383,15 @@ function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
     // show a role, and it needs no new art — the name label is already drawn over every player.
     case 'badge': if (key) { g.badges.set(key, String(a.text || '').slice(0, 8)); g.dirty = true; } break;
     case 'unbadge': if (key) { g.badges.delete(key); g.dirty = true; } break;
-    case 'say':  out.say.push({ a, sid, key }); break;
+    // ⚠️ The OTHER person travels with the message, not just the actor: "{player} knocked out {other}" has to
+    // name both, and by flush time the pass that knew them is over.
+    case 'say':  out.say.push({ a, sid, key, osid: (ctx && ctx.sid2) || null }); break;
     // ⭐ REMEMBER / FORGET — a per-LEVEL fact, which is what "you cannot trigger this unless something else has
     // been triggered" needs. Deliberately NOT a mark on a player: "the bomb was planted" is true of the Level,
     // not of whoever planted it, and storing it on the person would lose it the moment they left.
     case 'remember': for (const n of names) g.flags.add(n); g.dirty = true; break;
     case 'forget':   for (const n of names) g.flags.delete(n); g.dirty = true; break;
+    case 'teams':    doRuleTeams(avRoom, g, a, names); break;
     case 'spawn':    doRuleSpawn(avRoom, g, a, names, sid); break;
     // ⚠️ ONLY THE COPIES RULES MADE, never the author's original. `hide` is what makes an authored thing go
     // away; if this removed everything with the name, a `spawn` after a `despawn` would have no template left
@@ -13380,8 +13442,15 @@ function flushRuleOut(avRoom, g, out, depth) {
     // ⚠️ THE ACTOR STILL WINS WHERE THERE IS ONE, or "{player} has the crown!" would tell every reader that
     // THEY had the crown. So: the actor if the rule has one, otherwise the reader.
     const who = ruleWhoName(g, m.sid, m.key);
-    const textFor = (sid2) => String(a.text).replace(/\{player\}/g,
-      who || (sid2 && socketToUsername[sid2]) || 'you');
+    // ⭐ `{other}` — the other person in a two-person event. Empty everywhere else rather than a word like
+    // "nobody", because a message that reads correctly with a name in it reads as a mistake with a noun in it.
+    const oth = m.osid ? ruleWhoName(g, m.osid, playerKeyFor(m.osid)) : '';
+    const secs = Math.max(0, Math.round((Date.now() - g.roundStart) / 1000));
+    const clock = Math.floor(secs / 60) + ':' + String(secs % 60).padStart(2, '0');
+    const textFor = (sid2) => String(a.text)
+      .replace(/\{time\}/g, clock)
+      .replace(/\{other\}/g, oth)
+      .replace(/\{player\}/g, who || (sid2 && socketToUsername[sid2]) || 'you');
     // ⭐ WHO HEARS IT. Everyone by default; just the player the rule is about; or only the people carrying
     // certain marks — which is how a message to one team is written today and will keep working unchanged when
     // teams arrive, because a team is a mark.
@@ -13426,6 +13495,37 @@ function doRuleSpawn(avRoom, g, a, names, sid) {
       const copy = buildWorldObject(src.type, at, id, id, 'world', avRoom);
       if (copy) { map.set(id, copy); io.to(avRoom).emit('avatar-object-add', copy); }
     }
+  }
+  g.dirty = true;
+}
+// ⭐⭐ DEALING PEOPLE OUT INTO TEAMS — the one thing teams need that marks did not already provide.
+// ⚠️ IT IS A WORLD ACTION, not a per-player one: it looks at everybody present at once, because "evenly" and
+// "one of you is the boss" are statements about the whole room and cannot be decided a player at a time.
+// ⚠️ Every named team is TAKEN OFF everyone first, so re-dealing at the start of a round does not leave last
+// round's marks on people — the commonest way a second round of a team game comes out wrong.
+function doRuleTeams(avRoom, g, a, names) {
+  if (names.length < 2) return;                          // one team is not teams; nothing to decide
+  const players = rulePlayers(avRoom);
+  if (!players.length) return;
+  for (const n of names) g.tags.set(n, new Set());
+  // Fisher–Yates, so "evenly" is not "in join order" — the first two people to arrive should not be able to
+  // guarantee themselves the same side every round.
+  const order = players.slice();
+  for (let i = order.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = order[i]; order[i] = order[j]; order[j] = t; }
+  const put = (key, ti) => {
+    g.tags.get(names[ti]).add(key);
+    g.badges.set(key, RULE_TEAM_BADGES[ti % RULE_TEAM_BADGES.length]);
+  };
+  if (a.mode === 'boss') {
+    // ⭐ ONE PLAYER AGAINST EVERYONE ELSE. The first name is the boss's, the second is everybody else's, and
+    // any further names are ignored rather than silently changing what "boss" means.
+    order.forEach(([, key], i) => put(key, i === 0 ? 0 : 1));
+  } else if (a.mode === 'random') {
+    // Each player independently — which really can come out lopsided, and that is the point of offering it
+    // beside "evenly" rather than instead of it.
+    for (const [, key] of order) put(key, (Math.random() * names.length) | 0);
+  } else {
+    order.forEach(([, key], i) => put(key, i % names.length));
   }
   g.dirty = true;
 }
@@ -13500,7 +13600,24 @@ function ruleStateFor(avRoom, sid) {
   for (const [k, mm] of g.nums) { const v = mm.get('score'); if (v) board.push({ name: g.names.get(k) || '…', v, me: k === key }); }
   board.sort((a, b) => b.v - a.v);
   return { mine, shared, tags: mytags, marked, badges, off: g.off ? 1 : 0, hidden: [...g.hidden], board: board.slice(0, 8),
-           round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)) };
+           round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)), limit: roundLimitOf(avRoom) };
+}
+// ⭐ IS THERE A TIME LIMIT, AND WHAT IS IT? Read back OUT of the rules rather than stored as a setting, because
+// ending a round is an ordinary rule (the author's decision) — so the only honest place the length of a round
+// exists is in whichever rule ends it. A rule that ends the round once the clock passes N seconds IS a time
+// limit, and the shortest such N is the one the players are racing.
+// ⚠️ This is an INFERENCE, and it is only used to draw a countdown. Nothing depends on it being right: get it
+// wrong and the clock counts up instead of down, which is what it did before this existed.
+function roundLimitOf(avRoom) {
+  let best = 0;
+  for (const r of (roomRules[avRoom] || [])) {
+    if (!r.then.some(a => a.do === 'endround' || a.do === 'win')) continue;
+    for (const c of r.ifs) {
+      if (c.kind !== 'time' || (c.op !== '>=' && c.op !== '>')) continue;
+      if (!best || c.v < best) best = c.v;
+    }
+  }
+  return best || undefined;
 }
 function broadcastRuleState(avRoom) {
   const g = roomGame[avRoom]; if (!g) return;
@@ -16338,6 +16455,20 @@ io.on('connection', (socket) => {
       }
       case 'touch': { if (!tag || g.hidden.has(tag)) return; fireRuleEvent(avRoom, 'touch', { sid: socket.id, tag }, 0); break; }
       case 'break': { if (!tag) return; fireRuleEvent(avRoom, 'break', { sid: socket.id, tag }, 0); break; }
+      // ⭐⭐ ONE PLAYER DOING SOMETHING TO ANOTHER. Reported by the person it HAPPENED TO — which is the right
+      // party for the same reason the game's own KO banner uses it: you cannot credit yourself with a knockout,
+      // only somebody else. `by` is the attacker's socket, and the pair becomes actor + other.
+      // ⚠️ Refused if `by` is not a real player standing in this same Level, or is the reporter themselves.
+      // That is not anti-cheat — a modified client can still credit a friend, exactly as it can claim to be
+      // standing on the hill — it is what stops a stale or crafted id naming somebody in another room.
+      case 'ko': {
+        const by = (typeof msg.by === 'string') ? msg.by : '';
+        if (!by || by === socket.id) return;
+        if (!(roomAvt[avRoom] && roomAvt[avRoom].has(by))) return;
+        if (socketToUsername[by]) g.names.set(playerKeyFor(by), socketToUsername[by]);
+        fireRuleEvent(avRoom, 'ko', { sid: by, sid2: socket.id }, 0);
+        break;
+      }
       case 'respawn': fireRuleEvent(avRoom, 'respawn', { sid: socket.id }, 0); break;
       case 'goal':    fireRuleEvent(avRoom, 'goal', { sid: socket.id }, 0); break;
     }
