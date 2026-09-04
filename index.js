@@ -12999,7 +12999,6 @@ const RULE_ACTS   = new Set(['give', 'take', 'add', 'set', 'hide', 'show', 'move
                              // later, with the same player. That is what makes "spawn something five seconds after
                              // this" one rule rather than a rule plus a timer plus a flag to link them.
                              'wait', 'spawn', 'despawn', 'remember', 'forget']);
-const SAY_WHERE   = ['top', 'mid', 'low'];
 const RULE_OPS    = ['>=', '<=', '>', '<', '==', '!='];
 const RULES_PER_LEVEL = 64;          // a rule set is authored by hand; this is a clutter bound, not a budget
 const ACTS_PER_RULE   = 16;
@@ -13088,14 +13087,25 @@ function sanitizeRule(raw) {
     //         rule nominating an arbitrary font or size on somebody's screen.
     if (a.do === 'say') {
       o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 200);
-      if (SAY_WHERE.includes(a.where)) o.where = a.where;
       o.secs = clampRuleNum(a.secs, 1, 600, 5);
-      const at = ruleTag(a.at); if (at) o.at = at;                       // '' = the screen; otherwise a thing to stand beside
-      const to = (a.to === 'them') ? 'them' : ruleTags(a.to); if (to) o.to = to;
+      // 🟥🟥 EXPLICIT FLAGS, NOT A SENTINEL IN A NAME FIELD. The first version encoded "in the world" as a
+      // single SPACE in `at` and "only these people" as a space in `to` — both of which this sanitiser trims to
+      // empty and therefore never stored, so the dropdown snapped straight back and neither could be chosen at
+      // all. Reported from play. It is the SAME mistake as the disappearing "+ condition": a state parked in a
+      // field that gets cleaned up. A choice the author made is its own field.
+      if (a.world) o.world = 1;
+      const at = ruleTag(a.at); if (at) o.at = at;          // which thing the box stands beside, when in the world
+      // ⭐ WHERE ON THE SCREEN, as a position rather than three presets — the user's call: *"just always let the
+      // user place it somewhere in some box … though it could be centred at the top by default."*
+      o.sx = clampRuleNum(a.sx, 0, 100, 50);
+      o.sy = clampRuleNum(a.sy, 0, 100, 8);
+      o.aud = (a.aud === 'them' || a.aud === 'mark') ? a.aud : 'all';
+      const to = ruleTags(a.to); if (to) o.to = to;
       o.size = clampRuleNum(a.size, 8, 96, 14);
       const f = ruleTag(a.font); if (f) o.font = f.slice(0, 16);
       if (a.bold) o.bold = 1;
       if (a.italic) o.italic = 1;
+      if (a.under) o.under = 1;
       if (isFinite(a.hue)) o.hue = clampRuleNum(a.hue, -1, 360, -1);
     }
     if (a.do === 'badge') o.text = (typeof a.text === 'string' ? a.text : '').slice(0, 8);
@@ -13201,7 +13211,7 @@ const PER_PLAYER_ACTS = new Set(['give', 'take', 'add', 'set', 'mark', 'unmark',
 // ⚠️ `say` is normally ONE announcement however many players matched — but "say this to THEM" is a different
 // verb wearing the same word, and it has to run once per matched player or only the first would be told.
 // Hence a function rather than a set lookup: the audience is part of what the action IS.
-function actIsPerPlayer(a) { return PER_PLAYER_ACTS.has(a.do) || (a.do === 'say' && a.to === 'them'); }
+function actIsPerPlayer(a) { return PER_PLAYER_ACTS.has(a.do) || (a.do === 'say' && a.aud === 'them'); }
 function rulePerPlayer(r) {
   return r.ifs.some(c => c.kind !== 'count') || r.then.some(a => actIsPerPlayer(a));
 }
@@ -13351,14 +13361,15 @@ function flushRuleOut(avRoom, g, out, depth) {
   for (const m of out.say) {
     const a = m.a;
     const msg = { text: String(a.text).replace(/\{player\}/g, m.who || 'Someone'),
-                  where: a.where || 'mid', secs: a.secs || 5, at: a.at || '',
+                  secs: a.secs || 5, world: a.world ? 1 : 0, at: a.at || '',
+                  sx: (a.sx == null) ? 50 : a.sx, sy: (a.sy == null) ? 8 : a.sy,
                   size: a.size || 14, font: a.font || '', bold: a.bold ? 1 : 0, italic: a.italic ? 1 : 0,
-                  hue: (a.hue == null) ? -1 : a.hue };
+                  under: a.under ? 1 : 0, hue: (a.hue == null) ? -1 : a.hue };
     // ⭐ WHO HEARS IT. Everyone by default; just the player the rule is about; or only the people carrying
     // certain marks — which is how a message to one team is written today and will keep working unchanged when
     // teams arrive, because a team is a mark.
-    if (!a.to) { io.to(avRoom).emit('rule-say', msg); continue; }
-    if (a.to === 'them') { if (m.sid) io.to(m.sid).emit('rule-say', msg); continue; }
+    if (a.aud !== 'them' && a.aud !== 'mark') { io.to(avRoom).emit('rule-say', msg); continue; }
+    if (a.aud === 'them') { if (m.sid) io.to(m.sid).emit('rule-say', msg); continue; }
     const want = ruleTagList(a.to);
     for (const [sid2, key2] of rulePlayers(avRoom)) {
       if (want.some(n => { const s = g.tags.get(n); return s && s.has(key2); })) io.to(sid2).emit('rule-say', msg);
