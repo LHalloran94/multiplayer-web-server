@@ -12763,7 +12763,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
 // Twin of the client `applyLevel`: load a stored Lvl blob (terrain RLE + mats + objects) directly into the
 // in-memory room state. Runs once per av-room per server lifetime, before the avt-join replay, so every
 // joiner (incl. the first) gets the content. Re-runs after a restart → robust unattended rooms.
-function hydrateRoomFromBlob(avRoom, blob) {
+// ⚠️ `keepGame` — a hydration at JOIN time is the Level arriving and its live game should not survive; a
+// hydration from `put the world back` happens INSIDE a running round, and destroying the game there detaches
+// the very object the caller is holding. Three call sites had that hazard and one of them looped for ever.
+function hydrateRoomFromBlob(avRoom, blob, keepGame) {
   if (!blob || !blob.terrain) return;
   const terr = blob.terrain;
   const sc = terr.cols | 0, sr = terr.rows | 0;
@@ -12785,6 +12788,18 @@ function hydrateRoomFromBlob(avRoom, blob) {
   for (let r = 0; r < ROWS; r++) { const rs = Math.min(sr - 1, (r * sr / ROWS) | 0);
     for (let c = 0; c < COLS; c++) { const cs = Math.min(sc - 1, (c * sc / COLS) | 0); const si = rs * sc + cs, v = src[si]; if (v) { const di = c * ROWS + r; grid.s(di, v); hp.s(di, srcHp[si] || matStrengthSrv(mats, v)); } } }
   const map = roomObjects[avRoom] || (roomObjects[avRoom] = new Map());
+  // 🟥🟥 THE OLD OBJECTS GO FIRST, AND THIS WAS MISSING. Every hydration ADDED a fresh copy of every object
+  // under a new id, so a Level restored twice held two of everything and a Level restored twenty times held
+  // twenty. Two portals became forty sharing one pair, and the destination lookup — "the first other portal
+  // with my pair" — found a DUPLICATE OF THE ENTRY, standing exactly where the entry stands. That is the
+  // reported *"you appear out of the same portal over and over again"*, and it is why it only happened in a
+  // PUBLISHED Level: a draft restores through the client, which replaces its list rather than appending.
+  // ⭐ The clients were already right: `broadcastLevelRestore` sends `avatar-objects-init`, which REPLACES a
+  // client's whole list. Only the server was accumulating, so the two had silently disagreed about what was
+  // in the room.
+  // ⚠️ Generated scatter is kept: it belongs to the world rather than to the Level being restored, and it is
+  // the same exemption the object cap already makes.
+  for (const k of [...map.keys()]) if (!(typeof k === 'string' && k.startsWith('world-'))) map.delete(k);
   let placed = 0;
   for (const src of blob.objects || []) {
     if (placed >= MAX_OBJECTS_PER_ROOM) break;
@@ -12804,7 +12819,7 @@ function hydrateRoomFromBlob(avRoom, blob) {
   if (_lb && _rl.length) roomLobby[avRoom] = _lb; else delete roomLobby[avRoom];
   const _tp = (typeof blob.tpl === 'string' ? blob.tpl.trim().slice(0, 24) : '');
   if (_tp && _rl.length) roomRuleTpl[avRoom] = _tp; else delete roomRuleTpl[avRoom];
-  delete roomGame[avRoom];
+  if (!keepGame) delete roomGame[avRoom];
 }
 // #102 — replay a restored Level to EVERYONE standing in it. The same three events the join path sends to a
 // single socket, aimed at the room instead. Terrain first, then the liquid that was re-derived from it, then
@@ -13756,8 +13771,25 @@ function endRuleRound(avRoom, g, winKey, restore, depth, isGame) {
 // world, which is the whole reason the world is restored at all.
 // ⚠️ The world restore comes BEFORE the rules run: a `roundstart` rule that places or moves something would
 // otherwise be undone by the restore a moment later.
-function beginRuleRound(avRoom, g) {
+function beginRuleRound(avRoom, g0) {
   const lob = roomLobby[avRoom];
+  // 🟥🟥 PUT THE WORLD BACK **FIRST**, BECAUSE DOING SO DESTROYS THE LIVE GAME. `restoreRuleWorld` ends in
+  // `hydrateRoomFromBlob`, which deletes `roomGame[avRoom]` — a hydration is the Level going back to how it
+  // was authored, and last round's scores are not part of that. So every field set before that line was
+  // thrown away, the next `gameOf()` built a fresh game, and a published Level's fresh game starts in
+  // 'wait' — the countdown finished, the world was restored, and the lobby began waiting again. For ever.
+  // Reported as *"it says starting in …, but then when it finishes counting down, it just resets and it does
+  // this over and over and never actually starts"*, and every template that puts the world back had it.
+  // ⚠️ It is why this only bit a PUBLISHED Level: a draft restores through the client (`avt-hydrate`), which
+  // never touches the server's game.
+  // ⭐ The rounds-won tally and the names are carried ACROSS the restore by hand — they are facts about the
+  // MATCH, not about the Level, and a game-end screen saying "best of five" needs them to survive a round.
+  const wins = new Map(g0.wins), names = new Map(g0.names), wasOff = g0.off;
+  if (lob && lob.restore) restoreRuleWorld(avRoom);
+  const g = gameOf(avRoom);                // …may be a NEW object if the restore above deleted the old one
+  g.off = wasOff;
+  g.wins = wins;
+  g.names = names;
   g.phase = 'play';
   g.ready.clear();
   g.benched.clear();                       // …everyone who was waiting is in this one
@@ -13767,7 +13799,6 @@ function beginRuleRound(avRoom, g) {
   g.groups.clear();
   for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);
   for (const [sid2, key2] of ruleEveryone(avRoom)) if (socketToUsername[sid2]) g.names.set(key2, socketToUsername[sid2]);
-  if (lob && lob.restore) restoreRuleWorld(avRoom);
   g.roundStart = Date.now();
   g.dirty = true;
   fireRuleEvent(avRoom, 'roundstart', {}, 0);
@@ -13824,7 +13855,9 @@ function restoreRuleWorld(avRoom) {
   if (!meta || !meta.roomId) return;
   const h = publishedHydrationFor(meta.roomId, meta.levelIndex);
   if (h && h.blob) {
-    hydrateRoomFromBlob(avRoom, h.blob);
+    // ⭐ THE GAME SURVIVES. "Put the world back" is about the terrain and the things standing in it; the
+    // round's scores are the game's business and the author already has a word for resetting them.
+    hydrateRoomFromBlob(avRoom, h.blob, true);
     seedLiquidActivity(avRoom);
     broadcastLevelRestore(avRoom, meta.levelIndex);
   } else if (meta.ownerId && discordIdToSocket[meta.ownerId]) {
