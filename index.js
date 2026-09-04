@@ -13025,8 +13025,17 @@ const RULE_ACTS   = new Set(['give', 'take', 'add', 'set', 'hide', 'show', 'move
                              // so the only genuinely new thing teams need is DEALING them out. This is that one
                              // verb, and everything else about a team (conditions, scores, messages to one side)
                              // is written with the words that already existed.
-                             'wait', 'spawn', 'despawn', 'remember', 'forget', 'teams']);
-const RULE_TEAM_MODES = ['even', 'random', 'boss'];
+                             // ⭐ `endgame` ends the whole match rather than one round of it, which is what a final standings screen needs
+// something to hang on. A round ends and another begins; a GAME ends, is shown, and goes back to the lobby.
+                             'wait', 'spawn', 'despawn', 'remember', 'forget', 'teams', 'endgame']);
+// ⭐⭐ HOW MANY GO ON EACH SIDE IS A NUMBER PER TEAM, NOT A CHOICE FROM A MENU (user, 2026-09-04):
+// *"if somebody comes up with some game idea that requires 3 players on one side, and 7 on the other, that
+// should be possible … hard-coding different possibilities is worse than coding generalized rules that can
+// apply to all or many possibilities."*
+// ⭐ The whole mechanism is: each team has a SIZE, and a size of 0 means "however many are left over, shared
+// out". That one rule covers everything the three old modes did and everything they did not — 3 and 7, one
+// against the rest, and an even split are all the same mechanism with different numbers in it.
+const RULE_TEAM_LEGACY = { boss: '1', even: '', random: '' };   // …what the old fixed splits meant, as sizes
 // The mark each team gets beside its players' names, by position in the list. ⚠️ Assigned by the verb rather
 // than authored per team: a team you cannot tell apart from another team is not a team, and making the author
 // write a badge rule per side before their game was playable would be a wall in front of the commonest case.
@@ -13059,6 +13068,21 @@ function ruleTags(s) {
   return out.join(', ');
 }
 const ruleTagList = s => (typeof s === 'string' && s ? s.split(',').map(x => x.trim()).filter(Boolean) : []);
+// The sizes beside a team list: one number per name, in the same order, 0 (or missing) meaning "the rest".
+// Stored as a string for the same reason the names are — it is what the author typed, normalised once.
+function ruleSizes(s) {
+  if (typeof s === 'number') s = String(s);
+  if (typeof s !== 'string' || !s) return '';
+  const out = [];
+  for (const part of s.split(',')) {
+    const n = Math.max(0, Math.min(999, parseInt(part, 10) || 0));
+    out.push(String(n));
+    if (out.length >= RULE_NAMES_MAX) break;
+  }
+  while (out.length && out[out.length - 1] === '0') out.pop();     // trailing "the rest" entries say nothing
+  return out.join(', ');
+}
+const ruleSizeList = s => (typeof s === 'string' && s ? s.split(',').map(x => parseInt(x, 10) || 0) : []);
 // Does this list name that thing? An EMPTY list means "anything", which is what makes a rule with a blank box
 // a rule about everything rather than a rule about nothing.
 function ruleTagsHas(list, name) {
@@ -13111,7 +13135,13 @@ function sanitizeRule(raw) {
     if (a.do === 'moveto') { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); }   // …`to` is one place, deliberately
     if (a.do === 'spawn')  { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); o.n = clampRuleNum(a.n, 1, 8, 1); }
     if (a.do === 'wait')   { o.secs = clampRuleNum(a.secs, 0.1, 600, 1); if (a.still) o.still = 1; }
-    if (a.do === 'teams')  { o.tag = ruleTags(a.tag); o.mode = RULE_TEAM_MODES.includes(a.mode) ? a.mode : 'even'; }
+    // ⚠️ A rule written before sizes existed carries a `mode`; it is translated rather than dropped, so a
+    // Level authored against the old three-way choice keeps meaning what its author meant.
+    if (a.do === 'teams')  {
+      o.tag = ruleTags(a.tag);
+      const sz = (a.sizes !== undefined) ? a.sizes : RULE_TEAM_LEGACY[a.mode];
+      o.sizes = ruleSizes(sz);
+    }
     if (a.do === 'add' || a.do === 'set') { o.num = ruleTag(a.num) || 'score'; o.v = clampRuleNum(a.v, -1e9, 1e9, 1); if (a.sh) o.sh = 1; }
     // ⭐⭐ SAYING SOMETHING HAS THREE INDEPENDENT QUESTIONS, and the first version only answered half of one.
     // WHERE — on the player's screen, or as a sign standing IN THE WORLD (`at` names a thing or an area, so the
@@ -13229,19 +13259,42 @@ function gameOf(avRoom) {
       dirty: false,
       // ── the lobby, when the author asked for one ──
       // ⚠️ A Level with no lobby is ALWAYS in 'play', so every existing game keeps running exactly as it did.
-      phase: roomLobby[avRoom] ? 'wait' : 'play',
+      // ⚠️ A published Level with a lobby starts by WAITING; a draft starts by playing, because its author is
+      // in it to build. `off` below is what keeps the draft's rules quiet until they press Test.
+      phase: (roomLobby[avRoom] && !ruleWorkshop(avRoom)) ? 'wait' : 'play',
+      lobbyDemo: false,     // the author has asked to watch the lobby in a draft — see `rules-run`
       ready: new Set(),     // playerKeys who have said they are ready
       countAt: 0,           // when the countdown ends (ms), while phase is 'count'
       // ⭐ People who arrived mid-round in a game that does not allow it. They can walk about and talk — the
       // world is not frozen (the user's call) — they are simply not IN the game: no events, no score, not
       // counted. Cleared when the next round starts, which is the moment they were waiting for.
       benched: new Set(),
+      wins: new Map(),      // playerKey -> rounds won this match, for the game-end standings
     };
     for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);   // phases that start closed
   }
   return g;
 }
 function hasRules(avRoom) { const r = roomRules[avRoom]; return !!(r && r.length); }
+// ══ THE WORKSHOP ════════════════════════════════════════════════════════════════════════════════════════════
+// ⭐⭐ A LEVEL BEING BUILT IS NOT A LEVEL BEING PLAYED, AND TREATING THEM ALIKE IS A DESIGN FAULT the user named
+// directly (2026-09-04): *"the way things are setup it treats the level in the editor as if it is the same as
+// the published level, in regards to rules … waiting for players when you are in the editor in an unpublished
+// level is obviously not right, but you do want to be able to see this at least somehow so you can test it."*
+// ⭐ THE TEST IS ALREADY IN THE DATA and needs nothing new: a room backed by a PUBLISHED world is a place people
+// came to play; anything else is a draft its author is still working on. `publishedHydrationFor` is the same
+// question `restore` already asks, so the two cannot disagree about which kind of room this is.
+// ⚠️ It is a property of the ROOM, not of who is looking. One person quietly playing a different game from
+// everybody else in the same world is not a state worth having — the same reasoning as the author's pause.
+// ⭐ What it changes, and deliberately nothing else:
+//   · the game starts PAUSED, because a Level whose own rules keep respawning you cannot be built in;
+//   · the lobby does NOT wait — a test starts with whoever is standing there, however few;
+//   · …but the lobby can still be WATCHED on demand, which is the half the user asked for. See `rules-run`.
+function ruleWorkshop(avRoom) {
+  const meta = ruleRoomMeta[avRoom];
+  if (!meta || !meta.roomId) return false;                    // no Level behind it at all — treat as live
+  try { return !publishedHydrationFor(meta.roomId, meta.levelIndex); } catch (e) { return false; }
+}
 // 🟥 A SOCKET THAT LEAVES MUST FORGET WHICH REGIONS IT WAS STANDING IN, and this is not only tidiness. `enter`
 // is EDGE-TRIGGERED — it is ignored if the set already holds the tag — so a stale entry means that walking out
 // of a Level and back in while standing on the hill would never fire the rule again, which is a fault nobody
@@ -13484,6 +13537,7 @@ function doRuleAct(avRoom, g, a, sid0, key0, ctx, out, depth) {
     case 'respawn': if (sid) (out.kill = out.kill || []).push(sid); break;
     case 'win':  if (key) out.win = key; out.end = true; break;
     case 'endround': out.end = true; break;
+    case 'endgame': out.end = true; out.game = true; break;
     case 'resetscores': g.nums.clear(); g.dirty = true; break;
     case 'restore': out.restore = true; break;
     case 'group': if (a.on) g.groups.delete(a.tag); else g.groups.add(a.tag); g.dirty = true; break;
@@ -13543,7 +13597,7 @@ function flushRuleOut(avRoom, g, out, depth) {
   if (out.tp) for (const t of out.tp) { const o = findTaggedObj(avRoom, t.tag); if (o) io.to(t.sid).emit('rule-move-me', { x: o.x, y: o.y }); }
   if (out.kill) for (const sid of out.kill) io.to(sid).emit('rule-respawn-me', {});
   if (out.move) for (const m of out.move) applyRuleMove(avRoom, m);
-  if (out.end) endRuleRound(avRoom, g, out.win, out.restore, depth);
+  if (out.end) endRuleRound(avRoom, g, out.win, out.restore, depth, out.game);
   else if (out.restore) restoreRuleWorld(avRoom);
   if (g.dirty) broadcastRuleState(avRoom);
 }
@@ -13581,7 +13635,7 @@ function doRuleTeams(avRoom, g, a, names) {
   const players = rulePlayers(avRoom);
   if (!players.length) return;
   for (const n of names) g.tags.set(n, new Set());
-  // Fisher–Yates, so "evenly" is not "in join order" — the first two people to arrive should not be able to
+  // Fisher-Yates, so a split is not "in join order" - the first two people to arrive should not be able to
   // guarantee themselves the same side every round.
   const order = players.slice();
   for (let i = order.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; const t = order[i]; order[i] = order[j]; order[j] = t; }
@@ -13589,17 +13643,20 @@ function doRuleTeams(avRoom, g, a, names) {
     g.tags.get(names[ti]).add(key);
     g.badges.set(key, RULE_TEAM_BADGES[ti % RULE_TEAM_BADGES.length]);
   };
-  if (a.mode === 'boss') {
-    // ⭐ ONE PLAYER AGAINST EVERYONE ELSE. The first name is the boss's, the second is everybody else's, and
-    // any further names are ignored rather than silently changing what "boss" means.
-    order.forEach(([, key], i) => put(key, i === 0 ? 0 : 1));
-  } else if (a.mode === 'random') {
-    // Each player independently — which really can come out lopsided, and that is the point of offering it
-    // beside "evenly" rather than instead of it.
-    for (const [, key] of order) put(key, (Math.random() * names.length) | 0);
-  } else {
-    order.forEach(([, key], i) => put(key, i % names.length));
-  }
+  // ⭐⭐ ONE RULE COVERS EVERY SPLIT. Teams with a stated size are filled first, in the order they are written;
+  // whoever is left over is shared round-robin among the teams that asked for "the rest". "1 and the rest" is a
+  // boss, "3 and 7" is three against seven, and all-zeroes is an even split - the same arithmetic each time.
+  // ⚠️ A stated size is a CEILING, not a promise: eight people cannot fill a team of ten, and a game that
+  // refused to start rather than dealing what it has would be worse than a slightly uneven round.
+  const sizes = ruleSizeList(a.sizes);
+  const want = names.map((_, i) => Math.max(0, sizes[i] | 0));
+  let at = 0;
+  names.forEach((_, ti) => { for (let k = 0; k < want[ti] && at < order.length; k++) put(order[at++][1], ti); });
+  // …and the remainder. Teams that named no size take it; if every team named one, it is spread over all of
+  // them rather than left standing about with no side at all.
+  let rest = names.map((_, i) => i).filter(i => !want[i]);
+  if (!rest.length) rest = names.map((_, i) => i);
+  for (let k = 0; at < order.length; k++, at++) put(order[at][1], rest[k % rest.length]);
   g.dirty = true;
 }
 function findTaggedObj(avRoom, tag) {
@@ -13624,18 +13681,45 @@ function applyRuleMove(avRoom, m) {
 // A round ends. ⭐⭐ THERE IS NO BUILT-IN RESET — the user's call, 2026-09-04: the author decides what happens,
 // by writing `WHEN the round ends`. All this does is announce the result and re-arm, so a Level with no
 // roundend rule simply keeps playing, and one with them can restore, move things, or change which rules apply.
-function endRuleRound(avRoom, g, winKey, restore, depth) {
+// ⭐⭐ WHAT A ROUND END AND A GAME END SHOW (user, 2026-09-04): *"it's important that there is an end round
+// screen to show leaderboards and such, and a game end screen to show the winner/s and leaderboards/stats"*.
+// ⚠️ THE STANDINGS TRAVEL WITH THE MESSAGE rather than being read off the next `rule-state`. A round end wipes
+// the scores it is reporting - that is what the author's `reset every score` rule does - so a screen that went
+// looking for them afterwards would reliably show zeroes, and only sometimes, which is the worst kind of bug.
+function ruleStandings(avRoom, g) {
+  const rows = [];
+  for (const [, key] of rulePlayers(avRoom)) {
+    const m = g.nums.get(key);
+    rows.push({ name: g.names.get(key) || '...', v: (m && m.get('score')) || 0, wins: g.wins.get(key) || 0 });
+  }
+  rows.sort((a, b) => (b.wins - a.wins) || (b.v - a.v));
+  return rows.slice(0, 12);
+}
+function endRuleRound(avRoom, g, winKey, restore, depth, isGame) {
   const now = Date.now();
   if (now - g.lastRound < ROUND_MIN_MS) return;          // see ROUND_MIN_MS
   g.lastRound = now;
-  io.to(avRoom).emit('rule-round', { over: 1, winner: winKey ? (g.names.get(winKey) || 'Someone') : null });   // (a winner is always a real player, so a name is always known)
+  // ⭐ ROUNDS WON ARE TALLIED HERE AND NOWHERE ELSE. A game-end screen has to be able to say "best of five",
+  // and asking every author to keep that count by hand in a shared number would make the commonest thing the
+  // fiddliest. It is a fact about the match, so the match keeps it.
+  if (winKey) g.wins.set(winKey, (g.wins.get(winKey) || 0) + 1);
+  const shared = {}; for (const [k, v] of g.shared) shared[k] = v;
+  io.to(avRoom).emit('rule-round', {
+    over: 1, game: isGame ? 1 : 0,
+    winner: winKey ? (g.names.get(winKey) || 'Someone') : null,
+    board: ruleStandings(avRoom, g), shared,
+    secs: Math.max(0, Math.round((now - g.roundStart) / 1000)),
+  });
   if (restore) restoreRuleWorld(avRoom);
   fireRuleEvent(avRoom, 'roundend', {}, depth + 1);
   g.roundStart = Date.now();
   g.timers.clear();
+  // ⭐ A GAME ENDING PUTS EVERYTHING BACK, including the rounds-won tally - that is the difference between it
+  // and a round ending, and it is why `endgame` exists as its own word.
+  if (isGame) g.wins.clear();
   // ⭐ WITH A LOBBY, THE END OF A ROUND IS THE START OF A WAIT, not the start of the next round. Without one,
   // nothing changes: play rolls straight on, which is what every game written before lobbies existed expects.
-  if (roomLobby[avRoom]) { g.phase = 'wait'; g.ready.clear(); g.benched.clear(); g.dirty = true; }
+  if (roomLobby[avRoom] && !ruleWorkshop(avRoom)) { g.phase = 'wait'; g.ready.clear(); g.benched.clear(); g.dirty = true; }
   else fireRuleEvent(avRoom, 'roundstart', {}, depth + 1);
   broadcastRuleState(avRoom);
 }
@@ -13676,6 +13760,11 @@ function lobbyTally(avRoom, g) {
 function lobbyTick(avRoom, g) {
   const lob = roomLobby[avRoom];
   if (!lob || g.off) return;
+  // ⭐⭐ A DRAFT DOES NOT WAIT FOR PLAYERS. Standing alone in your own unpublished Level being told to wait for
+  // a second person is the confusion the user named. Pressing ▶ Test starts it with whoever is there.
+  // ⭐ …unless you asked to WATCH the lobby (`g.lobbyDemo`), which is the other half of what they asked for:
+  // you still need to see the thing you wrote before you publish it.
+  if (ruleWorkshop(avRoom) && !g.lobbyDemo) { if (g.phase !== 'play') beginRuleRound(avRoom, g); return; }
   const t = lobbyTally(avRoom, g);
   if (g.phase === 'count') {
     // ⚠️ THE COUNTDOWN IS ABANDONED IF PEOPLE LEAVE. Counting down to a game that can no longer start, and
@@ -13739,12 +13828,16 @@ function ruleStateFor(avRoom, sid) {
   if (lob) {
     const t = lobbyTally(avRoom, g);
     lobby = { phase: g.phase, here: t.here, min: lob.min, full: lob.full, ready: t.ready, need: t.need,
-              mine: g.ready.has(key) ? 1 : 0, text: lob.text,
+              mine: g.ready.has(key) ? 1 : 0, text: lob.text, demo: g.lobbyDemo ? 1 : 0,
               benched: g.benched.has(key) ? 1 : 0,
               secs: g.phase === 'count' ? Math.max(0, Math.ceil((g.countAt - Date.now()) / 1000)) : 0 };
   }
   return { mine, shared, tags: mytags, marked, badges, off: g.off ? 1 : 0, hidden: [...g.hidden], board: board.slice(0, 8),
-           round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)), limit: roundLimitOf(avRoom), lobby };
+           round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)), limit: roundLimitOf(avRoom), lobby,
+           // ⚠️ The client draws a DRAFT differently — "Testing" rather than a live game — so it has to be told
+           // which it is looking at. It is not allowed to work this out for itself: only the server knows
+           // whether this Level has been published.
+           draft: ruleWorkshop(avRoom) ? 1 : 0 };
 }
 // ⭐ IS THERE A TIME LIMIT, AND WHAT IS IT? Read back OUT of the rules rather than stored as a setting, because
 // ending a round is an ordinary rule (the author's decision) — so the only honest place the length of a round
@@ -16556,10 +16649,15 @@ io.on('connection', (socket) => {
     // You pause the rules in order to edit them, so having an edit switch them back on would undo the button
     // every time it was used for the thing it exists for.
     const _wasOff = roomGame[avRoom] ? roomGame[avRoom].off : false;
+    const _isNew = !roomGame[avRoom];
     delete roomGame[avRoom];
     if (rules.length) {
       ruleRoomMeta[avRoom] = { roomId: currentAvBuildRoomId, levelIndex: currentAvLevelIndex | 0, ownerId: currentAvOwnerId || null };
-      const _g2 = gameOf(avRoom); _g2.off = _wasOff;
+      const _g2 = gameOf(avRoom);
+      // ⭐⭐ A DRAFT'S GAME STARTS PAUSED. You cannot build a Level while its own rules keep respawning you and
+      // dealing you into teams, and the author pressing ▶ Test is a clearer statement of intent than a game
+      // that begins the instant a rule is typed. A published Level is unaffected: people came there to play.
+      _g2.off = _isNew ? ruleWorkshop(avRoom) : _wasOff;
       // ⚠️ Everyone standing here is recorded NOW. The join path only records a name when the Level already had
       // rules, so the author of a brand-new game — and anybody watching them write it — had no name at all.
       for (const [sid2, key2] of rulePlayers(avRoom)) if (socketToUsername[sid2]) _g2.names.set(key2, socketToUsername[sid2]);
@@ -16587,22 +16685,32 @@ io.on('connection', (socket) => {
   // something you can iterate on rather than something you write blind — you cannot build a Level while its own
   // rules keep respawning you. Both are per ROOM and broadcast, like the author's pause, because one player
   // silently playing a different game from everyone else in the room is not a state worth having.
-  socket.on('rules-run', ({ on, reset }) => {
+  socket.on('rules-run', ({ on, reset, lobby }) => {
     const avRoom = currentAvatarRoom;
     if (!avRoom || !currentAvBuildRoomId || overworldRooms.has(avRoom)) return;
     if (!canBuild() || !hasRules(avRoom)) return;
     const g = gameOf(avRoom);
+    // ⭐⭐ WATCH THE LOBBY IN A DRAFT. A draft skips the wait so you can build in it, which would otherwise leave
+    // the lobby — a thing you WROTE — impossible to look at before publishing. This puts it back for as long as
+    // you want it, and starting a test takes it away again.
+    if (lobby !== undefined) {
+      g.lobbyDemo = !!lobby;
+      if (g.lobbyDemo) { g.phase = 'wait'; g.ready.clear(); }
+      g.dirty = true;
+      io.to(avRoom).emit('rule-say', { text: g.lobbyDemo ? 'Showing the lobby as players will see it.' : 'Lobby preview off.' });
+      broadcastRuleState(avRoom); return;
+    }
     if (reset) {
       // ⚠️ Everything the RULES own goes back; the WORLD is untouched. Putting the terrain back is a rule the
       // author writes (`put the world back`), and doing it here as well would make this button destructive in a
       // way its name does not admit to.
-      g.nums.clear(); g.shared.clear(); g.tags.clear(); g.badges.clear();
+      g.nums.clear(); g.shared.clear(); g.tags.clear(); g.badges.clear(); g.wins.clear();
       g.hidden.clear(); g.taken.clear(); g.groups.clear(); g.timers.clear(); g.flags.clear();
       g.pending.length = 0; g.epoch++;          // …and anything a `wait` had parked, so it cannot land after the reset
       for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);
       g.roundStart = Date.now(); g.lastRound = 0;
     }
-    if (on !== undefined) g.off = !on;
+    if (on !== undefined) { g.off = !on; if (on) g.lobbyDemo = false; }
     g.dirty = true;
     io.to(avRoom).emit('rule-say', { text: reset ? 'Game reset.' : (g.off ? 'Rules paused.' : 'Rules running.') });
     if (!g.off && reset) fireRuleEvent(avRoom, 'roundstart', {}, 0);
