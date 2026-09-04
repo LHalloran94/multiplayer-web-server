@@ -10214,6 +10214,94 @@ db.exec(`CREATE TABLE IF NOT EXISTS published_worlds (
   created_at INTEGER DEFAULT (unixepoch()),
   updated_at INTEGER DEFAULT (unixepoch())
 )`);
+// ══ YOUR SAVED LEVELS, ON YOUR ACCOUNT ══════════════════════════════════════════════════════════════════════
+// ⭐⭐ THE USER'S DIAGNOSIS, 2026-09-05, AND IT WAS THE RIGHT ONE: a "draft Level on the account" and a "Level
+// saved in the browser" are the same idea filed under two names, because the split was by WHERE THE BYTES LIVE
+// rather than by what the thing IS. Two categories were agreed instead:
+//   · a LEVEL is a PLACE — a creator room you walk into and edit in situ (`rooms`, kind 'creator');
+//   · a TEMPLATE is a SAVED COPY — a snapshot you stamp into any Level. This table.
+// ⇒ saving keeps a copy on your ACCOUNT when you are signed in, so it follows you to any machine; the browser
+// copy stays as the offline fallback and for signed-out use, and stops being a category anybody has to think
+// about. A remix lands here too, which is what a remix has always been: somebody else's Level as a copy.
+// ⚠️ NOT `shared_templates` — that is the Select tool's terrain-STAMP library, which is public and a different
+// thing entirely. The word collides; the storage must not.
+// ⚠️ The LIST route deliberately does not return `content`. Forty Levels of terrain is megabytes, and a panel
+// that lists them needs a name and a couple of counts — `summary` carries exactly that, and the content is
+// fetched when somebody actually loads or publishes one.
+db.exec(`CREATE TABLE IF NOT EXISTS user_levels (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  name TEXT,
+  content TEXT NOT NULL,
+  summary TEXT,
+  size_bytes INTEGER DEFAULT 0,
+  created_at INTEGER DEFAULT (unixepoch()),
+  updated_at INTEGER DEFAULT (unixepoch())
+)`);
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_user_levels_owner ON user_levels(owner_id)'); } catch (e) {}
+const USER_LEVEL_MAX_BYTES = 2_000_000;   // one saved copy, same order as a published World
+const USER_LEVELS_PER_USER = 40;          // mirrors the client's own cap on the browser list
+const _ulList = db.prepare('SELECT id, name, summary, size_bytes, created_at, updated_at FROM user_levels WHERE owner_id = ? ORDER BY updated_at DESC');
+const _ulGet = db.prepare('SELECT id, name, content, summary, updated_at FROM user_levels WHERE id = ? AND owner_id = ?');
+const _ulCount = db.prepare('SELECT COUNT(*) AS c FROM user_levels WHERE owner_id = ?');
+const _ulPut = db.prepare(`INSERT INTO user_levels (id, owner_id, name, content, summary, size_bytes, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, unixepoch(), unixepoch())
+  ON CONFLICT(id) DO UPDATE SET name = excluded.name, content = excluded.content, summary = excluded.summary,
+                                size_bytes = excluded.size_bytes, updated_at = unixepoch()`);
+const _ulDel = db.prepare('DELETE FROM user_levels WHERE id = ? AND owner_id = ?');
+
+app.get('/my-levels', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const rows = _ulList.all(user.sub).map(r => {
+      let summary = null; try { summary = r.summary ? JSON.parse(r.summary) : null; } catch (e) {}
+      return { id: r.id, name: r.name, summary, size_bytes: r.size_bytes, created_at: r.created_at, updated_at: r.updated_at };
+    });
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: 'list failed' }); }
+});
+app.get('/my-levels/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const row = _ulGet.get(String(req.params.id || ''), user.sub);
+  if (!row) return res.status(404).json({ error: 'Not found' });
+  let content = null; try { content = JSON.parse(row.content); } catch (e) {}
+  if (!content) return res.status(500).json({ error: 'unreadable' });
+  res.json({ id: row.id, name: row.name, content, updated_at: row.updated_at });
+});
+app.put('/my-levels/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const id = String(req.params.id || '').slice(0, 64);
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(id)) return res.status(400).json({ error: 'bad id' });
+  const b = req.body || {};
+  const content = b.content;
+  // ⚠️ Validated as a LIST OF LEVELS, each with terrain — the same shape `validatePublishContent` insists on,
+  // because this is the same blob and it is what Load and Publish will read back.
+  if (!Array.isArray(content) || !content.length || content.length > 32) return res.status(400).json({ error: 'bad content' });
+  if (!content.every(l => l && typeof l === 'object' && l.terrain && Array.isArray(l.terrain.runs))) return res.status(400).json({ error: 'bad content' });
+  const json = JSON.stringify(content);
+  if (json.length > USER_LEVEL_MAX_BYTES) return res.status(413).json({ error: 'Too big (over 2 MB)' });
+  // ⚠️ The cap counts what is ALREADY there, and an update of an existing row must not be refused by it.
+  const existing = _ulGet.get(id, user.sub);
+  if (!existing && (_ulCount.get(user.sub).c | 0) >= USER_LEVELS_PER_USER) {
+    return res.status(409).json({ error: 'Saved-Level limit reached (' + USER_LEVELS_PER_USER + ')' });
+  }
+  const name = (typeof b.name === 'string' ? b.name : '').trim().slice(0, 48) || 'Level';
+  const summary = JSON.stringify(Array.isArray(b.summary) ? b.summary.slice(0, 32) : []);
+  try {
+    _ulPut.run(id, user.sub, name, json, summary, json.length);
+    res.json({ ok: 1, id, updated_at: Math.floor(Date.now() / 1000) });
+  } catch (e) { res.status(500).json({ error: 'save failed' }); }
+});
+app.delete('/my-levels/:id', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  try { _ulDel.run(String(req.params.id || ''), user.sub); res.json({ ok: 1 }); }
+  catch (e) { res.status(500).json({ error: 'delete failed' }); }
+});
+
 const PUBLISHED_MAX_BYTES = 2_000_000;                // content blob cap per World (~2 MB)
 const PUBLISHED_PER_USER = 12;                        // how many Worlds one user may have published at once
 // ⚠️ 400k, not 60k. The previews render at 480x270 now (192 was upscaled into a blur by the card), and this
