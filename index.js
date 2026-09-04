@@ -2537,6 +2537,8 @@ function exportLevelBlob(roomId, levelIndex, lvl) {
     mats: blob.mats || {},
     objects: blob.objects || [],
     rules: (blob.rules && blob.rules.length) ? blob.rules : undefined,   // #98 — see captureRoomBlob
+    lobby: blob.lobby || undefined,
+    tpl: (typeof blob.tpl === 'string' ? blob.tpl.slice(0, 24) : undefined),
   };
 }
 
@@ -10283,6 +10285,8 @@ function validatePublishContent(levels) {
     // #98 — a Level's game is uploaded content like everything else here, so it is rebuilt field by field
     // rather than stored as whatever the client sent. An empty result drops the key entirely.
     if (l.rules !== undefined) { const r = sanitizeRules(l.rules); if (r.length) l.rules = r; else delete l.rules; }
+    if (l.lobby !== undefined) { const b = sanitizeLobby(l.lobby); if (b && l.rules) l.lobby = b; else delete l.lobby; }
+    if (l.tpl !== undefined) { const t = (typeof l.tpl === 'string' ? l.tpl.trim().slice(0, 24) : ''); if (t && l.rules) l.tpl = t; else delete l.tpl; }
   }
   return levels;
 }
@@ -12795,7 +12799,11 @@ function hydrateRoomFromBlob(avRoom, blob) {
   // ⚠️ The LIVE game is dropped, not carried: a hydration is the Level going back to how it was authored, and
   // last round's scores are not part of that.
   const _rl = sanitizeRules(blob.rules);
+  const _lb = sanitizeLobby(blob.lobby);
   if (_rl.length) roomRules[avRoom] = _rl; else delete roomRules[avRoom];
+  if (_lb && _rl.length) roomLobby[avRoom] = _lb; else delete roomLobby[avRoom];
+  const _tp = (typeof blob.tpl === 'string' ? blob.tpl.trim().slice(0, 24) : '');
+  if (_tp && _rl.length) roomRuleTpl[avRoom] = _tp; else delete roomRuleTpl[avRoom];
   delete roomGame[avRoom];
 }
 // #102 — replay a restored Level to EVERYONE standing in it. The same three events the join path sends to a
@@ -12941,6 +12949,8 @@ function captureRoomBlob(avRoom) {                      // → a Lvl blob (terra
     // #98 — the Level's game travels with its content, because that is what it is part of. Absent when there
     // is none, so nothing about a Level without rules changes shape.
     rules: (roomRules[avRoom] && roomRules[avRoom].length) ? roomRules[avRoom] : undefined,
+    lobby: roomLobby[avRoom] || undefined,          // #98 — the wait is part of the game, so it travels with it
+    tpl: roomRuleTpl[avRoom] || undefined,
   };
 }
 const _persistentWorlds = db.prepare("SELECT id, room_id, content FROM published_worlds WHERE durability = 'persistent'");
@@ -13100,7 +13110,7 @@ function sanitizeRule(raw) {
      || a.do === 'despawn' || a.do === 'remember' || a.do === 'forget') o.tag = ruleTags(a.tag);
     if (a.do === 'moveto') { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); }   // …`to` is one place, deliberately
     if (a.do === 'spawn')  { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); o.n = clampRuleNum(a.n, 1, 8, 1); }
-    if (a.do === 'wait')   o.secs = clampRuleNum(a.secs, 0.1, 600, 1);
+    if (a.do === 'wait')   { o.secs = clampRuleNum(a.secs, 0.1, 600, 1); if (a.still) o.still = 1; }
     if (a.do === 'teams')  { o.tag = ruleTags(a.tag); o.mode = RULE_TEAM_MODES.includes(a.mode) ? a.mode : 'even'; }
     if (a.do === 'add' || a.do === 'set') { o.num = ruleTag(a.num) || 'score'; o.v = clampRuleNum(a.v, -1e9, 1e9, 1); if (a.sh) o.sh = 1; }
     // ⭐⭐ SAYING SOMETHING HAS THREE INDEPENDENT QUESTIONS, and the first version only answered half of one.
@@ -13149,6 +13159,38 @@ function sanitizeRules(raw) {
   return out;
 }
 
+// ══ THE LOBBY ═══════════════════════════════════════════════════════════════════════════════════════════════
+// ⭐⭐ WAITING IS OPT-IN AND THE LOBBY ITSELF IS AUTHORED (user, 2026-09-04). A Level with a game does NOT wait
+// by default — that would make testing your own game impossible and would change what every Level written so
+// far does — but an author who wants a match to start fairly gets to say how: the fewest players, whether it
+// starts on its own or on a vote, what share of the room has to be ready, and whether somebody may walk into a
+// round already in progress.
+// ⭐ IT IS SETTINGS, NOT A RULE, and that is a deliberate exception to "everything is a rule". "How many people
+// before we begin" is not a thing that HAPPENS; it is a property of the game, in the same way a Level's size is
+// a property of the Level. The things that do happen — the round starting, the round ending — are rules, and
+// they are what the author writes against.
+// ⚠️ AND THE WORLD GOES BACK WHEN A ROUND STARTS (the user's point, and I would have missed it): people can
+// walk about and build while the lobby waits, so without this you could set the world up in your own favour
+// before anybody could stop you.
+const LOBBY_DEFAULT = { on: 0, min: 2, full: 0, ready: 0, count: 5, join: 1, restore: 1, text: '' };
+function sanitizeLobby(raw) {
+  if (!raw || typeof raw !== 'object' || !raw.on) return null;
+  return {
+    on: 1,
+    min:   clampRuleNum(raw.min, 1, 64, 2),        // fewest players before a round can begin at all
+    full:  clampRuleNum(raw.full, 0, 64, 0),       // …and the number at which it begins on its own (0 = never)
+    ready: clampRuleNum(raw.ready, 0, 100, 0),     // % of the people here who must say they are ready (0 = no vote)
+    count: clampRuleNum(raw.count, 0, 60, 5),      // the countdown everybody sees before it begins
+    join:  raw.join ? 1 : 0,                       // may somebody walk into a round already running
+    restore: raw.restore ? 1 : 0,                  // put the world back as the round starts
+    text: (typeof raw.text === 'string' ? raw.text : '').slice(0, 120),
+  };
+}
+// ⭐ WHICH READY-MADE GAME THIS STARTED FROM, if any. One short string, carried with the rules so the Levels
+// list can say "from Deathmatch" — the user's ask, and deliberately nothing more than that: a Level's own NAME
+// carries most of the nuance, so this is a provenance note rather than a schema.
+const roomRuleTpl = {};              // avRoom → template name, or absent
+const roomLobby = {};                // avRoom → lobby settings, or absent
 const roomRules = {};                // avRoom → [rule]        the authored list (empty/absent = no game here)
 const roomGame  = {};                // avRoom → live state (below); only exists while a room has rules
 const ruleRoomMeta = {};             // avRoom → { roomId, levelIndex, ownerId }   recorded at join, for `restore`
@@ -13185,6 +13227,15 @@ function gameOf(avRoom) {
       pending: [],          // parked continuations from `wait` — see runActions
       epoch: 0,             // bumped by a reset, so parked work under old rules is dropped rather than landing late
       dirty: false,
+      // ── the lobby, when the author asked for one ──
+      // ⚠️ A Level with no lobby is ALWAYS in 'play', so every existing game keeps running exactly as it did.
+      phase: roomLobby[avRoom] ? 'wait' : 'play',
+      ready: new Set(),     // playerKeys who have said they are ready
+      countAt: 0,           // when the countdown ends (ms), while phase is 'count'
+      // ⭐ People who arrived mid-round in a game that does not allow it. They can walk about and talk — the
+      // world is not frozen (the user's call) — they are simply not IN the game: no events, no score, not
+      // counted. Cleared when the next round starts, which is the moment they were waiting for.
+      benched: new Set(),
     };
     for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);   // phases that start closed
   }
@@ -13218,7 +13269,22 @@ function cmpRule(a, op, b) {
   return false;
 }
 // Everyone standing in this Level, as [socketId, playerKey]. `roomAvt` is the set the join path maintains.
+// ⚠️ SOMEBODY BENCHED IS NOT IN THE GAME AT ALL — not scored, not counted, not addressed. That is what "you
+// will join next round" has to mean, or a rule aimed at everyone would quietly include the people waiting.
 function rulePlayers(avRoom) {
+  const out = [];
+  const g = roomGame[avRoom];
+  for (const sid of (roomAvt[avRoom] || [])) {
+    if (!io.sockets.sockets.has(sid)) continue;
+    const key = playerKeyFor(sid);
+    if (g && g.benched.size && g.benched.has(key)) continue;
+    out.push([sid, key]);
+  }
+  return out;
+}
+// Everybody standing here, benched or not — what the lobby counts, because the people waiting to join ARE the
+// reason it is waiting.
+function ruleEveryone(avRoom) {
   const out = [];
   for (const sid of (roomAvt[avRoom] || [])) if (io.sockets.sockets.has(sid)) out.push([sid, playerKeyFor(sid)]);
   return out;
@@ -13234,7 +13300,11 @@ function insideOf(avRoom, sid) {
 // ⭐ A rule runs FOR EACH PLAYER IT IS ABOUT, and things that affect the world happen ONCE. That is the whole
 // scoping rule, and it is what lets "EVERY 1s / IF a player has [holder] / THEN add 1 to their score" mean what
 // it reads as, without the author having to choose a scope from a menu.
-const PER_PLAYER_ACTS = new Set(['give', 'take', 'add', 'set', 'mark', 'unmark', 'tp', 'respawn', 'win']);
+// 🟥 `badge`/`unbadge` BELONG HERE AND WERE MISSING, which is a real bug rather than tidiness: the crown
+// starter's round-end rule clears the mark from everybody's name, and without this it cleared it from ONE
+// player and left the rest wearing a crown they no longer had. It never showed up because every other use of
+// them sits under an event with exactly one actor.
+const PER_PLAYER_ACTS = new Set(['give', 'take', 'add', 'set', 'mark', 'unmark', 'tp', 'respawn', 'win', 'badge', 'unbadge']);
 // ⚠️ `say` is normally ONE announcement however many players matched — but "say this to THEM" is a different
 // verb wearing the same word, and it has to run once per matched player or only the first would be told.
 // Hence a function rather than a set lookup: the audience is part of what the action IS.
@@ -13307,6 +13377,9 @@ function fireRuleEvent(avRoom, when, ctx, depth) {
   if ((depth | 0) > 2) return;
   const g = gameOf(avRoom);
   if (g.off) return;                       // the game is switched off while its author works on it
+  // ⚠️ NOTHING FIRES WHILE THE LOBBY IS WAITING — except the round starting, which is the event that ends the
+  // wait. The world is still live (you can walk, build and talk); it is the GAME that has not begun.
+  if (g.phase !== 'play' && when !== 'roundstart') return;
   const out = { say: [], win: null, end: false };
   for (let i = 0; i < rules.length; i++) {
     const r = rules[i];
@@ -13349,8 +13422,8 @@ function runActions(avRoom, g, r, from, matched, ctx, out, depth) {
       // the right person — and with the game's `epoch`, so a reset or a rule edit throws away work that was
       // queued under rules that no longer exist.
       g.pending.push({ at: Date.now() + Math.round((a.secs || 1) * 1000), epoch: g.epoch, rule: r, idx: i + 1,
-                       matched: matched.map(m => [m[0], m[1]]),
-                       ctx: ctx ? { sid: ctx.sid, tag: ctx.tag, num: ctx.num } : null, depth });
+                       matched: matched.map(m => [m[0], m[1]]), still: a.still ? 1 : 0,
+                       ctx: ctx ? { sid: ctx.sid, tag: ctx.tag, sid2: ctx.sid2, num: ctx.num } : null, depth });
       return;
     }
     if (actIsPerPlayer(a)) { for (const [sid, key] of matched) doRuleAct(avRoom, g, a, sid, key, ctx, out, depth); }
@@ -13560,8 +13633,68 @@ function endRuleRound(avRoom, g, winKey, restore, depth) {
   fireRuleEvent(avRoom, 'roundend', {}, depth + 1);
   g.roundStart = Date.now();
   g.timers.clear();
-  fireRuleEvent(avRoom, 'roundstart', {}, depth + 1);
+  // ⭐ WITH A LOBBY, THE END OF A ROUND IS THE START OF A WAIT, not the start of the next round. Without one,
+  // nothing changes: play rolls straight on, which is what every game written before lobbies existed expects.
+  if (roomLobby[avRoom]) { g.phase = 'wait'; g.ready.clear(); g.benched.clear(); g.dirty = true; }
+  else fireRuleEvent(avRoom, 'roundstart', {}, depth + 1);
   broadcastRuleState(avRoom);
+}
+// ⭐⭐ THE ROUND BEGINS. Everything the game owns goes back to nothing, the world is put back if the author
+// asked, and only THEN does `roundstart` fire — so a rule written against the start of a round runs on a clean
+// world, which is the whole reason the world is restored at all.
+// ⚠️ The world restore comes BEFORE the rules run: a `roundstart` rule that places or moves something would
+// otherwise be undone by the restore a moment later.
+function beginRuleRound(avRoom, g) {
+  const lob = roomLobby[avRoom];
+  g.phase = 'play';
+  g.ready.clear();
+  g.benched.clear();                       // …everyone who was waiting is in this one
+  g.nums.clear(); g.shared.clear(); g.tags.clear(); g.badges.clear();
+  g.hidden.clear(); g.taken.clear(); g.flags.clear(); g.timers.clear();
+  g.pending.length = 0; g.epoch++;
+  g.groups.clear();
+  for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);
+  for (const [sid2, key2] of ruleEveryone(avRoom)) if (socketToUsername[sid2]) g.names.set(key2, socketToUsername[sid2]);
+  if (lob && lob.restore) restoreRuleWorld(avRoom);
+  g.roundStart = Date.now();
+  g.dirty = true;
+  fireRuleEvent(avRoom, 'roundstart', {}, 0);
+  broadcastRuleState(avRoom);
+}
+// How many people are here, how many are ready, and how many readies it would take.
+function lobbyTally(avRoom, g) {
+  const lob = roomLobby[avRoom];
+  const here = ruleEveryone(avRoom);
+  let ready = 0;
+  for (const [, key] of here) if (g.ready.has(key)) ready++;
+  // ⭐ THE VOTE TO START EARLY, and the minimum still binds — the user's requirement exactly: you can agree to
+  // begin before the Level is full, but not before there are enough of you for the game to mean anything.
+  const need = lob.ready ? Math.max(1, Math.ceil(here.length * lob.ready / 100)) : 0;
+  return { here: here.length, ready, need };
+}
+// Drive the wait. Called from the 10Hz pass, so a player arriving or leaving is noticed within a tick.
+function lobbyTick(avRoom, g) {
+  const lob = roomLobby[avRoom];
+  if (!lob || g.off) return;
+  const t = lobbyTally(avRoom, g);
+  if (g.phase === 'count') {
+    // ⚠️ THE COUNTDOWN IS ABANDONED IF PEOPLE LEAVE. Counting down to a game that can no longer start, and
+    // then starting it anyway, is worse than going back to waiting and saying so.
+    if (t.here < lob.min) { g.phase = 'wait'; g.dirty = true; return; }
+    if (Date.now() >= g.countAt) beginRuleRound(avRoom, g);
+    return;
+  }
+  if (g.phase !== 'wait') return;
+  if (t.here < lob.min) return;                                     // not enough people yet, whatever anyone votes
+  const full  = lob.full && t.here >= lob.full;                     // the Level filled up
+  const voted = lob.ready && t.ready >= t.need;                     // …or enough of them said they were ready
+  // ⚠️ A LEVEL WITH NEITHER A FULL-AT NUMBER NOR A VOTE STARTS AS SOON AS IT HAS ENOUGH PEOPLE. Otherwise an
+  // author who only set a minimum would have written a game that can never begin.
+  if (!full && !voted && (lob.full || lob.ready)) return;
+  g.phase = 'count';
+  g.countAt = Date.now() + Math.round(lob.count * 1000);
+  g.dirty = true;
+  if (!lob.count) { beginRuleRound(avRoom, g); return; }             // no countdown asked for
 }
 // "put the world back" — #102's restore, verbatim.
 // 🟥 THE SERVER ROUTE, NOT THE CLIENT ONE. `applyLevel` begins with `avatar-objects-clear-all`, which
@@ -13599,8 +13732,19 @@ function ruleStateFor(avRoom, sid) {
   const board = [];
   for (const [k, mm] of g.nums) { const v = mm.get('score'); if (v) board.push({ name: g.names.get(k) || '…', v, me: k === key }); }
   board.sort((a, b) => b.v - a.v);
+  // ⚠️ Sent to everybody in the room, benched or not — somebody waiting for the next round most of all needs
+  // to be told what they are waiting for.
+  let lobby;
+  const lob = roomLobby[avRoom];
+  if (lob) {
+    const t = lobbyTally(avRoom, g);
+    lobby = { phase: g.phase, here: t.here, min: lob.min, full: lob.full, ready: t.ready, need: t.need,
+              mine: g.ready.has(key) ? 1 : 0, text: lob.text,
+              benched: g.benched.has(key) ? 1 : 0,
+              secs: g.phase === 'count' ? Math.max(0, Math.ceil((g.countAt - Date.now()) / 1000)) : 0 };
+  }
   return { mine, shared, tags: mytags, marked, badges, off: g.off ? 1 : 0, hidden: [...g.hidden], board: board.slice(0, 8),
-           round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)), limit: roundLimitOf(avRoom) };
+           round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)), limit: roundLimitOf(avRoom), lobby };
 }
 // ⭐ IS THERE A TIME LIMIT, AND WHAT IS IT? Read back OUT of the rules rather than stored as a setting, because
 // ending a round is an ordinary rule (the author's decision) — so the only honest place the length of a round
@@ -13622,7 +13766,9 @@ function roundLimitOf(avRoom) {
 function broadcastRuleState(avRoom) {
   const g = roomGame[avRoom]; if (!g) return;
   g.dirty = false;
-  for (const [sid] of rulePlayers(avRoom)) { const st = ruleStateFor(avRoom, sid); if (st) io.to(sid).emit('rule-state', st); }
+  // ⚠️ `ruleEveryone`, not `rulePlayers` — somebody benched until the next round is exactly the person who most
+  // needs to be told what is going on, and `rulePlayers` deliberately does not include them.
+  for (const [sid] of ruleEveryone(avRoom)) { const st = ruleStateFor(avRoom, sid); if (st) io.to(sid).emit('rule-state', st); }
 }
 // ── THE 10Hz PASS ───────────────────────────────────────────────────────────────────────────────────────────
 // ⭐ Only timers and region population need polling; everything else is event-driven. And it walks `roomRules`,
@@ -13638,6 +13784,8 @@ function rulesTick() {
     if (!(roomAvt[avRoom] && roomAvt[avRoom].size)) continue;      // nobody here — a game with no players does not run
     const g = gameOf(avRoom);
     if (g.off) continue;
+    lobbyTick(avRoom, g);                     // …the wait, the vote and the countdown
+    if (g.phase !== 'play') { if (g.dirty || ruleTickCount % 5 === 0) broadcastRuleState(avRoom); continue; }
     const now = Date.now();
     // ⭐ Work parked by `wait`, now due. ⚠️ Dropped rather than run if the game has been reset or its rules
     // edited since (the epoch), so a five-second delay from a deleted rule cannot land on the next round.
@@ -13647,8 +13795,18 @@ function rulesTick() {
         g.pending = g.pending.filter(p => p.at > now);
         for (const p of due) {
           if (p.epoch !== g.epoch) continue;
+          let matched = p.matched;
+          // ⭐⭐ A TIMED ACTION IN A PLACE — planting a bomb, defusing it, capturing a point. The rule's
+          // conditions are asked AGAIN when the wait runs out, so somebody who walked away, died or lost the
+          // mark part-way through does not finish it. That one flag is the difference between "wait five
+          // seconds" and "hold this for five seconds", and it is what search-and-destroy is written out of.
+          if (p.still) {
+            matched = matched.filter(([sid, key]) =>
+              p.rule.ifs.every(c => condHolds(avRoom, g, c, sid, key, p.ctx)));
+            if (!matched.length) continue;
+          }
           const out = { say: [], win: null, end: false };
-          runActions(avRoom, g, p.rule, p.idx, p.matched, p.ctx, out, (p.depth | 0));
+          runActions(avRoom, g, p.rule, p.idx, matched, p.ctx, out, (p.depth | 0));
           flushRuleOut(avRoom, g, out, (p.depth | 0));
         }
       }
@@ -15797,10 +15955,16 @@ io.on('connection', (socket) => {
         ruleRoomMeta[avRoom] = { roomId: currentAvBuildRoomId || null, levelIndex, ownerId: currentAvOwnerId || null };
         const _g = gameOf(avRoom);
         _g.names.set(playerKeyFor(socket.id), currentUsername || socketToUsername[socket.id] || 'Someone');
-        socket.emit('rules-init', { levelIndex, rules: _rl });
+        // ⭐ WALKING IN MID-ROUND. The author decides (user, 2026-09-04: *"some games it would be fine to have
+        // them join part way through, but in others it wouldn't"*). Not allowed means BENCHED, not frozen: they
+        // can walk about and talk, they are simply not in this round — no events, no score, not counted. The
+        // bench empties the moment the next round starts.
+        const _lob = roomLobby[avRoom];
+        if (_lob && !_lob.join && _g.phase === 'play') { _g.benched.add(playerKeyFor(socket.id)); _g.dirty = true; }
+        socket.emit('rules-init', { levelIndex, rules: _rl, lobby: _lob || null, tpl: roomRuleTpl[avRoom] || '' });
         const _st = ruleStateFor(avRoom, socket.id); if (_st) socket.emit('rule-state', _st);
       } else {
-        socket.emit('rules-init', { levelIndex, rules: [] });
+        socket.emit('rules-init', { levelIndex, rules: [], lobby: null, tpl: '' });
       }
     }
     // 🟥 THE WHOLE-LIST JOIN REPLAY IS GONE. It sent every pile in the room to every joiner — fine while a TTL
@@ -16379,7 +16543,12 @@ io.on('connection', (socket) => {
     if (!currentAvBuildRoomId || overworldRooms.has(avRoom)) { socket.emit('build-refused', { why: 'Rules belong to a Level, and this is a shared world.' }); return; }
     if (!canBuild()) return;                              // writing a Level's game IS a build op
     const rules = sanitizeRules(data.rules);
+    const lobby = sanitizeLobby(data.lobby);
     if (rules.length) roomRules[avRoom] = rules; else delete roomRules[avRoom];
+    // ⚠️ A lobby without rules is nothing to wait for, so it goes with them.
+    if (lobby && rules.length) roomLobby[avRoom] = lobby; else delete roomLobby[avRoom];
+    const tpl = (typeof data.tpl === 'string' ? data.tpl.trim().slice(0, 24) : '');
+    if (tpl && rules.length) roomRuleTpl[avRoom] = tpl; else delete roomRuleTpl[avRoom];
     // ⚠️ THE LIVE GAME IS THROWN AWAY WHEN THE RULES CHANGE, deliberately: scores and tags earned under the old
     // rules mean nothing under the new ones, and keeping them is how an author ends up debugging a game that is
     // half one version and half another.
@@ -16395,8 +16564,24 @@ io.on('connection', (socket) => {
       // rules, so the author of a brand-new game — and anybody watching them write it — had no name at all.
       for (const [sid2, key2] of rulePlayers(avRoom)) if (socketToUsername[sid2]) _g2.names.set(key2, socketToUsername[sid2]);
     }
-    io.to(avRoom).emit('rules-init', { levelIndex: currentAvLevelIndex | 0, rules });
-    if (rules.length) { fireRuleEvent(avRoom, 'roundstart', {}, 0); broadcastRuleState(avRoom); }
+    io.to(avRoom).emit('rules-init', { levelIndex: currentAvLevelIndex | 0, rules, lobby, tpl: roomRuleTpl[avRoom] || '' });
+    // ⚠️ With a lobby the round does NOT begin here — the wait is the first thing that happens, and `lobbyTick`
+    // decides when it ends. Without one, nothing changes.
+    if (rules.length) { if (!lobby) fireRuleEvent(avRoom, 'roundstart', {}, 0); broadcastRuleState(avRoom); }
+  });
+  // ⭐ THE VOTE TO START EARLY (user, 2026-09-04): *"the lobby should include things like the ability to vote to
+  // start the match before it is full"*. One message, no argument beyond yes/no — the share of the room it takes
+  // is the author's setting, not the voter's.
+  socket.on('rules-ready', ({ on }) => {
+    const avRoom = currentAvatarRoom;
+    if (!avRoom || !hasRules(avRoom) || !roomLobby[avRoom]) return;
+    const g = gameOf(avRoom);
+    if (g.phase !== 'wait') return;                       // …you cannot un-ready a game that has started
+    const key = playerKeyFor(socket.id);
+    if (on === false) g.ready.delete(key); else g.ready.add(key);
+    if (socketToUsername[socket.id]) g.names.set(key, socketToUsername[socket.id]);
+    g.dirty = true;
+    broadcastRuleState(avRoom);
   });
   // ⭐ TESTING CONTROLS. Switching a game off and putting it back to the start are what make a rule set
   // something you can iterate on rather than something you write blind — you cannot build a Level while its own
@@ -16433,6 +16618,9 @@ io.on('connection', (socket) => {
     if (now - _ruleEvtWindow > 1000) { _ruleEvtWindow = now; _ruleEvtBudget = 240; }
     if (_ruleEvtBudget-- <= 0) return;                    // a rule event is edge-triggered; this is a flood bound
     const g = gameOf(avRoom);
+    // ⚠️ SOMEBODY WAITING FOR THE NEXT ROUND REPORTS NOTHING. They are standing in a live world and their
+    // browser sees every touch and region crossing it always did — the difference is that none of it counts.
+    if (g.benched.size && g.benched.has(playerKeyFor(socket.id))) return;
     g.names.set(playerKeyFor(socket.id), currentUsername || socketToUsername[socket.id] || 'Someone');
     const tag = (typeof msg.tag === 'string') ? msg.tag.trim().slice(0, RULE_TAG_MAX) : '';
     switch (msg.ev) {
