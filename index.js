@@ -13324,7 +13324,7 @@ function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
     // show a role, and it needs no new art — the name label is already drawn over every player.
     case 'badge': if (key) { g.badges.set(key, String(a.text || '').slice(0, 8)); g.dirty = true; } break;
     case 'unbadge': if (key) { g.badges.delete(key); g.dirty = true; } break;
-    case 'say':  out.say.push({ a, sid, who: key ? (g.names.get(key) || '') : '' }); break;
+    case 'say':  out.say.push({ a, sid, key }); break;
     // ⭐ REMEMBER / FORGET — a per-LEVEL fact, which is what "you cannot trigger this unless something else has
     // been triggered" needs. Deliberately NOT a mark on a player: "the bomb was planted" is true of the Level,
     // not of whoever planted it, and storing it on the person would lose it the moment they left.
@@ -13357,10 +13357,18 @@ function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
 // Everything a pass DECIDED, applied once at the end. Actions collect into `out` rather than emitting as they
 // run, so a rule that both moves the crown and ends the round produces one message in one order, and a round
 // cannot be ended twice by two rules in the same pass.
+// 🟥 WHO {player} IS, ASKED OF THE SOCKET FIRST. This used to read one map, filled in at two places — and the
+// join that fills it is guarded on the Level ALREADY having rules, which an author writing their first rule has
+// by definition not got. So the commonest case of all — you write a game, you play it, it announces you — named
+// nobody and printed "Someone". Reported from play. The live socket knows its own name; the map is only needed
+// for a delayed message whose player has since left.
+function ruleWhoName(g, sid, key) {
+  return (sid && socketToUsername[sid]) || (key && g.names.get(key)) || 'Someone';
+}
 function flushRuleOut(avRoom, g, out, depth) {
   for (const m of out.say) {
     const a = m.a;
-    const msg = { text: String(a.text).replace(/\{player\}/g, m.who || 'Someone'),
+    const msg = { text: String(a.text).replace(/\{player\}/g, ruleWhoName(g, m.sid, m.key)),
                   secs: a.secs || 5, world: a.world ? 1 : 0, at: a.at || '',
                   sx: (a.sx == null) ? 50 : a.sx, sy: (a.sy == null) ? 8 : a.sy,
                   size: a.size || 14, font: a.font || '', bold: a.bold ? 1 : 0, italic: a.italic ? 1 : 0,
@@ -16248,7 +16256,13 @@ io.on('connection', (socket) => {
     // every time it was used for the thing it exists for.
     const _wasOff = roomGame[avRoom] ? roomGame[avRoom].off : false;
     delete roomGame[avRoom];
-    if (rules.length) { ruleRoomMeta[avRoom] = { roomId: currentAvBuildRoomId, levelIndex: currentAvLevelIndex | 0, ownerId: currentAvOwnerId || null }; gameOf(avRoom).off = _wasOff; }
+    if (rules.length) {
+      ruleRoomMeta[avRoom] = { roomId: currentAvBuildRoomId, levelIndex: currentAvLevelIndex | 0, ownerId: currentAvOwnerId || null };
+      const _g2 = gameOf(avRoom); _g2.off = _wasOff;
+      // ⚠️ Everyone standing here is recorded NOW. The join path only records a name when the Level already had
+      // rules, so the author of a brand-new game — and anybody watching them write it — had no name at all.
+      for (const [sid2, key2] of rulePlayers(avRoom)) if (socketToUsername[sid2]) _g2.names.set(key2, socketToUsername[sid2]);
+    }
     io.to(avRoom).emit('rules-init', { levelIndex: currentAvLevelIndex | 0, rules });
     if (rules.length) { fireRuleEvent(avRoom, 'roundstart', {}, 0); broadcastRuleState(avRoom); }
   });
