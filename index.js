@@ -13594,7 +13594,7 @@ function flushRuleOut(avRoom, g, out, depth) {
       if (want.some(n => { const s = g.tags.get(n); return s && s.has(key2); })) io.to(sid2).emit('rule-say', Object.assign({ text: textFor(sid2) }, look));
     }
   }
-  if (out.tp) for (const t of out.tp) { const o = findTaggedObj(avRoom, t.tag); if (o) io.to(t.sid).emit('rule-move-me', { x: o.x, y: o.y }); }
+  if (out.tp) for (const t of out.tp) { const p2 = pickTaggedSpot(avRoom, t.tag); if (p2) io.to(t.sid).emit('rule-move-me', p2); }
   if (out.kill) for (const sid of out.kill) io.to(sid).emit('rule-respawn-me', {});
   if (out.move) for (const m of out.move) applyRuleMove(avRoom, m);
   if (out.end) endRuleRound(avRoom, g, out.win, out.restore, depth, out.game);
@@ -13658,6 +13658,34 @@ function doRuleTeams(avRoom, g, a, names) {
   if (!rest.length) rest = names.map((_, i) => i);
   for (let k = 0; at < order.length; k++, at++) put(order[at][1], rest[k % rest.length]);
   g.dirty = true;
+}
+// ⭐⭐ WHERE "SEND THEM TO [somewhere]" ACTUALLY PUTS SOMEBODY — and it is the whole of team spawn points
+// (user, 2026-09-04): *"different spawn points, that can be assigned to different teams. Perhaps multiple per
+// team in some instances, so that all the people on one team don't spawn in the same place."*
+// ⭐ There is no spawn-point FEATURE here, and deliberately so. Two small generalisations of a verb that
+// already existed cover the whole ask, and cover more besides:
+//   1. SEVERAL things may share a name, and one of them is chosen at RANDOM. Place three markers called
+//      "red spawn" and a team no longer lands in a heap. With one, this is exactly what it did before.
+//   2. If the chosen thing is an AREA, a random point INSIDE it is used rather than its centre — so one
+//      dragged-out rectangle is a spawn zone, which is usually what somebody means by "over there".
+// A team spawn is then an ordinary rule the author can read: "when someone respawns, if they have [red],
+// send them to [red spawn]". Nothing new to place, nothing new to learn, and it works for anything you can
+// name rather than only for spawning.
+// ⚠️ `moveto` and `spawn` deliberately keep taking the FIRST match: putting a flag back at "its base" wants a
+// predictable place, and a thing that landed somewhere different each round would read as a bug.
+function pickTaggedSpot(avRoom, tag) {
+  const map = roomObjects[avRoom]; if (!map || !tag) return null;
+  const hits = [];
+  for (const o of map.values()) if (o.tag === tag) hits.push(o);
+  if (!hits.length) return null;
+  const o = hits[(Math.random() * hits.length) | 0];
+  if (o.type === 'region' && o.w > 8 && o.h > 8) {
+    // ⚠️ Inset from the edges, so nobody is dropped straddling the boundary of the very area a rule is about
+    // to ask whether they are inside.
+    const mx = Math.min(o.w / 4, 48), my = Math.min(o.h / 4, 48);
+    return { x: o.x + (Math.random() - 0.5) * (o.w - mx * 2), y: o.y + (Math.random() - 0.5) * (o.h - my * 2) };
+  }
+  return { x: o.x, y: o.y };
 }
 function findTaggedObj(avRoom, tag) {
   const map = roomObjects[avRoom]; if (!map || !tag) return null;
@@ -16695,7 +16723,13 @@ io.on('connection', (socket) => {
     // you want it, and starting a test takes it away again.
     if (lobby !== undefined) {
       g.lobbyDemo = !!lobby;
+      // 🟥 SWITCHING IT OFF HAS TO PUT THE PHASE BACK HERE. Turning it on sets the phase to "waiting"; turning
+      // it off used to leave it there and rely on `lobbyTick` to notice — and the tick returns early while the
+      // rules are paused, which is exactly when an author is looking at the lobby. So the preview stayed on
+      // screen until you pressed Test, which is what was reported. A control that undoes itself has to undo
+      // itself in the same place it acted.
       if (g.lobbyDemo) { g.phase = 'wait'; g.ready.clear(); }
+      else { g.phase = 'play'; g.ready.clear(); }
       g.dirty = true;
       io.to(avRoom).emit('rule-say', { text: g.lobbyDemo ? 'Showing the lobby as players will see it.' : 'Lobby preview off.' });
       broadcastRuleState(avRoom); return;
