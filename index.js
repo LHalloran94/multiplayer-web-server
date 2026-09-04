@@ -13363,24 +13363,39 @@ function doRuleAct(avRoom, g, a, sid, key, ctx, out, depth) {
 // nobody and printed "Someone". Reported from play. The live socket knows its own name; the map is only needed
 // for a delayed message whose player has since left.
 function ruleWhoName(g, sid, key) {
-  return (sid && socketToUsername[sid]) || (key && g.names.get(key)) || 'Someone';
+  return (sid && socketToUsername[sid]) || (key && g.names.get(key)) || '';
 }
 function flushRuleOut(avRoom, g, out, depth) {
   for (const m of out.say) {
     const a = m.a;
-    const msg = { text: String(a.text).replace(/\{player\}/g, ruleWhoName(g, m.sid, m.key)),
-                  secs: a.secs || 5, world: a.world ? 1 : 0, at: a.at || '',
-                  sx: (a.sx == null) ? 50 : a.sx, sy: (a.sy == null) ? 8 : a.sy,
-                  size: a.size || 14, font: a.font || '', bold: a.bold ? 1 : 0, italic: a.italic ? 1 : 0,
-                  under: a.under ? 1 : 0, hue: (a.hue == null) ? -1 : a.hue };
+    const look = { secs: a.secs || 5, world: a.world ? 1 : 0, at: a.at || '',
+                   sx: (a.sx == null) ? 50 : a.sx, sy: (a.sy == null) ? 8 : a.sy,
+                   size: a.size || 14, font: a.font || '', bold: a.bold ? 1 : 0, italic: a.italic ? 1 : 0,
+                   under: a.under ? 1 : 0, hue: (a.hue == null) ? -1 : a.hue };
+    // ⭐⭐ {player} IS WHOEVER THE RULE IS ABOUT — AND WHEN IT IS ABOUT NOBODY, IT IS THE PERSON READING IT.
+    // 🟥 Reported from play twice. "every 1 second, say hello {player}" has no actor at all: a timer fires on
+    // the server's clock, and if the rule has no per-player condition or action there is no one player it
+    // concerns — so it printed the literal word "Someone" to everybody, which as the user put it "doesn't
+    // really make sense in any scenario". Their expectation is the right one: each person sees their own name.
+    // ⚠️ THE ACTOR STILL WINS WHERE THERE IS ONE, or "{player} has the crown!" would tell every reader that
+    // THEY had the crown. So: the actor if the rule has one, otherwise the reader.
+    const who = ruleWhoName(g, m.sid, m.key);
+    const textFor = (sid2) => String(a.text).replace(/\{player\}/g,
+      who || (sid2 && socketToUsername[sid2]) || 'you');
     // ⭐ WHO HEARS IT. Everyone by default; just the player the rule is about; or only the people carrying
     // certain marks — which is how a message to one team is written today and will keep working unchanged when
     // teams arrive, because a team is a mark.
-    if (a.aud !== 'them' && a.aud !== 'mark') { io.to(avRoom).emit('rule-say', msg); continue; }
-    if (a.aud === 'them') { if (m.sid) io.to(m.sid).emit('rule-say', msg); continue; }
+    // ⚠️ ONE BROADCAST WHEN IT CAN BE, a message each when it cannot: with an actor the words are the same for
+    // everybody, and only a reader-dependent {player} costs a send per person.
+    if (a.aud !== 'them' && a.aud !== 'mark') {
+      if (who || a.text.indexOf('{player}') < 0) { io.to(avRoom).emit('rule-say', Object.assign({ text: textFor(null) }, look)); continue; }
+      for (const [sid2] of rulePlayers(avRoom)) io.to(sid2).emit('rule-say', Object.assign({ text: textFor(sid2) }, look));
+      continue;
+    }
+    if (a.aud === 'them') { if (m.sid) io.to(m.sid).emit('rule-say', Object.assign({ text: textFor(m.sid) }, look)); continue; }
     const want = ruleTagList(a.to);
     for (const [sid2, key2] of rulePlayers(avRoom)) {
-      if (want.some(n => { const s = g.tags.get(n); return s && s.has(key2); })) io.to(sid2).emit('rule-say', msg);
+      if (want.some(n => { const s = g.tags.get(n); return s && s.has(key2); })) io.to(sid2).emit('rule-say', Object.assign({ text: textFor(sid2) }, look));
     }
   }
   if (out.tp) for (const t of out.tp) { const o = findTaggedObj(avRoom, t.tag); if (o) io.to(t.sid).emit('rule-move-me', { x: o.x, y: o.y }); }
@@ -13440,7 +13455,7 @@ function endRuleRound(avRoom, g, winKey, restore, depth) {
   const now = Date.now();
   if (now - g.lastRound < ROUND_MIN_MS) return;          // see ROUND_MIN_MS
   g.lastRound = now;
-  io.to(avRoom).emit('rule-round', { over: 1, winner: winKey ? (g.names.get(winKey) || 'Someone') : null });
+  io.to(avRoom).emit('rule-round', { over: 1, winner: winKey ? (g.names.get(winKey) || 'Someone') : null });   // (a winner is always a real player, so a name is always known)
   if (restore) restoreRuleWorld(avRoom);
   fireRuleEvent(avRoom, 'roundend', {}, depth + 1);
   g.roundStart = Date.now();
