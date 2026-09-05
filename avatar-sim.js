@@ -36,10 +36,14 @@
     // The curve is what was played and liked in the middle; the clamps are what stop the new extremes running
     // away, so the ends saturate instead.
     // ⚠️ Jump softened -0.35 → -0.22 on play ("maybe a little too high on the jump on the small side").
+    // ⚠️ THE CEILINGS CAME DOWN AGAIN ON PLAY ("the speed and jump increase is a little too high when small").
+    // Deliberately as CLAMPS rather than as gentler exponents: 3 cells — 1.29× speed, 1.12× jump — is the
+    // reading the user played and approved, and softening the curve would move that too. The clamp only bites
+    // at the small end, so what was liked is untouched and the extreme stops overshooting it.
     SIZE_SPEED_POW: -0.5,
     SIZE_JUMP_POW: -0.22,
-    SIZE_SPEED_MIN: 0.7, SIZE_SPEED_MAX: 1.5,
-    SIZE_JUMP_MIN: 0.82, SIZE_JUMP_MAX: 1.25,
+    SIZE_SPEED_MIN: 0.7, SIZE_SPEED_MAX: 1.32,
+    SIZE_JUMP_MIN: 0.82, SIZE_JUMP_MAX: 1.13,
     AIR_ACCEL: 0.52, AIR_DECEL: 0.985,
     COYOTE_FRAMES: 7, JUMP_BUFFER_FRAMES: 10,
     WALL_SLIDE_VY: 1.5, WALL_SLIDE_VY_FAST: 6,   // hold ↓ on a wall to slide down faster
@@ -136,8 +140,8 @@
   // ---- Body size ----
   // ⭐ ONE READER FOR THE WHOLE FILE. Clamped rather than trusted: `sizeK` arrives from a client packet on the
   // relay, and a body of size 0 (or 40) is not a small avatar, it is a hole in every collision test here.
-  // ⚠️ THE BOUNDS MUST MATCH THE CLIENT'S SIZE RANGE. 1..11 cells of 8px against a 40px default is 0.2..2.2.
-  function sizeOf(s) { const k = (s && s.sizeK) || 1; return k < 0.2 ? 0.2 : (k > 2.2 ? 2.2 : k); }
+  // ⚠️ THE BOUNDS MUST MATCH THE CLIENT'S SIZE RANGE. 2..11 cells of 8px against a 40px default is 0.4..2.2.
+  function sizeOf(s) { const k = (s && s.sizeK) || 1; return k < 0.4 ? 0.4 : (k > 2.2 ? 2.2 : k); }
   const clamp = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v));
   function bodyW(s) { return C.AV_W * sizeOf(s); }
   function bodyH(s) { return C.AV_H * sizeOf(s); }
