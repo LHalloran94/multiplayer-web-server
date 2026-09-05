@@ -9579,9 +9579,99 @@ const CUSTOM_MAT_MIN = MATGEN.GEN_MAT_MAX + 1, CUSTOM_MAT_CAP = 160;   // custom
 // died. That is the ninth time this exact boundary has bitten on this track. Anything referencing a required
 // module belongs below EVERY block-end marker, not below the nearest one.
 for (const id of MATGEN.POWDER_IDS) { POWDER_MOVE[id] = 1; POWDER_SEED[id] = 1; }
-for (const id of MATGEN.PLANT_IDS) POWDER_MOVE[id] = 1;
+// 🟥🟥 PLANTS ARE NOT POWDER ANY MORE (#108, 2026-09-05). They were, and it produced the reported
+// *"when you break a tree it sort of disappears outward or upwards from the point that you broke it"*:
+// `activatePowderRect` woke the cell above the cut, it fell, `wakeAround` woke the one above THAT, and the
+// tree unravelled upward one grain at a time, trickling diagonally into a spreading heap. The cells were
+// conserved the whole time — but as scattered terrain nobody can pick up, which is why it read as vanishing.
+// ⭐ A PLANT CELL NOW EITHER STANDS OR IS COLLECTED. It never falls as terrain: `collapsePlants` finds the
+// part of the plant that is no longer holding onto anything and turns the whole of it into drops at once.
+// That is also what makes a tree fell as a TREE rather than dissolve grain by grain.
+// ⚠️ `MAT_PLANT` replaces the POWDER_MOVE entry — the sim still has to be able to ASK what a plant is.
+const MAT_PLANT = new Uint8Array(256);
+for (const id of MATGEN.PLANT_IDS) MAT_PLANT[id] = 1;
+const isPlantId = (v) => MAT_PLANT[v] === 1;
 for (const id of MATGEN.HANGS_IDS) MAT_HANGS[id] = 1;
 SALT_ID = MATGEN.NAMES['Salt'];   // the salt + water → brine reaction's reagent, same seam and the same reason
+
+// ══ #108 · A CUT TREE COMES DOWN, AND YOU CAN PICK IT UP ══════════════════════════════════════════════════
+//  A plant cell is SUPPORTED if, walking through plant cells, you can reach a cell that is solid and is not
+//  itself a plant — the ground, a rock, a placed block. That one rule covers all three cases without knowing
+//  which is which: a trunk stands on earth, a branch stands on the trunk, and a VINE hangs off the stone above
+//  it. Support has no direction, which is exactly how the user described it — "attached to the ground, or
+//  attached to something attached to the ground".
+//  ⭐ THE WHOLE UNSUPPORTED REGION GOES AT ONCE, as one pile of collectable material. That is what makes a
+//  felled tree read as a tree rather than as a slow drizzle of grains, and it is why plants left POWDER_MOVE.
+//  🟥 IT MUST NOT BUILD WORLD. On a generated room a plain read PRODUCES the chunk it lands in, so a flood
+//  fill that walked off the edge of what exists would generate the Overworld one tree at a time. Reads go
+//  through `peekCellAt`, and an UNBUILT neighbour counts as SUPPORT — refusing to fell what we cannot see is
+//  the conservative answer, and the alternative is felling a tree into a chunk nobody has made yet.
+const PLANT_FELL_MAX = 600;      // biggest region worth felling; past this it is a kelp field, not a tree
+function collapsePlants(room, c0, r0, c1, r1) {
+  const st = cellsOf(room), grid = st.terrain, hp = st.terrainHp;
+  if (!grid || !hp) return;
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows, nn = grid.length;
+  c0 = Math.max(0, c0 - 1); r0 = Math.max(0, r0 - 1);
+  c1 = Math.min(COLS - 1, c1 + 1); r1 = Math.min(ROWS - 1, r1 + 1);
+  const genRoom = !!grid.seedFn;
+  // -1 = unbuilt. Sky is honestly air, as in the powder tick.
+  const peek = genRoom ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
+  const seen = new Set();          // cells already decided, across every region this call looks at
+  const cleared = [];
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) {
+    const start = c * ROWS + r;
+    if (seen.has(start) || !isPlantId(peek(start))) continue;
+    // Flood the connected plant region, 8-neighbour (a canopy is not 4-connected — leaves meet at corners).
+    const region = [], stack = [start], mark = new Set([start]);
+    let supported = false, overflow = false;
+    while (stack.length) {
+      const i = stack.pop();
+      region.push(i);
+      if (region.length > PLANT_FELL_MAX) { overflow = true; break; }
+      const ic = (i / ROWS) | 0, ir = i - ic * ROWS;
+      for (let dc = -1; dc <= 1 && !supported; dc++) for (let dr = -1; dr <= 1; dr++) {
+        if (!dc && !dr) continue;
+        const nc = ic + dc, nr = ir + dr;
+        if (nc < 0 || nc >= COLS || nr < 0 || nr >= ROWS) continue;
+        const j = nc * ROWS + nr; if (j < 0 || j >= nn) continue;
+        const v = peek(j);
+        if (v < 0) { supported = true; break; }                  // unbuilt — do not fell into the unknown
+        if (isPlantId(v)) { if (!mark.has(j)) { mark.add(j); stack.push(j); } continue; }
+        if (isSolidCell(v)) { supported = true; break; }         // ground, rock, or something a player placed
+      }
+      if (supported) break;
+    }
+    for (const i of mark) seen.add(i);
+    if (supported || overflow || !region.length) continue;
+    // Nothing holds it up ⇒ it comes down as material. Composition first, then clear.
+    const mats = new Map();
+    let sx = 0, top = Infinity;
+    for (const i of region) {
+      const v = grid.g(i); if (!isPlantId(v)) continue;
+      const y = MATGEN.yieldOf(v); mats.set(y, (mats.get(y) || 0) + 1);
+      const ic = (i / ROWS) | 0, ir = i - ic * ROWS;
+      sx += ic; if (ir < top) top = ir;
+      grid.s(i, 0); hp.s(i, 0); cleared.push(i, 0);
+    }
+    if (!mats.size) continue;
+    // ⚠️ The pile is spawned at the region's own middle and TOP, so it visibly falls the height of the tree
+    // rather than appearing at your feet. `spawnDrop` resolves the resting row itself.
+    const px = ((sx / region.length) + 0.5) * TERRAIN_CELL, py = (top + 0.5) * TERRAIN_CELL;
+    // ⚠️ SPLIT INTO PILES OF 64. That is the cap a hand-made `terrain-drop` is held to, and a big canopy is
+    // several times it — one giant pile would also be one giant pickup.
+    let batch = [], n = 0;
+    for (const [m, k] of mats) {
+      let left = k;
+      while (left > 0) {
+        const take = Math.min(left, 64 - n);
+        batch.push([m, take]); n += take; left -= take;
+        if (n >= 64) { spawnDrop(room, px, py, batch); batch = []; n = 0; }
+      }
+    }
+    if (batch.length) spawnDrop(room, px, py, batch);
+  }
+  if (cleared.length) wireFanout(room, 'terrain-set', { cells: cleared });
+}
 const roomMats = {};                                 // room → { id: def }
 function ensureMats(room) { return roomMats[room] || (roomMats[room] = {}); }
 
@@ -17499,6 +17589,9 @@ io.on('connection', (socket) => {
         emitFineCells(currentAvatarRoom, changedFine);
       }
       activatePowderRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);   // dig removes support / paint drops grains
+      // #108 — and whatever plant the edit just cut free comes down as material. AFTER the powder wake, so
+      // the two never argue about the same cell: a plant is not powder any more, so nothing here overlaps.
+      if (op === 'carve') collapsePlants(currentAvatarRoom, Math.floor((cx - rr) / TERRAIN_CELL), Math.floor((cy - rr) / TERRAIN_CELL), Math.floor((cx + rr) / TERRAIN_CELL), Math.floor((cy + rr) / TERRAIN_CELL));
       // `hits`/`keepLiq` ride the rebroadcast too, or every OTHER client lands a different number of chips
       // than the sender did and their hp drifts apart — the same desync, one step removed.
       socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd, hits: nHits, keepLiq: keepLiq ? 1 : undefined });
@@ -17543,6 +17636,17 @@ io.on('connection', (socket) => {
       emitFineCells(currentAvatarRoom, changedFine);
     }
     if (changed) wireFanout(currentAvatarRoom, 'terrain-set', { cells });   // Phase 4: a player's edit is a cell diff like any other
+    // #108 — an explicit cell write can cut a trunk just as a carve can (undo, paste, a Level being applied),
+    // so the same collapse runs over the cells it touched. Bounded by the write, which is already capped.
+    if (changed) {
+      const SR = grid.geom.rows; let bc0 = Infinity, br0 = Infinity, bc1 = -1, br1 = -1;
+      for (let k = 0; k + 1 < cells.length; k += 2) {
+        const i = cells[k] | 0; if (i < 0 || i >= grid.length) continue;
+        const c = (i / SR) | 0, r = i - c * SR;
+        if (c < bc0) bc0 = c; if (c > bc1) bc1 = c; if (r < br0) br0 = r; if (r > br1) br1 = r;
+      }
+      if (bc1 >= 0) collapsePlants(currentAvatarRoom, bc0, br0, bc1, br1);
+    }
   });
   // Custom material registry: define a new custom mat (or match an identical existing one). Dedups by signature,
   // assigns the next free id (16..255), stores per-room + broadcasts so every client can render/paint it. Acks {id, def}.

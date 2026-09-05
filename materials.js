@@ -340,8 +340,19 @@
     return v;
   }
 
+  // ---- what cutting something gives you -------------------------------------------------------------------
+  // ⭐ ONE TABLE, TWO READERS, like everything else here. The client says what came out of a dig (it applied
+  // the carve optimistically, so it already had to know) and the SERVER says what a collapsing tree gives up.
+  // Written in either place alone, the two answers drift and the same tree pays out differently depending on
+  // which cell of it you happened to hit.
+  // ⚠️ Anything not named here yields ITSELF, which is the case for every leaf, frond, reed and moss: plant
+  // matter is collected as what it is. Only wood becomes something else, because a felled tree is timber.
+  const DIG_YIELD = {};
+  DIG_YIELD[NAMES.Wood] = NAMES.Timber;
+  const yieldOf = (id) => DIG_YIELD[id] || id;
+
   return {
-    ROWS, DEFS, NAMES, NAME_TO_ID, idOf, STRENGTH, EMIT,
+    ROWS, DEFS, NAMES, NAME_TO_ID, idOf, STRENGTH, EMIT, DIG_YIELD, yieldOf,
     WORTH, PRIMA_WORTH, PRIMA_REFINE_MIN, primaWorthOf, primaRefinable,
     GEN_MAT_MIN, GEN_MAT_MAX,
     POWDER_IDS, PLANT_IDS, HANGS_IDS,
