@@ -9643,32 +9643,40 @@ function collapsePlants(room, c0, r0, c1, r1) {
     }
     for (const i of mark) seen.add(i);
     if (supported || overflow || !region.length) continue;
-    // Nothing holds it up ⇒ it comes down as material. Composition first, then clear.
-    const mats = new Map();
-    let sx = 0, top = Infinity;
-    for (const i of region) {
-      const v = grid.g(i); if (!isPlantId(v)) continue;
-      const y = MATGEN.yieldOf(v); mats.set(y, (mats.get(y) || 0) + 1);
+    // ⭐⭐ IT COMES DOWN AS A SHOWER, NOT AS A LUMP (user, 2026-09-05: *"it feels discontinuous and dodgy to
+    // cut a tree down and have a single bunch or two fall"*). One pile at the region's centroid was correct
+    // about the MATERIAL and wrong about the EVENT: a tree is a lot of separate things coming loose, and the
+    // whole of it arriving as one object at one point reads as a teleport, not a collapse.
+    // ⭐ EACH BUNCH FALLS FROM WHERE ITS OWN CELLS WERE, so the canopy starts high, the trunk starts low, and
+    // they land staggered — the timing comes out of the geometry rather than being animated.
+    // ⚠️ THEY MERGE ON LANDING, not on release (`dropMergeTarget` runs against the RESTING place), so a shower
+    // of forty bunches still leaves two or three things to pick up. That is what makes this affordable.
+    // ⚠️ Sorted by column then row so a bunch is a contiguous piece of the plant — the DFS order the flood
+    // fill produces is a snaking path, and bunching along it would scatter unrelated bits of the tree together.
+    const live = region.filter(i => isPlantId(grid.g(i)));
+    if (!live.length) continue;
+    live.sort((a, b) => a - b);                       // column-major index ⇒ column, then row
+    // ~one bunch per 3 cells, so the shower is proportional to the plant; bounded so a 600-cell region does
+    // not become 200 falling objects.
+    const per = Math.max(3, Math.ceil(live.length / 48));
+    let bunch = new Map(), bx = 0, by = 0, bn = 0;
+    const flush = () => {
+      if (!bn) return;
+      const px = ((bx / bn) + 0.5) * TERRAIN_CELL, py = ((by / bn) + 0.5) * TERRAIN_CELL;
+      // A little sideways throw so the pieces spread instead of dropping in a column. Small: they should
+      // land around the stump, not across the clearing.
+      spawnDrop(room, px, py, Array.from(bunch), 0, { vx: (Math.random() - 0.5) * 0.36 });
+      bunch = new Map(); bx = 0; by = 0; bn = 0;
+    };
+    for (const i of live) {
+      const v = grid.g(i);
+      const y = MATGEN.yieldOf(v); bunch.set(y, (bunch.get(y) || 0) + 1);
       const ic = (i / ROWS) | 0, ir = i - ic * ROWS;
-      sx += ic; if (ir < top) top = ir;
+      bx += ic; by += ir; bn++;
       grid.s(i, 0); hp.s(i, 0); cleared.push(i, 0);
+      if (bn >= per) flush();
     }
-    if (!mats.size) continue;
-    // ⚠️ The pile is spawned at the region's own middle and TOP, so it visibly falls the height of the tree
-    // rather than appearing at your feet. `spawnDrop` resolves the resting row itself.
-    const px = ((sx / region.length) + 0.5) * TERRAIN_CELL, py = (top + 0.5) * TERRAIN_CELL;
-    // ⚠️ SPLIT INTO PILES OF 64. That is the cap a hand-made `terrain-drop` is held to, and a big canopy is
-    // several times it — one giant pile would also be one giant pickup.
-    let batch = [], n = 0;
-    for (const [m, k] of mats) {
-      let left = k;
-      while (left > 0) {
-        const take = Math.min(left, 64 - n);
-        batch.push([m, take]); n += take; left -= take;
-        if (n >= 64) { spawnDrop(room, px, py, batch); batch = []; n = 0; }
-      }
-    }
-    if (batch.length) spawnDrop(room, px, py, batch);
+    flush();
   }
   if (cleared.length) wireFanout(room, 'terrain-set', { cells: cleared });
 }
