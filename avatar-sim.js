@@ -30,9 +30,16 @@
     // ⚠️ THEY LIVE HERE, NOT IN THE CLIENT'S `moveCfg`, and that is not a filing decision — this file runs on
     // both machines and must produce identical numbers from identical state. A debug dial the client could
     // change would be a sim that disagrees with the server about how fast you are.
-    // Over the shipped 0.6..1.4 range: speed runs 1.29× down to 0.85×, jump HEIGHT 1.42× down to 0.79×.
+    // ⚠️ AND THEY ARE CLAMPED, which matters far more since the range widened to 1..11 cells (0.2..2.2).
+    // An exponent tuned across 0.6..1.4 does not stay sane over 0.2..2.2: at 0.2 the raw speed curve gives
+    // 2.24× walk pace — a body that outruns its own DASH, which is not a small avatar, it is a broken one.
+    // The curve is what was played and liked in the middle; the clamps are what stop the new extremes running
+    // away, so the ends saturate instead.
+    // ⚠️ Jump softened -0.35 → -0.22 on play ("maybe a little too high on the jump on the small side").
     SIZE_SPEED_POW: -0.5,
-    SIZE_JUMP_POW: -0.35,
+    SIZE_JUMP_POW: -0.22,
+    SIZE_SPEED_MIN: 0.7, SIZE_SPEED_MAX: 1.5,
+    SIZE_JUMP_MIN: 0.82, SIZE_JUMP_MAX: 1.25,
     AIR_ACCEL: 0.52, AIR_DECEL: 0.985,
     COYOTE_FRAMES: 7, JUMP_BUFFER_FRAMES: 10,
     WALL_SLIDE_VY: 1.5, WALL_SLIDE_VY_FAST: 6,   // hold ↓ on a wall to slide down faster
@@ -129,8 +136,9 @@
   // ---- Body size ----
   // ⭐ ONE READER FOR THE WHOLE FILE. Clamped rather than trusted: `sizeK` arrives from a client packet on the
   // relay, and a body of size 0 (or 40) is not a small avatar, it is a hole in every collision test here.
-  // ⚠️ THE BOUNDS MUST MATCH THE CLIENT'S SIZE RANGE. 3..7 cells of 8px against a 40px default is 0.6..1.4.
-  function sizeOf(s) { const k = (s && s.sizeK) || 1; return k < 0.6 ? 0.6 : (k > 1.4 ? 1.4 : k); }
+  // ⚠️ THE BOUNDS MUST MATCH THE CLIENT'S SIZE RANGE. 1..11 cells of 8px against a 40px default is 0.2..2.2.
+  function sizeOf(s) { const k = (s && s.sizeK) || 1; return k < 0.2 ? 0.2 : (k > 2.2 ? 2.2 : k); }
+  const clamp = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v));
   function bodyW(s) { return C.AV_W * sizeOf(s); }
   function bodyH(s) { return C.AV_H * sizeOf(s); }
   function bodyR(s) { return C.BLOB_R * sizeOf(s); }
@@ -139,8 +147,8 @@
   // between them moves the small one almost all of the way, which is what the report asked for at both ends
   // ("bigger… launch less far", "smaller… get launched further").
   function massOf(s) { const k = sizeOf(s); return k * k; }
-  function maxVxOf(s) { return C.MAX_VX * Math.pow(sizeOf(s), C.SIZE_SPEED_POW); }
-  function jumpVyOf(s) { return C.JUMP_VY * Math.pow(sizeOf(s), C.SIZE_JUMP_POW); }
+  function maxVxOf(s) { return C.MAX_VX * clamp(Math.pow(sizeOf(s), C.SIZE_SPEED_POW), C.SIZE_SPEED_MIN, C.SIZE_SPEED_MAX); }
+  function jumpVyOf(s) { return C.JUMP_VY * clamp(Math.pow(sizeOf(s), C.SIZE_JUMP_POW), C.SIZE_JUMP_MIN, C.SIZE_JUMP_MAX); }
 
   // ---- Platform + bounds collision (mirror of client resolveStage*) ----
   function resolveStageCollisions(s, P) {
