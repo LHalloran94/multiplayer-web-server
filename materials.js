@@ -131,6 +131,20 @@
     // Appended rather than filed with the other sediments, per the "never insert" rule at the top of ROWS —
     // in-order placement would renumber 40+ ids for a cosmetic gain.
     ['Ooze', '#cfc9b4', 'solid', 1], // 90 ooze — abyssal sediment, barely consolidated (the softest solid here)
+    // ⭐⭐ TIMBER (#108) — THE ONE MATERIAL HERE THAT THE GENERATOR NEVER PLACES. Every other row describes
+    // something the world grows or lays down; this is what you get when you cut a tree down, and the only way
+    // a cell of it exists is that a player put it there.
+    // 🟥 IT IS A SECOND MATERIAL RATHER THAN A FLAG ON WOOD, and that is the whole design. The card asked for
+    // placed tree cells to be SOLID while grown ones stay walk-through — otherwise every forest in the
+    // Overworld becomes an obstacle course overnight. A terrain cell is ONE BYTE, the material id, with no
+    // spare bit to say who put it there, and a parallel "player-placed" bit-plane would cost a bit per cell
+    // across the whole shared world plus wire plus persistence. Carrying the distinction in the id itself
+    // costs nothing and reads better anyway: a forest becomes a source of building material.
+    // ⚠️ Appending moves GEN_MAT_MAX and therefore CUSTOM_MAT_MIN (both sides derive it, so they move
+    // together). Saved Levels and published Worlds carry their own `mats` table and are remapped on load, so
+    // they are safe; a raw stored id in the old custom range is not, which is the price of the "never insert"
+    // rule and is why this is appended rather than filed beside Wood.
+    ['Timber', '#7a5a3a', 'solid', 2], // 91 timber — sawn wood. Solid, unlike the Wood a tree is made of.
   ];
 
   const GEN_MAT_MIN = 18;
