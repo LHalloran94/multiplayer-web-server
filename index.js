@@ -4990,6 +4990,22 @@ function ensureTerrainHp(room) { const s = cellsOf(room); return s.terrainHp || 
 // ⚠️ 1..17 are the LEVEL CREATOR's built-ins and are listed here; 18..89 are the world generator's and are
 // merged in from materials.js, which is the one place they are declared. Anything absent is strength 1.
 const BUILTIN_STRENGTH = Object.assign({ 2: 3, 4: 2, 5: 2, 17: 2 }, MATGEN.STRENGTH);  // stone tough, ice/mud/drain middling (matches client TERRAIN_MATS); others 1
+// ⭐⭐ A CUSTOM LIQUID IS STORED AS THE LIQUID IT FLOWS AS (Trello #129, confirmed broken in play 2026-09-06).
+// `isFluidId` is a six-value table and a custom material's id is 91 or above, so a custom fluid painted into
+// the grid was a SOLID here while the client — which reads the block's own definition — emptied the cell and
+// drew nothing. The world held invisible ground you could walk into.
+// ⇒ Substituted the moment an edit arrives, so nothing downstream (the sim, the wire, persistence, published
+// content, the generator's diffs) ever meets an id it does not understand. The client does the same to its
+// optimistic copy; THIS is the one that decides.
+// ⚠️ `base` is already the built-in the author picked — `representativeBase` on the client returns it for
+// fluids and hazards alike — so there is no second mapping table to keep in step.
+function liqBaseSrv(mats, v) {
+  if (v < CUSTOM_MAT_MIN) return v;
+  const d = mats && mats[v];
+  if (!d || (d.behavior !== 'fluid' && d.behavior !== 'hazard')) return v;
+  const b = d.base | 0;
+  return LIQ_RANK[b] === undefined ? v : b;
+}
 function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return BUILTIN_STRENGTH[v] || 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
 const BUILTIN_UNBREAKABLE = new Set([7, 13]);          // built-in conveyor belts are unbreakable (matches client TERRAIN_MATS)
 function matBreakableSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return !BUILTIN_UNBREAKABLE.has(v); const d = mats[v]; return !d || d.breakable !== false; }
@@ -12304,7 +12320,10 @@ function sanitizeMatDef(raw) {
     bouncy: raw.bouncy === true,
     conveyor: raw.conveyor > 0 ? 1 : raw.conveyor < 0 ? -1 : 0,
     dusty: raw.dusty === true,
-    liquid: ['water', 'brine', 'oil', 'quicksand'].includes(raw.liquid) ? raw.liquid : 'water',
+    // ⚠️ LAVA AND ACID ARE IN HERE TOO. A Hazard block names which of them it flows as; without that, every
+    // custom hazard came out as lava (see `liqBaseSrv`). `matSig` already includes this field, so two hazards
+    // differing only in kind are correctly two different materials.
+    liquid: ['water', 'brine', 'oil', 'quicksand', 'lava', 'acid'].includes(raw.liquid) ? raw.liquid : 'water',
     fill: raw.fill, cap: raw.cap,
     capShade: MAT_HEX.test(raw.capShade) ? raw.capShade : raw.cap,
     breakable: raw.breakable !== false,
@@ -15048,8 +15067,10 @@ io.on('connection', (socket) => {
     // ordinary players out of them; this stops the one case that cannot be undone.
     if (overworldRooms.has(room)) return;
     const grid = cellsOf(room).terrain; if (!grid) return;
-    const rank = LIQ_RANK[id | 0];
-    if (on && rank === undefined) return;                    // sources are built-in liquids only (custom liquids have no rank)
+    // ⭐ A custom liquid resolves to the one it flows as, so a source painted with one now works — it used to
+    // be rejected outright here, which is the second place the six-liquid table showed through.
+    const rank = LIQ_RANK[liqBaseSrv(roomMats[room], id | 0)];
+    if (on && rank === undefined) return;                    // still nothing else: a source has to BE one of the six
     const rt = rate === undefined ? undefined : Math.max(0, Math.min(64, rate | 0));
     const src = ensureSrcMap(room);
     const okCells = [];
@@ -17460,7 +17481,9 @@ io.on('connection', (socket) => {
     const _ed = roomDims(currentAvatarRoom);
     const cx = Math.max(0, Math.min(_ed.cols * TERRAIN_CELL, x)), cy = Math.max(0, Math.min(_ed.rows * TERRAIN_CELL, y));
     const rr = Math.max(TERRAIN_CELL / 2, Math.min(160, r));   // floor = one fine tile's half-extent so the client's smallest (1-cell) brush isn't inflated server-side
-    const m = (op === 'paint') ? (Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;  // material id 1..255 (carve = 0)
+    // material id 1..255 (carve = 0). ⭐ A custom LIQUID resolves to the built-in it flows as before anything
+    // else looks at it — see `liqBaseSrv`. Everything below this line therefore only ever handles the six.
+    const m = (op === 'paint') ? liqBaseSrv(roomMats[currentAvatarRoom], Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;
     const sq = shape === 'square';
     // ⭐ ARM THE DRAIN CHECK BY USING ONE. `liquidCfg.sinks` ships off because drain blocks are a test tool and
     // looking for them costs ~3% of the liquid tick in every world that has none (see `sinkOn`). Painting one
@@ -17623,7 +17646,11 @@ io.on('connection', (socket) => {
     let changed = false;
     for (let k = 0; k + 1 < cells.length; k += 2) {
       const i = cells[k] | 0;
-      const v = Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0));
+      // ⭐ Same substitution as `terrain-edit`: a pasted or undone custom liquid is stored as the liquid it
+      // flows as. Cells captured out of the grid are already built-ins, so this only fires on a clip that
+      // predates the fix or one written straight from a material id.
+      const v = liqBaseSrv(mats, Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0)));
+      cells[k + 1] = v;                                     // …and the rebroadcast below carries what was STORED, not what was asked for
       if (i >= 0 && i < grid.length) { if (grid.g(i) !== v) { grid.s(i, v); changed = true; } hp.s(i, v ? matStrengthSrv(mats, v) : 0); }
       // Same rule for an explicit cell write (undo / paste / a test scene): anything that is no longer the liquid it
       // was drops its source flag. Only a cell that stays a liquid keeps refilling.
