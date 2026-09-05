@@ -25,6 +25,14 @@
     GRAVITY_APEX_MULT: 0.68, APEX_VY_THRESH: 0.38,
     JUMP_VY: -14, MAX_VY: 22,
     ACCEL: 0.75, DECEL: 0.68, MAX_VX: 5.0,
+    // ⭐ WHAT BODY SIZE COSTS AND BUYS. Exponents on the size multiplier, so one number covers the whole range
+    // instead of a table: "as you get larger you move slower and can't jump as high, and vice versa".
+    // ⚠️ THEY LIVE HERE, NOT IN THE CLIENT'S `moveCfg`, and that is not a filing decision — this file runs on
+    // both machines and must produce identical numbers from identical state. A debug dial the client could
+    // change would be a sim that disagrees with the server about how fast you are.
+    // Over the shipped 0.6..1.4 range: speed runs 1.29× down to 0.85×, jump HEIGHT 1.42× down to 0.79×.
+    SIZE_SPEED_POW: -0.5,
+    SIZE_JUMP_POW: -0.35,
     AIR_ACCEL: 0.52, AIR_DECEL: 0.985,
     COYOTE_FRAMES: 7, JUMP_BUFFER_FRAMES: 10,
     WALL_SLIDE_VY: 1.5, WALL_SLIDE_VY_FAST: 6,   // hold ↓ on a wall to slide down faster
@@ -103,6 +111,14 @@
       coyote: 0, jumpBuffer: 0, fallThroughIdx: -1,
       grabbing: null, grabbedBy: null,
       noCollideId: null, noCollideTicks: 0,   // post-throw collision grace
+      // ⭐ BODY SIZE, as a multiplier of the default (1 = the 40px body every avatar used to be). It is part of
+      // the SIM STATE and not a client-side cosmetic, because it changes the collision box, the walk speed, the
+      // jump and how far a shove moves you — all of which two machines have to agree about or prediction and
+      // authority drift apart. Defaults to 1, so a state that never sets it behaves exactly as before.
+      // ⚠️ Everything below reads `sizeOf(s)`, never `s.sizeK` directly, so an OLD state object arriving from
+      // anywhere (an un-migrated snapshot, a peer on a previous build) is a full-size body rather than a
+      // zero-size one — which would be a body that fits through nothing and collides with no one.
+      sizeK: 1,
       // input edge memory
       prevJump: false, prevDown: false, prevRespawn: false, prevGrab: false,
       grab: false,        // latest grab-held flag (consumed by resolveGrabThrow)
@@ -110,31 +126,48 @@
     };
   }
 
+  // ---- Body size ----
+  // ⭐ ONE READER FOR THE WHOLE FILE. Clamped rather than trusted: `sizeK` arrives from a client packet on the
+  // relay, and a body of size 0 (or 40) is not a small avatar, it is a hole in every collision test here.
+  // ⚠️ THE BOUNDS MUST MATCH THE CLIENT'S SIZE RANGE. 3..7 cells of 8px against a 40px default is 0.6..1.4.
+  function sizeOf(s) { const k = (s && s.sizeK) || 1; return k < 0.6 ? 0.6 : (k > 1.4 ? 1.4 : k); }
+  function bodyW(s) { return C.AV_W * sizeOf(s); }
+  function bodyH(s) { return C.AV_H * sizeOf(s); }
+  function bodyR(s) { return C.BLOB_R * sizeOf(s); }
+  // ⚠️ MASS GOES AS THE SQUARE, not as the radius — these are discs, and "bigger shoves smaller" only reads
+  // right if the difference is more than linear. A 7-cell blob is 5.4× the mass of a 3-cell one, so a collision
+  // between them moves the small one almost all of the way, which is what the report asked for at both ends
+  // ("bigger… launch less far", "smaller… get launched further").
+  function massOf(s) { const k = sizeOf(s); return k * k; }
+  function maxVxOf(s) { return C.MAX_VX * Math.pow(sizeOf(s), C.SIZE_SPEED_POW); }
+  function jumpVyOf(s) { return C.JUMP_VY * Math.pow(sizeOf(s), C.SIZE_JUMP_POW); }
+
   // ---- Platform + bounds collision (mirror of client resolveStage*) ----
   function resolveStageCollisions(s, P) {
     s.onGround = false;
-    if (s.fallThroughIdx >= 0 && (s.y - C.AV_H) > P[s.fallThroughIdx].y + P[s.fallThroughIdx].h) s.fallThroughIdx = -1;
+    if (s.fallThroughIdx >= 0 && (s.y - bodyH(s)) > P[s.fallThroughIdx].y + P[s.fallThroughIdx].h) s.fallThroughIdx = -1;
     for (let i = 0; i < P.length; i++) {
       if (i === s.fallThroughIdx) continue;
       const p = P[i];
-      const al = s.x - C.AV_W / 2, ar = s.x + C.AV_W / 2;
-      const at = s.y - C.AV_H, ab = s.y;
+      const hw = bodyW(s) / 2;
+      const al = s.x - hw, ar = s.x + hw;
+      const at = s.y - bodyH(s), ab = s.y;
       if (ar <= p.x || al >= p.x + p.w || ab <= p.y || at >= p.y + p.h) continue;
       const oTop = ab - p.y, oBot = (p.y + p.h) - at;
       if (s.vy >= 0 && oTop < oBot) { s.y -= oTop; s.vy = 0; s.onGround = true; break; }
     }
   }
   function resolveStageBounds(s) {
-    const WW = boundsW(s), WH = boundsH(s);
-    if (s.x - C.AV_W / 2 < 0) {
-      s.x = C.AV_W / 2; s.vx = 0;
+    const WW = boundsW(s), WH = boundsH(s), hw = bodyW(s) / 2, bh = bodyH(s);
+    if (s.x - hw < 0) {
+      s.x = hw; s.vx = 0;
       if (!s.onGround && s.vy > 0) s.wallSlideDir = -1;
     }
-    if (s.x + C.AV_W / 2 > WW) {
-      s.x = WW - C.AV_W / 2; s.vx = 0;
+    if (s.x + hw > WW) {
+      s.x = WW - hw; s.vx = 0;
       if (!s.onGround && s.vy > 0) s.wallSlideDir = 1;
     }
-    if (s.y - C.AV_H < 0) { s.y = C.AV_H; if (s.vy < 0) s.vy = 0; }
+    if (s.y - bh < 0) { s.y = bh; if (s.vy < 0) s.vy = 0; }
     if (s.y > WH) { s.y = WH; s.vy = 0; s.onGround = true; }
   }
 
@@ -164,7 +197,7 @@
       if (s.onGround || s.vy < 0) {
         s.wallSlideDir = 0;
       } else {
-        s.x = s.wallSlideDir === -1 ? C.AV_W / 2 : boundsW(s) - C.AV_W / 2;
+        s.x = s.wallSlideDir === -1 ? bodyW(s) / 2 : boundsW(s) - bodyW(s) / 2;
         s.vx = 0; s.vy = Math.min(s.vy, wantsDown ? C.WALL_SLIDE_VY_FAST : C.WALL_SLIDE_VY);
       }
     }
@@ -178,19 +211,19 @@
         let onIdx = -1;
         for (let i = 0; i < P.length; i++) {
           const p = P[i];
-          if (Math.abs(s.y - p.y) <= 3 && s.x + C.AV_W / 2 > p.x && s.x - C.AV_W / 2 < p.x + p.w) { onIdx = i; break; }
+          if (Math.abs(s.y - p.y) <= 3 && s.x + bodyW(s) / 2 > p.x && s.x - bodyW(s) / 2 < p.x + p.w) { onIdx = i; break; }
         }
         // index 0 is the canonical ground floor (floorY = P[0].y) — always solid, never droppable.
         if (onIdx > 0 && P[onIdx].y + P[onIdx].h < boundsH(s)) { s.fallThroughIdx = onIdx; s.vy = 5; }
         s.jumpBuffer = 0; s.coyote = 0;
       } else if (canWallJump) {
-        s.vy = C.JUMP_VY; s.vx = -s.wallSlideDir * C.MAX_VX * 1.4;
+        s.vy = jumpVyOf(s); s.vx = -s.wallSlideDir * maxVxOf(s) * 1.4;
         s.facingLeft = s.wallSlideDir > 0; s.hasDoubleJump = true;
         s.wallSlideDir = 0; s.jumpBuffer = 0; s.coyote = 0;
       } else if (canJump) {
-        s.vy = C.JUMP_VY; s.jumpBuffer = 0; s.coyote = 0;
+        s.vy = jumpVyOf(s); s.jumpBuffer = 0; s.coyote = 0;
       } else if (canDoubleJump) {
-        s.vy = C.JUMP_VY * 0.78; s.hasDoubleJump = false; s.jumpBuffer = 0;
+        s.vy = jumpVyOf(s) * 0.78; s.hasDoubleJump = false; s.jumpBuffer = 0;
       }
     }
 
@@ -199,7 +232,8 @@
       if (s.onGround && Math.sign(inputX) !== Math.sign(s.vx) && Math.abs(s.vx) > 1.0) s.vx *= 0.40;
       const accel = s.onGround ? C.ACCEL : C.AIR_ACCEL;
       s.vx += inputX * accel;
-      s.vx = Math.max(-C.MAX_VX, Math.min(C.MAX_VX, s.vx));
+      const mvx = maxVxOf(s);
+      s.vx = Math.max(-mvx, Math.min(mvx, s.vx));
     } else {
       s.vx *= s.onGround ? C.DECEL : C.AIR_DECEL;
       if (Math.abs(s.vx) < 0.05) s.vx = 0;
@@ -282,7 +316,6 @@
 
   // ---- Avatar↔avatar collision (mutual separation + shove) ----
   function resolveCollisions(list, byId) {
-    const minDist = C.BLOB_R * 2.1;
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         const a = list[i], b = list[j];
@@ -290,20 +323,27 @@
         if (a.grabbing === b.id || b.grabbing === a.id) continue;
         if ((a.noCollideId === b.id && a.noCollideTicks > 0) ||
             (b.noCollideId === a.id && b.noCollideTicks > 0)) continue;  // post-throw grace
+        // ⭐ THE CONTACT DISTANCE IS THE PAIR'S, not a constant. `BLOB_R * 2.1` was two default bodies plus 5%
+        // resting slack; written as the sum of the two radii it means the same thing for equal sizes and the
+        // right thing for unequal ones.
+        const minDist = (bodyR(a) + bodyR(b)) * 1.05;
         const dx = b.x - a.x, dy = b.y - a.y;
         const dist = Math.hypot(dx, dy);
         if (dist >= minDist || dist <= 0.5) continue;
         const nx = dx / dist, ny = dy / dist;
         const overlap = minDist - dist;
-        // Separate both equally (x more than y so they don't launch vertically)
-        a.x -= nx * overlap * 0.5; a.y -= ny * overlap * 0.3;
-        b.x += nx * overlap * 0.5; b.y += ny * overlap * 0.3;
+        // ⭐ AND THE SEPARATION IS SHARED BY MASS. Equal sizes give 0.5/0.5, i.e. exactly the old behaviour;
+        // a big body against a small one barely moves while the small one is shoved nearly the whole overlap.
+        // (x more than y so a contact never launches anyone vertically — unchanged.)
+        const ma = massOf(a), mb = massOf(b), sa = mb / (ma + mb), sb = ma / (ma + mb);
+        a.x -= nx * overlap * sa; a.y -= ny * overlap * sa * 0.6;
+        b.x += nx * overlap * sb; b.y += ny * overlap * sb * 0.6;
         // Exchange momentum along the contact normal when approaching = the shove
         const vn = (b.vx - a.vx) * nx + (b.vy - a.vy) * ny;
         if (vn < 0) {
-          const imp = -vn * 0.6;
-          a.vx -= nx * imp; a.vy -= ny * imp * 0.5;
-          b.vx += nx * imp; b.vy += ny * imp * 0.5;
+          const imp = -vn * 1.2;                           // ×2 of the old 0.6, since each side now takes its share
+          a.vx -= nx * imp * sa; a.vy -= ny * imp * sa * 0.5;
+          b.vx += nx * imp * sb; b.vy += ny * imp * sb * 0.5;
         }
       }
     }
@@ -325,19 +365,24 @@
   // being inside the world is not.
   function resolveOwnCollision(s, obstacles, solidAt) {
     if (s.grabbedBy) return;
-    const minDist = C.BLOB_R * 2.1;
     const SLOP = 3;                                      // resting tolerance: don't correct tiny overlaps →
                                                         // kills the two-body feedback jitter when blobs touch
+    // ⚠️ MY SHARE IS THE *OTHER* BODY'S MASS OVER THE TOTAL, exactly as in `resolveCollisions` above — and it
+    // has to be, because this function IS that function's a-side, run on the predicting client. If the two
+    // disagreed about how much of an overlap each body takes, every contact would reconcile.
+    const myMass = massOf(s);
     for (const o of obstacles) {
       if (s.grabbing === o.id) continue;
       if (s.noCollideId === o.id && s.noCollideTicks > 0) continue;
+      const minDist = (bodyR(s) + bodyR(o)) * 1.05;
+      const share = massOf(o) / (myMass + massOf(o));
       const dx = o.x - s.x, dy = o.y - s.y;
       const dist = Math.hypot(dx, dy);
       if (dist >= minDist || dist <= 0.5) continue;
       const nx = dx / dist, ny = dy / dist, overlap = minDist - dist;
       if (overlap > SLOP) {
         const px = s.x, py = s.y;
-        s.x -= nx * (overlap - SLOP) * 0.5; s.y -= ny * (overlap - SLOP) * 0.3;
+        s.x -= nx * (overlap - SLOP) * share; s.y -= ny * (overlap - SLOP) * share * 0.6;
         // Only ever VETO a move that puts us somewhere bad; never veto one that was already bad (being nudged
         // while stuck must stay possible, or a blob buried by a terrain edit could never be pushed free).
         if (solidAt && solidAt(s.x, s.y) && !solidAt(px, py)) {
@@ -347,7 +392,7 @@
       }
       const ovx = o.vx || 0, ovy = o.vy || 0;
       const vn = (ovx - s.vx) * nx + (ovy - s.vy) * ny;
-      if (vn < -0.6) { const imp = -vn * 0.6; s.vx -= nx * imp; s.vy -= ny * imp * 0.5; } // ignore interpolation-jitter rel-vel
+      if (vn < -0.6) { const imp = -vn * 1.2 * share; s.vx -= nx * imp; s.vy -= ny * imp * 0.5; } // ignore interpolation-jitter rel-vel; `share` = ×0.6 between equals, as before
     }
   }
 
@@ -363,6 +408,7 @@
       grabbing: s.grabbing, grabbedBy: s.grabbedBy,
       noCollideId: s.noCollideId, noCollideTicks: s.noCollideTicks,
       prevJump: s.prevJump, prevDown: s.prevDown, prevGrab: s.prevGrab, prevRespawn: s.prevRespawn,
+      sizeK: s.sizeK,
       seq: s.lastSeq
     };
   }
@@ -376,11 +422,19 @@
     s.grabbing = a.grabbing; s.grabbedBy = a.grabbedBy;
     s.noCollideId = a.noCollideId; s.noCollideTicks = a.noCollideTicks;
     s.prevJump = a.prevJump; s.prevDown = a.prevDown; s.prevGrab = a.prevGrab; s.prevRespawn = a.prevRespawn;
+    // ⚠️ ONLY IF THE SNAPSHOT CARRIES ONE. Size is owned by the player, not by authority: the client sets it
+    // and tells everyone. A snapshot from a server build that does not know about it would otherwise reset
+    // you to full size on every reconciliation — a body that changes shape whenever a packet lands.
+    if (a.sizeK != null) s.sizeK = a.sizeK;
     s.lastSeq = a.seq;
   }
 
   return {
     C, STAGE_LAYOUTS, layoutIndex, platformsFor, floorY, setBounds, boundsW, boundsH,
-    createState, stepMovement, resolveGrabThrow, resolveCollisions, resolveOwnCollision, snapshot, applySnapshot
+    createState, stepMovement, resolveGrabThrow, resolveCollisions, resolveOwnCollision, snapshot, applySnapshot,
+    // ⭐ EXPORTED so the client asks THIS FILE what a body's dimensions are, rather than keeping a second
+    // opinion. The clamp, the exponents and the mass law are physics and belong to the sim; a client that
+    // computed its own would be the two-lists-of-materials bug in another costume.
+    sizeOf, bodyW, bodyH, bodyR, massOf, maxVxOf, jumpVyOf
   };
 });
