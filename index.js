@@ -10733,30 +10733,109 @@ registerLibrary({
   },
 });
 
-// Layer-2 terrain-TEMPLATE library — a multi-cell terrain STAMP {name,w,h,cells} (the Select-tool
-// `terrainTemplates`), stored as a JSON content blob. (Whole Worlds share via upload+Remix, not here.)
+// ══ THE SHARED CREATION LIBRARY — anything somebody can put down ══════════════════════════════════════════
+// ⭐⭐ ONE STORE, TWO DOORS, AND THAT IS THE WHOLE DESIGN. A creation is a CLIP: a patch of terrain, a set of
+// placed things, and the block definitions those cells refer to. So "share this sign" and "share this corner of
+// my level" are the same record with different parts filled in — one browse, one search, one quota, one
+// takedown button — and a contraption made of four platforms and a picture shares as readily as one plank.
+// ⚠️ IT REPLACES THE TEMPLATE LIBRARY, which was this minus the single-thing case and minus the blocks. A
+// template stored raw material NUMBERS and no definitions, so a shared patch built out of somebody's own blocks
+// arrived meaning whatever those numbers happened to mean in the destination Level — invisible, and wrong.
+const CREATION_MAX_BYTES = 600_000;
+const CREATION_OBJS_MAX  = 200;      // the clipboard's own cap
+const CREATION_MATS_MAX  = 160;      // a Level has 160 custom-block slots, so more than that could never land
+const CREATION_DIM_MAX   = 400;      // cells across / down, as templates had
+const CREATION_STR_MAX   = 8192;     // any one string in the blob (a stamp's content is the longest legitimate one)
+const CREATION_NODES_MAX = 40000;    // total values walked — a bound on shape as well as on size
+// 🟥 A REFERENCE, NEVER BYTES — the shared-face library's rule, and it has to hold here for the same reason.
+// A creation carries pictures (a painting's layers, a stamp's image) and every one of them travels as an
+// `i:<hash>` into the picture store, which has its OWN size cap, per-user count and takedown. Let a `data:`
+// URL through and this table becomes a second, unbudgeted place to put a megabyte and call it a picture.
+// ⚠️ Written as a walk over the WHOLE blob rather than as a list of fields to check. A creation grows new
+// fields every increment; a check that names them is a check that stops covering the newest one in silence.
+function creationScan(v, depth, st) {
+  if (++st.n > CREATION_NODES_MAX || depth > 12) return false;
+  if (v == null || typeof v === 'number' || typeof v === 'boolean') return true;
+  if (typeof v === 'string') {
+    if (v.length > CREATION_STR_MAX) return false;
+    if (/^\s*data:/i.test(v)) { st.bytes = true; return false; }
+    return true;
+  }
+  if (Array.isArray(v)) { for (const x of v) if (!creationScan(x, depth + 1, st)) return false; return true; }
+  if (typeof v === 'object') { for (const k of Object.keys(v)) { if (k.length > 64) return false; if (!creationScan(v[k], depth + 1, st)) return false; } return true; }
+  return false;                                                    // functions, symbols — not something JSON gave us
+}
+// One custom block travelling with a creation. The same shape `block-lib` stores, checked the same way: these
+// are handed back to `mat-define` on the way in, which validates them again in its own terms.
+function creationMat(d) {
+  if (!d || typeof d !== 'object') return null;
+  if (!/^#[0-9a-f]{6}$/i.test(d.fill || '') || !/^#[0-9a-f]{6}$/i.test(d.cap || '')) return null;
+  return d;
+}
 registerLibrary({
-  path: 'template-lib', table: 'shared_templates', perUser: 60, searchCol: 'title', descCol: 'descr',
-  cols: [{ name: 'title', type: 'TEXT' }, { name: 'descr', type: 'TEXT' }, { name: 'content', type: 'TEXT' }, { name: 'w', type: 'INTEGER' }, { name: 'h', type: 'INTEGER' }, { name: 'size_bytes', type: 'INTEGER' }],
+  path: 'creation-lib', table: 'shared_creations', perUser: 60, searchCol: 'title', descCol: 'descr', facetCol: 'facets',
+  cols: [{ name: 'title', type: 'TEXT' }, { name: 'descr', type: 'TEXT' }, { name: 'content', type: 'TEXT' },
+         { name: 'facets', type: 'TEXT' }, { name: 'w', type: 'INTEGER' }, { name: 'h', type: 'INTEGER' },
+         { name: 'n_objs', type: 'INTEGER' }, { name: 'size_bytes', type: 'INTEGER' }],
   validate(body) {
-    const title = (body.title || '').toString().trim().slice(0, 60) || 'Template';
+    const title = (body.title || '').toString().trim().slice(0, 60) || 'Creation';
     const descr = (body.desc || '').toString().trim().slice(0, 300);
     let t;
     try { t = typeof body.content === 'string' ? JSON.parse(body.content) : body.content; } catch (e) { return null; }
     if (!t || typeof t !== 'object') return null;
+    const st = { n: 0, bytes: false };
+    if (!creationScan(t, 0, st)) return null;
     const w = t.w | 0, h = t.h | 0;
-    if (w < 1 || h < 1 || w > 400 || h > 400) return null;
-    if (!Array.isArray(t.cells) || t.cells.length !== w * h) return null;
-    if (!t.cells.every(v => Number.isInteger(v) && v >= 0 && v <= 255)) return null;   // material ids
-    // Optional non-terrain objects (props/markers) captured with the template, clip-relative (dx,dy).
+    if (w < 1 || h < 1 || w > CREATION_DIM_MAX || h > CREATION_DIM_MAX) return null;
+    // ⭐ RUN-LENGTHS, NOT A CELL PER NUMBER. A creation whose terrain is empty — one shared sign — is two
+    // numbers instead of sixteen thousand zeroes, and a real patch of level is a fraction of what a template
+    // cost. `[value, count]` pairs, and the counts have to add up to the stated footprint exactly.
+    if (!Array.isArray(t.runs)) return null;
+    let total = 0, solid = 0;
+    for (const run of t.runs) {
+      if (!Array.isArray(run) || run.length !== 2) return null;
+      const v = run[0] | 0, n = run[1] | 0;
+      if (v < 0 || v > 255 || n < 1) return null;
+      total += n; if (v) solid += n;
+      if (total > w * h) return null;
+    }
+    if (total !== w * h) return null;
     let objs = [];
-    if (Array.isArray(t.objs)) { if (t.objs.length > 200) return null; objs = t.objs; }
-    const content = JSON.stringify({ name: (t.name || title).toString().slice(0, 40), w, h, cells: t.cells, objs });
-    if (content.length > 600_000) return null;
-    return { title, descr, content, w, h, size_bytes: content.length };
+    if (Array.isArray(t.objs)) { if (t.objs.length > CREATION_OBJS_MAX) return null; objs = t.objs; }
+    if (!solid && !objs.length) return null;                       // nothing in it at all
+    const mats = {};
+    if (t.mats && typeof t.mats === 'object') {
+      const keys = Object.keys(t.mats);
+      if (keys.length > CREATION_MATS_MAX) return null;
+      for (const k of keys) { if (!/^\d{1,3}$/.test(k)) return null; const d = creationMat(t.mats[k]); if (!d) return null; mats[k] = d; }
+    }
+    const content = JSON.stringify({ name: (t.name || title).toString().slice(0, 40), w, h, runs: t.runs, objs, mats });
+    if (content.length > CREATION_MAX_BYTES) return null;
+    // What it is, so the browse can be filtered to the kind you came looking for. Derived here rather than
+    // taken from the client: a facet is what the row can be searched by, and a client that named its own would
+    // be deciding what everybody else's search finds.
+    const f = new Set();
+    for (const o of objs) {
+      const ty = (o && typeof o.type === 'string') ? o.type : '';
+      if (ty === 'painting') { f.add('painting'); if (Array.isArray(o.frames) && o.frames.length > 1) f.add('animated'); }
+      else if (ty === 'sign') f.add('sign');
+      else if (ty === 'stamp') f.add('stamp');
+      else if (ty === 'platform') f.add('platform');
+      else if (ty === 'stroke') f.add('drawing');
+      else if (ty === 'region') f.add('area');
+      else if (ty) f.add('marker');
+      if (o && (o.path || o.spin || o.osc)) f.add('moving');
+      if (o && Array.isArray(o.poses) && o.poses.length) f.add('poses');
+    }
+    if (solid) f.add('terrain');
+    if (objs.length + (solid ? 1 : 0) > 1) f.add('scene');
+    const facets = '|' + [...f].join('|') + '|';
+    return { title, descr, content, facets, w, h, n_objs: objs.length, size_bytes: content.length };
   },
   mapRow(r, me) {
-    return { id: r.id, title: r.title, desc: r.descr || '', author: r.author_name, mine: r.author_id === me, w: r.w, h: r.h, likes: r.likes || 0, downloads: r.downloads, created_at: r.created_at, content: r.content };
+    return { id: r.id, title: r.title, desc: r.descr || '', facets: r.facets || '', author: r.author_name,
+             mine: r.author_id === me, w: r.w, h: r.h, objs: r.n_objs | 0, likes: r.likes || 0,
+             downloads: r.downloads, created_at: r.created_at, content: r.content };
   },
 });
 
