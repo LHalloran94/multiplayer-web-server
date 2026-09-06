@@ -3600,7 +3600,7 @@ const MAX_OBJECTS_PER_ROOM = 150;  // Phase 6: per-Level cap on USER-placed obje
 // OBJECT rather than a new kind of thing so that it inherits saving, publishing, hydration, the playable-band
 // clamp and a build-options panel for nothing. It is never solid and never collides; its whole content is
 // "am I inside it", which the client reports and the rule engine consumes.
-const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal', 'region', 'sign']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter); region = a named area rules can ask about
+const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal', 'region', 'sign', 'painting']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter); region = a named area rules can ask about
 const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
@@ -12907,6 +12907,29 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             w: clampN(data.w, 16, 4000, 240), h: clampN(data.h, 16, 4000, 160),
             hue: clampN(data.hue, 0, 360, 190),
             hp: null };                                    // never breakable — there is nothing there to break
+  } else if (type === 'painting') {
+    // #339 — a painting placed as a PICTURE. Stored as it is authored: a palette and run-length-encoded cell
+    // indices, which is both the smallest form and the one that still means something (a PNG would not survive
+    // being re-coloured or turned back into blocks).
+    // ⚠️ EVERY BOUND HERE IS A WIRE BOUND. Each of these goes out to every client in the room and is replayed to
+    // every joiner, so an unbounded run list or palette is a way to make a room unloadable for everybody in it.
+    if (!isFinite(data.x) || !isFinite(data.y)) return null;
+    const cols = clampN(data.cols, 1, 128, 32), rows = clampN(data.rows, 1, 128, 32);
+    if (!Array.isArray(data.palette) || !Array.isArray(data.runs)) return null;
+    const palette = data.palette.slice(0, 256).map(v => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v)) ? v : null);
+    const runs = [];
+    let total = 0;
+    for (const r of data.runs) {
+      if (!Array.isArray(r) || r.length < 2) continue;
+      const v = Math.max(0, Math.min(255, r[0] | 0)), n = Math.max(0, Math.min(cols * rows, r[1] | 0));
+      if (!n) continue;
+      runs.push([v, n]); total += n;
+      if (runs.length > 4096 || total > cols * rows) break;     // a run list longer than the picture is nonsense
+    }
+    obj = { id, type, ownerId, owner: ownerName,
+            x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
+            cols, rows, w: cols * TERRAIN_CELL, h: rows * TERRAIN_CELL, palette, runs,
+            hp: data.breakable === false ? null : 2 };
   } else if (type === 'sign') {
     // #339 — author-written words in the world. The only object here whose content is free text, so it is the
     // only one that needs a length cap and a line cap: a "sign" carrying ten thousand characters is a payload
@@ -17107,7 +17130,7 @@ io.on('connection', (socket) => {
       if (Array.isArray(obj.pts)) for (const p of obj.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
       if (obj.path && Array.isArray(obj.path.pts)) for (const p of obj.path.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
     }
-    if (type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal' && type !== 'region' && type !== 'sign') {  // no building solids on the spawn (world mode); non-solid flags, regions + signs → allowed
+    if (type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal' && type !== 'region' && type !== 'sign' && type !== 'painting') {  // no building solids on the spawn (world mode); the non-solid ones — flags, regions, signs, paintings — are allowed
       const clear = spawnClearRect(currentAvatarRoom);
       if (clear) {
         let bx0, by0, bx1, by1;
