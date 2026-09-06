@@ -12939,6 +12939,20 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       obj.frames = data.frames.slice(0, 16).map(cleanRuns).filter(r => r.length);
       if (obj.frames.length > 1) obj.fps = clampN(data.fps, 1, 24, 6); else delete obj.frames;
     }
+    // Pictures sitting behind the cells. ⚠️ REFERENCES ONLY — the same `i:<hash>` or web address a face picture
+    // uses, capped in length. A painting is broadcast to everyone in the room and replayed to every joiner, so
+    // an inline `data:` image here would be megabytes per object; the picture store exists for exactly this.
+    if (Array.isArray(data.images) && data.images.length) {
+      const imgs = [];
+      for (const im of data.images.slice(0, 8)) {
+        if (!im || typeof im.src !== 'string' || im.src.length > 400 || !/^(i:[0-9a-f]{1,32}|https?:\/\/\S+)$/i.test(im.src)) continue;
+        if (!isFinite(im.x) || !isFinite(im.y) || !isFinite(im.w) || !isFinite(im.h)) continue;
+        imgs.push({ src: im.src, x: clampN(im.x, -cols, cols * 2, 0), y: clampN(im.y, -rows, rows * 2, 0),
+                    w: clampN(im.w, 0.25, cols * 2, 8), h: clampN(im.h, 0.25, rows * 2, 8),
+                    rot: clampN(im.rot, 0, 359, 0) });
+      }
+      if (imgs.length) obj.images = imgs;
+    }
   } else if (type === 'sign') {
     // #339 — author-written words in the world. The only object here whose content is free text, so it is the
     // only one that needs a length cap and a line cap: a "sign" carrying ten thousand characters is a payload
