@@ -13009,6 +13009,25 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
   // this project has hit seven times).
   // ⚠️ THE BOUNDS ARE UNCHANGED and they are wire bounds: 64 waypoints, clamped into the room, because every
   // one of them is replayed to every joiner for as long as the object exists.
+  // ⭐⭐ #339 — THE POSES THIS THING CAN BE PUT INTO, stored as OFFSETS from where it stands rather than as
+  // absolute places. That is what lets a door be dragged somewhere else and still open the same way: move it and
+  // its poses move with it, because they were never pinned to a spot on the map.
+  // ⚠️ Every bound here is a wire bound. Eight poses, short names, offsets clamped to a room's worth of travel —
+  // this list is replayed to every joiner for as long as the object exists.
+  if (obj && Array.isArray(data.poses) && data.poses.length) {
+    const out = [];
+    for (const p of data.poses.slice(0, 8)) {
+      if (!p || typeof p.n !== 'string') continue;
+      const n = p.n.trim().slice(0, 24); if (!n) continue;
+      if (out.some(q => q.n === n)) continue;              // two poses with one name is a rule that cannot be aimed
+      out.push({ n,
+        dx: clampN(p.dx, -WW, WW, 0), dy: clampN(p.dy, -WH, WH, 0),
+        da: clampN(p.da, -Math.PI * 2, Math.PI * 2, 0),
+        fr: Math.max(0, Math.min(15, p.fr | 0)),           // which frame an animated picture freezes on (0 = keep playing)
+        hid: p.hid ? 1 : 0 });
+    }
+    if (out.length) obj.poses = out;
+  }
   if (obj) {
     obj.spin = clampN(data.spin, -0.012, 0.012, 0);        // continuous rotation (rad/ms; 0 = still)
     if (!obj.spin) delete obj.spin;                        // …and a still thing carries no key at all
@@ -13326,7 +13345,11 @@ const RULE_ACTS   = new Set(['give', 'take', 'add', 'set', 'hide', 'show', 'move
                              // is written with the words that already existed.
                              // ⭐ `endgame` ends the whole match rather than one round of it, which is what a final standings screen needs
 // something to hang on. A round ends and another begins; a GAME ends, is shown, and goes back to the lobby.
-                             'wait', 'spawn', 'despawn', 'remember', 'forget', 'teams', 'endgame']);
+                             // ⭐⭐ #339 — `pose` is the verb that makes a thing DO something rather than merely
+                             // appear or vanish. `hide`/`show` could already switch a door for a hole in the
+                             // wall; this opens the door. The poses themselves are authored on the object and
+                             // travel with it, so a rule names one exactly the way it names anything else.
+                             'wait', 'spawn', 'despawn', 'remember', 'forget', 'teams', 'endgame', 'pose']);
 // ⭐⭐ HOW MANY GO ON EACH SIDE IS A NUMBER PER TEAM, NOT A CHOICE FROM A MENU (user, 2026-09-04):
 // *"if somebody comes up with some game idea that requires 3 players on one side, and 7 on the other, that
 // should be possible … hard-coding different possibilities is worse than coding generalized rules that can
@@ -13432,6 +13455,11 @@ function sanitizeRule(raw) {
     if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp'
      || a.do === 'despawn' || a.do === 'remember' || a.do === 'forget') o.tag = ruleTags(a.tag);
     if (a.do === 'moveto') { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); }   // …`to` is one place, deliberately
+    // ⭐ #339 — "put <these things> into <this pose> over <n> seconds". ⚠️ AND THIS LINE IS THE WHOLE ACTION:
+    // the sanitiser rebuilds every action FIELD BY FIELD, so a verb it does not name here arrives stripped of
+    // everything but the verb — it is accepted, stored, fires, and does nothing, with no error anywhere. The
+    // tenth instance of that shape on this project, and the reason `RULE_ACTS` alone was not enough.
+    if (a.do === 'pose')   { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); o.secs = clampRuleNum(a.secs, 0, 60, 0.5); }
     if (a.do === 'spawn')  { o.tag = ruleTags(a.tag); o.to = ruleTag(a.to); o.n = clampRuleNum(a.n, 1, 8, 1); }
     if (a.do === 'wait')   { o.secs = clampRuleNum(a.secs, 0.1, 600, 1); if (a.still) o.still = 1; }
     // ⚠️ A rule written before sizes existed carries a `mode`; it is translated rather than dropped, so a
@@ -13537,6 +13565,12 @@ function gameOf(avRoom) {
       tags: new Map(),      // tagName → Set(playerKey)
       names: new Map(),     // playerKey → display name
       hidden: new Set(),    // object tags currently hidden by a rule
+      // ⭐⭐ #339 — WHICH POSE EACH NAMED THING IS IN, and when it was sent there. NOT where it is: the pose
+      // itself lives on the object (every client already has it), so all the server has to say is which one and
+      // since when, and every client works out the slide from its own clock. That is the same property paths
+      // have — nothing per-tick on the wire — and it is what lets a door open smoothly for everybody at once.
+      // `from` is the pose it was in, so a client that arrives mid-swing draws it mid-swing rather than snapping.
+      poses: new Map(),     // tagName → { to, from, at, ms }
       // ⭐⭐ WHO WON THE RACE FOR IT. "One hidden object, whoever holds it" needs exactly one taker, and this is
       // where that is decided — a `take` claim succeeds only if the tag is neither hidden nor already taken, and
       // the winner is whoever's message the server read first. Same property `drop-take` already enforces for a
@@ -13787,7 +13821,7 @@ function doRuleAct(avRoom, g, a, sid0, key0, ctx, out, depth) {
   if (a.who === 'other' && !sid) return;                   // aimed at somebody this event does not have
   const names = ruleTagList(a.tag);       // every name-taking verb applies to EACH name in the box
   // …and a verb you have chosen but not yet aimed does nothing, rather than being deleted as you type.
-  if (!names.length && ['give', 'take', 'hide', 'show', 'tp', 'moveto'].includes(a.do)) return;
+  if (!names.length && ['give', 'take', 'hide', 'show', 'tp', 'moveto', 'pose'].includes(a.do)) return;
   if (a.do === 'badge' && !a.text) return;
   switch (a.do) {
     case 'give': if (key) for (const n of names) { let s = g.tags.get(n); if (!s) g.tags.set(n, s = new Set()); s.add(key); g.dirty = true; } break;
@@ -13799,6 +13833,22 @@ function doRuleAct(avRoom, g, a, sid0, key0, ctx, out, depth) {
     case 'set':  setNum(g, key, a.num, a.sh, a.v);
                  fireRuleEvent(avRoom, 'reach', { sid, num: a.num }, depth + 1); break;
     case 'hide': for (const n of names) g.hidden.add(n); g.dirty = true; break;
+    // ⭐⭐ #339 — SEND IT TO ONE OF ITS POSES. The server stores WHICH and WHEN and nothing else: the pose's
+    // actual numbers live on the object, which every client already has, so a door opening costs one small
+    // message and then nothing at all while it swings. `from` is whatever it was in, which is what lets a
+    // client that joins mid-swing draw it mid-swing instead of snapping it to the end.
+    // ⚠️ Re-sending the pose it is ALREADY in is ignored rather than restarting the slide — a rule that fires
+    // every tick while somebody stands on a plate would otherwise hold the door permanently half-open.
+    case 'pose': {
+      const to = String(a.to || '').trim().slice(0, 24);
+      const ms = Math.max(0, Math.min(60000, Math.round((a.secs == null ? 0.5 : +a.secs) * 1000)));
+      for (const n of names) {
+        const cur = g.poses.get(n);
+        if (cur && cur.to === to) continue;
+        g.poses.set(n, { to, from: (cur && cur.to) || '', at: Date.now(), ms });
+      }
+      g.dirty = true; break;
+    }
     // ⚠️ Showing something again also makes it TAKEABLE again. Those are one fact, not two: a crown you can see
     // and cannot pick up is a bug nobody would be able to diagnose from inside the game.
     case 'show': for (const n of names) { g.hidden.delete(n); g.taken.delete(n); } g.dirty = true; break;
@@ -14078,7 +14128,7 @@ function beginRuleRound(avRoom, g0) {
   g.ready.clear();
   g.benched.clear();                       // …everyone who was waiting is in this one
   g.nums.clear(); g.shared.clear(); g.tags.clear(); g.badges.clear();
-  g.hidden.clear(); g.taken.clear(); g.flags.clear(); g.timers.clear();
+  g.hidden.clear(); g.taken.clear(); g.flags.clear(); g.timers.clear(); g.poses.clear();
   g.pending.length = 0; g.epoch++;
   g.groups.clear();
   for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);
@@ -14177,7 +14227,11 @@ function ruleStateFor(avRoom, sid) {
               benched: g.benched.has(key) ? 1 : 0,
               secs: g.phase === 'count' ? Math.max(0, Math.ceil((g.countAt - Date.now()) / 1000)) : 0 };
   }
-  return { mine, shared, tags: mytags, marked, badges, off: g.off ? 1 : 0, hidden: [...g.hidden], board: board.slice(0, 8),
+  // ⚠️ SENT AS ABSOLUTE WALL-CLOCK TIMES, not as "started 400ms ago". The client works the slide out from its
+  // own clock, so a relative age would be wrong by however long the message took, and wrong again for a client
+  // that arrives later — which is exactly the case this field exists to get right.
+  const poses = {}; for (const [t, p] of g.poses) poses[t] = { to: p.to, from: p.from, at: p.at, ms: p.ms };
+  return { mine, shared, tags: mytags, marked, badges, off: g.off ? 1 : 0, hidden: [...g.hidden], poses, board: board.slice(0, 8),
            round: Math.max(0, Math.round((Date.now() - g.roundStart) / 1000)), limit: roundLimitOf(avRoom), lobby,
            // ⚠️ The client draws a DRAFT differently — "Testing" rather than a live game — so it has to be told
            // which it is looking at. It is not allowed to work this out for itself: only the server knows
@@ -17058,7 +17112,7 @@ io.on('connection', (socket) => {
       // author writes (`put the world back`), and doing it here as well would make this button destructive in a
       // way its name does not admit to.
       g.nums.clear(); g.shared.clear(); g.tags.clear(); g.badges.clear(); g.wins.clear();
-      g.hidden.clear(); g.taken.clear(); g.groups.clear(); g.timers.clear(); g.flags.clear();
+      g.hidden.clear(); g.taken.clear(); g.groups.clear(); g.timers.clear(); g.flags.clear(); g.poses.clear();
       g.pending.length = 0; g.epoch++;          // …and anything a `wait` had parked, so it cannot land after the reset
       for (const r of (roomRules[avRoom] || [])) if (r.group && r.off) g.groups.add(r.group);
       g.roundStart = Date.now(); g.lastRound = 0;
