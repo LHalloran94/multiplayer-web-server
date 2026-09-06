@@ -17720,6 +17720,24 @@ io.on('connection', (socket) => {
     io.to(currentAvatarRoom).emit('mat-defined', { id, def });
     if (typeof ack === 'function') ack({ id, def });
   });
+  // ⭐ THE WAY BACK TO PLAIN WATER (user, 2026-09-06: *"there needs to be some way to restore the default liquid
+  // block, since currently once you change it you can't change it back"*). A custom liquid is a LOOK worn by one
+  // of the six built-ins for as long as it is defined in this room, so taking it off means undefining it — and
+  // that has to happen HERE, not in one client, or the author restores their water and everyone else keeps
+  // seeing the old one.
+  // ⚠️ ONLY LIQUIDS AND HAZARDS, and that restriction is what makes this safe rather than a way to delete other
+  // people's work. A custom SOLID's id is written into the terrain grid, so undefining one would leave cells
+  // pointing at a material that no longer exists; a custom liquid is never in the grid at all (it is stored as
+  // the liquid it flows as — see `liqBaseSrv`), so nothing can be left dangling.
+  socket.on('mat-undefine', ({ id }, ack) => {
+    const ok = (v) => { if (typeof ack === 'function') ack(!!v); };
+    if (!currentAvatarRoom || !canBuild()) return ok(false);
+    const mats = roomMats[currentAvatarRoom]; const d = mats && mats[id | 0];
+    if (!d || (d.behavior !== 'fluid' && d.behavior !== 'hazard')) return ok(false);
+    delete mats[id | 0];
+    io.to(currentAvatarRoom).emit('mat-undefined', { id: id | 0 });
+    ok(true);
+  });
   socket.on('avatar-object-hit', ({ id, dmg }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     const obj = roomObjects[currentAvatarRoom].get(id);
