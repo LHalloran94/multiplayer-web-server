@@ -12917,19 +12917,28 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     const cols = clampN(data.cols, 1, 128, 32), rows = clampN(data.rows, 1, 128, 32);
     if (!Array.isArray(data.palette) || !Array.isArray(data.runs)) return null;
     const palette = data.palette.slice(0, 256).map(v => (typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v)) ? v : null);
-    const runs = [];
-    let total = 0;
-    for (const r of data.runs) {
-      if (!Array.isArray(r) || r.length < 2) continue;
-      const v = Math.max(0, Math.min(255, r[0] | 0)), n = Math.max(0, Math.min(cols * rows, r[1] | 0));
-      if (!n) continue;
-      runs.push([v, n]); total += n;
-      if (runs.length > 4096 || total > cols * rows) break;     // a run list longer than the picture is nonsense
-    }
+    const cleanRuns = (list) => {
+      const runs = []; let total = 0;
+      for (const r of (Array.isArray(list) ? list : [])) {
+        if (!Array.isArray(r) || r.length < 2) continue;
+        const v = Math.max(0, Math.min(255, r[0] | 0)), n = Math.max(0, Math.min(cols * rows, r[1] | 0));
+        if (!n) continue;
+        runs.push([v, n]); total += n;
+        if (runs.length > 4096 || total > cols * rows) break;   // a run list longer than the picture is nonsense
+      }
+      return runs;
+    };
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-            cols, rows, w: cols * TERRAIN_CELL, h: rows * TERRAIN_CELL, palette, runs,
+            cols, rows, w: cols * TERRAIN_CELL, h: rows * TERRAIN_CELL, palette, runs: cleanRuns(data.runs),
             hp: data.breakable === false ? null : 2 };
+    // An ANIMATED painting carries its frames as well. ⚠️ Sixteen of them, each bounded exactly as the still one
+    // is — the frame count is a multiplier on everything this object costs to send and to keep, so it is the one
+    // number that has to be capped rather than merely validated.
+    if (Array.isArray(data.frames) && data.frames.length > 1) {
+      obj.frames = data.frames.slice(0, 16).map(cleanRuns).filter(r => r.length);
+      if (obj.frames.length > 1) obj.fps = clampN(data.fps, 1, 24, 6); else delete obj.frames;
+    }
   } else if (type === 'sign') {
     // #339 — author-written words in the world. The only object here whose content is free text, so it is the
     // only one that needs a length cap and a line cap: a "sign" carrying ten thousand characters is a payload
