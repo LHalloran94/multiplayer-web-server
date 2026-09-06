@@ -12931,6 +12931,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             cols, rows, w: cols * TERRAIN_CELL, h: rows * TERRAIN_CELL, palette, runs: cleanRuns(data.runs),
+            angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // #339 — a picture can be hung at an angle, and turn
             hp: data.breakable === false ? null : 2 };
     // An ANIMATED painting carries its frames as well. ⚠️ Sixteen of them, each bounded exactly as the still one
     // is — the frame count is a multiplier on everything this object costs to send and to keep, so it is the one
@@ -12969,6 +12970,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             size: clampN(data.size, 8, 96, 18),
             bold: data.bold === true, italic: data.italic === true, under: data.under === true,
             shape: ['plate', 'board', 'oval', 'none'].includes(data.shape) ? data.shape : 'plate',
+            angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // #339 — a sign can be hung at an angle, and swing
             w: clampN(data.w, 8, 2000, 96), h: clampN(data.h, 8, 1200, 40),
             hp: data.breakable === false ? null : 2 };
     if (isFinite(data.bgHue)) obj.bgHue = clampN(data.bgHue, 0, 360, 34);
@@ -12989,7 +12991,6 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             w: clampN(data.w, 24, 400, 96), h: clampN(data.h, 8, 60, 16),
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),
-            spin: clampN(data.spin, -0.012, 0.012, 0),     // continuous rotation (rad/ms; 0 = static)
             boost: clampN(data.boost, -48, 48, 0), updraft: clampN(data.updraft, 0, 30, 0),
             fanLen: clampN(data.fanLen, 0.3, 3, 1),        // fan effective-distance multiplier (× base column height)
             fanMode: ['push', 'pull', 'pulse', 'pulsepush', 'pulsepull', 'alt'].includes(data.fanMode) ? data.fanMode : 'push',
@@ -12999,9 +13000,21 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     if (isFinite(data.topHue)) obj.topHue = clampN(data.topHue, 0, 360, 0);   // custom top-surface colour (round-trips)
     if (isFinite(data.botHue)) obj.botHue = clampN(data.botHue, 0, 360, 0);   // custom body colour (round-trips)
-    if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // rotate around an edge
+  }
+  // ⭐⭐ #339 — MOTION IS VALIDATED ONCE, FOR EVERY KIND OF THING. This block used to sit inside the platform
+  // branch, which is the only reason a sign or a portal could not move: the client could always have sent a
+  // path, and this function would have dropped it on the floor, silently, the way it drops every field it does
+  // not name. Lifted out here it applies to whatever the branches above built — and because it is INLINE rather
+  // than a helper, it survives the probe rigs slicing this file into pieces (the ReferenceError-in-a-guard trap
+  // this project has hit seven times).
+  // ⚠️ THE BOUNDS ARE UNCHANGED and they are wire bounds: 64 waypoints, clamped into the room, because every
+  // one of them is replayed to every joiner for as long as the object exists.
+  if (obj) {
+    obj.spin = clampN(data.spin, -0.012, 0.012, 0);        // continuous rotation (rad/ms; 0 = still)
+    if (!obj.spin) delete obj.spin;                        // …and a still thing carries no key at all
+    if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // turn around an edge, not the middle
     if (data.osc && typeof data.osc === 'object' && isFinite(data.osc.w) && isFinite(data.osc.amp)) {
-      obj.osc = { w: clampN(data.osc.w, -0.25, 0.25, 0),   // oscillating rotation (sweep an arc, no full spin)
+      obj.osc = { w: clampN(data.osc.w, -0.25, 0.25, 0),   // swinging rotation (sweep an arc, no full turn)
                   amp: clampN(data.osc.amp, 0, Math.PI, 0),
                   phase: clampN(data.osc.phase, 0, Math.PI * 2, 0) };
     }
