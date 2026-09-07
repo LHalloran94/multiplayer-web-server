@@ -10813,15 +10813,16 @@ registerLibrary({
     if (content.length > CREATION_MAX_BYTES) return null;
     // ⭐⭐ ONE PRIMARY KIND, AND IT IS A PARTITION. Every creation is exactly one of: a picture, a sign, a
     // stamp, a platform, a drawing, an area, a marker — or, when it is terrain and/or more than one thing, a
-    // PIECE OF LEVEL. The first version let a creation carry several kind labels at once plus a vague
+    // TEMPLATE. The first version let a creation carry several kind labels at once plus a vague
     // "several things", which made the Kind filter a pile of overlapping flags rather than a choice: the user
     // said so ("not remotely instructive as to what it means"). One thing on its own is that thing; anything
-    // bigger is a piece of level, which is what you would call it out loud.
+    // bigger is a TEMPLATE — the user's word, 2026-09-07, and the one this project already uses for a saved
+    // patch of level you stamp down again.
     // ⚠️ Derived HERE rather than taken from the client: a facet is what the row can be searched by, and a
     // client that named its own would be deciding what everybody else's search finds.
     const KIND_OF = { painting: 'picture', sign: 'sign', stamp: 'stamp', platform: 'platform', stroke: 'drawing', region: 'area' };
     const one = (objs.length === 1 && !solid) ? objs[0] : null;
-    const kind = one ? (KIND_OF[(one && typeof one.type === 'string') ? one.type : ''] || 'marker') : 'piece';
+    const kind = one ? (KIND_OF[(one && typeof one.type === 'string') ? one.type : ''] || 'marker') : 'template';
     // …and the qualities, which are things you might genuinely want to filter ON rather than restatements of
     // the kind: does it move by itself, does it animate, has the author given it named arrangements.
     const f = new Set([kind]);
