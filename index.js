@@ -3553,6 +3553,67 @@ const roomAvatars = {}; // legacy (old position-broadcast model; kept for back-c
 const roomAvt = {};     // room → Set<socketId> in the avatar P2P DataChannel mesh (Stage 6 pivot)
 const roomObjects = {}; // room → Map<objId,obj>  (Stage 6 environment props; in-memory, persist till restart)
 let objSeq = 0;
+// ⭐⭐ #178/#189/#180 + #98 — WHAT HAS HAPPENED TO ONE PARTICULAR OBJECT. The rules engine keys everything on a
+// NAME, and a name is a class: `hide [floor]` hides every floor called that at once. Everything in list 13's
+// "reacts when you step on THIS one" family — a crumbling platform, a push-plate, a piston — is about the
+// single one you touched, so it needs a store keyed by id, and this is it.
+//
+// ⭐ IT HOLDS A MOMENT, NOT A STATE. `act` is simply WHEN the trigger landed; the wait, the effect and the
+// coming-back all live in `obj.react`, which every client already has. So a floor giving way is one four-byte
+// message and then nothing at all while it falls, and a client that arrives halfway through draws it halfway
+// through — the same property poses have, and the reason neither needs a tick.
+// ⚠️ NEVER STORED. This is what is happening right now, not how the Level was authored; a save carries the
+// reaction and not the fact that somebody once stood on it.
+// ⚠️ Deliberately NOT inside `gameOf`: a reacting object must work in a Level with no rules at all, and the
+// rules game is only created — and only ticked — for rooms that have some.
+const roomObjSt = {};   // room → Map<objId, { act?: ms, hid?: 1, pose?: {to,from,at,ms} }>
+function objStOf(avRoom) { return roomObjSt[avRoom] || (roomObjSt[avRoom] = new Map()); }
+function objStWire(avRoom) {
+  const m = roomObjSt[avRoom]; if (!m || !m.size) return null;
+  const o = {}; for (const [id, s] of m) o[id] = s;
+  return { o };
+}
+function broadcastObjSt(avRoom) { const w = objStWire(avRoom); io.to(avRoom).emit('obj-state', w || { o: {} }); }
+// ⭐ START THIS ONE'S REACTION, IF IT HAS ONE AND IS NOT ALREADY MID-WAY THROUGH IT. Everything about the
+// timing is derived by the clients from `obj.react`, so all that happens here is a timestamp and a broadcast.
+// ⚠️ A trigger arriving while the thing is still crumbling is DROPPED, not queued: a rule that fires every tick
+// while somebody stands on a plate would otherwise hold it permanently mid-collapse. Same reasoning as `pose`
+// ignoring the pose it is already in.
+// ⚠️ `back: 0` means it never comes back, so `once` and a zero return are two ways of saying the same thing and
+// both leave the entry in place for ever — which is correct: the entry IS the record that it is gone.
+function armObjReact(avRoom, id, on) {
+  const map = roomObjects[avRoom]; if (!map) return;
+  const obj = map.get(id); const R = obj && obj.react;
+  if (!R || R.on === 'timer' || R.on !== on) return;    // a timer needs no server at all — see `obj.react`
+  sweepObjSt(avRoom);                                   // the trigger is also what tidies up after the last one
+  const st = objStOf(avRoom);
+  const cur = st.get(id);
+  const now = Date.now();
+  if (cur && cur.act != null) {
+    if (R.once) return;                                          // spent, permanently
+    const doneAt = cur.act + R.wait * 1000 + (R.back > 0 ? R.back * 1000 : Infinity);
+    if (now < doneAt) return;                                    // still acting / still away
+  }
+  const rec = cur || {}; rec.act = now; st.set(id, rec);
+  broadcastObjSt(avRoom);
+}
+// Drop the records of reactions that have finished and left nothing behind, so a busy Level's map does not grow
+// for the length of the session. ⚠️ A reaction that never returns (`back: 0`) is KEPT — that entry is the only
+// record that the thing is gone.
+function sweepObjSt(avRoom) {
+  const st = roomObjSt[avRoom]; if (!st || !st.size) return;
+  const map = roomObjects[avRoom]; const now = Date.now();
+  for (const [id, s] of [...st]) {
+    if (s.hid || s.pose) continue;                               // a rule put this here; not ours to sweep
+    const obj = map && map.get(id);
+    if (!obj) { st.delete(id); continue; }                       // the object itself is gone
+    const R = obj.react;
+    if (!R || s.act == null) { st.delete(id); continue; }
+    if (R.once || R.back <= 0) continue;                         // permanent by design
+    if (now > s.act + (R.wait + R.back) * 1000 + 2000) st.delete(id);
+  }
+  if (!st.size) delete roomObjSt[avRoom];
+}
 // ⭐⭐ …AND THE SAME MAP SEEN BY CHUNK, IN THE OVERWORLD ONLY. `roomObjects` alone is the shape CLAUDE.md has
 // named as a blocker for years: one per-room Map, broadcast whole on every add and replayed entirely on join.
 // That is survivable in a page room (small, bounded by MAX_OBJECTS_PER_ROOM, and its objects belong to a LEVEL —
@@ -12938,6 +12999,13 @@ function emitSnapshotToStalker(stalkeeId, stalkeeUsername, socketId, stalkerId) 
 function buildWorldObject(type, data, id, ownerId, ownerName, room) {
   const _rd = roomDims(room);
   const WW = _rd.cols * TERRAIN_CELL, WH = _rd.rows * TERRAIN_CELL;
+  // ⭐ #166 — HOW MANY HITS THIS TAKES, which was hard-coded at 2 (3 for a drawn line) with only an on/off tick
+  // beside it. Creator-made BLOCKS have had a "takes N hits" dial all along; objects simply never got one, so a
+  // crate and a boulder broke in the same two punches. `breakable: false` still means "never", which is a
+  // different statement from "takes a lot" and stays its own answer rather than becoming hits = ∞.
+  // ⚠️ Inline, not a module-level helper: the probe rigs slice this file into pieces and a bare reference across
+  // a slice boundary throws ReferenceError in a guard and nowhere else — the trap this project has hit seven times.
+  const objHits = (d, dflt) => d.breakable === false ? null : Math.max(1, Math.min(9, (d.hits | 0) || dflt));
   let obj;
   if (type === 'stroke') {
     if (!Array.isArray(data.pts)) return null;
@@ -12952,7 +13020,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     obj = { id, type, ownerId, owner: ownerName, x: sx / pts.length, y: sy / pts.length, pts,
             w: clampN(data.w, 2, 40, 8),
             color: (typeof data.color === 'string' && data.color.length <= 32) ? data.color : '#22c55e',
-            hp: data.breakable === false ? null : 3 };   // indestructible when breakable:false (matches stamps/platforms)
+            hp: objHits(data, 3) };   // indestructible when breakable:false (matches stamps/platforms)
     {                                                        // any stroke can carry a modifier (same clamps as platforms)
       const boost = clampN(data.boost, -48, 48, 0), updraft = clampN(data.updraft, 0, 30, 0);
       if (data.bouncy) obj.bouncy = 1;
@@ -12972,14 +13040,14 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             shape: (data.shape === 'ellipse' || data.shape === 'tri') ? data.shape : 'rect',
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),
             stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
-            hp: data.breakable === false ? null : 2 };   // indestructible when breakable:false
+            hp: objHits(data, 2) };   // indestructible when breakable:false
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // scroll-set base rotation (round-trips like stamps)
-            hp: data.breakable === false ? null : 2 };  // erasable/destructible like other props
+            hp: objHits(data, 2) };  // erasable/destructible like other props
     if (type === 'goal' && isFinite(data.target)) obj.target = Math.max(-1, Math.min(63, data.target | 0));  // series destination Level (-1 = next; Phase 5b)
   } else if (type === 'region') {
     // #98 — a named area. No hp (it is not a thing you can hit), no surface, no modifier: a rectangle and a name.
@@ -13014,7 +13082,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             cols, rows, w: cols * TERRAIN_CELL, h: rows * TERRAIN_CELL, palette, runs: cleanRuns(data.runs),
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // #339 — a picture can be hung at an angle, and turn
-            hp: data.breakable === false ? null : 2 };
+            hp: objHits(data, 2) };
     // An ANIMATED painting carries its frames as well. ⚠️ Sixteen of them, each bounded exactly as the still one
     // is — the frame count is a multiplier on everything this object costs to send and to keep, so it is the one
     // number that has to be capped rather than merely validated.
@@ -13054,7 +13122,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             shape: ['plate', 'board', 'oval', 'none'].includes(data.shape) ? data.shape : 'plate',
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // #339 — a sign can be hung at an angle, and swing
             w: clampN(data.w, 8, 2000, 96), h: clampN(data.h, 8, 1200, 40),
-            hp: data.breakable === false ? null : 2 };
+            hp: objHits(data, 2) };
     if (isFinite(data.bgHue)) obj.bgHue = clampN(data.bgHue, 0, 360, 34);
     if (isFinite(data.inkHue)) obj.inkHue = clampN(data.inkHue, 0, 360, 0);
   } else if (type === 'portal') {
@@ -13066,7 +13134,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // scroll-set base rotation (round-trips like stamps)
             oval: clampN(data.oval, 0, 1, 0),        // ovalness: 0 = circle → 1 = narrow (round-trips; both ends share it)
             hue: clampN(data.hue, 0, 360, 275),     // user-chosen pair colour (round-trips; both ends share it)
-            hp: data.breakable === false ? null : 2 };
+            hp: objHits(data, 2) };
   } else {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type: 'platform', ownerId, owner: ownerName,
@@ -13077,8 +13145,13 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             fanLen: clampN(data.fanLen, 0.3, 3, 1),        // fan effective-distance multiplier (× base column height)
             fanMode: ['push', 'pull', 'pulse', 'pulsepush', 'pulsepull', 'alt'].includes(data.fanMode) ? data.fanMode : 'push',
             fanPeriod: clampN(data.fanPeriod, 0.5, 6, 2),  // pulse/alt cycle length (seconds)
-            hp: data.breakable === false ? null : 2 };     // indestructible when breakable:false
+            hp: objHits(data, 2) };     // indestructible when breakable:false
     if (data.bouncy) obj.bouncy = 1;
+    // ⭐ #173 — SOLID ON EVERY FACE. A platform is a one-way bar by default: land on its top, jump up through it
+    // from underneath, ↓+jump to drop off it. This is the other kind — a bar you cannot get through from any
+    // direction and cannot drop off, which is what a wall, a ceiling and a sealed box are made of. Drawn with
+    // its cap edge running all the way round so the two are told apart at a glance rather than by trial.
+    if (data.solid) obj.solid = 1;
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     if (isFinite(data.topHue)) obj.topHue = clampN(data.topHue, 0, 360, 0);   // custom top-surface colour (round-trips)
     if (isFinite(data.botHue)) obj.botHue = clampN(data.botHue, 0, 360, 0);   // custom body colour (round-trips)
@@ -13142,6 +13215,36 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
   // nowhere else — the trap this track has now hit six times (`wireFanout`, `chunkDroppable`, the domain
   // registry, the pause…). One expression is cheaper than another seam.
   if (obj) { const t = (typeof data.tag === 'string') ? data.tag.trim().slice(0, 24) : ''; if (t) obj.tag = t; }
+  // 🟥 #166 — THE AUTHOR'S NUMBER HAS TO BE ITS OWN FIELD, AND A GUARD CAUGHT THIS RATHER THAN A READING.
+  // `objHits` above turns it into `hp` and stops there — which is right for the live object and quietly wrong
+  // for a saved one, because `snapshotObj` deliberately drops `hp` (that carries DAMAGE, not the author's
+  // choice). So "takes seven hits" placed perfectly, played perfectly, and came back from a publish as two.
+  // Tenth instance of the by-name-rebuild shape on this project.
+  // ⚠️ Stored only when it was actually chosen, so an object nobody set a dial on is byte-identical to before.
+  if (obj && obj.hp != null && (data.hits | 0) > 0) obj.hits = Math.max(1, Math.min(9, data.hits | 0));
+  // ⭐⭐ #178/#189/#180 — WHAT THIS ONE DOES WHEN SOMEBODY STANDS ON IT. A rule points at a NAME, and a name is a
+  // whole class of things: `hide [platform]` hides every platform called that. So a crumbling platform, a
+  // push-plate and a piston cannot be written as rules at all — each is about the ONE you touched. That is what
+  // this is: the reaction belongs to the object, so it is per-instance for nothing.
+  // ⭐ Everything after the trigger is DERIVED, not sent. The server stores only WHEN the trigger landed (see
+  // `roomObjSt`); the wait, the effect and the coming-back are all here on the object, which every client
+  // already has — so a floor crumbling costs one small message and then nothing at all while it falls.
+  // ⚠️ `timer` is not even that: a thing that acts every N seconds is a function of the shared wall clock, so
+  // every client works it out alone and the server never hears about it.
+  // ⚠️ Clamped like every other authored field. `wait`/`back` are seconds because that is what the author types.
+  if (obj && data.react && typeof data.react === 'object') {
+    const R = data.react;
+    const on = ['stand', 'touch', 'hit', 'timer'].includes(R.on) ? R.on : 'stand';
+    const act = ['vanish', 'pose', 'launch', 'shake'].includes(R.do) ? R.do : 'vanish';
+    const r = { on, do: act,
+                wait: clampN(R.wait, 0, 60, 0.6),      // how long after the trigger the effect lands
+                back: clampN(R.back, 0, 60, 3),        // …and how long until it is itself again (0 = never)
+                once: R.once ? 1 : 0 };
+    if (act === 'pose')   r.to = (typeof R.to === 'string') ? R.to.trim().slice(0, 24) : '';
+    if (act === 'launch') { r.power = clampN(R.power, 4, 48, 20); r.dir = clampN(R.dir, -180, 180, 0); }
+    if (on === 'timer')   r.every = clampN(R.every, 0.5, 120, 3);
+    obj.react = r;
+  }
   return obj;
 }
 // ---- Phase 7b: server-side hydration of a PUBLISHED World room (no host present) ----
@@ -13185,6 +13288,10 @@ function hydrateRoomFromBlob(avRoom, blob, keepGame) {
   // ⚠️ Generated scatter is kept: it belongs to the world rather than to the Level being restored, and it is
   // the same exemption the object cap already makes.
   for (const k of [...map.keys()]) if (!(typeof k === 'string' && k.startsWith('world-'))) map.delete(k);
+  // ⚠️ …AND WHAT HAD HAPPENED TO THEM. Every object below is about to be minted under a NEW id, so a record
+  // keyed by the old ones is not merely stale, it is aimed at things that no longer exist. A Level going back
+  // to how it was authored includes its floors being whole again.
+  delete roomObjSt[avRoom];
   let placed = 0;
   for (const src of blob.objects || []) {
     if (placed >= MAX_OBJECTS_PER_ROOM) break;
@@ -13285,6 +13392,7 @@ function maybeResetShowcase(avRoom) {
   let h = null; try { h = publishedHydrationFor(roomId, levelIndex); } catch { return; }
   if (!h || h.durability === 'persistent') return;
   if (roomObjects[avRoom]) roomObjects[avRoom].clear();
+  delete roomObjSt[avRoom];                        // …and what had happened to those objects goes with them
   hydratedAvRooms.delete(avRoom);                  // the next joiner rebuilds it from the blob
 }
 function maybeHydratePublished(avRoom, roomId, levelIndex) {
@@ -13532,6 +13640,12 @@ function sanitizeRule(raw) {
     if (!a || !RULE_ACTS.has(a.do)) continue;
     const o = { do: a.do };
     if (a.who === 'other') o.who = 'other';                // …done to the other person in a two-person event
+    // ⭐⭐ AIMED AT THE ONE THAT TRIGGERED THIS, rather than at everything sharing its name. A name is a CLASS
+    // here — `hide [floor]` hides every floor called that — which is right for a door and wrong for the floor
+    // you just stepped on. This says "that one", and it is what lets one rule serve a hundred identical tiles.
+    // ⚠️ Only means anything for an event that HAS an object in it (touch / take / enter / leave / break); on
+    // any other event the engine finds nothing and the action simply does not fire, rather than misfiring.
+    if (a.it) o.it = 1;
     // …and the same for actions: a verb you have chosen but not yet aimed is kept, and does nothing. See the
     // note on conditions above — dropping it here is what made a half-written rule undo itself as you typed.
     if (a.do === 'give' || a.do === 'take' || a.do === 'hide' || a.do === 'show' || a.do === 'tp'
@@ -13902,6 +14016,24 @@ function doRuleAct(avRoom, g, a, sid0, key0, ctx, out, depth) {
   const [sid, key] = ruleSubj(a, ctx, sid0, key0);
   if (a.who === 'other' && !sid) return;                   // aimed at somebody this event does not have
   const names = ruleTagList(a.tag);       // every name-taking verb applies to EACH name in the box
+  // ⭐⭐ "THE ONE THAT TRIGGERED THIS" — the per-INSTANCE half of list 13. A name is a class, so `hide [floor]`
+  // takes away every floor at once; this takes away the single tile that was stepped on, which is what makes
+  // one rule serve a hundred identical ones. Handled here, ahead of the name walk, because it is a different
+  // question from "which names" rather than a special case of it.
+  // ⚠️ Only hide / show / pose. Everything else in this verb list is about a PERSON or a NUMBER, where "the one
+  // that triggered this" would mean nothing.
+  if (a.it) {
+    if (!ctx || !ctx.oid) return;                        // an event with no object in it: do nothing, quietly
+    const st = objStOf(avRoom); const rec = st.get(ctx.oid) || {};
+    if (a.do === 'hide') { rec.hid = 1; st.set(ctx.oid, rec); out.objSt = true; }
+    else if (a.do === 'show') { delete rec.hid; if (Object.keys(rec).length) st.set(ctx.oid, rec); else st.delete(ctx.oid); out.objSt = true; }
+    else if (a.do === 'pose') {
+      const to = String(a.to || '').trim().slice(0, 24);
+      const ms = Math.max(0, Math.min(60000, Math.round((a.secs == null ? 0.5 : +a.secs) * 1000)));
+      if (!rec.pose || rec.pose.to !== to) { rec.pose = { to, from: (rec.pose && rec.pose.to) || '', at: Date.now(), ms }; st.set(ctx.oid, rec); out.objSt = true; }
+    }
+    return;
+  }
   // …and a verb you have chosen but not yet aimed does nothing, rather than being deleted as you type.
   if (!names.length && ['give', 'take', 'hide', 'show', 'tp', 'moveto', 'pose'].includes(a.do)) return;
   if (a.do === 'badge' && !a.text) return;
@@ -14031,6 +14163,9 @@ function flushRuleOut(avRoom, g, out, depth) {
   if (out.end) endRuleRound(avRoom, g, out.win, out.restore, depth, out.game);
   else if (out.restore) restoreRuleWorld(avRoom);
   if (g.dirty) broadcastRuleState(avRoom);
+  // ⚠️ A SEPARATE WIRE FROM THE RULE STATE, and deliberately: what has happened to one particular object also
+  // happens in Levels with no rules at all (a crumbling floor needs no game), so the two cannot share a message.
+  if (out.objSt) broadcastObjSt(avRoom);
 }
 // ⭐ SPAWN — make more of a named thing, somewhere named. The author places one (often hidden) and it becomes
 // the template; the copies carry the SAME name, so every rule about it already applies to all of them.
@@ -16543,6 +16678,11 @@ io.on('connection', (socket) => {
         socket.emit('rules-init', { levelIndex, rules: [], lobby: null, tpl: '' });
       }
     }
+    // ⭐ WHAT HAS ALREADY HAPPENED TO THE OBJECTS HERE — the floor that gave way a moment before you arrived, the
+    // door a rule opened. Sent unconditionally (an empty list clears the previous Level's, exactly as
+    // `drops-init` below does), and OUTSIDE the rules branch above, because a reacting object works in a Level
+    // with no rules in it at all.
+    { const _os = objStWire(avRoom); socket.emit('obj-state', _os || { o: {} }); }
     // 🟥 THE WHOLE-LIST JOIN REPLAY IS GONE. It sent every pile in the room to every joiner — fine while a TTL
     // and a 300 cap kept the list small, and the same shape as the whole-world terrain replay that hung this
     // server once piles stopped expiring. Piles now arrive WITH THEIR CHUNK, in `sendChunkContent`, so a joiner
@@ -17220,13 +17360,18 @@ io.on('connection', (socket) => {
     if (g.benched.size && g.benched.has(playerKeyFor(socket.id))) return;
     g.names.set(playerKeyFor(socket.id), currentUsername || socketToUsername[socket.id] || 'Someone');
     const tag = (typeof msg.tag === 'string') ? msg.tag.trim().slice(0, RULE_TAG_MAX) : '';
+    // ⭐ WHICH ONE, as well as what it was called. The tag says a hundred tiles are all "floor"; this says which
+    // of them you are standing on, and it is what an action marked "the one that triggered this" acts upon.
+    // ⚠️ Carried but never trusted as a fact about the world: the only thing done with it is a lookup in this
+    // room's own object map, so an id from somewhere else finds nothing.
+    const oid = (typeof msg.oid === 'string') ? msg.oid.slice(0, 64) : '';
     switch (msg.ev) {
       case 'enter': case 'leave': {
         if (!tag) return;
         const m = roomInside[avRoom] || (roomInside[avRoom] = new Map());
         let s = m.get(socket.id); if (!s) m.set(socket.id, s = new Set());
         if (msg.ev === 'enter') { if (s.has(tag)) return; s.add(tag); } else { if (!s.delete(tag)) return; }
-        fireRuleEvent(avRoom, msg.ev, { sid: socket.id, tag }, 0);
+        fireRuleEvent(avRoom, msg.ev, { sid: socket.id, tag, oid }, 0);
         break;
       }
       // ⭐⭐ THE CONTESTED ONE. `take` is where "one hidden object, whoever holds it" is decided, and it is the
@@ -17235,11 +17380,11 @@ io.on('connection', (socket) => {
       case 'take': {
         if (!tag || g.hidden.has(tag) || g.taken.has(tag)) return;
         g.taken.add(tag);
-        fireRuleEvent(avRoom, 'take', { sid: socket.id, tag }, 0);
+        fireRuleEvent(avRoom, 'take', { sid: socket.id, tag, oid }, 0);
         break;
       }
-      case 'touch': { if (!tag || g.hidden.has(tag)) return; fireRuleEvent(avRoom, 'touch', { sid: socket.id, tag }, 0); break; }
-      case 'break': { if (!tag) return; fireRuleEvent(avRoom, 'break', { sid: socket.id, tag }, 0); break; }
+      case 'touch': { if (!tag || g.hidden.has(tag)) return; fireRuleEvent(avRoom, 'touch', { sid: socket.id, tag, oid }, 0); break; }
+      case 'break': { if (!tag) return; fireRuleEvent(avRoom, 'break', { sid: socket.id, tag, oid }, 0); break; }
       // ⭐⭐ ONE PLAYER DOING SOMETHING TO ANOTHER. Reported by the person it HAPPENED TO — which is the right
       // party for the same reason the game's own KO banner uses it: you cannot credit yourself with a knockout,
       // only somebody else. `by` is the attacker's socket, and the pair becomes actor + other.
@@ -17949,6 +18094,18 @@ io.on('connection', (socket) => {
       emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-removed', { id });
     }
     else { objsTouch(currentAvatarRoom, obj.ch); emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-update', { id, hp: obj.hp }); }
+    if (obj.hp > 0) armObjReact(currentAvatarRoom, id, 'hit');    // #189/#178 — "when I get hit" is a trigger like any other
+  });
+
+  // ⭐⭐ #178/#189/#180 — SOMEBODY TRIGGERED ONE PARTICULAR OBJECT. The client detects the contact (it is the
+  // only end that can — the same split every rule event already uses) and the server decides, once, whether
+  // that starts the reaction. Two people landing on the same crumbling floor in the same frame get ONE collapse
+  // between them, which is the whole reason this is not simply done locally.
+  // ⚠️ `on` is checked against the object's OWN spec: a client claiming a `stand` on something that only reacts
+  // to being hit is ignored rather than trusted.
+  socket.on('obj-react', ({ id, on }) => {
+    if (!currentAvatarRoom) return;
+    armObjReact(currentAvatarRoom, id, on === 'touch' ? 'touch' : on === 'hit' ? 'hit' : 'stand');
   });
 
   // Phase 3: the host manages L2 build permissions live (owner-only). `mode` is the role default and
