@@ -3581,6 +3581,16 @@ function broadcastObjSt(avRoom) { const w = objStWire(avRoom); io.to(avRoom).emi
 // ignoring the pose it is already in.
 // ⚠️ `back: 0` means it never comes back, so `once` and a zero return are two ways of saying the same thing and
 // both leave the entry in place for ever — which is correct: the entry IS the record that it is gone.
+// How long one trip along an object's own route takes, in ms — the same length-over-speed the clients compute
+// for themselves, so the two ends agree about when a travelling platform is free to be set off again.
+// ⚠️ Inline arithmetic, no shared helper: the probe rigs slice this file into pieces and a bare reference
+// across a slice boundary throws ReferenceError in a guard and nowhere else.
+function travelMs(obj) {
+  const p = obj && obj.path, pts = p && p.pts;
+  if (!pts || pts.length < 2) return 1000;
+  let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+  return Math.max(200, Math.min(120000, (L || 1) / (p.speed || 0.18)));
+}
 function armObjReact(avRoom, id, on) {
   const map = roomObjects[avRoom]; if (!map) return;
   const obj = map.get(id); const R = obj && obj.react;
@@ -3591,7 +3601,11 @@ function armObjReact(avRoom, id, on) {
   const now = Date.now();
   if (cur && cur.act != null) {
     if (R.once) return;                                          // spent, permanently
-    const doneAt = cur.act + R.wait * 1000 + (R.back > 0 ? R.back * 1000 : Infinity);
+    // ⭐ A TRAVELLING PLATFORM IS BUSY FOR AS LONG AS THE JOURNEY TAKES, and the journey is the route the
+    // author drew — so the server measures it rather than making them type a number that has to agree with a
+    // path they can redraw at any time. One that does not come back is busy for ever: it is at the far end.
+    const busy = R.do === 'travel' ? (R.ret ? travelMs(obj) * 2 : Infinity) : (R.back > 0 ? R.back * 1000 : Infinity);
+    const doneAt = cur.act + R.wait * 1000 + busy;
     if (now < doneAt) return;                                    // still acting / still away
   }
   const rec = cur || {}; rec.act = now; st.set(id, rec);
@@ -13235,13 +13249,21 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
   if (obj && data.react && typeof data.react === 'object') {
     const R = data.react;
     const on = ['stand', 'touch', 'hit', 'timer'].includes(R.on) ? R.on : 'stand';
-    const act = ['vanish', 'pose', 'launch', 'shake'].includes(R.do) ? R.do : 'vanish';
+    const act = ['vanish', 'pose', 'move', 'launch', 'travel'].includes(R.do) ? R.do : 'vanish';
     const r = { on, do: act,
                 wait: clampN(R.wait, 0, 60, 0.6),      // how long after the trigger the effect lands
                 back: clampN(R.back, 0, 60, 3),        // …and how long until it is itself again (0 = never)
                 once: R.once ? 1 : 0 };
     if (act === 'pose')   r.to = (typeof R.to === 'string') ? R.to.trim().slice(0, 24) : '';
+    // ⭐ `move` IS THE PISTON, AND IT CARRIES ITS OWN DISTANCE. The first version reused `pose`, which meant a
+    // piston did nothing at all until the author had gone and set up a pose called "out" — so the commonest
+    // thing anyone would try silently failed. A distance and a direction need no setting up.
+    if (act === 'move')   { r.dist = clampN(R.dist, 4, 600, 64); r.dir = clampN(R.dir, -180, 180, 0); }
     if (act === 'launch') { r.power = clampN(R.power, 4, 48, 20); r.dir = clampN(R.dir, -180, 180, 0); }
+    // ⭐ `travel` — set off along the route you drew, when somebody lands on it. Writable as rules, but the
+    // user asked for the plain version: *"worth having a straightforward version for people to access since
+    // the rules can be a bit complicated and intimidating."* `ret` = come back along it afterwards.
+    if (act === 'travel') r.ret = R.ret ? 1 : 0;
     if (on === 'timer')   r.every = clampN(R.every, 0.5, 120, 3);
     obj.react = r;
   }
