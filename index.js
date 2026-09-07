@@ -3604,11 +3604,20 @@ function armObjReact(avRoom, id, on) {
     // ⭐ A TRAVELLING PLATFORM IS BUSY FOR AS LONG AS THE JOURNEY TAKES, and the journey is the route the
     // author drew — so the server measures it rather than making them type a number that has to agree with a
     // path they can redraw at any time. One that does not come back is busy for ever: it is at the far end.
-    const busy = R.do === 'travel' ? (R.ret ? travelMs(obj) * 2 : Infinity) : (R.back > 0 ? R.back * 1000 : Infinity);
+    // 0 = Stays: it is at the far end and that is where it lives now. 1 = Returns: out, a pause there, and
+    // back. 2 = Waits: ONE trip per landing, so it is free again the moment it arrives — and the next landing
+    // sends it the other way.
+    const busy = R.do === 'travel'
+      ? (R.ret === 2 ? travelMs(obj) : R.ret === 1 ? travelMs(obj) * 2 + 900 : Infinity)
+      : (R.back > 0 ? R.back * 1000 : Infinity);
     const doneAt = cur.act + R.wait * 1000 + busy;
     if (now < doneAt) return;                                    // still acting / still away
   }
-  const rec = cur || {}; rec.act = now; st.set(id, rec);
+  const rec = cur || {};
+  // ⭐ A LIFT REMEMBERS WHICH END IT IS AT, and the server is the only place that can: two clients working it
+  // out for themselves would disagree the first time one of them joined halfway through a trip.
+  if (R.do === 'travel' && R.ret === 2 && cur && cur.act != null) rec.rev = rec.rev ? 0 : 1;
+  rec.act = now; st.set(id, rec);
   broadcastObjSt(avRoom);
 }
 // Drop the records of reactions that have finished and left nothing behind, so a busy Level's map does not grow
@@ -3624,6 +3633,10 @@ function sweepObjSt(avRoom) {
     const R = obj.react;
     if (!R || s.act == null) { st.delete(id); continue; }
     if (R.once || R.back <= 0) continue;                         // permanent by design
+    // ⚠️ A TRAVELLING PLATFORM'S RECORD IS NEVER SWEPT. For "Waits" it is the only thing that remembers which
+    // end it is at, and for the other two it is what says the journey happened at all — dropping it would put
+    // the thing back at the start with nothing having moved it.
+    if (R.do === 'travel') continue;
     if (now > s.act + (R.wait + R.back) * 1000 + 2000) st.delete(id);
   }
   if (!st.size) delete roomObjSt[avRoom];
@@ -13263,7 +13276,9 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // ⭐ `travel` — set off along the route you drew, when somebody lands on it. Writable as rules, but the
     // user asked for the plain version: *"worth having a straightforward version for people to access since
     // the rules can be a bit complicated and intimidating."* `ret` = come back along it afterwards.
-    if (act === 'travel') r.ret = R.ret ? 1 : 0;
+    // 0 = Stays (stop at the far end for good) · 1 = Returns (comes back on its own, after a pause there) ·
+    // 2 = Waits (sits at whichever end it reached until somebody lands on it again — a lift, not a shuttle).
+    if (act === 'travel') r.ret = Math.max(0, Math.min(2, R.ret | 0));
     if (on === 'timer')   r.every = clampN(R.every, 0.5, 120, 3);
     obj.react = r;
   }
