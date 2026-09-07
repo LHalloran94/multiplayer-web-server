@@ -10811,24 +10811,26 @@ registerLibrary({
     }
     const content = JSON.stringify({ name: (t.name || title).toString().slice(0, 40), w, h, runs: t.runs, objs, mats });
     if (content.length > CREATION_MAX_BYTES) return null;
-    // What it is, so the browse can be filtered to the kind you came looking for. Derived here rather than
-    // taken from the client: a facet is what the row can be searched by, and a client that named its own would
-    // be deciding what everybody else's search finds.
-    const f = new Set();
+    // ⭐⭐ ONE PRIMARY KIND, AND IT IS A PARTITION. Every creation is exactly one of: a picture, a sign, a
+    // stamp, a platform, a drawing, an area, a marker — or, when it is terrain and/or more than one thing, a
+    // PIECE OF LEVEL. The first version let a creation carry several kind labels at once plus a vague
+    // "several things", which made the Kind filter a pile of overlapping flags rather than a choice: the user
+    // said so ("not remotely instructive as to what it means"). One thing on its own is that thing; anything
+    // bigger is a piece of level, which is what you would call it out loud.
+    // ⚠️ Derived HERE rather than taken from the client: a facet is what the row can be searched by, and a
+    // client that named its own would be deciding what everybody else's search finds.
+    const KIND_OF = { painting: 'picture', sign: 'sign', stamp: 'stamp', platform: 'platform', stroke: 'drawing', region: 'area' };
+    const one = (objs.length === 1 && !solid) ? objs[0] : null;
+    const kind = one ? (KIND_OF[(one && typeof one.type === 'string') ? one.type : ''] || 'marker') : 'piece';
+    // …and the qualities, which are things you might genuinely want to filter ON rather than restatements of
+    // the kind: does it move by itself, does it animate, has the author given it named arrangements.
+    const f = new Set([kind]);
     for (const o of objs) {
-      const ty = (o && typeof o.type === 'string') ? o.type : '';
-      if (ty === 'painting') { f.add('painting'); if (Array.isArray(o.frames) && o.frames.length > 1) f.add('animated'); }
-      else if (ty === 'sign') f.add('sign');
-      else if (ty === 'stamp') f.add('stamp');
-      else if (ty === 'platform') f.add('platform');
-      else if (ty === 'stroke') f.add('drawing');
-      else if (ty === 'region') f.add('area');
-      else if (ty) f.add('marker');
+      if (o && o.type === 'painting' && Array.isArray(o.frames) && o.frames.length > 1) f.add('animated');
       if (o && (o.path || o.spin || o.osc)) f.add('moving');
       if (o && Array.isArray(o.poses) && o.poses.length) f.add('poses');
     }
     if (solid) f.add('terrain');
-    if (objs.length + (solid ? 1 : 0) > 1) f.add('scene');
     const facets = '|' + [...f].join('|') + '|';
     return { title, descr, content, facets, w, h, n_objs: objs.length, size_bytes: content.length };
   },
