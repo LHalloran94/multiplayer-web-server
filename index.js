@@ -3689,7 +3689,10 @@ const MAX_OBJECTS_PER_ROOM = 150;  // Phase 6: per-Level cap on USER-placed obje
 // clamp and a build-options panel for nothing. It is never solid and never collides; its whole content is
 // "am I inside it", which the client reports and the rule engine consumes.
 const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 'spawn', 'portal', 'region', 'sign', 'painting']); // unified primitives (platform absorbs pad/ramp/conveyor/booster/fan/movplat as modifiers); checkpoint/goal/spawn/portal = non-solid flags (respawn anchor / Level exit / shared entry / paired teleporter); region = a named area rules can ask about
-const SURF_TYPES = ['ice', 'mud', 'hazard'];      // contact-property surface modifiers (Inc 10)
+// Contact-property surface modifiers (Inc 10). ⚠️ MUST MATCH the client's `OBJ_SURFS` — a name this list does
+// not carry is dropped silently on the way in, which looks exactly like a surface that can be chosen and does
+// nothing. #167 added the last three: grip (hold on all the way round a thing) and the two that resize you.
+const SURF_TYPES = ['ice', 'mud', 'hazard', 'stick', 'grow', 'shrink'];
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
 // back, smash anybody's and it falls on the ground as a cairn for whoever gets there first. That one rule is
