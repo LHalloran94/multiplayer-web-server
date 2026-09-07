@@ -13283,6 +13283,12 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // has (routes, poses, hits, modifiers, reactions) applies unchanged, which is what makes a patrolling spike
     // wall and a gate on a lift fall out for free instead of needing their own object.
     if (data.look === 'gate' || data.look === 'spikes') obj.look = data.look;
+    // ⭐ #345 — WHICH KIND OF DOOR. A barred gate, a plank door and a metal one are the same object with three
+    // faces; nothing else about them differs, which is why this is a style name and not three more types.
+    if (obj.look === 'gate' && ['bars', 'wood', 'metal'].includes(data.style)) obj.style = data.style;
+    // ⭐ #185 — teeth on one face or on both. ⚠️ NOT `solid` any more: solidity is not offered on a spike strip
+    // (it is always solid) so it can no longer carry this, and a one-sided strip also wants a thinner rail.
+    if (obj.look === 'spikes' && data.sides === 'both') obj.sides = 'both';
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     if (isFinite(data.topHue)) obj.topHue = clampN(data.topHue, 0, 360, 0);   // custom top-surface colour (round-trips)
     if (isFinite(data.botHue)) obj.botHue = clampN(data.botHue, 0, 360, 0);   // custom body colour (round-trips)
