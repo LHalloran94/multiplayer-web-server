@@ -3568,10 +3568,79 @@ let objSeq = 0;
 // rules game is only created — and only ticked — for rooms that have some.
 const roomObjSt = {};   // room → Map<objId, { act?: ms, hid?: 1, pose?: {to,from,at,ms} }>
 function objStOf(avRoom) { return roomObjSt[avRoom] || (roomObjSt[avRoom] = new Map()); }
+// ⭐⭐ #347/#345 — WHICH PLATES ARE BEING STOOD ON RIGHT NOW. Per room, per plate, the set of people holding it
+// down, because two players on one plate is one held plate and the second one stepping off must not open it.
+// ⚠️ A PLATE IS HELD AND A SWITCH IS FLIPPED, and the difference is the whole reason these are two mechanisms
+// rather than one. Holding is a fact about a person, so it lives here and evaporates when they leave the room
+// or disconnect; a flipped lever is a fact about the WORLD, so it lives in the per-object record above where it
+// already broadcasts to everyone and replays to joiners for nothing.
+const roomPlateOn = {};   // room → Map<plateObjId, Set<socketId>>
+function plateHeld(avRoom, id) { const m = roomPlateOn[avRoom]; const s = m && m.get(id); return !!(s && s.size); }
+// 🟥 A SOCKET THAT LEAVES MUST LET GO OF EVERY PLATE, and this is the same hazard `forgetRuleSocket` exists
+// for one door along: a player who walks out of a Level while standing on a plate would otherwise hold its gate
+// open for the rest of the session, with nobody in the room and nothing to step off. Returns whether anything
+// changed, so the caller only has to re-broadcast when it did.
+function forgetPlateSocket(avRoom, sid) {
+  const m = roomPlateOn[avRoom]; if (!m) return false;
+  let hit = false;
+  for (const [id, s] of [...m]) { if (s.delete(sid)) hit = true; if (!s.size) m.delete(id); }
+  if (!m.size) delete roomPlateOn[avRoom];
+  return hit;
+}
+// The removal seam, called from `objUnindex`. A plate that is erased stops holding anything, and anything it
+// was keeping away comes back — so this both forgets the holders and re-broadcasts, but only when the thing
+// removed had something to say, so erasing a hundred ordinary blocks sends nothing.
+function objLinkDrop(room, o) {
+  if (!o) return;
+  const m = roomPlateOn[room];
+  const held = m && m.delete(o.id);
+  if (m && !m.size) delete roomPlateOn[room];
+  if (o.link || held || (o.part === 'switch')) broadcastObjSt(room);
+}
+// ⭐⭐ WHICH NAMES ARE SHUT AWAY BY A PLATE OR A SWITCH — the whole of the no-rules wiring, in one function.
+// A link says "Opens" (`hide`: while this is held, those things are not there) or "Closes" (`show`: those
+// things are not there UNTIL this is held). Read that second sentence again: "Closes" is what gives a name a
+// CLOSED DEFAULT, so there is no separate "starts hidden" setting to get out of step with it. A thing is
+// controlled by whatever says it is controlled, and nothing else has to be authored.
+// ⚠️ OPEN BEATS SHUT, both ways round. Two plates opening one gate: either one opens it. Two plates closing one
+// bridge: either one puts it there. A plain union of "reasons to hide" would have made the second case
+// impossible — the other plate's mere existence would hold the bridge away for ever.
+function objLinkHidden(avRoom) {
+  const map = roomObjects[avRoom]; if (!map) return null;
+  const st = roomObjSt[avRoom];
+  let hideOn = null, showAny = null, showOn = null;
+  for (const o of map.values()) {
+    if (!o.link) continue;
+    const rec = st && st.get(o.id);
+    const active = o.part === 'switch' ? !!(rec && rec.sw) : plateHeld(avRoom, o.id);
+    for (const n of o.link.split(',')) {
+      const t = n.trim(); if (!t) continue;
+      if (o.linkDo === 'show') { (showAny || (showAny = new Set())).add(t); if (active) (showOn || (showOn = new Set())).add(t); }
+      else if (active) (hideOn || (hideOn = new Set())).add(t);
+    }
+  }
+  if (!hideOn && !showAny) return null;
+  const out = new Set(hideOn || []);
+  if (showAny) for (const t of showAny) if (!showOn || !showOn.has(t)) out.add(t);
+  return out.size ? [...out] : null;
+}
 function objStWire(avRoom) {
-  const m = roomObjSt[avRoom]; if (!m || !m.size) return null;
-  const o = {}; for (const [id, s] of m) o[id] = s;
-  return { o };
+  const m = roomObjSt[avRoom];
+  // ⚠️ THE LINK HALF IS COMPUTED EVEN WHEN THE PER-OBJECT MAP IS EMPTY. A room whose only mechanism is one
+  // plate closing one bridge has nothing in `roomObjSt` at all, and returning null there would have left the
+  // bridge on screen — the state that needs sending is precisely the state nobody has touched yet.
+  const k = objLinkHidden(avRoom);
+  // ⭐ WHICH PLATES ARE DOWN, so everybody's screen shows the same slab pressed rather than only the screen of
+  // the person standing on it. A handful of ids at most, sent on the same edges the link already changes on —
+  // a plate somebody is parked on costs nothing while they stand there.
+  let p = null;
+  { const pm = roomPlateOn[avRoom]; if (pm) for (const [id, s] of pm) if (s.size) (p || (p = [])).push(id); }
+  if ((!m || !m.size) && !k && !p) return null;
+  const o = {}; if (m) for (const [id, s] of m) o[id] = s;
+  const w = { o };
+  if (k) w.k = k;
+  if (p) w.p = p;
+  return w;
 }
 function broadcastObjSt(avRoom) { const w = objStWire(avRoom); io.to(avRoom).emit('obj-state', w || { o: {} }); }
 // ⭐ START THIS ONE'S REACTION, IF IT HAS ONE AND IS NOT ALREADY MID-WAY THROUGH IT. Everything about the
@@ -3627,7 +3696,7 @@ function sweepObjSt(avRoom) {
   const st = roomObjSt[avRoom]; if (!st || !st.size) return;
   const map = roomObjects[avRoom]; const now = Date.now();
   for (const [id, s] of [...st]) {
-    if (s.hid || s.pose) continue;                               // a rule put this here; not ours to sweep
+    if (s.hid || s.pose || s.sw) continue;                       // a rule put this here, or somebody flipped a lever; not ours to sweep
     const obj = map && map.get(id);
     if (!obj) { st.delete(id); continue; }                       // the object itself is gone
     const R = obj.react;
@@ -13087,6 +13156,30 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             w: clampN(data.w, 16, 4000, 240), h: clampN(data.h, 16, 4000, 160),
             hue: clampN(data.hue, 0, 360, 190),
             hp: null };                                    // never breakable — there is nothing there to break
+    // ⭐⭐ #347/#164 — A PRESSURE PLATE AND A SWITCH ARE THIS SAME OBJECT, SEEN. An area is a named rectangle
+    // that knows when somebody is inside it, and that is the whole of a pressure plate except for being visible
+    // and being pressed rather than merely occupied. Making them a THIRD TYPE would have meant a new branch
+    // here, a new sanitiser, a new hydration case and about thirty client sites — and would have bought a
+    // duplicate of the enter/leave detection that has worked since #98. So: one type, three presentations.
+    // ⚠️ The empty string is today's invisible area and stays the default, so every area that already exists
+    // reads back exactly as it did.
+    if (data.part === 'plate' || data.part === 'switch') obj.part = data.part;
+    // ⭐⭐ WHAT THIS ONE OPENS, WITHOUT WRITING A RULE. Rules are Level-only by design, and a plate that does
+    // nothing at all in the world you are standing in is the "a setting that silently does nothing" fault this
+    // track has already fixed twice. So a plate carries its own one-line rule: a list of NAMES, and whether
+    // being pressed makes them go away or brings them back.
+    // 🟥 A NAME, NEVER AN ID. An object's identity is re-minted on every save and every hydrate (see
+    // `applyLevel` and `hydrateRoomFromBlob`), so a link stored as "that exact gate" would come back from a
+    // publish pointing at nothing — silently, and looking exactly like a broken feature. The world-picker in
+    // the panel FILLS THIS BOX; it is not a second way of addressing things.
+    if (typeof data.link === 'string' && data.link.trim()) {
+      const names = [];
+      // ⚠️ 24 WRITTEN OUT, not `RULE_TAG_MAX`: that lives inside the rules block, and the probe rigs slice this
+      // file into pieces — a bare reference across a slice boundary throws in a guard and nowhere else. Eighth
+      // instance of that trap on this project. It must agree with `ruleTag`, and it is asserted to.
+      for (const p of data.link.split(',')) { const t = p.trim().slice(0, 24); if (t && !names.includes(t)) names.push(t); if (names.length >= 8) break; }
+      if (names.length) { obj.link = names.join(', '); obj.linkDo = data.linkDo === 'show' ? 'show' : 'hide'; }
+    }
   } else if (type === 'painting') {
     // #339 — a painting placed as a PICTURE. Stored as it is authored: a palette and run-length-encoded cell
     // indices, which is both the smallest form and the one that still means something (a PNG would not survive
@@ -13182,6 +13275,14 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // direction and cannot drop off, which is what a wall, a ceiling and a sealed box are made of. Drawn with
     // its cap edge running all the way round so the two are told apart at a glance rather than by trial.
     if (data.solid) obj.solid = 1;
+    // ⭐⭐ #345/#185 — A GATE AND A ROW OF SPIKES ARE A PLATFORM WEARING A DIFFERENT FACE. Both were already
+    // buildable and neither looked like itself: a gate is a fully-solid bar that a rule hides (#173 shipped the
+    // solidity, hide/show shipped the opening), and a spike is a bar with the Hazard modifier, which has
+    // respawned whoever touched it since surfaces existed. What was missing in both cases was only that they
+    // read as scenery rather than as what they are. So this is a LOOK and nothing else — every dial a platform
+    // has (routes, poses, hits, modifiers, reactions) applies unchanged, which is what makes a patrolling spike
+    // wall and a gate on a lift fall out for free instead of needing their own object.
+    if (data.look === 'gate' || data.look === 'spikes') obj.look = data.look;
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     if (isFinite(data.topHue)) obj.topHue = clampN(data.topHue, 0, 360, 0);   // custom top-surface colour (round-trips)
     if (isFinite(data.botHue)) obj.botHue = clampN(data.botHue, 0, 360, 0);   // custom body colour (round-trips)
@@ -13551,7 +13652,11 @@ setInterval(autosavePersistentWorlds, 30000);
 // is the sentence deathmatch, free-for-all and zombies are all built out of. Its actor is the one who did it —
 // so "add to their score" credits the attacker, which is what a kill counter is — and the person it happened to
 // is reachable from every condition and every action through `who: 'other'`.
-const RULE_EVENTS = new Set(['take', 'touch', 'enter', 'leave', 'respawn', 'goal', 'break', 'timer', 'reach', 'roundstart', 'roundend', 'ko']);
+// ⭐⭐ #347 — `press` IS THE ONE EVENT A PLAYER CHOOSES TO RAISE. Every other event here happens TO somebody —
+// you walk into a place, you get knocked out, a clock ticks — and a switch is the opposite: nothing happens
+// until a person decides it should. The E key has existed for a long time and precisely one thing listened to
+// it (a checkpoint), so a lever was unbuildable without this even though every other piece was already here.
+const RULE_EVENTS = new Set(['take', 'touch', 'enter', 'leave', 'press', 'respawn', 'goal', 'break', 'timer', 'reach', 'roundstart', 'roundend', 'ko']);
 // Which events concern two people. A `who` picker is meaningless anywhere else, and the editor only offers it
 // here — but the ENGINE simply resolves to nobody, so a `who` left behind by an edited rule cannot misfire.
 const RULE_TWO_PERSON = new Set(['ko']);
@@ -15013,6 +15118,13 @@ function objIndex(room, o) {
 }
 function objUnindex(room, o) {
   const map = roomObjects[room]; if (map) map.delete(o.id);
+  // #347 — erasing a plate that is being stood on must let go of whatever it was holding open, and erasing a
+  // plate that was holding a bridge AWAY must put the bridge back. Done here rather than in the half-dozen
+  // removal handlers because this is the one seam every one of them goes through.
+  // ⚠️ `typeof`-guarded, and that is not defensiveness: the probe rigs slice this file into blocks and run them
+  // separately, so a bare call across a block boundary throws in a guard and nowhere else — the trap this
+  // project has now hit nine times. Same no-op-and-reassign seam the liquid tick's fan-out uses.
+  if (typeof objLinkDrop === 'function') objLinkDrop(room, o);
   if (!objChunked(room)) return;
   objsTouch(room, o.ch);
   const by = roomObjectChunk[room];
@@ -15915,7 +16027,7 @@ io.on('connection', (socket) => {
         removeSimAvatar(currentRoom, oldSid);
         const oldAv = socketToAvatarRoom[oldSid];   // the evicted socket's avatar-world room (mode-scoped, may differ from this one)
         if (oldAv && roomAvt[oldAv] && roomAvt[oldAv].delete(oldSid)) { socket.to(oldAv).emit('avt-peer-left', { id: oldSid }); delete socketToAvatarRoom[oldSid]; }
-        if (oldAv) { dropRelay(oldAv, oldSid); forgetRuleSocket(oldAv, oldSid); }   // Phase 5a: and stop relaying a socket that is gone · #98: and forget the regions it was in
+        if (oldAv) { dropRelay(oldAv, oldSid); forgetRuleSocket(oldAv, oldSid); if (forgetPlateSocket(oldAv, oldSid)) broadcastObjSt(oldAv); }   // Phase 5a: and stop relaying a socket that is gone · #98: and forget the regions it was in
         io.to(currentPageRoom).emit('cursor-leave', { id: oldSid });
         io.to(currentRoom).emit('avatar-leave', { id: oldSid });
         const oldSock = io.sockets.sockets.get(oldSid);
@@ -16567,7 +16679,7 @@ io.on('connection', (socket) => {
     if (dupSockets.length) {
       for (const other of dupSockets) {
         if (roomAvt[avRoom] && roomAvt[avRoom].delete(other)) socket.to(avRoom).emit('avt-peer-left', { id: other });
-        dropRelay(avRoom, other); forgetRuleSocket(avRoom, other);   // Phase 5a · #98
+        dropRelay(avRoom, other); forgetRuleSocket(avRoom, other); if (forgetPlateSocket(avRoom, other)) broadcastObjSt(avRoom);   // Phase 5a · #98
         if (socketToAvatarRoom[other] === avRoom) delete socketToAvatarRoom[other];
         try { io.sockets.sockets.get(other)?.leave(avRoom); } catch {}
         io.to(other).emit('avt-evicted', { levelIndex });
@@ -16592,7 +16704,7 @@ io.on('connection', (socket) => {
     if (currentAvatarRoom && currentAvatarRoom !== avRoom) {
       socket.leave(currentAvatarRoom);
       if (roomAvt[currentAvatarRoom] && roomAvt[currentAvatarRoom].delete(socket.id)) socket.to(currentAvatarRoom).emit('avt-peer-left', { id: socket.id });
-      dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id);   // Phase 5a: a Level switch must not leave a ghost being relayed · #98: switching Level also leaves every region
+      dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id); if (forgetPlateSocket(currentAvatarRoom, socket.id)) broadcastObjSt(currentAvatarRoom);   // Phase 5a: a Level switch must not leave a ghost being relayed · #98: switching Level also leaves every region
     }
     currentAvatarRoom = avRoom;
     socketToAvatarRoom[socket.id] = avRoom;
@@ -16776,7 +16888,7 @@ io.on('connection', (socket) => {
     }
     if (currentAvatarRoom) socket.leave(currentAvatarRoom);
     if (currentAvatarRoom && roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);   // Phase 3: stop holding chunks resident for someone who left
-    if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id); }   // Phase 4: stop tracking what they were subscribed/meshed to · Phase 5a: and stop relaying them · #98: and forget their regions
+    if (currentAvatarRoom) { dropSubs(currentAvatarRoom, socket.id); dropPeers(currentAvatarRoom, socket.id); dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id); if (forgetPlateSocket(currentAvatarRoom, socket.id)) broadcastObjSt(currentAvatarRoom); }   // Phase 4: stop tracking what they were subscribed/meshed to · Phase 5a: and stop relaying them · #98: and forget their regions
     maybeResetShowcase(currentAvatarRoom);   // last one out of a showcase Level → it goes back to how its author made it
     delete socketToAvatarRoom[socket.id];
     // Out of the world ⇒ back to the shared purse. The invariant this keeps is simply "a Level's scope is set
@@ -17424,6 +17536,10 @@ io.on('connection', (socket) => {
         break;
       }
       case 'touch': { if (!tag || g.hidden.has(tag)) return; fireRuleEvent(avRoom, 'touch', { sid: socket.id, tag, oid }, 0); break; }
+      // #347 — somebody pressed a switch. Same shape as `touch` (the client owns the detection, the server owns
+      // everything that follows); the switch's own flipped/unflipped state is kept separately, in the per-object
+      // record, because that is a fact about the WORLD rather than about this moment.
+      case 'press': { if (!tag || g.hidden.has(tag)) return; fireRuleEvent(avRoom, 'press', { sid: socket.id, tag, oid }, 0); break; }
       case 'break': { if (!tag) return; fireRuleEvent(avRoom, 'break', { sid: socket.id, tag, oid }, 0); break; }
       // ⭐⭐ ONE PLAYER DOING SOMETHING TO ANOTHER. Reported by the person it HAPPENED TO — which is the right
       // party for the same reason the game's own KO banner uses it: you cannot credit yourself with a knockout,
@@ -18148,6 +18264,38 @@ io.on('connection', (socket) => {
     armObjReact(currentAvatarRoom, id, on === 'touch' ? 'touch' : on === 'hit' ? 'hit' : 'stand');
   });
 
+  // ⭐⭐ #347 — SOMEBODY STEPPED ONTO A PRESSURE PLATE, OR OFF ONE. The client owns the detection for the same
+  // reason it owns every other contact (only it knows to the frame); the server owns who is on what, because
+  // "is this plate held" is a question about the whole room and two people are commonly standing on it.
+  // ⚠️ CHECKED AGAINST THE OBJECT, not trusted: a claim about something that is not a plate in this room does
+  // nothing at all, so a stale id from a Level you have just left cannot hold a door open somewhere else.
+  socket.on('obj-plate', ({ id, on }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const map = roomObjects[room]; const o = map && map.get(id);
+    if (!o || o.type !== 'region' || o.part !== 'plate') return;
+    const m = roomPlateOn[room] || (roomPlateOn[room] = new Map());
+    let s = m.get(id);
+    if (on) { if (s && s.has(socket.id)) return; if (!s) m.set(id, s = new Set()); s.add(socket.id); }
+    else { if (!s || !s.delete(socket.id)) return; if (!s.size) m.delete(id); }
+    broadcastObjSt(room);
+  });
+  // ⭐⭐ #347 — SOMEBODY PRESSED A SWITCH. Unlike a plate this is a fact about the WORLD and outlives the person
+  // who caused it, so it goes in the per-object record, which already broadcasts to everyone in the room and is
+  // replayed to whoever joins next — a lever somebody flipped an hour ago is still flipped when you arrive.
+  // ⚠️ A LEVER WITH NOTHING TO SAY STILL FLIPS. The switch's own state and what it is wired to are separate
+  // questions: an unwired lever is a perfectly good thing for a rule to listen to, and one that visibly did not
+  // move would read as broken.
+  socket.on('obj-switch', ({ id }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const map = roomObjects[room]; const o = map && map.get(id);
+    if (!o || o.type !== 'region' || o.part !== 'switch') return;
+    const st = objStOf(room);
+    const rec = st.get(id) || {};
+    if (rec.sw) delete rec.sw; else rec.sw = 1;
+    st.set(id, rec);
+    broadcastObjSt(room);
+  });
+
   // Phase 3: the host manages L2 build permissions live (owner-only). `mode` is the role default and
   // persists in rooms.perms; per-user overrides are in-memory. Both broadcast to the room's presence
   // bucket ('pg:'+roomId — every member building in any Level of the room is in it) so each client
@@ -18732,7 +18880,7 @@ io.on('connection', (socket) => {
       if (roomWhere[currentAvatarRoom]) roomWhere[currentAvatarRoom].delete(socket.id);
       dropSubs(currentAvatarRoom, socket.id);
       dropPeers(currentAvatarRoom, socket.id);
-      dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id);   // Phase 5a · #98
+      dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id); if (forgetPlateSocket(currentAvatarRoom, socket.id)) broadcastObjSt(currentAvatarRoom);   // Phase 5a · #98
     }
     wireBatchOk.delete(socket.id);
     if (socketDmRooms[socket.id]) {
