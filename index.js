@@ -3665,6 +3665,44 @@ function travelMs(obj) {
 // and two effects on one object cannot share a single timestamp: the collapse starts its own clock.
 // ⭐ Keyed by WHAT IT DOES rather than by its index in the list. An index has to stay in step with an array
 // that a re-save can reorder; a verb is what every reader asks for anyway.
+// ⭐⭐ #183 — SOMEBODY SET A BOMB OFF, AND THAT IS THE ONLY THING EVER SENT ABOUT ONE. Everything after this —
+// the arc it flies, where it lands, the instant it goes off, the hole it leaves and who it catches — is
+// derived by every client from this one record, exactly as a floor's collapse is derived from `act`.
+// ⭐ A THROWN BOMB IS A SHOT WITH A FUSE. A shot's whole flight is arithmetic on (when, where, how fast) plus
+// the terrain, which everybody has, which is why nothing is sent about one. A punched bomb is the same
+// arithmetic with the instant supplied by a fist instead of by the clock — so it needed no agreement between
+// players, and that is what let #183 be built before the crates.
+// ⚠️ THE THROWER SUPPLIES THE POSITION, deliberately. The server does not evaluate routes or poses, so it does
+// not know where a bomb riding a lift actually is; the client that hit it does. Clamped to the world and to
+// the neighbourhood of where the bomb was authored, so a forged one can only lie locally.
+// ⚠️ RE-LIGHTING IS REFUSED WHILE IT IS BUSY, the same rule `armObjReact` uses one function down: without it a
+// player standing next to a bomb punching every frame would restart its fuse for ever and it would never blow.
+function armBomb(avRoom, id, sid, data) {
+  const map = roomObjects[avRoom]; if (!map) return false;
+  const obj = map.get(id);
+  if (!obj || obj.look !== 'bomb') return false;
+  const st = objStOf(avRoom);
+  const rec = st.get(id) || {};
+  const now = Date.now();
+  if (rec.lit) {
+    const fuseMs = Math.max(200, (obj.fuse || 2.5) * 1000);
+    // `back` 0 means it never comes back, so it is busy for ever — which is correct: the record IS the fact
+    // that it is gone.
+    if (!(obj.back > 0) || now < rec.lit.at + fuseMs + obj.back * 1000) return true;
+  }
+  const _rd = roomDims(avRoom);
+  const WW = _rd.cols * TERRAIN_CELL, WH = _rd.rows * TERRAIN_CELL;
+  const near = (v, home) => Math.max(home - 2000, Math.min(home + 2000, v));
+  const px = isFinite(data && data.x) ? near(Math.max(0, Math.min(WW, data.x)), obj.x) : obj.x;
+  const py = isFinite(data && data.y) ? near(Math.max(0, Math.min(WH, data.y)), obj.y) : obj.y;
+  rec.lit = { at: now, x: px, y: py,
+              vx: clampN(data && data.vx, -900, 900, 0),      // px/s, the shove the fist gave it
+              vy: clampN(data && data.vy, -900, 900, 0),
+              by: sid };                                       // …and who therefore digs the hole
+  st.set(id, rec);
+  broadcastObjSt(avRoom);
+  return true;
+}
 function armObjReact(avRoom, id, on) {
   const map = roomObjects[avRoom]; if (!map) return;
   const obj = map.get(id); const list = obj && obj.reacts;
@@ -3706,6 +3744,19 @@ function sweepObjSt(avRoom) {
   const st = roomObjSt[avRoom]; if (!st || !st.size) return;
   const map = roomObjects[avRoom]; const now = Date.now();
   for (const [id, s] of [...st]) {
+    // 🟥 #183 — A LIT BOMB'S RECORD IS THE ONLY THING THAT SAYS IT IS LIT, and without this line the sweep
+    // deleted it outright: the test below throws away any record on an object with no `reacts`, and a bomb
+    // need not have any. The fuse would simply stop, mid-burn, the next time anything else triggered a sweep.
+    // ⚠️ Kept for ever when `back` is 0, because there the record IS the fact that the bomb is gone; swept only
+    // once one that comes back has actually come back.
+    if (s.lit) {
+      const b = map && map.get(id);
+      const fuseMs = Math.max(200, ((b && b.fuse) || 2.5) * 1000);
+      const bk = (b && b.back > 0) ? b.back * 1000 : 0;
+      if (!bk || now < s.lit.at + fuseMs + bk + 2000) continue;
+      delete s.lit;
+      if (!s.a && !s.hid && !s.pose && !s.sw && !s.bl && s.rev == null) { st.delete(id); continue; }
+    }
     if (s.hid || s.pose || s.sw || s.bl) continue;               // a rule put this here, somebody flipped a lever, or somebody died there; not ours to sweep
     const obj = map && map.get(id);
     if (!obj) { st.delete(id); continue; }                       // the object itself is gone
@@ -11003,7 +11054,7 @@ registerLibrary({
     // this derived plain 'platform' for all three, so picking "Doors" in the shared library returned nothing and
     // said nothing about why. The client's own shelf has classified them this way since increment 3b; this is
     // the same partition, on the side that decides what everybody else's search finds.
-    const LOOK_KIND = { gate: 'door', spikes: 'spikes', shooter: 'shooter' };
+    const LOOK_KIND = { gate: 'door', spikes: 'spikes', shooter: 'shooter', bomb: 'bomb' };
     const kind = one
       ? ((one.type === 'platform' && LOOK_KIND[one.look]) || KIND_OF[typeof one.type === 'string' ? one.type : ''] || 'marker')
       : 'template';
@@ -13333,7 +13384,31 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // read as scenery rather than as what they are. So this is a LOOK and nothing else — every dial a platform
     // has (routes, poses, hits, modifiers, reactions) applies unchanged, which is what makes a patrolling spike
     // wall and a gate on a lift fall out for free instead of needing their own object.
-    if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter') obj.look = data.look;
+    if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter' || data.look === 'bomb') obj.look = data.look;
+    // ⭐⭐ #183 — A BOMB. Same trick as the gate, the spike strip and the shooter: a platform wearing a face, so
+    // a bomb on a lift, a bomb on a route and a bomb a rule can hide all cost nothing.
+    // 🟥 EVERY DIAL HAS TO BE NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds an object field by field and
+    // drops what it does not mention. That is the by-name-rebuild shape this project has been bitten by ten
+    // times, most recently #166's `hits`, which placed and played perfectly and came back from a publish as
+    // the default. A dropped fuse here would read as "my bombs forget their settings when I republish".
+    if (obj.look === 'bomb') {
+      obj.solid = 1;                                   // …like the shooter's: no panel row feeds it, so it is
+                                                       // not left to the sender. A bomb you walk through is nonsense.
+      // Square, one dial, both ends of the wire agreeing — so the drawn body and the box you punch are the
+      // same thing. `max(w,h)/2` is exact for a square, which is what makes that true rather than approximate.
+      obj.w = clampN(data.w, 16, 120, 34);
+      obj.h = obj.w;
+      obj.fuse  = clampN(data.fuse, 0.2, 10, 2.5);     // seconds from being hit to going off
+      obj.blast = clampN(data.blast, 40, 400, 150);    // how far the bang reaches (px)
+      obj.force = clampN(data.force, 0, 40, 18);       // how hard it throws whoever is caught
+      obj.back  = clampN(data.back, 0, 120, 8);        // …and how long until there is one there again (0 = never)
+      // ⚠️ POSITIVE FLAGS WITH AN "ON" DEFAULT, written as an explicit refusal rather than as a bare truthiness
+      // test. `data.dig` absent must mean "yes, it breaks ground" — a bomb that leaves the wall standing is not
+      // what anybody types the word bomb expecting — and a plain `data.dig ? 1 : 0` would have made every
+      // object built anywhere but this panel a dud with nothing saying why.
+      obj.dig   = (data.dig === 0 || data.dig === false) ? 0 : 1;
+      obj.kills = (data.kills === 0 || data.kills === false) ? 0 : 1;
+    }
     // ⭐ #345 — WHICH KIND OF DOOR. A barred gate, a plank door and a metal one are the same object with three
     // faces; nothing else about them differs, which is why this is a style name and not three more types.
     if (obj.look === 'gate' && ['bars', 'wood', 'metal'].includes(data.style)) obj.style = data.style;
@@ -18362,9 +18437,15 @@ io.on('connection', (socket) => {
     io.to(currentAvatarRoom).emit('mat-undefined', { id: id | 0 });
     ok(true);
   });
-  socket.on('avatar-object-hit', ({ id, dmg }) => {
+  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     const obj = roomObjects[currentAvatarRoom].get(id);
+    // ⭐⭐ #183 — HITTING A BOMB SETS IT OFF; it does not damage it. This is deliberately the SAME message a
+    // punch, a slam and one blast catching another already send, rather than a wire of its own: "what happens
+    // when you hit this" is the whole of what a bomb is, and a second message would only have been the first
+    // one with a different name. `vx`/`vy` are the shove the fist gave it — the card asks for exactly this
+    // ("could punch it to throw it") — and are ignored by everything that is not a bomb.
+    if (obj && obj.look === 'bomb') { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy }); return; }
     if (!obj || typeof obj.hp !== 'number') return;
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
     if (obj.hp <= 0) {
