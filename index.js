@@ -13360,10 +13360,12 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       obj.shots = Math.max(1, Math.min(7, (data.shots | 0) || 1));    // how many leave the muzzle at once
       obj.spread = clampN(data.spread, 0, 90, 0);        // the angle they fan out over
       obj.sweep = clampN(data.sweep, 20, 360, 180);      // how far off its face it can bring the gun to bear
-      // ⚠️ ONLY A BALL MAY BE HARMLESS (user, 2026-09-08: *"actually just balls"*). Decided here as well as in
-      // the panel, because the panel only hides the row — and a field no visible row feeds must not be able to
-      // arrive from a hand-edited Level and make a jet of flame that quietly does nothing.
-      obj.shove = obj.ammo === 'shell' ? clampN(data.shove, 0, 40, 0) : 0;
+      // ⭐⭐ A BALL IS ALWAYS HARMLESS AND NOTHING ELSE EVER IS (user, 2026-09-08: *"balls should just be made
+      // harmless permanently … since the other projectiles already cover killing"*). So this is not a choice
+      // being validated, it is a consequence of the ammunition — a ball always carries a push, and every other
+      // kind carries none whatever the message said. Decided here as well as in the panel, because the panel
+      // only HIDES a row, and a jet of flame that quietly does nothing is indistinguishable from a broken one.
+      obj.shove = obj.ammo === 'shell' ? clampN(data.shove, 2, 40, 14) : 0;
     }
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐ THE WHOLE COLOUR, not just its angle. A picker's saturation/value square was being thrown away and the
