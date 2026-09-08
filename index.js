@@ -3696,7 +3696,7 @@ function sweepObjSt(avRoom) {
   const st = roomObjSt[avRoom]; if (!st || !st.size) return;
   const map = roomObjects[avRoom]; const now = Date.now();
   for (const [id, s] of [...st]) {
-    if (s.hid || s.pose || s.sw) continue;                       // a rule put this here, or somebody flipped a lever; not ours to sweep
+    if (s.hid || s.pose || s.sw || s.bl) continue;               // a rule put this here, somebody flipped a lever, or somebody died there; not ours to sweep
     const obj = map && map.get(id);
     if (!obj) { st.delete(id); continue; }                       // the object itself is gone
     const R = obj.react;
@@ -18309,6 +18309,27 @@ io.on('connection', (socket) => {
   // ⚠️ A LEVER WITH NOTHING TO SAY STILL FLIPS. The switch's own state and what it is wired to are separate
   // questions: an unwired lever is a perfectly good thing for a rule to listen to, and one that visibly did not
   // move would read as broken.
+  // ⭐⭐ #185 — SOMEBODY DIED ON THESE SPIKES. The client that died reports where along the strip and which
+  // face; the server keeps the list and tells the room, so a stain is the same for everyone rather than a
+  // private souvenir on one screen.
+  // ⚠️ IT LIVES IN THE PER-OBJECT RECORD, which is NEVER STORED — the same map a collapsing floor uses. That is
+  // exactly right for blood: it is what has happened in this room since the server came up, not something the
+  // author built, so it must not follow a published Level to whoever plays it next.
+  // ⚠️ CAPPED AND OLDEST-OUT. A busy spike pit would otherwise grow an unbounded list that is replayed to every
+  // joiner for the rest of the session.
+  socket.on('obj-blood', ({ id, u, f }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const map = roomObjects[room]; const o = map && map.get(id);
+    if (!o || o.look !== 'spikes') return;
+    if (!isFinite(u)) return;
+    const st = objStOf(room);
+    const rec = st.get(id) || {};
+    const list = rec.bl || (rec.bl = []);
+    list.push([Math.max(0, Math.min(1, +u)), f < 0 ? -1 : 1]);
+    if (list.length > 10) list.splice(0, list.length - 10);
+    st.set(id, rec);
+    broadcastObjSt(room);
+  });
   socket.on('obj-switch', ({ id }) => {
     const room = currentAvatarRoom; if (!room) return;
     const map = roomObjects[room]; const o = map && map.get(id);
