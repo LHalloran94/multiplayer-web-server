@@ -13252,9 +13252,13 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (obj.part === 'vortex') {
       obj.w = clampN(data.w, 60, 1200, 260);
       obj.h = obj.w;
-      obj.pull = clampN(data.pull, 1, 30, 10);            // how hard it drags, at the very centre
+      obj.pull = clampN(data.pull, 1, 30, 19);            // how hard it drags, at the very centre
       obj.vmode = data.vmode === 'push' ? 'push' : 'pull';  // sucks in, or blows out
-      obj.swirl = clampN(data.swirl, -100, 100, 45);      // −100 … 100: which way round it turns you, 0 = straight in
+      // ⭐ SPIRALLING IS A CHOICE (user, 2026-09-09) and it is OFF by default — the one anybody wants first is
+      // the straight pull. `swirl` is only read when this is set, so an old vortex saved with a swirl and no
+      // flag comes back as the direct kind, which is the behaviour that was asked for.
+      if (data.spiral) obj.spiral = 1;
+      obj.swirl = clampN(data.swirl, -100, 100, 55);      // −100 … 100: which way round it turns you
       if (data.core) obj.core = 1;                        // …and whether reaching the middle kills you
     }
     // ⭐ A PART KEEPS THE WHOLE COLOUR, not just the hue. Every other coloured thing here stores an angle and
@@ -13399,9 +13403,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       obj.w = clampN(data.w, 16, 120, 34);
       obj.h = obj.w;
       obj.fuse  = clampN(data.fuse, 0.2, 10, 2.5);     // seconds from being hit to going off
-      obj.blast = clampN(data.blast, 40, 400, 150);    // how far the bang reaches (px)
-      obj.force = clampN(data.force, 0, 40, 18);       // how hard it throws whoever is caught
       obj.back  = clampN(data.back, 0, 120, 8);        // …and how long until there is one there again (0 = never)
+      // ⚠️ NO `blast` AND NO `force` (user, 2026-09-09: both are the bomb's SIZE). Not stored at all rather than
+      // stored and ignored — a field the clients no longer read is a field that will eventually be believed.
+      // A bomb saved before today still carries them and comes back agreeing with its own size instead.
       // ⚠️ POSITIVE FLAGS WITH AN "ON" DEFAULT, written as an explicit refusal rather than as a bare truthiness
       // test. `data.dig` absent must mean "yes, it breaks ground" — a bomb that leaves the wall standing is not
       // what anybody types the word bomb expecting — and a plain `data.dig ? 1 : 0` would have made every
