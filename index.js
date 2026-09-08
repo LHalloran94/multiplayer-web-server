@@ -13255,6 +13255,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             hp: objHits(data, 2) };
     if (isFinite(data.bgHue)) obj.bgHue = clampN(data.bgHue, 0, 360, 34);
     if (isFinite(data.inkHue)) obj.inkHue = clampN(data.inkHue, 0, 360, 0);
+    if (obj.bgHue != null && isFinite(data.bgSat)) obj.bgSat = clampN(data.bgSat, 0, 100, 62);
+    if (obj.bgHue != null && isFinite(data.bgLum)) obj.bgLum = clampN(data.bgLum, 4, 96, 62);
   } else if (type === 'portal') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
@@ -13298,8 +13300,16 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (obj.look === 'spikes' && data.sides === 'both') obj.sides = 'both';
     if (obj.look === 'spikes' && data.deep) obj.deep = 1;       // #185 — rows of teeth receding into the background
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
+    // ⭐ THE WHOLE COLOUR, not just its angle. A picker's saturation/value square was being thrown away and the
+    // colour rebuilt at a fixed saturation and lightness, so an author who chose a dusty slate got a bright one.
+    // ⚠️ Optional siblings: an object saved before these existed simply has none and falls back exactly as it
+    // always did, which is why they are separate fields rather than a changed meaning for the hue.
     if (isFinite(data.topHue)) obj.topHue = clampN(data.topHue, 0, 360, 0);   // custom top-surface colour (round-trips)
     if (isFinite(data.botHue)) obj.botHue = clampN(data.botHue, 0, 360, 0);   // custom body colour (round-trips)
+    if (obj.topHue != null && isFinite(data.topSat)) obj.topSat = clampN(data.topSat, 0, 100, 68);
+    if (obj.topHue != null && isFinite(data.topLum)) obj.topLum = clampN(data.topLum, 4, 96, 66);
+    if (obj.botHue != null && isFinite(data.botSat)) obj.botSat = clampN(data.botSat, 0, 100, 52);
+    if (obj.botHue != null && isFinite(data.botLum)) obj.botLum = clampN(data.botLum, 4, 96, 50);
   }
   // ⭐⭐ #339 — MOTION IS VALIDATED ONCE, FOR EVERY KIND OF THING. This block used to sit inside the platform
   // branch, which is the only reason a sign or a portal could not move: the client could always have sent a
