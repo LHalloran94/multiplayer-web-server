@@ -13187,7 +13187,25 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // duplicate of the enter/leave detection that has worked since #98. So: one type, three presentations.
     // ⚠️ The empty string is today's invisible area and stays the default, so every area that already exists
     // reads back exactly as it did.
-    if (data.part === 'plate' || data.part === 'switch') obj.part = data.part;
+    if (data.part === 'plate' || data.part === 'switch' || data.part === 'vortex') obj.part = data.part;
+    // ⭐⭐ #177 — A VORTEX. The card is one line ("things that suck in basically"), and the whole of it is a
+    // radius, a strength and which way round it goes. It is the FOURTH presentation of this one type, and it
+    // costs a branch here rather than a type because everything an area already does — being named, being
+    // asked about by a rule, being published — is exactly what it needs.
+    // ⭐ NOTHING ABOUT IT IS EVER SENT WHILE IT RUNS. A pull is a force on the person feeling it, and every
+    // client already moves its own body and announces where it ended up — the same reason a fan, a booster and
+    // a bounce pad have never needed a message. That is why this one could be built before the crates.
+    // ⚠️ SQUARE, ENFORCED HERE TOO. The client keeps `h` in step with `w`, but a field no row feeds must not be
+    // left to the sender — the fault a guard caught on the shooter's solidity. A forged oblong would draw a
+    // circle of one radius and pull with another.
+    if (obj.part === 'vortex') {
+      obj.w = clampN(data.w, 60, 1200, 260);
+      obj.h = obj.w;
+      obj.pull = clampN(data.pull, 1, 30, 10);            // how hard it drags, at the very centre
+      obj.vmode = data.vmode === 'push' ? 'push' : 'pull';  // sucks in, or blows out
+      obj.swirl = clampN(data.swirl, -100, 100, 45);      // −100 … 100: which way round it turns you, 0 = straight in
+      if (data.core) obj.core = 1;                        // …and whether reaching the middle kills you
+    }
     // ⭐ A PART KEEPS THE WHOLE COLOUR, not just the hue. Every other coloured thing here stores an angle and
     // rebuilds the colour at a fixed saturation and lightness, which means a picker's saturation/value square
     // is thrown away — the author picks a dusty blue and gets a bright one. Two more clamped numbers.
