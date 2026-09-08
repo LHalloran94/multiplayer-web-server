@@ -10998,7 +10998,15 @@ registerLibrary({
     // client that named its own would be deciding what everybody else's search finds.
     const KIND_OF = { painting: 'picture', sign: 'sign', stamp: 'stamp', platform: 'platform', stroke: 'drawing', region: 'area' };
     const one = (objs.length === 1 && !solid) ? objs[0] : null;
-    const kind = one ? (KIND_OF[(one && typeof one.type === 'string') ? one.type : ''] || 'marker') : 'template';
+    // ⭐ …AND A PLATFORM WEARING A FACE IS FILED AS THAT FACE. A door, a spike strip and a shooter are platforms
+    // underneath, which is what makes them cheap — but the shelf offers a filter for each of them, and until now
+    // this derived plain 'platform' for all three, so picking "Doors" in the shared library returned nothing and
+    // said nothing about why. The client's own shelf has classified them this way since increment 3b; this is
+    // the same partition, on the side that decides what everybody else's search finds.
+    const LOOK_KIND = { gate: 'door', spikes: 'spikes', shooter: 'shooter' };
+    const kind = one
+      ? ((one.type === 'platform' && LOOK_KIND[one.look]) || KIND_OF[typeof one.type === 'string' ? one.type : ''] || 'marker')
+      : 'template';
     // …and the qualities, which are things you might genuinely want to filter ON rather than restatements of
     // the kind: does it move by itself, does it animate, has the author given it named arrangements.
     const f = new Set([kind]);
@@ -13307,7 +13315,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // read as scenery rather than as what they are. So this is a LOOK and nothing else — every dial a platform
     // has (routes, poses, hits, modifiers, reactions) applies unchanged, which is what makes a patrolling spike
     // wall and a gate on a lift fall out for free instead of needing their own object.
-    if (data.look === 'gate' || data.look === 'spikes') obj.look = data.look;
+    if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter') obj.look = data.look;
     // ⭐ #345 — WHICH KIND OF DOOR. A barred gate, a plank door and a metal one are the same object with three
     // faces; nothing else about them differs, which is why this is a style name and not three more types.
     if (obj.look === 'gate' && ['bars', 'wood', 'metal'].includes(data.style)) obj.style = data.style;
@@ -13315,6 +13323,38 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // (it is always solid) so it can no longer carry this, and a one-sided strip also wants a thinner rail.
     if (obj.look === 'spikes' && data.sides === 'both') obj.sides = 'both';
     if (obj.look === 'spikes' && data.deep) obj.deep = 1;       // #185 — rows of teeth receding into the background
+    // ⭐⭐ #165 — A SHOOTER IS ONE OBJECT WITH DIALS, NOT FIVE DEVICES (user, 2026-09-08: *"what we should have
+    // is a sort of default shooter template, like a default platform is for platforms, and then a bunch of
+    // settings to make it different things"*). A dart trap, a turret, a flamethrower, a cannon and a laser are
+    // this object set differently — so there is one face, one panel and one wire shape, and the named devices
+    // are starting points rather than types.
+    // ⭐ Two of the user's dials cost NOTHING here: "whether it moves" and "whether it rotates" are the platform's
+    // own route and spin, validated below for every object, which is the whole reason a shooter is a platform
+    // wearing a face like a gate and a spike strip are.
+    // 🟥 EVERY ONE OF THESE HAS TO BE NAMED IN THIS FUNCTION OR IT DOES NOT SURVIVE. This rebuilds an object
+    // FIELD BY FIELD and drops every key it does not mention — the by-name-rebuild shape that has bitten this
+    // project ten times, most recently #166's `hits`, which placed and played perfectly and came back from a
+    // publish as the default. A dropped dial here would look like "my turret forgets its settings when I
+    // republish", and nothing would say why.
+    if (obj.look === 'shooter') {
+      // ⚠️ SOLID HERE, NOT ONLY ON THE CLIENT. The panel does not offer a shooter a Solidity row — it is a
+      // housing, and one you could walk through is nonsense — so nothing an author can do decides this, and a
+      // field no row feeds must not be left to whatever happened to be in the message. A guard caught it: an
+      // object built anywhere but the placement panel arrived non-solid and looked completely normal.
+      obj.solid = 1;
+      obj.ammo  = ['pellet', 'dart', 'shell', 'fire', 'beam'].includes(data.ammo) ? data.ammo : 'pellet';
+      obj.rate  = clampN(data.rate, 0.2, 8, 1.2);        // seconds between shots
+      obj.pspd  = clampN(data.pspd, 40, 900, 260);       // how fast the shot travels (px/s)
+      obj.reach = clampN(data.reach, 40, 1400, 460);     // how far it gets before it expires (px)
+      if (data.arc) obj.arc = 1;                         // the shot falls under gravity (a cannon, not a rifle)
+      if (data.aimAt) obj.aimAt = 1;                     // turns to face the nearest player before firing
+      obj.trig  = data.trig === 'near' ? 'near' : 'always';
+      obj.arange = clampN(data.arange, 40, 1600, 320);   // activation range, when it only fires with somebody near
+      if (data.los) obj.los = 1;                         // …and only with a clear line to them
+      obj.shots = Math.max(1, Math.min(7, (data.shots | 0) || 1));    // how many leave the muzzle at once
+      obj.spread = clampN(data.spread, 0, 90, 0);        // the angle they fan out over
+      obj.shove = clampN(data.shove, 0, 40, 0);          // 0 = deadly; above 0 = knocks you back this hard instead
+    }
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐ THE WHOLE COLOUR, not just its angle. A picker's saturation/value square was being thrown away and the
     // colour rebuilt at a fixed saturation and lightness, so an author who chose a dusty slate got a bright one.
