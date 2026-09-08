@@ -3660,33 +3660,43 @@ function travelMs(obj) {
   let L = 0; for (let i = 1; i < pts.length; i++) L += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
   return Math.max(200, Math.min(120000, (L || 1) / (p.speed || 0.18)));
 }
+// ⭐⭐ ARM EVERY REACTION THIS TRIGGER SETS OFF, and time each one SEPARATELY. A platform can now carry more
+// than one — "set off along your route, and fall away a few seconds later" is the case the user asked for —
+// and two effects on one object cannot share a single timestamp: the collapse starts its own clock.
+// ⭐ Keyed by WHAT IT DOES rather than by its index in the list. An index has to stay in step with an array
+// that a re-save can reorder; a verb is what every reader asks for anyway.
 function armObjReact(avRoom, id, on) {
   const map = roomObjects[avRoom]; if (!map) return;
-  const obj = map.get(id); const R = obj && obj.react;
-  if (!R || R.on === 'timer' || R.on !== on) return;    // a timer needs no server at all — see `obj.react`
+  const obj = map.get(id); const list = obj && obj.reacts;
+  if (!list || !list.length) return;
   sweepObjSt(avRoom);                                   // the trigger is also what tidies up after the last one
   const st = objStOf(avRoom);
   const cur = st.get(id);
   const now = Date.now();
-  if (cur && cur.act != null) {
-    if (R.once) return;                                          // spent, permanently
-    // ⭐ A TRAVELLING PLATFORM IS BUSY FOR AS LONG AS THE JOURNEY TAKES, and the journey is the route the
-    // author drew — so the server measures it rather than making them type a number that has to agree with a
-    // path they can redraw at any time. One that does not come back is busy for ever: it is at the far end.
-    // 0 = Stays: it is at the far end and that is where it lives now. 1 = Returns: out, a pause there, and
-    // back. 2 = Waits: ONE trip per landing, so it is free again the moment it arrives — and the next landing
-    // sends it the other way.
-    const busy = R.do === 'travel'
-      ? (R.ret === 2 ? travelMs(obj) : R.ret === 1 ? travelMs(obj) * 2 + 900 : Infinity)
-      : (R.back > 0 ? R.back * 1000 : Infinity);
-    const doneAt = cur.act + R.wait * 1000 + busy;
-    if (now < doneAt) return;                                    // still acting / still away
-  }
   const rec = cur || {};
-  // ⭐ A LIFT REMEMBERS WHICH END IT IS AT, and the server is the only place that can: two clients working it
-  // out for themselves would disagree the first time one of them joined halfway through a trip.
-  if (R.do === 'travel' && R.ret === 2 && cur && cur.act != null) rec.rev = rec.rev ? 0 : 1;
-  rec.act = now; st.set(id, rec);
+  const acts = rec.a || (rec.a = {});
+  let any = false;
+  for (const R of list) {
+    if (R.on === 'timer' || R.on !== on) continue;      // a timer needs no server at all — see `obj.reacts`
+    const was = acts[R.do];
+    if (was != null) {
+      if (R.once) continue;                                        // spent, permanently
+      // ⭐ A TRAVELLING PLATFORM IS BUSY FOR AS LONG AS THE JOURNEY TAKES, and the journey is the route the
+      // author drew — so the server measures it rather than making them type a number that has to agree with a
+      // path they can redraw at any time. One that does not come back is busy for ever: it is at the far end.
+      // 0 = Stays · 1 = Returns (out, a pause, and back) · 2 = Waits (one trip per landing, alternating).
+      const busy = R.do === 'travel'
+        ? (R.ret === 2 ? travelMs(obj) : R.ret === 1 ? travelMs(obj) * 2 + 900 : Infinity)
+        : (R.back > 0 ? R.back * 1000 : Infinity);
+      if (now < was + R.wait * 1000 + busy) continue;               // still acting / still away
+    }
+    // ⭐ A LIFT REMEMBERS WHICH END IT IS AT, and the server is the only place that can: two clients working it
+    // out for themselves would disagree the first time one of them joined halfway through a trip.
+    if (R.do === 'travel' && R.ret === 2 && was != null) rec.rev = rec.rev ? 0 : 1;
+    acts[R.do] = now; any = true;
+  }
+  if (!any) return;
+  st.set(id, rec);
   broadcastObjSt(avRoom);
 }
 // Drop the records of reactions that have finished and left nothing behind, so a busy Level's map does not grow
@@ -3699,14 +3709,20 @@ function sweepObjSt(avRoom) {
     if (s.hid || s.pose || s.sw || s.bl) continue;               // a rule put this here, somebody flipped a lever, or somebody died there; not ours to sweep
     const obj = map && map.get(id);
     if (!obj) { st.delete(id); continue; }                       // the object itself is gone
-    const R = obj.react;
-    if (!R || s.act == null) { st.delete(id); continue; }
-    if (R.once || R.back <= 0) continue;                         // permanent by design
-    // ⚠️ A TRAVELLING PLATFORM'S RECORD IS NEVER SWEPT. For "Waits" it is the only thing that remembers which
-    // end it is at, and for the other two it is what says the journey happened at all — dropping it would put
-    // the thing back at the start with nothing having moved it.
-    if (R.do === 'travel') continue;
-    if (now > s.act + (R.wait + R.back) * 1000 + 2000) st.delete(id);
+    const list = obj.reacts, acts = s.a;
+    if (!list || !list.length || !acts) { st.delete(id); continue; }
+    // ⚠️ ONE ENTRY AT A TIME. With several reactions on a thing, one may be finished and forgettable while
+    // another is still running — dropping the whole record because the first has expired would put a
+    // travelling platform back at the start with nothing having moved it.
+    for (const R of list) {
+      if (acts[R.do] == null) continue;
+      if (R.once || R.back <= 0) continue;                       // permanent by design
+      // ⚠️ A TRAVELLING PLATFORM'S RECORD IS NEVER SWEPT: for "Waits" it is the only thing that remembers
+      // which end it is at.
+      if (R.do === 'travel') continue;
+      if (now > acts[R.do] + (R.wait + R.back) * 1000 + 2000) delete acts[R.do];
+    }
+    if (!Object.keys(acts).length && s.rev == null) st.delete(id);
   }
   if (!st.size) delete roomObjSt[avRoom];
 }
@@ -13387,10 +13403,20 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
   // ⚠️ `timer` is not even that: a thing that acts every N seconds is a function of the shared wall clock, so
   // every client works it out alone and the server never hears about it.
   // ⚠️ Clamped like every other authored field. `wait`/`back` are seconds because that is what the author types.
-  if (obj && data.react && typeof data.react === 'object') {
-    const R = data.react;
+  // ⭐⭐ MORE THAN ONE OF THEM (user, 2026-09-08): *"we should have the ability to have multiple reacts on the
+  // same platform or object … a user could set a platform to set off and then fall away after a certain
+  // duration."* So a reaction is one of a LIST now, and the list is keyed by WHAT IT DOES: at most one vanish,
+  // one launch, one travel, one piston on a thing. That constraint is what keeps every reader simple — each
+  // one asks for the verb it cares about instead of scanning, and the per-object record can key its timestamps
+  // the same way rather than needing an index that has to stay in step with the array.
+  // ⚠️ `react` (singular) is still READ, because every Level saved before today has one. It is normalised into
+  // the list here, so nothing downstream has to know both shapes.
+  const _rawReacts = Array.isArray(data.reacts) ? data.reacts : (data.react ? [data.react] : []);
+  for (const R of _rawReacts.slice(0, 4)) {
+    if (!obj || !R || typeof R !== 'object') continue;
     const on = ['stand', 'touch', 'hit', 'timer'].includes(R.on) ? R.on : 'stand';
     const act = ['vanish', 'pose', 'move', 'launch', 'travel'].includes(R.do) ? R.do : 'vanish';
+    if (obj.reacts && obj.reacts.some(x => x.do === act)) continue;   // one of each kind, and the first wins
     const r = { on, do: act,
                 wait: clampN(R.wait, 0, 60, 0.6),      // how long after the trigger the effect lands
                 back: clampN(R.back, 0, 60, 3),        // …and how long until it is itself again (0 = never)
@@ -13408,7 +13434,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // 2 = Waits (sits at whichever end it reached until somebody lands on it again — a lift, not a shuttle).
     if (act === 'travel') r.ret = Math.max(0, Math.min(2, R.ret | 0));
     if (on === 'timer')   r.every = clampN(R.every, 0.5, 120, 3);
-    obj.react = r;
+    (obj.reacts || (obj.reacts = [])).push(r);
   }
   return obj;
 }
