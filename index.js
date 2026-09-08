@@ -13346,7 +13346,11 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // a shooter is sized by one dial that keeps its proportions, and a large one is 90 tall — so it would have
       // been silently squashed into a wrong-shaped turret with nothing saying why. Bounds only: the SHAPE is the
       // client's to decide (one aspect ratio, one place), and a second copy of it here is how the two drift.
-      obj.h = clampN(data.h, 14, 90, 30);
+      // ⚠️ THE HEIGHT'S CEILING MATCHES THE WIDTH'S NOW. A dart trap is SQUARE (it has to be deep enough to
+      // hold the arrow it is about to fire), so at the top of the Size dial its depth is the same 130 its width
+      // has always been allowed — and at the old cap of 90 a large trap would have been silently squashed into
+      // a wrong-shaped block with nothing saying why. Bounds only: the SHAPE stays the client's to decide.
+      obj.h = clampN(data.h, 14, 140, 30);
       obj.w = clampN(data.w, 20, 140, 44);
       obj.ammo  = ['pellet', 'dart', 'shell', 'fire', 'beam'].includes(data.ammo) ? data.ammo : 'pellet';
       obj.rate  = clampN(data.rate, 0.2, 8, 1.2);        // seconds between shots
