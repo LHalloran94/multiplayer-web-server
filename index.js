@@ -13164,6 +13164,13 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // ⚠️ The empty string is today's invisible area and stays the default, so every area that already exists
     // reads back exactly as it did.
     if (data.part === 'plate' || data.part === 'switch') obj.part = data.part;
+    // ⭐ A PART KEEPS THE WHOLE COLOUR, not just the hue. Every other coloured thing here stores an angle and
+    // rebuilds the colour at a fixed saturation and lightness, which means a picker's saturation/value square
+    // is thrown away — the author picks a dusty blue and gets a bright one. Two more clamped numbers.
+    if (obj.part) {
+      if (isFinite(data.sat)) obj.sat = clampN(data.sat, 0, 100, 62);
+      if (isFinite(data.lum)) obj.lum = clampN(data.lum, 6, 94, 44);
+    }
     // ⭐⭐ WHAT THIS ONE OPENS, WITHOUT WRITING A RULE. Rules are Level-only by design, and a plate that does
     // nothing at all in the world you are standing in is the "a setting that silently does nothing" fault this
     // track has already fixed twice. So a plate carries its own one-line rule: a list of NAMES, and whether
@@ -13289,6 +13296,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // ⭐ #185 — teeth on one face or on both. ⚠️ NOT `solid` any more: solidity is not offered on a spike strip
     // (it is always solid) so it can no longer carry this, and a one-sided strip also wants a thinner rail.
     if (obj.look === 'spikes' && data.sides === 'both') obj.sides = 'both';
+    if (obj.look === 'spikes' && data.deep) obj.deep = 1;       // #185 — rows of teeth receding into the background
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     if (isFinite(data.topHue)) obj.topHue = clampN(data.topHue, 0, 360, 0);   // custom top-surface colour (round-trips)
     if (isFinite(data.botHue)) obj.botHue = clampN(data.botHue, 0, 360, 0);   // custom body colour (round-trips)
