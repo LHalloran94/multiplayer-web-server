@@ -13342,6 +13342,12 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // field no row feeds must not be left to whatever happened to be in the message. A guard caught it: an
       // object built anywhere but the placement panel arrived non-solid and looked completely normal.
       obj.solid = 1;
+      // ⚠️ ITS OWN SIZE BOUNDS. The generic platform clamp above caps height at 60 because a platform is a BAR;
+      // a shooter is sized by one dial that keeps its proportions, and a large one is 90 tall — so it would have
+      // been silently squashed into a wrong-shaped turret with nothing saying why. Bounds only: the SHAPE is the
+      // client's to decide (one aspect ratio, one place), and a second copy of it here is how the two drift.
+      obj.h = clampN(data.h, 14, 90, 30);
+      obj.w = clampN(data.w, 20, 140, 44);
       obj.ammo  = ['pellet', 'dart', 'shell', 'fire', 'beam'].includes(data.ammo) ? data.ammo : 'pellet';
       obj.rate  = clampN(data.rate, 0.2, 8, 1.2);        // seconds between shots
       obj.pspd  = clampN(data.pspd, 40, 900, 260);       // how fast the shot travels (px/s)
@@ -13353,7 +13359,11 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (data.los) obj.los = 1;                         // …and only with a clear line to them
       obj.shots = Math.max(1, Math.min(7, (data.shots | 0) || 1));    // how many leave the muzzle at once
       obj.spread = clampN(data.spread, 0, 90, 0);        // the angle they fan out over
-      obj.shove = clampN(data.shove, 0, 40, 0);          // 0 = deadly; above 0 = knocks you back this hard instead
+      obj.sweep = clampN(data.sweep, 20, 360, 180);      // how far off its face it can bring the gun to bear
+      // ⚠️ ONLY A BALL MAY BE HARMLESS (user, 2026-09-08: *"actually just balls"*). Decided here as well as in
+      // the panel, because the panel only hides the row — and a field no visible row feeds must not be able to
+      // arrive from a hand-edited Level and make a jet of flame that quietly does nothing.
+      obj.shove = obj.ammo === 'shell' ? clampN(data.shove, 0, 40, 0) : 0;
     }
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐ THE WHOLE COLOUR, not just its angle. A picker's saturation/value square was being thrown away and the
