@@ -13258,7 +13258,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // the straight pull. `swirl` is only read when this is set, so an old vortex saved with a swirl and no
       // flag comes back as the direct kind, which is the behaviour that was asked for.
       if (data.spiral) obj.spiral = 1;
-      obj.swirl = clampN(data.swirl, -100, 100, 55);      // −100 … 100: which way round it turns you
+      // ⭐ A DIRECTION, NOT AN AMOUNT (user, 2026-09-09: the SPEED of the turn is the strength). Only the sign
+      // was ever read on the client, so storing the sign is what the field actually means — and a vortex saved
+      // with the old 55 comes through as 1, which is the same vortex.
+      obj.swirl = (data.swirl < 0) ? -1 : 1;
       if (data.core) obj.core = 1;                        // …and whether reaching the middle kills you
     }
     // ⭐ A PART KEEPS THE WHOLE COLOUR, not just the hue. Every other coloured thing here stores an angle and
