@@ -13360,6 +13360,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       obj.shots = Math.max(1, Math.min(7, (data.shots | 0) || 1));    // how many leave the muzzle at once
       obj.spread = clampN(data.spread, 0, 90, 0);        // the angle they fan out over
       obj.sweep = clampN(data.sweep, 20, 360, 180);      // how far off its face it can bring the gun to bear
+      // ⭐ Seconds a jet or a beam stays lit per cycle. At or above `rate` it never goes out — "permanently" is
+      // not a separate flag, it is this number reaching the cycle length, so there is one thing to store and no
+      // way for a flag and a duration to disagree.
+      if (obj.ammo === 'fire' || obj.ammo === 'beam') obj.burn = clampN(data.burn, 0.2, 8, 0.9);
       // ⭐⭐ A BALL IS ALWAYS HARMLESS AND NOTHING ELSE EVER IS (user, 2026-09-08: *"balls should just be made
       // harmless permanently … since the other projectiles already cover killing"*). So this is not a choice
       // being validated, it is a consequence of the ammunition — a ball always carries a push, and every other
