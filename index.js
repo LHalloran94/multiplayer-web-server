@@ -18285,7 +18285,10 @@ io.on('connection', (socket) => {
   // to being hit is ignored rather than trusted.
   socket.on('obj-react', ({ id, on }) => {
     if (!currentAvatarRoom) return;
-    armObjReact(currentAvatarRoom, id, on === 'touch' ? 'touch' : on === 'hit' ? 'hit' : 'stand');
+    // ⚠️ NAMED, NOT PASSED THROUGH: `on` is checked against the object's OWN spec inside `armObjReact`, and this
+    // list is what a client is allowed to claim happened. #189's "it reached the end of its route" joins it.
+    armObjReact(currentAvatarRoom, id,
+      on === 'touch' ? 'touch' : on === 'hit' ? 'hit' : on === 'arrive' ? 'arrive' : 'stand');
   });
 
   // ⭐⭐ #347 — SOMEBODY STEPPED ONTO A PRESSURE PLATE, OR OFF ONE. The client owns the detection for the same
