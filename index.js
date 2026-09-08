@@ -3576,16 +3576,38 @@ function objStOf(avRoom) { return roomObjSt[avRoom] || (roomObjSt[avRoom] = new 
 // already broadcasts to everyone and replays to joiners for nothing.
 const roomPlateOn = {};   // room → Map<plateObjId, Set<socketId>>
 function plateHeld(avRoom, id) { const m = roomPlateOn[avRoom]; const s = m && m.get(id); return !!(s && s.size); }
+// ⭐⭐ #351/#182 — WHO IS DRIVING EACH SWINGING THING, and that is the ENTIRE server side of the physics
+// decision the user took on 2026-09-09: *"the last person to touch it drives it."* Their machine works out
+// where the plank has swung to and it rides their position stream as held state; this end never sees an angle,
+// never integrates anything, and would not know a seesaw from a swing.
+// ⭐ It is here rather than in the per-object record for the same reason `roomPlateOn` is: this is a fact about
+// a PERSON who is present, not about the world. It dies with them, it is never stored, and it must never
+// follow a published Level to whoever plays it next.
+// ⚠️ LAST CLAIM WINS, with no arbitration at all — that IS the rule, stated exactly. The only thing the server
+// adds is that there is exactly ONE answer, which two clients each running their own physics could not agree.
+const roomObjDrv = {};    // room → Map<objId, socketId>
+function forgetDriveSocket(avRoom, sid) {
+  const m = roomObjDrv[avRoom]; if (!m) return false;
+  let hit = false;
+  for (const [id, s] of [...m]) if (s === sid) { m.delete(id); hit = true; }
+  if (!m.size) delete roomObjDrv[avRoom];
+  return hit;
+}
 // 🟥 A SOCKET THAT LEAVES MUST LET GO OF EVERY PLATE, and this is the same hazard `forgetRuleSocket` exists
 // for one door along: a player who walks out of a Level while standing on a plate would otherwise hold its gate
 // open for the rest of the session, with nobody in the room and nothing to step off. Returns whether anything
 // changed, so the caller only has to re-broadcast when it did.
+// ⭐ ONE DOOR. It also lets go of every swinging thing they were driving (#351/#182), rather than being a
+// second thing to remember at the five places a socket can leave a Level. That is the `objHitSend` lesson from
+// #183 taken up front instead of after the bug: the fix for "one of five call sites forgot" is not to add the
+// line to the fifth. ⚠️ `||` would short-circuit and skip the second call — both always run.
 function forgetPlateSocket(avRoom, sid) {
-  const m = roomPlateOn[avRoom]; if (!m) return false;
+  const drv = forgetDriveSocket(avRoom, sid);
+  const m = roomPlateOn[avRoom]; if (!m) return drv;
   let hit = false;
   for (const [id, s] of [...m]) { if (s.delete(sid)) hit = true; if (!s.size) m.delete(id); }
   if (!m.size) delete roomPlateOn[avRoom];
-  return hit;
+  return hit || drv;
 }
 // The removal seam, called from `objUnindex`. A plate that is erased stops holding anything, and anything it
 // was keeping away comes back — so this both forgets the holders and re-broadcasts, but only when the thing
@@ -3595,7 +3617,12 @@ function objLinkDrop(room, o) {
   const m = roomPlateOn[room];
   const held = m && m.delete(o.id);
   if (m && !m.size) delete roomPlateOn[room];
-  if (o.link || held || (o.part === 'switch')) broadcastObjSt(room);
+  // …and a swinging thing that is erased stops being driven (#351/#182). Same seam, same reason: a stale entry
+  // here would name a driver for something that no longer exists.
+  const dm = roomObjDrv[room];
+  const drv = dm && dm.delete(o.id);
+  if (dm && !dm.size) delete roomObjDrv[room];
+  if (o.link || held || drv || (o.part === 'switch')) broadcastObjSt(room);
 }
 // ⭐⭐ WHICH NAMES ARE SHUT AWAY BY A PLATE OR A SWITCH — the whole of the no-rules wiring, in one function.
 // A link says "Opens" (`hide`: while this is held, those things are not there) or "Closes" (`show`: those
@@ -3635,11 +3662,16 @@ function objStWire(avRoom) {
   // a plate somebody is parked on costs nothing while they stand there.
   let p = null;
   { const pm = roomPlateOn[avRoom]; if (pm) for (const [id, s] of pm) if (s.size) (p || (p = [])).push(id); }
-  if ((!m || !m.size) && !k && !p) return null;
+  // ⭐ #351/#182 — …and who is driving each swinging thing. Sent on the same edges as the rest of this: a claim
+  // happens when somebody ARRIVES on one, so a plank being ridden costs nothing while they stand on it.
+  let d = null;
+  { const dm = roomObjDrv[avRoom]; if (dm) for (const [id, s] of dm) (d || (d = {}))[id] = s; }
+  if ((!m || !m.size) && !k && !p && !d) return null;
   const o = {}; if (m) for (const [id, s] of m) o[id] = s;
   const w = { o };
   if (k) w.k = k;
   if (p) w.p = p;
+  if (d) w.d = d;
   return w;
 }
 function broadcastObjSt(avRoom) { const w = objStWire(avRoom); io.to(avRoom).emit('obj-state', w || { o: {} }); }
@@ -13519,10 +13551,32 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     obj.spin = clampN(data.spin, -0.012, 0.012, 0);        // continuous rotation (rad/ms; 0 = still)
     if (!obj.spin) delete obj.spin;                        // …and a still thing carries no key at all
     if (data.pivot === 'left' || data.pivot === 'right') obj.pivot = data.pivot;   // turn around an edge, not the middle
+    // ⭐⭐ #351/#182 — IT TURNS BECAUSE OF WHAT IS ON IT, not because the author set it going. Anchored in the
+    // middle it balances until somebody stands to one side (a seesaw); anchored at an end its own weight hangs
+    // it down (a swing). One flag and four dials — the anchor is `pivot`, one line up, which is already stored.
+    // ⚠️ PLATFORMS ONLY, and the same restriction the panel enforces: the arithmetic is measured along a
+    // plank's long axis, and an area or a portal has no such axis to tip about.
+    // 🟥 EVERY ONE OF THESE HAS TO BE NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds an object field by field
+    // and drops what it does not mention. That is the by-name-rebuild shape this project has been bitten by ten
+    // times, most recently #166's `hits`, and a dropped Weight here would read as "my seesaw goes back to the
+    // default whenever I republish", with nothing saying why.
     if (data.osc && typeof data.osc === 'object' && isFinite(data.osc.w) && isFinite(data.osc.amp)) {
       obj.osc = { w: clampN(data.osc.w, -0.25, 0.25, 0),   // swinging rotation (sweep an arc, no full turn)
                   amp: clampN(data.osc.amp, 0, Math.PI, 0),
                   phase: clampN(data.osc.phase, 0, Math.PI * 2, 0) };
+    }
+    // ⚠️ AFTER the spin and the swing above, not before them, because it clears both — placed first, its
+    // `delete obj.osc` would have been quietly undone by the very next line and a free plank would have come
+    // back from a republish oscillating on a timer as well.
+    if (data.free && obj.type === 'platform') {
+      obj.free = 1;
+      delete obj.spin; delete obj.osc;                     // it is ONE kind of turning, not three at once
+      obj.fwt  = clampN(data.fwt,  0.5, 20, 6);            // how heavy the plank is next to one player = the card's "inertia"
+      obj.fdmp = clampN(data.fdmp, 0, 10, 3);              // how quickly it gives its swing up
+      obj.flim = clampN(data.flim, 0, 180, 55);            // how far from home it can get, in degrees — 0 = no stops at all
+      // ⚠️ Stored only when it was actually asked for, so a plank left to sit where it is put carries no key.
+      const spr = clampN(data.fspr, 0, 10, 0);
+      if (spr) obj.fspr = spr;
     }
     if (data.path && Array.isArray(data.path.pts) && data.path.pts.length >= 2) {
       const pts = [];
@@ -18497,6 +18551,24 @@ io.on('connection', (socket) => {
     let s = m.get(id);
     if (on) { if (s && s.has(socket.id)) return; if (!s) m.set(id, s = new Set()); s.add(socket.id); }
     else { if (!s || !s.delete(socket.id)) return; if (!s.size) m.delete(id); }
+    broadcastObjSt(room);
+  });
+  // ⭐⭐ #351/#182 — SOMEBODY TOUCHED A SWINGING THING, so they drive it now. The whole of the physics decision
+  // on this end: one socket id per object, and the angle never comes here at all. Their machine works out where
+  // the plank swings to and it rides their position stream as held state, exactly as their crouch and their
+  // body size do — which is what keeps a push feeling immediate instead of costing a round trip.
+  // ⚠️ CHECKED AGAINST THE OBJECT, not trusted, exactly like the plate above: a claim about something that is
+  // not a free-swinging platform in this room does nothing, so a stale id from a Level you have just left
+  // cannot take the wheel of something somewhere else.
+  // ⚠️ THE RE-CLAIM IS DROPPED SILENTLY. Standing on a plank re-asks every so often (the client rate-limits it);
+  // without this, one person parked on a seesaw would broadcast the room's whole object state on a timer.
+  socket.on('obj-drive', ({ id }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const map = roomObjects[room]; const o = map && map.get(id);
+    if (!o || o.type !== 'platform' || !o.free) return;
+    const m = roomObjDrv[room] || (roomObjDrv[room] = new Map());
+    if (m.get(id) === socket.id) return;
+    m.set(id, socket.id);
     broadcastObjSt(room);
   });
   // ⭐⭐ #347 — SOMEBODY PRESSED A SWITCH. Unlike a plate this is a fact about the WORLD and outlives the person
