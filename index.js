@@ -13266,6 +13266,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // …a pivoted one never lands on anything, so bounce means nothing to it and is not kept.
       const bnc = obj.loose === 2 ? 0 : clampN(data.lbnc, 0, 5, 0);
       if (bnc) obj.lbnc = bnc;
+      // …and only a pivoted one has a bearing to settle in. 0 is a windmill that never stops.
+      if (obj.loose === 2) obj.ldmp = clampN(data.ldmp, 0, 10, 3);
     }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
