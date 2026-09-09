@@ -13328,7 +13328,9 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       const bnc = obj.loose === 2 ? 0 : clampN(data.lbnc, 0, 5, 0);
       if (bnc) obj.lbnc = bnc;
       // …and only a pivoted one has a bearing to settle in. 0 is a windmill that never stops.
-      if (obj.loose === 2) obj.ldmp = clampN(data.ldmp, 0, 10, 3);
+      // ⚠️ …and a SLIDE, whose rail is the same kind of bearing. Named here or the dial comes back at its
+      // default after a republish and the slide coasts again.
+      if (obj.loose === 2 || obj.look === 'slide' || obj.look === 'rack') obj.ldmp = clampN(data.ldmp, 0, 10, 3);
       // ⭐⭐ …AND HOW FAST A MOTOR DRIVES ITSELF, signed for the direction it turns. It is the one thing in the
       // machinery kit that is a source of movement rather than a passenger, and it is stored here like every
       // other dial so that a mill somebody built still runs after a republish.
@@ -13344,6 +13346,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // which is how #166's `hits` came back from a publish as the default.
       if (data.trav) obj.trav = clampN(data.trav, 0, 600, 0);
       if (data.rdir < 0) obj.rdir = -1;
+      // …an arm's GEAR, which is a different number from how long the arm is, and how often a motor turns
+      // round. Both named here or dropped in silence, like every other dial on this object.
+      if (data.hub) obj.hub = clampN(data.hub, 22, 200, 48);
+      if (data.mrev) obj.mrev = clampN(data.mrev, 0, 30, 0);
     }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
