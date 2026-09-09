@@ -13328,12 +13328,13 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (bnc) obj.lbnc = bnc;
       // …and only a pivoted one has a bearing to settle in. 0 is a windmill that never stops.
       if (obj.loose === 2) obj.ldmp = clampN(data.ldmp, 0, 10, 3);
-      // ⭐⭐ …AND HOW FAST A MOTOR DRIVES ITSELF, in degrees a second, signed for the direction it turns. It is
-      // the one thing in the machinery kit that is a source of movement rather than a passenger, and it is
-      // stored here like every other dial so that a mill somebody built still runs after a republish.
-      // ⚠️ Clamped to one turn a second. Past that a cog outruns what the collision solver can see between
-      // frames, which is the same bound the loose bodies' speed cap states in its own units.
-      if (data.mspin) obj.mspin = clampN(data.mspin, -360, 360, 0);
+      // ⭐⭐ …AND HOW FAST A MOTOR DRIVES ITSELF, signed for the direction it turns. It is the one thing in the
+      // machinery kit that is a source of movement rather than a passenger, and it is stored here like every
+      // other dial so that a mill somebody built still runs after a republish.
+      // ⚠️ IT IS A RIM SPEED, in px per second, NOT an angle. At the same angular setting a bigger motor drives
+      // everything downstream harder, so the dial meant a different thing at every size; how fast its EDGE
+      // travels does not. Clamped because past this a small gear outruns what the collision solver can see.
+      if (data.mspin) obj.mspin = clampN(data.mspin, -600, 600, 0);
     }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
