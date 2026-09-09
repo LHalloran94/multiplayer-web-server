@@ -3864,7 +3864,8 @@ const SURF_TYPES = ['ice', 'mud', 'hazard', 'stick', 'grow', 'shrink'];
 // ⭐ The stamp presets' ids — the faces `drawStampLook` knows how to draw. ⚠️ IT IS A COPY OF A CLIENT LIST
 // and it has to be: the server cannot read `16a`. `probe_loose` S5 asserts the two agree, because a face
 // added on one side and not the other comes back from a round trip as a plain emoji stamp and says nothing.
-const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball', 'bowling',
+const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball', 'volleyball',
+                     'bowling', 'cricket', 'gridiron', 'puck',
                      'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum'];
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
