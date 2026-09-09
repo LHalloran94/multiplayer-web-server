@@ -13501,7 +13501,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // read as scenery rather than as what they are. So this is a LOOK and nothing else — every dial a platform
     // has (routes, poses, hits, modifiers, reactions) applies unchanged, which is what makes a patrolling spike
     // wall and a gate on a lift fall out for free instead of needing their own object.
-    if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter' || data.look === 'bomb') obj.look = data.look;
+    if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter' || data.look === 'bomb'
+        || data.look === 'net') obj.look = data.look;
     // ⭐⭐ #183 — A BOMB. Same trick as the gate, the spike strip and the shooter: a platform wearing a face, so
     // a bomb on a lift, a bomb on a route and a bomb a rule can hide all cost nothing.
     // 🟥 EVERY DIAL HAS TO BE NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds an object field by field and
