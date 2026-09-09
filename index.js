@@ -3898,7 +3898,9 @@ const SURF_TYPES = ['ice', 'mud', 'hazard', 'stick', 'grow', 'shrink'];
 // added on one side and not the other comes back from a round trip as a plain emoji stamp and says nothing.
 const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball', 'volleyball',
                      'bowling', 'cricket', 'gridiron', 'puck',
-                     'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum'];
+                     'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum',
+                     'cog', 'windmill', 'turnstile', 'balance',
+                     'pin', 'cone', 'pot', 'anvil', 'log'];
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
 // back, smash anybody's and it falls on the ground as a cairn for whoever gets there first. That one rule is
@@ -13299,6 +13301,9 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // so a block hit four times would end up at 0.34^4 of itself — vanishing rather than melting. And the hit
     // points it started with are what the fraction is measured against.
     if (data.melt) { obj.melt = 1; obj.w0 = obj.w; obj.h0 = obj.h; obj.hp0 = obj.hp; }
+    // ⭐ …and how hard a knock SHATTERS it, as a speed in px/step. Clamped: below about 3 a pot would break on
+    // the step it was placed, and above 40 nothing in this world moves fast enough to break anything.
+    if (data.frag > 0) obj.frag = clampN(data.frag, 3, 40, 7);
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐⭐ #168/#169/#170/#171 — PINNED, OR LOOSE. #171's own word: a pinned stamp is set at that position, and
     // one that is not pinned falls until something stops it and can be shoved about by the players. The three
