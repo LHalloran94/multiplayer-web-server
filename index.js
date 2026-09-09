@@ -3900,6 +3900,7 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'bowling', 'cricket', 'gridiron', 'puck',
                      'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum',
                      'cog', 'wheel', 'motor', 'crank', 'arm', 'windmill', 'turnstile', 'balance',
+                     'slide', 'rack', 'rod', 'ratchet',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
@@ -13335,6 +13336,14 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // everything downstream harder, so the dial meant a different thing at every size; how fast its EDGE
       // travels does not. Clamped because past this a small gear outruns what the collision solver can see.
       if (data.mspin) obj.mspin = clampN(data.mspin, -600, 600, 0);
+      // ⭐ …AND THE TWO THINGS THE LINKAGES STORE, which between them are all a linkage needs told. A slide's
+      // rail is where it was PLACED and which way it FACES — both of those are `x`/`y`/`angle`, which every
+      // object already carries — so the only thing left is how far along it may go. And a rod's joints are
+      // found from what its ends are sitting on, so it stores nothing at all.
+      // 🟥 NAMED HERE OR THEY DO NOT SURVIVE. This rebuilds field by field and drops what it does not mention,
+      // which is how #166's `hits` came back from a publish as the default.
+      if (data.trav) obj.trav = clampN(data.trav, 0, 600, 0);
+      if (data.rdir < 0) obj.rdir = -1;
     }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
