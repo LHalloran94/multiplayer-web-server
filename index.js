@@ -3899,7 +3899,7 @@ const SURF_TYPES = ['ice', 'mud', 'hazard', 'stick', 'grow', 'shrink'];
 const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball', 'volleyball',
                      'bowling', 'cricket', 'gridiron', 'puck',
                      'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum',
-                     'cog', 'windmill', 'turnstile', 'balance',
+                     'cog', 'cogsm', 'cogbig', 'wheel', 'windmill', 'turnstile', 'balance',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
