@@ -3861,6 +3861,11 @@ const OBJ_TYPES = new Set(['platform', 'stamp', 'stroke', 'checkpoint', 'goal', 
 // not carry is dropped silently on the way in, which looks exactly like a surface that can be chosen and does
 // nothing. #167 added the last three: grip (hold on all the way round a thing) and the two that resize you.
 const SURF_TYPES = ['ice', 'mud', 'hazard', 'stick', 'grow', 'shrink'];
+// ⭐ The stamp presets' ids — the faces `drawStampLook` knows how to draw. ⚠️ IT IS A COPY OF A CLIENT LIST
+// and it has to be: the server cannot read `16a`. `probe_loose` S5 asserts the two agree, because a face
+// added on one side and not the other comes back from a round trip as a plain emoji stamp and says nothing.
+const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball', 'bowling',
+                     'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum'];
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
 // back, smash anybody's and it falls on the ground as a cairn for whoever gets there first. That one rule is
@@ -13243,10 +13248,16 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64),
-            shape: (data.shape === 'ellipse' || data.shape === 'tri') ? data.shape : 'rect',
+            shape: (data.shape === 'ellipse' || data.shape === 'tri' || data.shape === 'cyl') ? data.shape : 'rect',
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),
             stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
             hp: objHits(data, 2) };   // indestructible when breakable:false
+    // ⭐⭐ WHICH PRESET DREW IT — a football, a barrel, a sandbag. It is a FACE and nothing else: every dial
+    // that makes a football a football is stored beside it and stays editable, exactly as a gate's Style is.
+    // ⚠️ VALIDATED AGAINST A LIST, and the list is the presets' own ids. A rebuild that let any string through
+    // would put arbitrary author text into everybody's draw path; one that forgot the field entirely would
+    // silently hand every client back a plain emoji stamp, which is the fault `probe_loose` S2 exists for.
+    if (STAMP_LOOKS.includes(data.look)) obj.look = data.look;
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐⭐ #168/#169/#170/#171 — PINNED, OR LOOSE. #171's own word: a pinned stamp is set at that position, and
     // one that is not pinned falls until something stops it and can be shoved about by the players. The three
