@@ -13248,6 +13248,20 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
             hp: objHits(data, 2) };   // indestructible when breakable:false
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
+    // ⭐⭐ #168/#169/#170/#171 — PINNED, OR LOOSE. #171's own word: a pinned stamp is set at that position, and
+    // one that is not pinned falls until something stops it and can be shoved about by the players. The three
+    // dials are stored ONLY when it is loose, so every stamp that already exists reads back exactly as it did
+    // and a pinned one costs nothing in a published Level.
+    // ⚠️ NOTHING ABOUT WHERE IT HAS GOT TO IS STORED, HERE OR ANYWHERE. `x`/`y` are where the AUTHOR put it —
+    // the thing a save keeps and a reload restores. Where somebody has shoved it to is worked out on the
+    // driver's machine and rides their position packet, exactly as a swinging plank's angle does.
+    if (data.loose) {
+      obj.loose = 1;
+      obj.lwt = clampN(data.lwt, 1, 20, 4);          // how heavy it is next to one player
+      obj.lslip = clampN(data.lslip, 0, 10, 2);      // how much speed it keeps on the ground
+      const bnc = clampN(data.lbnc, 0, 10, 0);
+      if (bnc) obj.lbnc = bnc;
+    }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
@@ -18565,7 +18579,10 @@ io.on('connection', (socket) => {
   socket.on('obj-drive', ({ id }) => {
     const room = currentAvatarRoom; if (!room) return;
     const map = roomObjects[room]; const o = map && map.get(id);
-    if (!o || o.type !== 'platform' || !o.free) return;
+    // ⭐ #168/#169/#170/#171 — TWO KINDS OF DRIVABLE THING NOW, and this end still does not know the difference
+    // between them: a plank reports an angle and a crate reports a place, and neither of those comes here. All
+    // that is checked is that the claim names something in THIS room that can be driven at all.
+    if (!o || !((o.type === 'platform' && o.free) || (o.type === 'stamp' && o.loose))) return;
     const m = roomObjDrv[room] || (roomObjDrv[room] = new Map());
     if (m.get(id) === socket.id) return;
     m.set(id, socket.id);
