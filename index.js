@@ -3902,6 +3902,15 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'cog', 'wheel', 'motor', 'crank', 'arm', 'windmill', 'turnstile', 'balance',
                      'slide', 'rack', 'rod', 'ratchet',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
+// 🟥🟥 …AND THE FOUR THAT MAY BE LONG, which is what "rods only come in one length" turned out to be. A rod
+// spans the gap between the two things it joins and a rack is a track something runs along, so their length is
+// decided by the machine rather than by a slider — and 160 is shorter than any real one. Measured against this
+// server before the change: a rod sent at 200, 320 and 480 all came back at 160, and the Rack preset's own
+// default of 180 came back at 160, so no rack has ever been the length its own table says.
+// ⚠️ A COPY OF A CLIENT LIST, like `STAMP_LOOKS` above it and for the same reason.
+const LONG_STAMP_LOOKS = ['rod', 'rack', 'slide', 'arm'];
+const STAMP_LONG_MAX = 600;
+function stampMax(look) { return LONG_STAMP_LOOKS.includes(look) ? STAMP_LONG_MAX : 160; }
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
 // back, smash anybody's and it falls on the ground as a cairn for whoever gets there first. That one rule is
@@ -13283,7 +13292,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-            content: data.content, w: clampN(data.w, 24, 160, 64), h: clampN(data.h, 24, 160, 64),
+            content: data.content, w: clampN(data.w, 24, stampMax(data.look), 64), h: clampN(data.h, 24, stampMax(data.look), 64),
             shape: (data.shape === 'ellipse' || data.shape === 'tri' || data.shape === 'cyl') ? data.shape : 'rect',
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),
             stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
