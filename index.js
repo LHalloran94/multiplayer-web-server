@@ -3709,15 +3709,21 @@ function travelMs(obj) {
 // the neighbourhood of where the bomb was authored, so a forged one can only lie locally.
 // ⚠️ RE-LIGHTING IS REFUSED WHILE IT IS BUSY, the same rule `armObjReact` uses one function down: without it a
 // player standing next to a bomb punching every frame would restart its fuse for ever and it would never blow.
+// ⭐⭐ WHAT CAN BE SET OFF. A bomb, or anything carrying `boom` — which is the SECONDS it burns for, so an oil
+// drum is a bomb with a short fuse and no "comes back" time. Everything below this line already worked: the
+// refusal to re-light one that is burning is what makes a chain propagate one hop per blast, and `back` being
+// unset is what makes it gone for good.
+function objExplodes(obj) { return !!obj && (obj.look === 'bomb' || obj.boom > 0); }
+function bombFuseMs(obj) { return Math.max(200, (obj.fuse == null ? (obj.boom > 0 ? obj.boom : 2.5) : obj.fuse) * 1000); }
 function armBomb(avRoom, id, sid, data) {
   const map = roomObjects[avRoom]; if (!map) return false;
   const obj = map.get(id);
-  if (!obj || obj.look !== 'bomb') return false;
+  if (!objExplodes(obj)) return false;
   const st = objStOf(avRoom);
   const rec = st.get(id) || {};
   const now = Date.now();
   if (rec.lit) {
-    const fuseMs = Math.max(200, (obj.fuse || 2.5) * 1000);
+    const fuseMs = bombFuseMs(obj);
     // `back` 0 means it never comes back, so it is busy for ever — which is correct: the record IS the fact
     // that it is gone.
     if (!(obj.back > 0) || now < rec.lit.at + fuseMs + obj.back * 1000) return true;
@@ -13259,6 +13265,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // would put arbitrary author text into everybody's draw path; one that forgot the field entirely would
     // silently hand every client back a plain emoji stamp, which is the fault `probe_loose` S2 exists for.
     if (STAMP_LOOKS.includes(data.look)) obj.look = data.look;
+    // ⭐ …and whether it goes up when something sets it off, as the seconds it burns for first. Clamped like
+    // every other dial: a fuse of zero would blast in the same frame as the hit that lit it, and a very long
+    // one is indistinguishable from a thing that never goes off.
+    if (data.boom > 0) obj.boom = clampN(data.boom, 0.2, 6, 0.8);
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐⭐ #168/#169/#170/#171 — PINNED, OR LOOSE. #171's own word: a pinned stamp is set at that position, and
     // one that is not pinned falls until something stops it and can be shoved about by the players. The three
@@ -18540,7 +18550,7 @@ io.on('connection', (socket) => {
     // when you hit this" is the whole of what a bomb is, and a second message would only have been the first
     // one with a different name. `vx`/`vy` are the shove the fist gave it — the card asks for exactly this
     // ("could punch it to throw it") — and are ignored by everything that is not a bomb.
-    if (obj && obj.look === 'bomb') { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy }); return; }
+    if (objExplodes(obj)) { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy }); return; }
     if (!obj || typeof obj.hp !== 'number') return;
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
     if (obj.hp <= 0) {
