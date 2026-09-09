@@ -3899,7 +3899,7 @@ const SURF_TYPES = ['ice', 'mud', 'hazard', 'stick', 'grow', 'shrink'];
 const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball', 'volleyball',
                      'bowling', 'cricket', 'gridiron', 'puck',
                      'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum',
-                     'cog', 'wheel', 'motor', 'crank', 'windmill', 'turnstile', 'balance',
+                     'cog', 'wheel', 'motor', 'crank', 'arm', 'windmill', 'turnstile', 'balance',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
@@ -11126,7 +11126,7 @@ registerLibrary({
     // this derived plain 'platform' for all three, so picking "Doors" in the shared library returned nothing and
     // said nothing about why. The client's own shelf has classified them this way since increment 3b; this is
     // the same partition, on the side that decides what everybody else's search finds.
-    const LOOK_KIND = { gate: 'door', spikes: 'spikes', shooter: 'shooter', bomb: 'bomb' };
+    const LOOK_KIND = { gate: 'door', spikes: 'spikes', shooter: 'shooter', bomb: 'bomb', belt: 'belt' };
     const kind = one
       ? ((one.type === 'platform' && LOOK_KIND[one.look]) || KIND_OF[typeof one.type === 'string' ? one.type : ''] || 'marker')
       : 'template';
@@ -13511,7 +13511,16 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // read as scenery rather than as what they are. So this is a LOOK and nothing else — every dial a platform
     // has (routes, poses, hits, modifiers, reactions) applies unchanged, which is what makes a patrolling spike
     // wall and a gate on a lift fall out for free instead of needing their own object.
-    if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter' || data.look === 'bomb') obj.look = data.look;
+    if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter' || data.look === 'bomb'
+        || data.look === 'belt') obj.look = data.look;
+    // ⭐⭐ A BELT is the same trick once more, and the only face here that keeps its own SOLIDITY: a
+    // conveyor laid as a floor is the one-way bar everybody knows, one laid as a ceiling is solid. Which wheels
+    // it drives is worked out from where its ends are, so nothing about that is on the wire — the one thing
+    // that cannot be derived is whether it is CROSSED, because a figure-of-eight and a straight run are the
+    // same bar between the same two wheels.
+    // 🟥 NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds field by field and drops what it does not
+    // mention, which is how #166's `hits` came back from a publish as the default.
+    if (obj.look === 'belt' && data.cross) obj.cross = 1;
     // ⭐⭐ #183 — A BOMB. Same trick as the gate, the spike strip and the shooter: a platform wearing a face, so
     // a bomb on a lift, a bomb on a route and a bomb a rule can hide all cost nothing.
     // 🟥 EVERY DIAL HAS TO BE NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds an object field by field and
