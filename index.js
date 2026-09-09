@@ -3900,7 +3900,7 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'bowling', 'cricket', 'gridiron', 'puck',
                      'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum',
                      'cog', 'windmill', 'turnstile', 'balance',
-                     'pin', 'cone', 'pot', 'anvil', 'log'];
+                     'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
 // back, smash anybody's and it falls on the ground as a cairn for whoever gets there first. That one rule is
@@ -13304,6 +13304,9 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // ⭐ …and how hard a knock SHATTERS it, as a speed in px/step. Clamped: below about 3 a pot would break on
     // the step it was placed, and above 40 nothing in this world moves fast enough to break anything.
     if (data.frag > 0) obj.frag = clampN(data.frag, 3, 40, 7);
+    // ⚠️ How much of a cylinder's width is FLAT. A barrel bulges, a log does not — one number rather than a
+    // second shape, and it has to survive the rebuild or every log comes back a barrel.
+    if (data.cflat > 0) obj.cflat = clampN(data.cflat, 0.3, 0.95, 0.55);
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐⭐ #168/#169/#170/#171 — PINNED, OR LOOSE. #171's own word: a pinned stamp is set at that position, and
     // one that is not pinned falls until something stops it and can be shoved about by the players. The three
@@ -13501,8 +13504,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // read as scenery rather than as what they are. So this is a LOOK and nothing else — every dial a platform
     // has (routes, poses, hits, modifiers, reactions) applies unchanged, which is what makes a patrolling spike
     // wall and a gate on a lift fall out for free instead of needing their own object.
-    if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter' || data.look === 'bomb'
-        || data.look === 'net') obj.look = data.look;
+    if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter' || data.look === 'bomb') obj.look = data.look;
     // ⭐⭐ #183 — A BOMB. Same trick as the gate, the spike strip and the shooter: a platform wearing a face, so
     // a bomb on a lift, a bomb on a route and a bomb a rule can hide all cost nothing.
     // 🟥 EVERY DIAL HAS TO BE NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds an object field by field and
