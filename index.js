@@ -3899,7 +3899,7 @@ const SURF_TYPES = ['ice', 'mud', 'hazard', 'stick', 'grow', 'shrink'];
 const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball', 'volleyball',
                      'bowling', 'cricket', 'gridiron', 'puck',
                      'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum',
-                     'cog', 'wheel', 'windmill', 'turnstile', 'balance',
+                     'cog', 'wheel', 'motor', 'crank', 'waterwheel', 'windmill', 'turnstile', 'balance',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
@@ -13328,6 +13328,12 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (bnc) obj.lbnc = bnc;
       // …and only a pivoted one has a bearing to settle in. 0 is a windmill that never stops.
       if (obj.loose === 2) obj.ldmp = clampN(data.ldmp, 0, 10, 3);
+      // ⭐⭐ …AND HOW FAST A MOTOR DRIVES ITSELF, in degrees a second, signed for the direction it turns. It is
+      // the one thing in the machinery kit that is a source of movement rather than a passenger, and it is
+      // stored here like every other dial so that a mill somebody built still runs after a republish.
+      // ⚠️ Clamped to one turn a second. Past that a cog outruns what the collision solver can see between
+      // frames, which is the same bound the loose bodies' speed cap states in its own units.
+      if (data.mspin) obj.mspin = clampN(data.mspin, -360, 360, 0);
     }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
