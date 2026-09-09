@@ -13255,11 +13255,13 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // ⚠️ NOTHING ABOUT WHERE IT HAS GOT TO IS STORED, HERE OR ANYWHERE. `x`/`y` are where the AUTHOR put it —
     // the thing a save keeps and a reload restores. Where somebody has shoved it to is worked out on the
     // driver's machine and rides their position packet, exactly as a swinging plank's angle does.
+    // ⏹️ THERE IS NO `lslip`. Friction turned out to be the SURFACE's business and not the weight's — the
+    // object's own modifier mixed with whatever it is resting on — so the dial was deleted rather than clamped
+    // here. An old stamp carrying one simply loses it, which is the behaviour that field now has anyway.
     if (data.loose) {
       obj.loose = 1;
-      obj.lwt = clampN(data.lwt, 1, 20, 4);          // how heavy it is next to one player
-      obj.lslip = clampN(data.lslip, 0, 10, 2);      // how much speed it keeps on the ground
-      const bnc = clampN(data.lbnc, 0, 10, 0);
+      obj.lwt = clampN(data.lwt, 1, 20, 4);          // how heavy it is next to one player: its mass
+      const bnc = clampN(data.lbnc, 0, 5, 0);        // …and how much of a fall it gives back, in five steps
       if (bnc) obj.lbnc = bnc;
     }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
