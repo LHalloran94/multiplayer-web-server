@@ -3714,6 +3714,32 @@ function travelMs(obj) {
 // refusal to re-light one that is burning is what makes a chain propagate one hop per blast, and `back` being
 // unset is what makes it gone for good.
 function objExplodes(obj) { return !!obj && (obj.look === 'bomb' || obj.boom > 0); }
+// ⭐⭐ DAMAGE THE WORLD DEALS, RATHER THAN A PLAYER, ARRIVES ONCE PER CLIENT — and that is not a bug in the
+// client, it is what "a turret everyone can see" means. A punch is initiated by one person so one client sends
+// it; a shot is initiated by an object, so five people watching one turret would smash the same crate five
+// times as fast, and a flame jet would deal sixty hits a second.
+// ⚠️ THE WINDOW IS THE SHOOTER'S OWN RATE, not a constant. Reports of the same shot land within a few tens of
+// milliseconds so they collapse; the NEXT shot is a whole period later so it lands. A fixed window would either
+// swallow real shots from a fast turret or let a slow one through twice.
+// ⚠️ KEYED ON THE SOURCE AS WELL AS THE TARGET, so two turrets on one crate are two streams of damage rather
+// than one — which is what a second turret is for.
+const roomWorldHit = Object.create(null);
+function worldHitOk(avRoom, id, src, obj) {
+  const m = roomWorldHit[avRoom] || (roomWorldHit[avRoom] = new Map());
+  const k = id + '|' + src, now = Date.now();
+  // …a shot source names the shooter, so its own rate decides; anything else gets a plain half-second.
+  let win = 500;
+  if (src.startsWith('shot:')) {
+    const sh = roomObjects[avRoom] && roomObjects[avRoom].get(src.slice(5));
+    win = Math.max(120, Math.min(4000, (sh && isFinite(sh.rate) ? sh.rate : 1.2) * 800));
+  }
+  const was = m.get(k);
+  if (was && now - was < win) return false;
+  m.set(k, now);
+  if (m.size > 400) { for (const [kk, t] of m) if (now - t > 8000) m.delete(kk); }
+  return true;
+}
+function forgetWorldHits(avRoom) { delete roomWorldHit[avRoom]; }
 function bombFuseMs(obj) { return Math.max(200, (obj.fuse == null ? (obj.boom > 0 ? obj.boom : 2.5) : obj.fuse) * 1000); }
 function armBomb(avRoom, id, sid, data) {
   const map = roomObjects[avRoom]; if (!map) return false;
@@ -13269,6 +13295,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // every other dial: a fuse of zero would blast in the same frame as the hit that lit it, and a very long
     // one is indistinguishable from a thing that never goes off.
     if (data.boom > 0) obj.boom = clampN(data.boom, 0.2, 6, 0.8);
+    // ⚠️ THE SIZE IT STARTED AT IS STORED, not inferred. Shrinking from the CURRENT size each time compounds,
+    // so a block hit four times would end up at 0.34^4 of itself — vanishing rather than melting. And the hit
+    // points it started with are what the fraction is measured against.
+    if (data.melt) { obj.melt = 1; obj.w0 = obj.w; obj.h0 = obj.h; obj.hp0 = obj.hp; }
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐⭐ #168/#169/#170/#171 — PINNED, OR LOOSE. #171's own word: a pinned stamp is set at that position, and
     // one that is not pinned falls until something stops it and can be shoved about by the players. The three
@@ -18542,7 +18572,7 @@ io.on('connection', (socket) => {
     io.to(currentAvatarRoom).emit('mat-undefined', { id: id | 0 });
     ok(true);
   });
-  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy }) => {
+  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, src }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     const obj = roomObjects[currentAvatarRoom].get(id);
     // ⭐⭐ #183 — HITTING A BOMB SETS IT OFF; it does not damage it. This is deliberately the SAME message a
@@ -18550,7 +18580,16 @@ io.on('connection', (socket) => {
     // when you hit this" is the whole of what a bomb is, and a second message would only have been the first
     // one with a different name. `vx`/`vy` are the shove the fist gave it — the card asks for exactly this
     // ("could punch it to throw it") — and are ignored by everything that is not a bomb.
-    if (objExplodes(obj)) { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy }); return; }
+    // ⚠️ COLLAPSED FIRST, before anything is decided. A repeat of world-dealt damage must not light a drum
+    // either, or five clients watching one flame jet would each arm it and the last one would win.
+    if (typeof src === 'string' && src && !worldHitOk(currentAvatarRoom, id, src.slice(0, 48), obj)) return;
+    // ⭐⭐ ONLY HEAT LIGHTS A DRUM (user, 2026-09-10: *"a punch shouldn't set oil drums off, nor should a slam or
+    // dig, only flame and similar things that would ignite a flammable substance"*). A BOMB is different and
+    // stays different: hitting one is the whole of what a bomb is (#183's card says "could punch it to throw
+    // it"), so a bomb answers to any hit and a drum answers only to fire.
+    // ⚠️ A drum that is punched to bits is therefore simply destroyed, not detonated. That is the rule as asked
+    // for; if smashing one should spill burning oil, that is a different thing and wants saying out loud.
+    if (obj && (obj.look === 'bomb' || (fire && obj.boom > 0))) { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy }); return; }
     if (!obj || typeof obj.hp !== 'number') return;
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
     if (obj.hp <= 0) {
@@ -18563,7 +18602,27 @@ io.on('connection', (socket) => {
       if (obj.cost > 0 && invGatedRoom(currentAvatarRoom)) scatterMatter(currentAvatarRoom, obj.x, obj.y - 12, [], obj.cost | 0, 1);
       emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-removed', { id });
     }
-    else { objsTouch(currentAvatarRoom, obj.ch); emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-update', { id, hp: obj.hp }); }
+    else {
+      objsTouch(currentAvatarRoom, obj.ch);
+      // ⭐⭐ SOMETHING THAT MELTS GETS SMALLER AS IT TAKES DAMAGE (user, 2026-09-10: *"ice should melt when
+      // exposed to such things, and I suppose it would happen gradually depending on the amount of exposure,
+      // producing water and shrinking itself"*).
+      // ⭐ THE SERVER DOES THE SHRINKING, and that is what makes this cost no new machinery at all: `w` and `h`
+      // are what every reader already asks for — the collision, the solver's shape, the draw, the minimap — so
+      // nothing had to learn a size that is a function of something else. The alternative, deriving the size
+      // from hit points on each client, would have touched every one of those places and given three ways to
+      // get it wrong.
+      // ⚠️ IT NEVER GOES TO NOTHING: at its last hit point it is still a third of its size, and it disappears
+      // by being destroyed like anything else. A block that shrank to a pixel would be a thing you cannot hit.
+      const upd = { id, hp: obj.hp };
+      if (obj.melt > 0 && obj.hp0 > 0) {
+        const k = 0.34 + 0.66 * Math.max(0, obj.hp) / obj.hp0;
+        obj.w = Math.max(6, Math.round(obj.w0 * k));
+        obj.h = Math.max(6, Math.round(obj.h0 * k));
+        upd.w = obj.w; upd.h = obj.h;
+      }
+      emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-update', upd);
+    }
     if (obj.hp > 0) armObjReact(currentAvatarRoom, id, 'hit');    // #189/#178 — "when I get hit" is a trigger like any other
   });
 
