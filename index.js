@@ -13317,6 +13317,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             // ⚠️ …and WHICH cam. A cam has four convex profiles and they are different machines, so a profile
             // dropped here comes back as the default one — the by-name rebuild trap, same as `shape` above it.
             camp: (data.camp === 'oval' || data.camp === 'drop' || data.camp === 'flat') ? data.camp : undefined,
+            // ⚠️ …and whether it is BOLTED to a gear it is sitting on. Which gear is worked out from where it
+            // is, so nothing about that is on the wire — but the fact that it is bolted at all cannot be
+            // derived from geometry (a crate merely resting on a gear looks identical), so it is stored.
+            wld: data.wld ? 1 : undefined,
             angle: wrapAngle(data.angle, 0),
             stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
             hp: objHits(data, 2) };   // indestructible when breakable:false
