@@ -3912,9 +3912,14 @@ const LONG_STAMP_LOOKS = ['rod', 'rack', 'slide', 'arm'];
 // ⚠️ 1200 — the old 600 was chosen by hand rather than derived, and it bound on ordinary machines. Kept in
 //    step with the client's `STAMP_LONG_MAX`; a cap only one side knows about is this file's oldest fault.
 const STAMP_LONG_MAX = 1200;
-// ⚠️ A CAM IS CAPPED SEPARATELY AND MUCH HIGHER — its lobe only reaches half its box from the pin, so at 160
-//    it could not out-reach the largest gear it might be mounted on. Kept in step with the client's `CAM_MAX`.
-function stampMax(look) { return (look === 'cam' || look === 'ring') ? 420 : LONG_STAMP_LOOKS.includes(look) ? STAMP_LONG_MAX : 160; }
+// ⚠️ EVERYTHING THAT TURNS ON A PIN IS CAPPED SEPARATELY AND MUCH HIGHER. 160 is the right ceiling for a thing
+//    you throw and it was never derived from anything about machinery — a gear is a piece of a structure, and
+//    a cam has to out-reach whatever it is bolted to, which is where this exception started. Kept in step with
+//    the client's `BIG_STAMP_LOOKS` / `BIG_STAMP_MAX`; a cap only one side knows about is this file's oldest
+//    fault, met four times on the machinery track alone.
+const BIG_STAMP_LOOKS = ['cam', 'ring', 'cog', 'motor', 'crank', 'wheel', 'ratchet'];
+const BIG_STAMP_MAX = 420;
+function stampMax(look) { return BIG_STAMP_LOOKS.includes(look) ? BIG_STAMP_MAX : LONG_STAMP_LOOKS.includes(look) ? STAMP_LONG_MAX : 160; }
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
 // back, smash anybody's and it falls on the ground as a cairn for whoever gets there first. That one rule is
