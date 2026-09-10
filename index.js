@@ -3944,6 +3944,19 @@ function objPriceOf(o) {
   return Math.max(1, Math.round(objAreaCells(o) * Math.max(0, objCfg.perCell | 0)));
 }
 const clampN = (v, lo, hi, dflt) => (typeof v === 'number' && isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : dflt;
+// 🟥🟥 AN ANGLE WRAPS, IT DOES NOT CLAMP, and clamping one is how a belt ended up facing exactly the wrong way.
+// Every angle here was `clampN(data.angle, -PI, PI, 0)`, which is a sensible-looking line and wrong: -PI and +PI
+// are the SAME PLACE, so anything a hair outside the range is not out of bounds at all — it is one turn round.
+// A belt placed by clicking its right-hand wheel first legitimately comes out at 2PI, and clamping stood it on
+// its head: its solid face pointed away from its own wheels, it found neither, and it drew as a bare slack bar.
+// Measured — the client sent 6.283 and 6.065, this stored 3.142 for both.
+// ⚠️ Still rejects rubbish: a non-number or an infinity is still the default, which is the half of `clampN`
+// that was actually doing a job here.
+const wrapAngle = (v, dflt) => {
+  if (typeof v !== 'number' || !isFinite(v)) return dflt;
+  const t = Math.PI * 2, w = ((v + Math.PI) % t + t) % t - Math.PI;
+  return w;
+};
 
 // ---- Destructible terrain (Tier C) -----------------------------------------
 // A coarse solidity grid per room — a raster mask at TERRAIN_CELL resolution (0 empty / 1 solid).
@@ -13294,7 +13307,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             content: data.content, w: clampN(data.w, 24, stampMax(data.look), 64), h: clampN(data.h, 24, stampMax(data.look), 64),
             shape: (data.shape === 'ellipse' || data.shape === 'tri' || data.shape === 'cyl') ? data.shape : 'rect',
-            angle: clampN(data.angle, -Math.PI, Math.PI, 0),
+            angle: wrapAngle(data.angle, 0),
             stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
             hp: objHits(data, 2) };   // indestructible when breakable:false
     // ⭐⭐ WHICH PRESET DREW IT — a football, a barrel, a sandbag. It is a FACE and nothing else: every dial
@@ -13364,7 +13377,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-            angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // scroll-set base rotation (round-trips like stamps)
+            angle: wrapAngle(data.angle, 0),   // scroll-set base rotation (round-trips like stamps)
             hp: objHits(data, 2) };  // erasable/destructible like other props
     if (type === 'goal' && isFinite(data.target)) obj.target = Math.max(-1, Math.min(63, data.target | 0));  // series destination Level (-1 = next; Phase 5b)
   } else if (type === 'region') {
@@ -13455,7 +13468,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             cols, rows, w: cols * TERRAIN_CELL, h: rows * TERRAIN_CELL, palette, runs: cleanRuns(data.runs),
-            angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // #339 — a picture can be hung at an angle, and turn
+            angle: wrapAngle(data.angle, 0),   // #339 — a picture can be hung at an angle, and turn
             hp: objHits(data, 2) };
     // An ANIMATED painting carries its frames as well. ⚠️ Sixteen of them, each bounded exactly as the still one
     // is — the frame count is a multiplier on everything this object costs to send and to keep, so it is the one
@@ -13494,7 +13507,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             size: clampN(data.size, 8, 96, 18),
             bold: data.bold === true, italic: data.italic === true, under: data.under === true,
             shape: ['plate', 'board', 'oval', 'none'].includes(data.shape) ? data.shape : 'plate',
-            angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // #339 — a sign can be hung at an angle, and swing
+            angle: wrapAngle(data.angle, 0),   // #339 — a sign can be hung at an angle, and swing
             w: clampN(data.w, 8, 2000, 96), h: clampN(data.h, 8, 1200, 40),
             hp: objHits(data, 2) };
     if (isFinite(data.bgHue)) obj.bgHue = clampN(data.bgHue, 0, 360, 34);
@@ -13507,7 +13520,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             pair: (typeof data.pair === 'string' && data.pair.length <= 64) ? data.pair : id,
             entry: data.entry !== false, oneWay: data.oneWay === true,
-            angle: clampN(data.angle, -Math.PI, Math.PI, 0),   // scroll-set base rotation (round-trips like stamps)
+            angle: wrapAngle(data.angle, 0),   // scroll-set base rotation (round-trips like stamps)
             oval: clampN(data.oval, 0, 1, 0),        // ovalness: 0 = circle → 1 = narrow (round-trips; both ends share it)
             hue: clampN(data.hue, 0, 360, 275),     // user-chosen pair colour (round-trips; both ends share it)
             hp: objHits(data, 2) };
@@ -13521,7 +13534,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             // its own wheels, found none, and drew itself as an unhooked slack strap — which is exactly the
             // picture that came back from play. Same shape as the rod's length: a cap only this file knew about.
             w: clampN(data.w, 24, data.look === 'belt' ? 2000 : 400, 96), h: clampN(data.h, 8, 60, 16),
-            angle: clampN(data.angle, -Math.PI, Math.PI, 0),
+            angle: wrapAngle(data.angle, 0),
             boost: clampN(data.boost, -48, 48, 0), updraft: clampN(data.updraft, 0, 30, 0),
             fanLen: clampN(data.fanLen, 0.3, 3, 1),        // fan effective-distance multiplier (× base column height)
             fanMode: ['push', 'pull', 'pulse', 'pulsepush', 'pulsepull', 'alt'].includes(data.fanMode) ? data.fanMode : 'push',
