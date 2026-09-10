@@ -3900,7 +3900,7 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'bowling', 'cricket', 'gridiron', 'puck',
                      'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum',
                      'cog', 'wheel', 'motor', 'crank', 'arm', 'windmill', 'turnstile', 'balance',
-                     'slide', 'rack', 'rod', 'ratchet',
+                     'slide', 'rack', 'rod', 'ratchet', 'cam',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
 // 🟥🟥 …AND THE FOUR THAT MAY BE LONG, which is what "rods only come in one length" turned out to be. A rod
 // spans the gap between the two things it joins and a rack is a track something runs along, so their length is
@@ -13308,7 +13308,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
             content: data.content, w: clampN(data.w, 24, stampMax(data.look), 64), h: clampN(data.h, 24, stampMax(data.look), 64),
-            shape: (data.shape === 'ellipse' || data.shape === 'tri' || data.shape === 'cyl') ? data.shape : 'rect',
+            // ⚠️ `cam` IS A SHAPE, and it has to be named here or a cam comes back a RECTANGLE — the by-name
+            // rebuild trap again, and the one this file has been bitten by most.
+            shape: (data.shape === 'ellipse' || data.shape === 'tri' || data.shape === 'cyl'
+                 || data.shape === 'cam') ? data.shape : 'rect',
             angle: wrapAngle(data.angle, 0),
             stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
             hp: objHits(data, 2) };   // indestructible when breakable:false
@@ -13556,7 +13559,12 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // has (routes, poses, hits, modifiers, reactions) applies unchanged, which is what makes a patrolling spike
     // wall and a gate on a lift fall out for free instead of needing their own object.
     if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter' || data.look === 'bomb'
-        || data.look === 'belt') obj.look = data.look;
+        || data.look === 'belt' || data.look === 'spring') obj.look = data.look;
+    // ⭐⭐ A SPRING is a platform wearing a face too — placed by its two ends like a belt, and a connector
+    // rather than an obstacle, so it is ALWAYS passable and says so here rather than trusting the client.
+    // 🟥 NAMED HERE OR IT DOES NOT SURVIVE: this rebuilds field by field and drops what it does not mention,
+    // which is the trap `hits` and the belt's own `nosol` were both caught by.
+    if (obj.look === 'spring') { obj.nosol = 1; delete obj.solid; obj.sk = clampN(data.sk, 1, 20, 6); }
     // ⭐⭐ A BELT is the same trick once more, and the only face here that keeps its own SOLIDITY: a
     // conveyor laid as a floor is the one-way bar everybody knows, one laid as a ceiling is solid. Which wheels
     // it drives is worked out from where its ends are, so nothing about that is on the wire — the one thing
