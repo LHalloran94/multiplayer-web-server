@@ -3908,7 +3908,9 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
 // server before the change: a rod sent at 200, 320 and 480 all came back at 160, and the Rack preset's own
 // default of 180 came back at 160, so no rack has ever been the length its own table says.
 // ⚠️ A COPY OF A CLIENT LIST, like `STAMP_LOOKS` above it and for the same reason.
-const LONG_STAMP_LOOKS = ['rod', 'rack', 'slide', 'arm'];
+// ⚠️ The three spinning BARS are on it too — a windmill, a turnstile and a balance are what an arm is, and
+//    their own presets (150 / 96 / 132) sat right under the 160 ceiling. Kept in step with the client's copy.
+const LONG_STAMP_LOOKS = ['rod', 'rack', 'slide', 'arm', 'windmill', 'turnstile', 'balance'];
 // ⚠️ 1200 — the old 600 was chosen by hand rather than derived, and it bound on ordinary machines. Kept in
 //    step with the client's `STAMP_LONG_MAX`; a cap only one side knows about is this file's oldest fault.
 const STAMP_LONG_MAX = 1200;
