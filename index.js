@@ -3900,7 +3900,7 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'bowling', 'cricket', 'gridiron', 'puck',
                      'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum',
                      'cog', 'wheel', 'motor', 'crank', 'arm', 'windmill', 'turnstile', 'balance',
-                     'slide', 'rack', 'rod', 'ratchet', 'cam',
+                     'slide', 'rack', 'rod', 'ratchet', 'cam', 'ring',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
 // 🟥🟥 …AND THE FOUR THAT MAY BE LONG, which is what "rods only come in one length" turned out to be. A rod
 // spans the gap between the two things it joins and a rack is a track something runs along, so their length is
@@ -3914,7 +3914,7 @@ const LONG_STAMP_LOOKS = ['rod', 'rack', 'slide', 'arm'];
 const STAMP_LONG_MAX = 1200;
 // ⚠️ A CAM IS CAPPED SEPARATELY AND MUCH HIGHER — its lobe only reaches half its box from the pin, so at 160
 //    it could not out-reach the largest gear it might be mounted on. Kept in step with the client's `CAM_MAX`.
-function stampMax(look) { return look === 'cam' ? 420 : LONG_STAMP_LOOKS.includes(look) ? STAMP_LONG_MAX : 160; }
+function stampMax(look) { return (look === 'cam' || look === 'ring') ? 420 : LONG_STAMP_LOOKS.includes(look) ? STAMP_LONG_MAX : 160; }
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
 // back, smash anybody's and it falls on the ground as a cairn for whoever gets there first. That one rule is
