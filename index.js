@@ -13515,7 +13515,12 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type: 'platform', ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-            w: clampN(data.w, 24, 400, 96), h: clampN(data.h, 8, 60, 16),
+            // 🟥🟥 A BELT MAY BE LONG, and this cap is what "the partial belt" actually was. A platform is a bar
+            // you drag out, so 400 is a sensible ceiling for one; a belt is strung between two wheels wherever
+            // the author put them, and its length is not a slider at all. Chopped to 400 it stopped reaching
+            // its own wheels, found none, and drew itself as an unhooked slack strap — which is exactly the
+            // picture that came back from play. Same shape as the rod's length: a cap only this file knew about.
+            w: clampN(data.w, 24, data.look === 'belt' ? 2000 : 400, 96), h: clampN(data.h, 8, 60, 16),
             angle: clampN(data.angle, -Math.PI, Math.PI, 0),
             boost: clampN(data.boost, -48, 48, 0), updraft: clampN(data.updraft, 0, 30, 0),
             fanLen: clampN(data.fanLen, 0.3, 3, 1),        // fan effective-distance multiplier (× base column height)
@@ -13545,6 +13550,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // 🟥 NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds field by field and drops what it does not
     // mention, which is how #166's `hits` came back from a publish as the default.
     if (obj.look === 'belt' && data.cross) obj.cross = 1;
+    // ⭐ …AND WHETHER IT IS AN OBSTACLE AT ALL. A belt's solidity row is Solid / Not solid rather than the
+    // platform's One-way / Solid: the second answer is a DRIVE belt, which turns its wheels and is drawn and
+    // which nothing collides with. Named here or it comes back solid after a republish, like every other dial.
+    if (obj.look === 'belt' && data.nosol) obj.nosol = 1;
     // ⭐⭐ #183 — A BOMB. Same trick as the gate, the spike strip and the shooter: a platform wearing a face, so
     // a bomb on a lift, a bomb on a route and a bomb a rule can hide all cost nothing.
     // 🟥 EVERY DIAL HAS TO BE NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds an object field by field and
