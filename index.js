@@ -3909,7 +3909,9 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
 // default of 180 came back at 160, so no rack has ever been the length its own table says.
 // ⚠️ A COPY OF A CLIENT LIST, like `STAMP_LOOKS` above it and for the same reason.
 const LONG_STAMP_LOOKS = ['rod', 'rack', 'slide', 'arm'];
-const STAMP_LONG_MAX = 600;
+// ⚠️ 1200 — the old 600 was chosen by hand rather than derived, and it bound on ordinary machines. Kept in
+//    step with the client's `STAMP_LONG_MAX`; a cap only one side knows about is this file's oldest fault.
+const STAMP_LONG_MAX = 1200;
 function stampMax(look) { return LONG_STAMP_LOOKS.includes(look) ? STAMP_LONG_MAX : 160; }
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
