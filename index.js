@@ -13316,7 +13316,13 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
                  || data.shape === 'cam') ? data.shape : 'rect',
             // ⚠️ …and WHICH cam. A cam has four convex profiles and they are different machines, so a profile
             // dropped here comes back as the default one — the by-name rebuild trap, same as `shape` above it.
-            camp: (data.camp === 'oval' || data.camp === 'drop' || data.camp === 'flat') ? data.camp : undefined,
+            camp: (data.camp === 'oval' || data.camp === 'drop' || data.camp === 'flat'
+                || data.camp === 'drawn') ? data.camp : undefined,
+            // ⚠️ …and a DRAWN cam's outline, as hundredths of its own box so it scales with the Size row. Each
+            // number is clamped and rounded here rather than trusted: this is author-supplied geometry that
+            // every other client will build a collider out of, and the cap is what stops one being enormous.
+            campts: Array.isArray(data.campts) && data.campts.length >= 6
+              ? data.campts.slice(0, 48).map(n => clampN(n, -60, 60, 0) | 0) : undefined,
             // ⚠️ …and whether it is BOLTED to a gear it is sitting on. Which gear is worked out from where it
             // is, so nothing about that is on the wire — but the fact that it is bolted at all cannot be
             // derived from geometry (a crate merely resting on a gear looks identical), so it is stored.
