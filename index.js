@@ -3902,26 +3902,17 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'cog', 'wheel', 'motor', 'crank', 'arm', 'windmill', 'turnstile', 'balance',
                      'slide', 'rack', 'rod', 'ratchet', 'cam', 'ring',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
-// 🟥🟥 …AND THE FOUR THAT MAY BE LONG, which is what "rods only come in one length" turned out to be. A rod
-// spans the gap between the two things it joins and a rack is a track something runs along, so their length is
-// decided by the machine rather than by a slider — and 160 is shorter than any real one. Measured against this
-// server before the change: a rod sent at 200, 320 and 480 all came back at 160, and the Rack preset's own
-// default of 180 came back at 160, so no rack has ever been the length its own table says.
-// ⚠️ A COPY OF A CLIENT LIST, like `STAMP_LOOKS` above it and for the same reason.
-// ⚠️ The three spinning BARS are on it too — a windmill, a turnstile and a balance are what an arm is, and
-//    their own presets (150 / 96 / 132) sat right under the 160 ceiling. Kept in step with the client's copy.
-const LONG_STAMP_LOOKS = ['rod', 'rack', 'slide', 'arm', 'windmill', 'turnstile', 'balance'];
-// ⚠️ 1200 — the old 600 was chosen by hand rather than derived, and it bound on ordinary machines. Kept in
-//    step with the client's `STAMP_LONG_MAX`; a cap only one side knows about is this file's oldest fault.
-const STAMP_LONG_MAX = 1200;
-// ⚠️ EVERYTHING THAT TURNS ON A PIN IS CAPPED SEPARATELY AND MUCH HIGHER. 160 is the right ceiling for a thing
-//    you throw and it was never derived from anything about machinery — a gear is a piece of a structure, and
-//    a cam has to out-reach whatever it is bolted to, which is where this exception started. Kept in step with
-//    the client's `BIG_STAMP_LOOKS` / `BIG_STAMP_MAX`; a cap only one side knows about is this file's oldest
-//    fault, met four times on the machinery track alone.
-const BIG_STAMP_LOOKS = ['cam', 'ring', 'cog', 'motor', 'crank', 'wheel', 'ratchet'];
-const BIG_STAMP_MAX = 420;
-function stampMax(look) { return BIG_STAMP_LOOKS.includes(look) ? BIG_STAMP_MAX : LONG_STAMP_LOOKS.includes(look) ? STAMP_LONG_MAX : 160; }
+// ⭐⭐ ONE CEILING FOR EVERY STAMP, AND IT IS 1200. There used to be three — 160 for an ordinary stamp, 420
+// for the things that turn on a pin, 1200 for the bars — and each exception was argued separately on the day
+// somebody found 160 binding on something it had no business binding on: a rod that came back at 160 whatever
+// length it was sent at, a cam that could not out-reach the gear it was bolted to, a windmill whose own preset
+// was 150. Every one was the same complaint about the same number, and that number was only ever right for a
+// thing you THROW. 1200 is the bars' old ceiling, kept because it is the one of the three chosen against this
+// world rather than against a football.
+// ⚠️ KEPT IN STEP WITH THE CLIENT'S `STAMP_MAX`. A cap only one side knows about is this file's oldest fault.
+// ⚠️ The `look` argument stays so the day a face needs its own ceiling again it is one line here.
+const STAMP_MAX_ALL = 1200;
+function stampMax(look) { return STAMP_MAX_ALL; }
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
 // nothing is destroyed, so the Prima a prop costs is Prima PARKED IN THE WORLD: erase your own and it comes
 // back, smash anybody's and it falls on the ground as a cairn for whoever gets there first. That one rule is
@@ -13361,7 +13352,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     //    and stay in. One flag, and it has to survive the rebuild like every other: this rebuild drops what it
     //    does not name, so without this line every hollow hoop comes straight back a solid disc. That trap has
     //    been paid for here twice already (a cam round-tripping as a rectangle, a belt losing its crossing).
-    if (data.hollow) obj.hollow = 1;
+    if (data.hollow) { obj.hollow = 1; obj.wall = clampN(data.wall, 2, 40, 13); }
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐⭐ #168/#169/#170/#171 — PINNED, OR LOOSE. #171's own word: a pinned stamp is set at that position, and
     // one that is not pinned falls until something stops it and can be shoved about by the players. The three
