@@ -13618,7 +13618,16 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (rp.length < 2) return null;
       obj.rp = rp;
       obj.angle = 0; obj.nosol = 1; delete obj.solid;
-      obj.slk = clampN(data.slk, 0, 800, 0);
+      // ⭐⭐ A ROPE IS A SIMULATED THING NOW (2026-09-12), so what it stores changed: `rl` is the LENGTH of rope it
+      //     is made of, in pixels, which is conserved — where `slk` used to ADD rope on top of whatever its route
+      //     measured at the time. An older rope carries `slk` and no `rl`, and the client reads it as route +
+      //     slack once, so nothing already strung changes length.
+      // …`rk` is which kind (a preset over `re`), `re` how far it stretches, 0 = the exact length rule.
+      // 🟥 NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds field by field and drops what it does not mention.
+      if (isFinite(+data.rl) && +data.rl > 0) obj.rl = clampN(data.rl, 8, 20000, 64);
+      else obj.slk = clampN(data.slk, 0, 800, 0);
+      if (data.rk === 'bungee') obj.rk = 'bungee'; else if (data.rk) obj.rk = 'rope';
+      if (data.re != null) obj.re = clampN(data.re, 0, 100, 0);
       if (data.rthru) obj.rthru = 1;
     }
     // ⭐⭐ A BELT is the same trick once more, and the only face here that keeps its own SOLIDITY: a
