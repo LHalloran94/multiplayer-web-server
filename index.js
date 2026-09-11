@@ -13594,7 +13594,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // 🟥 NAMED HERE OR IT DOES NOT SURVIVE: this rebuilds field by field and drops what it does not mention,
     // which is the trap `hits` and the belt's own `nosol` were both caught by.
     // `rr` = its rest length as a % of the placed length (2026-09-12); absent on older springs, which rest as placed
-    if (obj.look === 'spring') { delete obj.solid; if (data.nosol) obj.nosol = 1; obj.sk = clampN(data.sk, 1, 20, 6); obj.rr = clampN(data.rr, 25, 200, 100); }
+    if (obj.look === 'spring') { delete obj.solid; if (data.nosol) obj.nosol = 1; obj.sk = clampN(data.sk, 1, 20, 6); obj.rr = clampN(data.rr, 25, 200, 100); if (data.fe) obj.fe = 1; }
+    // …`fe`: an end in empty air is FREE rather than pinned to the world (2026-09-12). Absent on older springs.
     // ⭐⭐ A ROPE. Its shape is its ROUTE — the author's clicks, each [dx, dy, kind, side] from the rope's x/y —
     // so it lies flat (angle 0) and is never a collider itself. Everything live about it (which things it is
     // tied to, the corners it catches on, the rope in each stretch) is worked out on the client from these.
