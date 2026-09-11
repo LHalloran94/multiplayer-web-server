@@ -13561,7 +13561,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             // the author put them, and its length is not a slider at all. Chopped to 400 it stopped reaching
             // its own wheels, found none, and drew itself as an unhooked slack strap — which is exactly the
             // picture that came back from play. Same shape as the rod's length: a cap only this file knew about.
-            w: clampN(data.w, 24, data.look === 'belt' ? 2000 : 400, 96), h: clampN(data.h, 8, 60, 16),
+            // ⚠️ …AND A SPRING AND A ROPE ARE STRUNG THE SAME WAY, so they take the belt's ceiling. A spring clicked
+            // 600px long came back at 400 — the SAME class of fault, a cap only this file knew about, and one the
+            // client's own "too far apart" check (2000) could never warn about.
+            w: clampN(data.w, 24, (data.look === 'belt' || data.look === 'spring' || data.look === 'rope') ? 2000 : 400, 96), h: clampN(data.h, 8, 60, 16),
             angle: wrapAngle(data.angle, 0),
             boost: clampN(data.boost, -48, 48, 0), updraft: clampN(data.updraft, 0, 30, 0),
             fanLen: clampN(data.fanLen, 0.3, 3, 1),        // fan effective-distance multiplier (× base column height)
@@ -13582,12 +13585,40 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // has (routes, poses, hits, modifiers, reactions) applies unchanged, which is what makes a patrolling spike
     // wall and a gate on a lift fall out for free instead of needing their own object.
     if (data.look === 'gate' || data.look === 'spikes' || data.look === 'shooter' || data.look === 'bomb'
-        || data.look === 'belt' || data.look === 'spring') obj.look = data.look;
-    // ⭐⭐ A SPRING is a platform wearing a face too — placed by its two ends like a belt, and a connector
-    // rather than an obstacle, so it is ALWAYS passable and says so here rather than trusting the client.
+        || data.look === 'belt' || data.look === 'spring' || data.look === 'rope') obj.look = data.look;
+    // ⭐⭐ A SPRING is a platform wearing a face too — placed by its two ends like a belt.
+    // ⭐ SOLID UNLESS TOLD OTHERWISE (user, 2026-09-11: springs should interact with objects). What collides is
+    // the coil between its live ends, worked out on the client; the one stored answer is the opt-out, `nosol`.
+    // ⚠️ `solid` is never kept: the bar a spring was placed as is only its rest length, not a thing to stand on.
+    // A spring saved before today carries `nosol: 1` and comes back passable, exactly as it was built.
     // 🟥 NAMED HERE OR IT DOES NOT SURVIVE: this rebuilds field by field and drops what it does not mention,
     // which is the trap `hits` and the belt's own `nosol` were both caught by.
-    if (obj.look === 'spring') { obj.nosol = 1; delete obj.solid; obj.sk = clampN(data.sk, 1, 20, 6); }
+    if (obj.look === 'spring') { delete obj.solid; if (data.nosol) obj.nosol = 1; obj.sk = clampN(data.sk, 1, 20, 6); }
+    // ⭐⭐ A ROPE. Its shape is its ROUTE — the author's clicks, each [dx, dy, kind, side] from the rope's x/y —
+    // so it lies flat (angle 0) and is never a collider itself. Everything live about it (which things it is
+    // tied to, the corners it catches on, the rope in each stretch) is worked out on the client from these.
+    // ⚠️ EVERY BOUND IS A WIRE BOUND: a route goes to everyone in the room and to every joiner. Two ends plus at
+    // most eight wheels, offsets inside the world's reach, the kinds and sides from their short lists.
+    // 🟥 NAMED HERE OR IT DOES NOT SURVIVE — `rp`, `slk` and `rthru` all, for the reason every dial above is.
+    if (obj.look === 'rope') {
+      const src = Array.isArray(data.rp) ? data.rp.slice(0, 10) : [];
+      const rp = [];
+      for (let i = 0; i < src.length; i++) {
+        const q = src[i];
+        if (!Array.isArray(q) || !isFinite(q[0]) || !isFinite(q[1])) return null;
+        let k = [0, 1, 2, 3].includes(q[2] | 0) ? (q[2] | 0) : 0;
+        const end = i === 0 || i === src.length - 1;
+        if (end && k === 1) k = 0;                         // …an end cannot be a wheel the rope goes ROUND
+        if (!end && k !== 1) k = 1;                         // …and a middle cannot be an end
+        rp.push([Math.round(clampN(q[0], -4000, 4000, 0) * 10) / 10, Math.round(clampN(q[1], -4000, 4000, 0) * 10) / 10,
+                 k, q[3] < 0 ? -1 : 1]);
+      }
+      if (rp.length < 2) return null;
+      obj.rp = rp;
+      obj.angle = 0; obj.nosol = 1; delete obj.solid;
+      obj.slk = clampN(data.slk, 0, 800, 0);
+      if (data.rthru) obj.rthru = 1;
+    }
     // ⭐⭐ A BELT is the same trick once more, and the only face here that keeps its own SOLIDITY: a
     // conveyor laid as a floor is the one-way bar everybody knows, one laid as a ceiling is solid. Which wheels
     // it drives is worked out from where its ends are, so nothing about that is on the wire — the one thing
