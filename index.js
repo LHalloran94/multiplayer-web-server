@@ -13593,7 +13593,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // A spring saved before today carries `nosol: 1` and comes back passable, exactly as it was built.
     // 🟥 NAMED HERE OR IT DOES NOT SURVIVE: this rebuilds field by field and drops what it does not mention,
     // which is the trap `hits` and the belt's own `nosol` were both caught by.
-    if (obj.look === 'spring') { delete obj.solid; if (data.nosol) obj.nosol = 1; obj.sk = clampN(data.sk, 1, 20, 6); }
+    // `rr` = its rest length as a % of the placed length (2026-09-12); absent on older springs, which rest as placed
+    if (obj.look === 'spring') { delete obj.solid; if (data.nosol) obj.nosol = 1; obj.sk = clampN(data.sk, 1, 20, 6); obj.rr = clampN(data.rr, 25, 200, 100); }
     // ⭐⭐ A ROPE. Its shape is its ROUTE — the author's clicks, each [dx, dy, kind, side] from the rope's x/y —
     // so it lies flat (angle 0) and is never a collider itself. Everything live about it (which things it is
     // tied to, the corners it catches on, the rope in each stretch) is worked out on the client from these.
