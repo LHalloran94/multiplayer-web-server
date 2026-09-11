@@ -13357,6 +13357,11 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // ⚠️ How much of a cylinder's width is FLAT. A barrel bulges, a log does not — one number rather than a
     // second shape, and it has to survive the rebuild or every log comes back a barrel.
     if (data.cflat > 0) obj.cflat = clampN(data.cflat, 0.3, 0.95, 0.55);
+    // ⭐⭐ …AND WHETHER IT IS A SHELL RATHER THAN A SOLID — a shape with a hole in it, which things fall inside
+    //    and stay in. One flag, and it has to survive the rebuild like every other: this rebuild drops what it
+    //    does not name, so without this line every hollow hoop comes straight back a solid disc. That trap has
+    //    been paid for here twice already (a cam round-tripping as a rectangle, a belt losing its crossing).
+    if (data.hollow) obj.hollow = 1;
     if (SURF_TYPES.includes(data.surf)) obj.surf = data.surf;       // contact-property surface modifier
     // ⭐⭐ #168/#169/#170/#171 — PINNED, OR LOOSE. #171's own word: a pinned stamp is set at that position, and
     // one that is not pinned falls until something stops it and can be shoved about by the players. The three
