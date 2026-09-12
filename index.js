@@ -13603,15 +13603,15 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // most eight wheels, offsets inside the world's reach, the kinds and sides from their short lists.
     // 🟥 NAMED HERE OR IT DOES NOT SURVIVE — `rp`, `slk` and `rthru` all, for the reason every dial above is.
     if (obj.look === 'rope') {
-      const src = Array.isArray(data.rp) ? data.rp.slice(0, 10) : [];
+      const src = Array.isArray(data.rp) ? data.rp.slice(0, 64) : [];
       const rp = [];
       for (let i = 0; i < src.length; i++) {
         const q = src[i];
         if (!Array.isArray(q) || !isFinite(q[0]) || !isFinite(q[1])) return null;
-        let k = [0, 1, 2, 3].includes(q[2] | 0) ? (q[2] | 0) : 0;
-        const end = i === 0 || i === src.length - 1;
-        if (end && k === 1) k = 0;                         // …an end cannot be a wheel the rope goes ROUND
-        if (!end && k !== 1) k = 1;                         // …and a middle cannot be an end
+        // ⭐ A ROPE IS DRAWN NOW, so `rp` is simply the path it was dragged along and every point on it means
+        //   the same thing (2026-09-12). The kinds are kept on the wire only so a rope strung before today comes
+        //   back with the shape it had; the client no longer reads them.
+        const k = [0, 1, 2, 3].includes(q[2] | 0) ? (q[2] | 0) : 0;
         rp.push([Math.round(clampN(q[0], -4000, 4000, 0) * 10) / 10, Math.round(clampN(q[1], -4000, 4000, 0) * 10) / 10,
                  k, q[3] < 0 ? -1 : 1]);
       }
