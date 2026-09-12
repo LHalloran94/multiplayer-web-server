@@ -13603,7 +13603,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // most eight wheels, offsets inside the world's reach, the kinds and sides from their short lists.
     // 🟥 NAMED HERE OR IT DOES NOT SURVIVE — `rp`, `slk` and `rthru` all, for the reason every dial above is.
     if (obj.look === 'rope') {
-      const src = Array.isArray(data.rp) ? data.rp.slice(0, 64) : [];
+      const src = Array.isArray(data.rp) ? data.rp.slice(0, 200) : [];
       const rp = [];
       for (let i = 0; i < src.length; i++) {
         const q = src[i];
