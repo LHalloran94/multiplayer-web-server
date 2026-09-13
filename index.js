@@ -13638,6 +13638,11 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // 🟥 NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds field by field and drops what it does not
     // mention, which is how #166's `hits` came back from a publish as the default.
     if (obj.look === 'belt' && data.cross) obj.cross = 1;
+    // ⭐ …AND WHICH TWO WHEELS, AS A HINT (2026-09-14). A belt on LOOSE wheels cannot be found from where its bar was
+    // placed once they have rolled away, so the client remembers the pair by id and follows them. A hint only: an edit
+    // re-mints a wheel's id, and the client falls back to finding the wheels by geometry when an id is gone.
+    if (obj.look === 'belt' && Array.isArray(data.bw) && data.bw.length === 2
+        && data.bw.every(s => typeof s === 'string' && s.length > 0 && s.length <= 96)) obj.bw = [data.bw[0], data.bw[1]];
     // ⭐ …AND WHETHER IT IS AN OBSTACLE AT ALL. A belt's solidity row is Solid / Not solid rather than the
     // platform's One-way / Solid: the second answer is a DRIVE belt, which turns its wheels and is drawn and
     // which nothing collides with. Named here or it comes back solid after a republish, like every other dial.
