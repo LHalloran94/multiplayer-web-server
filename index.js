@@ -13626,7 +13626,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // 🟥 NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds field by field and drops what it does not mention.
       if (isFinite(+data.rl) && +data.rl > 0) obj.rl = clampN(data.rl, 8, 20000, 64);
       else obj.slk = clampN(data.slk, 0, 800, 0);
-      if (data.rk === 'bungee') obj.rk = 'bungee'; else if (data.rk) obj.rk = 'rope';
+      if (data.rk === 'bungee' || data.rk === 'chain' || data.rk === 'cable') obj.rk = data.rk; else if (data.rk) obj.rk = 'rope';
       if (data.re != null) obj.re = clampN(data.re, 0, 100, 0);
       if (data.rthru) obj.rthru = 1;
     }
