@@ -3901,7 +3901,8 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'crate', 'metal', 'sandbag', 'iceblock', 'barrel', 'drum',
                      'cog', 'wheel', 'motor', 'crank', 'arm', 'windmill', 'turnstile', 'balance',
                      'slide', 'rack', 'rod', 'ratchet', 'cam', 'ring',
-                     'pin', 'cone', 'pot', 'anvil', 'log', 'net'];
+                     'pin', 'cone', 'pot', 'anvil', 'log', 'net',
+                     'box'];                              // …the plain rectangle you drag out (2026-09-14)
 // ⭐⭐ ONE CEILING FOR EVERY STAMP, AND IT IS 1200. There used to be three — 160 for an ordinary stamp, 420
 // for the things that turn on a pin, 1200 for the bars — and each exception was argued separately on the day
 // somebody found 160 binding on something it had no business binding on: a rod that came back at 160 whatever
@@ -3915,7 +3916,7 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
 //    than a piece of its structure. ⏹️ THE BARS KEEP 1200: a rod spans the gap between the two things it
 //    joins, so its length is decided by the machine and not by a slider, and folding it into 600 would quietly
 //    undo the decision that gave rods and racks their length. Kept in step with the client's `stampMaxFor`.
-const LONG_STAMP_LOOKS = ['rod', 'rack', 'slide', 'arm', 'windmill', 'turnstile', 'balance'];
+const LONG_STAMP_LOOKS = ['rod', 'rack', 'slide', 'arm', 'windmill', 'turnstile', 'balance', 'box'];
 const STAMP_MAX_ALL = 600, STAMP_LONG_MAX = 1200;
 function stampMax(look) { return LONG_STAMP_LOOKS.includes(look) ? STAMP_LONG_MAX : STAMP_MAX_ALL; }
 // ⭐⭐ WHAT A PROP COSTS — a DEPOSIT, not a fee, exactly as the crucible's is. Under `kickoff_prima.md` §2
