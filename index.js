@@ -13650,6 +13650,17 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // platform's One-way / Solid: the second answer is a DRIVE belt, which turns its wheels and is drawn and
     // which nothing collides with. Named here or it comes back solid after a republish, like every other dial.
     if (obj.look === 'belt' && data.nosol) obj.nosol = 1;
+    // ⭐ …AND WHAT A ROD'S OR A SPRING'S TWO ENDS ARE HOLDING, AS A HINT (2026-09-14, same shape as a belt's `bw`).
+    // An end used to be re-found from where everything is now, which stops working the moment a partner can MOVE:
+    // nothing saves where a loose thing came to rest, so a reload puts it back at its placement and the end finds
+    // nothing there. Six values: an id and an offset in that partner's own frame, per end. Dropped here and a rod
+    // bolted to a cart would come back attached to thin air.
+    if ((obj.look === 'rod' || obj.look === 'spring') && Array.isArray(data.rj || data.sj)) {
+      const src = data.rj || data.sj;
+      if (src.length === 6 && [0, 3].every(k => typeof src[k] === 'string' && src[k].length <= 96)
+          && [1, 2, 4, 5].every(k => typeof src[k] === 'number' && Number.isFinite(src[k]) && Math.abs(src[k]) <= 1e6))
+        obj[obj.look === 'rod' ? 'rj' : 'sj'] = [String(src[0]), +src[1], +src[2], String(src[3]), +src[4], +src[5]];
+    }
     // ⭐⭐ #183 — A BOMB. Same trick as the gate, the spike strip and the shooter: a platform wearing a face, so
     // a bomb on a lift, a bomb on a route and a bomb a rule can hide all cost nothing.
     // 🟥 EVERY DIAL HAS TO BE NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds an object field by field and
