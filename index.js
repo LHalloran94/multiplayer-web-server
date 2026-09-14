@@ -18080,6 +18080,35 @@ io.on('connection', (socket) => {
     io.to(currentAvatarRoom).emit('avatar-object-add', o);
   });
 
+  // ⭐⭐ A ROPE TIED OR UNTIED BY HAND (user, 2026-09-15: hold E to attach a rope's end to a surface, or to detach it, and
+  // *"you should be able to do it with anyone's ropes… for now the baseline is that people can interact with each other's
+  // placed objects in equal ways"*). A rope's ends are tied wherever its ROUTE starts and finishes, so tying or untying
+  // one is a new route for the SAME rope — updated in place, keeping its id, so a player still holding it keeps hold.
+  // ⚠️ NOT remove + spawn: `avatar-object-remove` is owner-only, so re-laying somebody else's rope that way left their
+  //    original behind and added a second one. Build permission is the only gate, the same as placing.
+  // ⚠️ THE ROUTE GOES THROUGH `buildWorldObject`, so it is clamped and cleaned exactly as a placed rope's is — and only
+  //    the route fields are taken from the result; what kind of rope it is and who placed it stay as they were.
+  socket.on('rope-relay', (data) => {
+    if (!currentAvatarRoom || !data || typeof data.id !== 'string') return;
+    if (!canBuild()) return;
+    ensureObjectsLoaded(currentAvatarRoom);
+    const map = roomObjects[currentAvatarRoom]; if (!map) return;
+    const o = map.get(data.id); if (!o || o.look !== 'rope') return;
+    const fresh = buildWorldObject('platform', { look: 'rope', content: o.content, x: data.x, y: data.y, w: data.w, h: o.h,
+                                                 rp: data.rp, rl: data.rl, rk: o.rk, re: o.re, nosol: 1 },
+                                   o.id, o.ownerId, o.owner, currentAvatarRoom);
+    if (!fresh || !Array.isArray(fresh.rp) || !(fresh.rl > 0)) return;
+    const oldChs = (o.chs || [o.ch]).slice();
+    objUnindex(currentAvatarRoom, o);
+    o.x = fresh.x; o.y = fresh.y; o.w = fresh.w; o.rp = fresh.rp; o.rl = fresh.rl; delete o.slk;
+    objIndex(currentAvatarRoom, o);
+    // …to whoever could see it before AND whoever can see it now: a rope tied across to somewhere new changes chunks
+    if (objChunked(currentAvatarRoom)) {
+      emitObjToChunks(currentAvatarRoom, { ch: o.ch, chs: [...new Set(oldChs.concat(o.chs || [o.ch]))] }, 'avatar-object-add', o);
+      socket.emit('avatar-object-add', o);
+    } else io.to(currentAvatarRoom).emit('avatar-object-add', o);
+  });
+
   // ---- Avatar world objects (Stage 6) — server-authoritative existence over reliable
   // socket.io; physics response is applied locally on each client. Persist till restart.
   socket.on('avatar-object-spawn', (data) => {
