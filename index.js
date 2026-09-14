@@ -13330,6 +13330,9 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
             // is, so nothing about that is on the wire — but the fact that it is bolted at all cannot be
             // derived from geometry (a crate merely resting on a gear looks identical), so it is stored.
             wld: data.wld ? 1 : undefined,
+            // ⚠️ …and whether a PIVOT's pin rides on the loose thing under it (a cart's wheel, a motor on a chassis).
+            // Which thing is found from where it is; that it rides at all is not in the geometry, so it is stored.
+            mnt: data.mnt && (data.loose | 0) === 2 ? 1 : undefined,
             angle: wrapAngle(data.angle, 0),
             stretch: data.stretch === true,               // image stamps: stretch-to-fill vs aspect-fit (default)
             hp: objHits(data, 2) };   // indestructible when breakable:false
