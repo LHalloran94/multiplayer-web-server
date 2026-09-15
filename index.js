@@ -13735,6 +13735,14 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       obj.shots = Math.max(1, Math.min(7, (data.shots | 0) || 1));    // how many leave the muzzle at once
       obj.spread = clampN(data.spread, 0, 90, 0);        // the angle they fan out over
       obj.sweep = clampN(data.sweep, 20, 360, 180);      // how far off its face it can bring the gun to bear
+      // ⭐⭐ HOMING. Only ever on something that FLIES — a jet has no flight to bend — and decided here as well
+      // as in the panel for the reason `shove` is: the panel only hides a row, and a stored flag that half the
+      // code honours is worse than one nobody set.
+      if (data.homing && ['pellet', 'dart', 'shell'].includes(obj.ammo)) {
+        obj.homing = 1;
+        obj.hturn = clampN(data.hturn, 30, 540, 180);    // degrees a second it may turn towards its target
+        obj.hchase = clampN(data.hchase, 0.2, 6, 2);     // …and for how long before it gives up (6 = its whole flight)
+      }
       // ⭐ Seconds a jet or a beam stays lit per cycle. At or above `rate` it never goes out — "permanently" is
       // not a separate flag, it is this number reaching the cycle length, so there is one thing to store and no
       // way for a flag and a duration to disagree.
