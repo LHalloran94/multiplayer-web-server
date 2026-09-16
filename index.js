@@ -5790,6 +5790,14 @@ const liquidCfg = {
   // ⭐ 4 → 1 on 2026-09-17: the user played both and wanted it as low as it goes. 1 = one unit a pass,
   // measured at 0.55s a cell and a ~420px band of fire.
   fireSlow: 1,
+  // ⭐⭐ How much of a cell's remaining fuel a flame takes each pass, as a SHARE — the cure for the vertical
+  // walls a burning pour used to grow. 0 = the old fixed bite exactly.
+  // ⚠️ 1/24 ON PURPOSE: a full cell is 24 units, so a full cell still gives up exactly ONE unit a pass, which
+  // is what it did before. Deep oil is untouched; only the thin edges change, and they are the whole problem.
+  // MEASURED (scratchpad/diag_oil_burn_spread.js), a 20-column pour onto lava, 60 ticks: the fixed bite spreads
+  // 55 columns, this spreads 180, and the front at tick 12 goes 55 → 87. Higher shares burn the body away
+  // before it can go anywhere (0.15 leaves nothing at all).
+  fireBurnShare: 0.042,
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7771,12 +7779,33 @@ function fineReactTickRoom(room, SUB, phase) {
       // directly freezes it, so a cell whose phase does not match never spends and the fire never burns out at
       // all — which reads as a broken sim and is a broken harness. Set `fireSlow` to 1 in a rig that does that;
       // `probe_fire_budget` does, and says so.
-      const slow = liquidCfg.fireSlow | 0;
-      if (slow <= 1 || ((tick + (i % slow)) % slow) === 0) {
-        const oburn = capFrac(liquidCfg.fireBurn * (liquidCfg.fireOnce ? 2 : 1));
+      // ⭐⭐ HOW MUCH FUEL A FLAME TAKES, AND HOW OFTEN. Two questions with one answer, because the unit of
+      // fuel is an INTEGER: a cell holds 24 of them, so the smallest possible bite is 1 and a cell with 2 units
+      // left is gone in two passes no matter what rate you ask for. That floor is what grows the vertical walls
+      // in a burning pour — the thin edges evaporate about twelve times sooner than the deep middle, and what
+      // is left is a flat-topped block with sheer sides.
+      // ὾5 A SHARE ALONE DOES NOT FIX IT AND MAKES IT WORSE. Measured: a 9% share of a full cell rounds to 2
+      // units, i.e. twice the old bite, so the deep middle dies FASTER while the thin edges still lose their
+      // one unit a pass. The gap narrows by killing the middle, which is not what anybody wanted.
+      // ⭐ So when the share works out at less than a whole unit, it is spent as one unit LESS OFTEN instead:
+      // a cell with 2 units left takes its bite every sixth pass rather than every pass. That is the same
+      // arithmetic a fraction would do, carried by the schedule because the amount cannot be fractional.
+      // ⚠️ `fireBurnShare` 0 = the old fixed spend exactly. `fireSlow` still sets the floor on the period, so
+      // the two dials compose rather than fight.
+      // ⚠️ The phase is per CELL, so a slick does not take its bites in lockstep and step down as one.
+      // ⚠️ `tick` only advances inside `runLiquidTick` — a rig calling this directly freezes every period here
+      // and nothing burns out at all. `probe_fire_budget` sets `fireSlow` to 1 and `fireBurnShare` to 0 for that.
+      const slow = Math.max(1, liquidCfg.fireSlow | 0), share = liquidCfg.fireBurnShare;
+      let oburn, per;
+      if (share > 0) {
+        const want = share * p[b + 5];                       // units a pass we would like to take
+        if (want >= 1) { oburn = Math.round(want); per = slow; }
+        else { oburn = 1; per = Math.max(slow, Math.min(64, Math.round(1 / Math.max(1e-6, want)))); }
+      } else { oburn = capFrac(liquidCfg.fireBurn * (liquidCfg.fireOnce ? 2 : 1)); per = slow; }
+      if (per <= 1 || ((tick + (i % per)) % per) === 0) {
         p[b + 5] = p[b + 5] > oburn ? p[b + 5] - oburn : 0;
+        recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
       }
-      recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
       addFx(i, 7);                                                          // flame, every pass it is alight — not a one-shot
       if (p[b + 5] <= 0 && fire.delete(i)) fireOut.push(i);
       // 🟥 A SLOWER FLAME FRONT WAS BUILT HERE ON 2026-09-16 AND REVERTED ON THE 17th, ON THE USER'S CALL AFTER
@@ -16444,6 +16473,7 @@ io.on('connection', (socket) => {
     // wire is — that would floor it to 0 and stop oil burning at all.
     if ('fireBurn' in patch) liquidCfg.fireBurn = Math.max(0.002, Math.min(1, +patch.fireBurn || 0.021));
     if ('fireSlow' in patch) liquidCfg.fireSlow = Math.max(1, Math.min(64, patch.fireSlow | 0));
+    if ('fireBurnShare' in patch) liquidCfg.fireBurnShare = Math.max(0, Math.min(1, +patch.fireBurnShare || 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
