@@ -7817,6 +7817,11 @@ function fineReactTickRoom(room, SUB, phase) {
       // same place as the fuel is. The numbers, and why a per-pass CHANCE kills the fire outright where a
       // per-cell DELAY does not, are in `scratchpad/kickoff_list13_next.md` — worth reading before trying again,
       // because the obvious version of this is measurably wrong.
+      // ⚠️ A MINIMUM FUEL TO CATCH WAS TRIED HERE AND REVERTED, 2026-09-17: the theory was that the flame
+      // front eats the thin leading edge of a pour as fast as it advances, so a trace film should not be
+      // able to light. MEASURED over thresholds 0, 4, 8, 12, 16 and 20 of a 24-unit cell, the visible body
+      // of a big burning pour came out at 101, 103, 100, 102, 101, 103 columns — no effect whatever. Do
+      // not re-add it without a measurement that says something different.
       const r = i % ROWS;
       for (const j of [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS])
         if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 5] > 0 && !fire.has(j)) { fire.add(j); fireLit.push(j); }   // the flame front
