@@ -5769,6 +5769,22 @@ const liquidCfg = {
   // (`probe_fire_budget.js`). 6,000 is roughly a fifth of the budget at the measured rate.
   fireOnce: 1,           // 0 = the old behaviour, fire on both reaction passes at half the spend
   fireMaxCells: 6000,    // 0 = unlimited. Per room per turn, from a rotating cursor. A DELAY, never a skip.
+  // ⭐⭐ HOW LONG ONE CELL STAYS ALIGHT, and it is the lever for *"the flames appear and disappear so rapidly
+  // that it makes it look like it's sped up"*. THE BAND OF FIRE IS AS WIDE AS THE FLAME IS LONG: the front
+  // crosses a cell a tick and a cell burns for `24 / units` ticks, so at the old spend — 5 units of a
+  // 24-unit cell per pass, 4.8 ticks, under a fifth of a second — a burning slick is a FIVE-CELL flickering
+  // line, about 40px, no matter how big the pool is. At one unit a pass it is a 24-cell band, ~190px of
+  // steady fire that visibly moves through the oil.
+  // 🟥 THIS IS NOT THE DIAL THAT WAS REVERTED. That one slowed the SPREAD, which pulled the fire away from
+  // the fuel (oil flows toward whatever is alight, so it drained out from under everything that was not).
+  // This one leaves the spread alone — every burning cell still lights its neighbours every pass — so the
+  // fire stays exactly where the oil is and simply stays there longer. Same family of number, opposite
+  // effect on the thing that was wrong.
+  // ⚠️ THE STEPS ARE COARSE and the value is not continuous: the spend is `round(48 * this)` units, floored
+  // at 1, so only 1-5 units are reachable — 0.021 ⇒ 1 (≈0.96s), 0.042 ⇒ 2 (≈0.48s), 0.0625 ⇒ 3, 0.083 ⇒ 4,
+  // 0.094 ⇒ 5 (the original). Below 0.021 nothing changes; a longer burn than that needs a bigger
+  // `LIQUID_MAX`, not a smaller number here.
+  fireBurn: 0.021,
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7379,6 +7395,11 @@ const roomFlowCursor = {};
 // is a ReferenceError in every probe rig and nowhere else, which this track has now hit six times.
 const fireCursor = {};        // room → where the rotating burn cursor got to
 let liqFireThrottles = 0;     // turns on which the fire cap BIT — the mechanism counter, not an outcome one
+// ⭐ How many burning cells the audit found with no fuel left in them. It SHOULD be zero: anything but zero
+// says something is still removing a cell's fuel without taking it out of the burning set, and the audit is
+// papering over it. A counter for a mechanism that is meant never to fire is how the next one gets found.
+let liqFireStale = 0;
+const FIRE_AUDIT_TICKS = 32;   // ~1.3s at the 40ms tick
 let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCand (⇒ it is biting; see the Perf tab)
 // ⚠️ A COUNT, NOT A CLOCK. `probe_react_budget` D2 first asserted "the flow moved liquid on most ticks", which
 // gave 18/30 and then 6/30 for identical code — the budget scheduler is `performance.now()`-driven, so any
@@ -7475,7 +7496,7 @@ const FREACT_MELT_COST_F = 0.125;  // lava spent melting one snow/ice cell
 const FREACT_MELT_AMT_F = 0.625;   // water a melted snow/ice cell leaves behind (< a full cell, so it flows away rather than sitting brim-full)
 const FREACT_BAKE_COST_F = 0.0625; // lava spent baking one mud cell → earth
 const FREACT_FUSE_COST_F = 0.0625; // lava spent fusing one sand cell → glass
-const FREACT_OIL_BURN_F = 0.09375;  // oil consumed per pass by a BURNING cell
+const FREACT_OIL_BURN_F = 0.09375;  // the ORIGINAL spend, kept as the record of it; `liquidCfg.fireBurn` is live
 const FREACT_FREEZE_COST_F = 0.375; // water consumed when a snow cell freezes into ice
 // ⭐ SALT + WATER → BRINE. The world redesign's one new reaction (user's call 2026-08-09). The game already has
 // brine as a fluid, so this is a new PAIR, not a new substance: a salt cell touching water dissolves away and
@@ -7715,10 +7736,24 @@ function fineReactTickRoom(room, SUB, phase) {
       fireCursor[room] = (cur + cap) % all.length;
       liqFireThrottles++;
     } else if (fireCursor[room]) fireCursor[room] = 0;
+    // ⭐⭐ AND EVERY SO OFTEN, CHECK THE WHOLE SET RATHER THAN THE SLICE. The loop below already drops a cell whose
+    // oil has gone — but only for the cells it looks at, and under the cap it looks at `fireMaxCells` of them,
+    // and only when this strip gets a turn. Anything that leaves a cell in the set without fuel (oil that flowed
+    // out from under it, a cell turned to stone by a quench, a path nobody has thought of) therefore keeps a
+    // flame on every client that can see it until the cursor happens round.
+    // 🟥 REPORTED TWICE. This is the third fix on this symptom and the first two were each a real, different bug,
+    // so this one is deliberately NOT another specific path: it is a reconciliation, and it closes the paths
+    // nobody has found as well as the ones they have. Cheap by construction — a room's fire is hundreds of
+    // cells, once every `FIRE_AUDIT_TICKS`, one already-resident read each.
+    // ⚠️ Deleting from a Set while iterating it is defined behaviour: a deleted entry is simply not revisited.
+    if ((tick % FIRE_AUDIT_TICKS) === 0) {
+      for (const i of fire)
+        if (i < 0 || i >= N || amt.rp(i)[amt.o(i) + 5] <= 0) { fire.delete(i); fireOut.push(i); liqFireStale++; }
+    }
     for (const i of list) {
       if (i < 0 || i >= N || amt.rp(i)[amt.o(i) + 5] <= 0) { if (fire.delete(i)) fireOut.push(i); continue; }   // burnt out (or the oil moved on)
       const p = amt.wp(i), b = amt.o(i);
-      const oburn = capFrac(FREACT_OIL_BURN_F * (liquidCfg.fireOnce ? 2 : 1));
+      const oburn = capFrac(liquidCfg.fireBurn * (liquidCfg.fireOnce ? 2 : 1));
       p[b + 5] = p[b + 5] > oburn ? p[b + 5] - oburn : 0;
       recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
       addFx(i, 7);                                                          // flame, every pass it is alight — not a one-shot
@@ -8671,7 +8706,7 @@ const runLiquidTick = () => {
         // that IS operating in a sectored world and it was console-only; `k2Throttles` is tier 2, whose stuck
         // `K=9` is what prompted this — a zero here with water plainly moving is the whole diagnosis in one
         // number. `rateSkips` is tier 3. Counters, so they reset per window and read as a rate.
-        k2Throttles: liqK2Throttles, rateSkips: liqRateSkips, fireThrottles: liqFireThrottles,
+        k2Throttles: liqK2Throttles, rateSkips: liqRateSkips, fireThrottles: liqFireThrottles, fireStale: liqFireStale,
         // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
         // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
         steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
@@ -8740,7 +8775,7 @@ const runLiquidTick = () => {
       // strip-turns was thrown away", which is the number to judge the throttle by.
       // ⚠️ Safe for the rigs: this whole block only runs with `perfLog` ON, and `probe_budget` explicitly turns
       // it off (it reads the same counters through the sliced module, cumulatively, and still can).
-      liqRateSkips = 0; liqK2Throttles = 0; liqFireThrottles = 0; liqSecTicks = 0; liqSecDeferred = 0; liqSecFallOnly = 0; liqReactSkips = 0;
+      liqRateSkips = 0; liqK2Throttles = 0; liqFireThrottles = 0; liqFireStale = 0; liqSecTicks = 0; liqSecDeferred = 0; liqSecFallOnly = 0; liqReactSkips = 0;
       // Same rule: the per-pass ms are a SUM over the window just reported, so they start again at zero. A
       // lifetime total here would answer "has the chemistry ever been expensive", which nobody is asking.
       for (const k in liqMsBy) liqMsBy[k] = 0;
@@ -16384,6 +16419,9 @@ io.on('connection', (socket) => {
     if ('reactMaxCand' in patch) liquidCfg.reactMaxCand = Math.max(0, Math.min(2000000, patch.reactMaxCand | 0));
     if ('fireOnce' in patch) liquidCfg.fireOnce = patch.fireOnce ? 1 : 0;
     if ('fireMaxCells' in patch) liquidCfg.fireMaxCells = Math.max(0, Math.min(2000000, patch.fireMaxCells | 0));
+    // ⚠️ A FRACTION, so it is clamped as one and never put through `| 0` the way every integer dial on this
+    // wire is — that would floor it to 0 and stop oil burning at all.
+    if ('fireBurn' in patch) liquidCfg.fireBurn = Math.max(0.002, Math.min(1, +patch.fireBurn || 0.021));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
