@@ -5769,24 +5769,6 @@ const liquidCfg = {
   // (`probe_fire_budget.js`). 6,000 is roughly a fifth of the budget at the measured rate.
   fireOnce: 1,           // 0 = the old behaviour, fire on both reaction passes at half the spend
   fireMaxCells: 6000,    // 0 = unlimited. Per room per turn, from a rotating cursor. A DELAY, never a skip.
-  // ⭐ HOW FAST FIRE TRAVELS, as opposed to how fast it LIGHTS. Reported from play: contact with lava looked
-  // right, the run along the slick did not. At 1 (the old behaviour) every burning cell lit all four of its oil
-  // neighbours on every pass, so the front moved a cell a tick — measured at 205px/s, over twice walking pace.
-  // This is how many passes a cell waits before it hands the flame on, each cell taking its turn on its own
-  // hashed phase so the edge stays ragged. See the front itself for why it is a per-cell DELAY and not a
-  // per-pass CHANCE (the chance kills the fire; measured), and for the floor the fuel's own life imposes.
-  fireSpread: 6,         // 1 = the old behaviour (every oil neighbour catches on every pass)
-  // ⭐ …and its partner: how much of a full cell of oil one burning cell eats per pass. `FREACT_OIL_BURN_F`'s
-  // old value, 0.09375, burnt a full cell in about five passes — a fifth of a second. Measured, THIS is what
-  // paces an established flame front (see the note at `oburn`), so it is the dial to reach for when fire travels
-  // too fast, and it is also what decides whether a burning slick stands and burns or flashes off.
-  // ⭐ MEASURED, in a sealed 80-cell channel, front speed at the two dials together: 205px/s at wait 1 (the old
-  // behaviour, either burn rate) · 128px/s at wait 6 on the old burn · 88px/s at wait 6 and this rate · 65px/s
-  // at wait 24 and this rate. Halved from 0.09375 so a cell burns for about 0.4s instead of 0.2s, which is what
-  // buys most of the slowdown and also lets a fire stand somewhere long enough to be looked at.
-  // ⚠️ IT SATURATES BELOW ~0.021: `capFrac` floors the spend at one unit of a 24-unit cell, so 0.023 and 0.012
-  // measured identically. Going slower than that needs a bigger `LIQUID_MAX`, not a smaller number here.
-  fireBurn: 0.047,
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7516,16 +7498,6 @@ const FREACT_ACID_COST_F = 0.09375; // acid spent per bite
 // OIL FIRE. Lava does not burn oil directly any more — it IGNITES it, and fire spreads cell to cell through the oil,
 // so a slick lights from the point of contact and runs back through itself instead of quietly shrinking.
 // (`fineFire` on the cell store: Set<fine cell> currently burning.)
-// The flame front's dice — see `liquidCfg.fireSpread`. A 0..1 value from (cell, tick, direction), so the same
-// cell rolls differently on each pass and in each direction while the whole tick stays a pure function of its
-// state. ⚠️ `>>> 0` before the divide: a bare `|0` gives a SIGNED int, so half the rolls would come out negative
-// and every one of those is < any threshold — i.e. a 50% floor on the spread chance, which would look like the
-// dial working until it was turned below a half.
-function fireRoll(i, tick, d) {
-  let h = (Math.imul(i | 0, 374761393) + Math.imul(tick | 0, 668265263) + Math.imul(d | 0, 1274126177)) | 0;
-  h = Math.imul(h ^ (h >>> 13), 1274126177);
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
-}
 function fineFireSet(room) { const s = cellsOf(room); if (!s.fineFire) { s.fineFire = new Set(); cellRooms.fire.add(room); } return s.fineFire; }
 // ⚠️ `phase` — 1 = the call BEFORE the flow, 2 = the call after it. Only the fire block reads it (see there).
 // Undefined when called directly, which is how the probe rigs call it, and undefined is not 1, so fire runs.
@@ -7746,48 +7718,23 @@ function fineReactTickRoom(room, SUB, phase) {
     for (const i of list) {
       if (i < 0 || i >= N || amt.rp(i)[amt.o(i) + 5] <= 0) { if (fire.delete(i)) fireOut.push(i); continue; }   // burnt out (or the oil moved on)
       const p = amt.wp(i), b = amt.o(i);
-      // ⭐⭐ HOW LONG ONE CELL BURNS, AND IT IS THE DIAL THAT ACTUALLY PACES THE FRONT. `fireSpread` governs how
-      // long a cell waits before handing the flame on, but MEASURED (see the front below) that only decides the
-      // first cell: oil FLOWS TOWARDS the fire and is consumed there, so the cell ahead of an established front
-      // is already half drained and burns out in a pass or two — and a cell that has burnt out passes the flame
-      // on immediately, whatever its phase says. So in steady state the front moves at one cell per FUEL LIFE,
-      // and the only way to slow it further is to make the fuel last longer. `fireBurn` is that: the fraction of
-      // a full cell a burning cell consumes per pass. It also decides how long a fire stands in one place, which
-      // is the other half of what a burning slick looks like.
-      const oburn = capFrac(liquidCfg.fireBurn * (liquidCfg.fireOnce ? 2 : 1));
+      const oburn = capFrac(FREACT_OIL_BURN_F * (liquidCfg.fireOnce ? 2 : 1));
       p[b + 5] = p[b + 5] > oburn ? p[b + 5] - oburn : 0;
       recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
       addFx(i, 7);                                                          // flame, every pass it is alight — not a one-shot
       if (p[b + 5] <= 0 && fire.delete(i)) fireOut.push(i);
-      // ⭐⭐ THE FLAME FRONT, AND IT HAS ITS OWN RATE — reported from play: *"it burns correctly when actually
-      // making direct contact with lava, but the rate that it transfers along the oil is too fast."* Lighting
-      // and travelling are two different speeds and there was one number doing both jobs: every burning cell lit
-      // all four of its oil neighbours on EVERY pass, so a front crossed a cell a tick, ~205px/s measured — over
-      // twice walking pace. `fireSpread` is how many passes a cell waits before it passes the flame on.
-      // 🟥🟥 A PER-CELL RANDOM **DELAY**, NOT A PER-PASS **CHANCE**, AND THE FIRST VERSION WAS THE CHANCE. A dice
-      // roll per neighbour per pass is the obvious way to get a ragged edge and it PUTS THE FIRE OUT: a cell's
-      // fuel lasts about 5 passes, so it gets about five rolls to light the cell ahead of it, and in a thin trail
-      // there is only ONE cell ahead — no redundancy at all. Measured in a sealed channel, 80 cells long: at a
-      // chance of 0.6 the front died before the far end in 8 runs out of 8 on a one-deep trail and 5 of 8 on a
-      // three-deep one, and every value below that died every time. "Set the oil alight and the fire goes out
-      // half way along" is a far worse bug than the one being fixed.
-      // ⇒ the cell's own PHASE decides instead: it hands the flame on when `(tick + hash(cell)) % period` comes
-      // round. Each cell therefore waits a different, fixed number of passes, which is the same ragged edge the
-      // dice were bought for — neighbours going early and late rather than a line advancing in step — while the
-      // front CANNOT stall, because every cell's turn is guaranteed to arrive.
-      // ⭐ …and the burnout fallback is what makes that guarantee unconditional: a cell whose fuel ran out this
-      // pass spreads whatever its phase says, so `fireSpread` can be set longer than a cell's fuel life without
-      // the fire dying. Past that point the period simply stops mattering — the floor on how slowly fire can
-      // travel is how long a cell burns (about 5 passes, ~38px/s), and lowering `FREACT_OIL_BURN_F` is the lever
-      // for going below it.
-      // ⚠️ HASHED, NOT `Math.random()`. Nothing else in this tick is random: `probe_fine_identity` compares 500
-      // ticks against a golden file byte for byte and `probe_addressing` compares two git trees cell for cell,
-      // and both rest on the sim being a pure function of its state.
-      const r = i % ROWS, per = liquidCfg.fireSpread | 0;
-      if (per <= 1 || p[b + 5] <= 0 || ((tick + ((fireRoll(i, 0, 7) * per) | 0)) % per) === 0) {
-        for (const j of [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS])
-          if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 5] > 0 && !fire.has(j)) { fire.add(j); fireLit.push(j); }
-      }
+      // 🟥 A SLOWER FLAME FRONT WAS BUILT HERE ON 2026-09-16 AND REVERTED ON THE 17th, ON THE USER'S CALL AFTER
+      // PLAYING IT: *"the oil just disappears without much animation and it's all out of sync"*. Two dials — a
+      // per-cell delay before a cell handed the flame on, and a slower fuel spend — took the front from 205px/s
+      // to 88px/s and the measurement was sound, but the RESULT was worse: with the fire strung out, oil flows
+      // toward the few cells that are alight and drains away from under everything else, so the slick visibly
+      // shrinks with no flame on most of it. The speed was never really the complaint; the fire being in the
+      // same place as the fuel is. The numbers, and why a per-pass CHANCE kills the fire outright where a
+      // per-cell DELAY does not, are in `scratchpad/kickoff_list13_next.md` — worth reading before trying again,
+      // because the obvious version of this is measurably wrong.
+      const r = i % ROWS;
+      for (const j of [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS])
+        if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 5] > 0 && !fire.has(j)) { fire.add(j); fireLit.push(j); }   // the flame front
     }
   }
   if (st.fineFire && !st.fineFire.size) dropFineFire(room);
@@ -16437,10 +16384,6 @@ io.on('connection', (socket) => {
     if ('reactMaxCand' in patch) liquidCfg.reactMaxCand = Math.max(0, Math.min(2000000, patch.reactMaxCand | 0));
     if ('fireOnce' in patch) liquidCfg.fireOnce = patch.fireOnce ? 1 : 0;
     if ('fireMaxCells' in patch) liquidCfg.fireMaxCells = Math.max(0, Math.min(2000000, patch.fireMaxCells | 0));
-    // ⚠️ FLOORED AT 1, not at 0: 0 would mean "a cell never passes the flame on", i.e. fire that cannot spread
-    // at all, which is a different feature and not what a slow dial should decay into.
-    if ('fireSpread' in patch) liquidCfg.fireSpread = Math.max(1, Math.min(240, patch.fireSpread | 0));
-    if ('fireBurn' in patch) liquidCfg.fireBurn = Math.max(0.001, Math.min(1, +patch.fireBurn || 0.09375));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
