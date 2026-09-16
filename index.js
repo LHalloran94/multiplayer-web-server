@@ -5787,7 +5787,9 @@ const liquidCfg = {
   fireBurn: 0.021,
   // ⭐ …and the extension below that floor: passes BETWEEN spends. 1 = spend every pass (the floor above).
   // MEASURED on a sealed slick: one unit a pass keeps a cell alight 0.55s; one unit every 4 passes, ~2.2s.
-  fireSlow: 4,
+  // ⭐ 4 → 1 on 2026-09-17: the user played both and wanted it as low as it goes. 1 = one unit a pass,
+  // measured at 0.55s a cell and a ~420px band of fire.
+  fireSlow: 1,
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
