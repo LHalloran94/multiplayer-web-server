@@ -6057,7 +6057,11 @@ function clearFineRoom(room) {
   if (s.fineTotal) s.fineTotal.fill(0);
   if (s.fineActive) s.fineActive.clear();
   if (s.fineReact) s.fineReact.clear();
-  if (s.fineFire) s.fineFire.clear();
+  // ⚠️ TELL THE CLIENTS. Emptying the set here removes every burning cell in one call without a single "out"
+  // going out, and a client only ever edits its own burning set from the wire — so a world clear would leave
+  // every flame that was on screen burning for ever. The other silent removal (a chunk being evicted) is
+  // repaired by the `clear` list on the chunk re-send; this one has no chunk to come back to, so it says so.
+  if (s.fineFire && s.fineFire.size) { s.fineFire.clear(); wireFanout(room, 'fire-cells', { cells: [], allOut: 1 }); }
 }
 function ensureFineArrays(room, SUB) {
   const s = cellsOf(room);
@@ -9044,18 +9048,28 @@ function sendChunkContent(sock, room, chunks) {
   // never the 4,096 of a chunk, so asking "which of these few are in the chunks you want" is the cheap direction.
   // Reading it the other way round would fault pages in — a read is not free on a generated world (F21).
   {
+    // 🟥🟥 IT CARRIES A `clear` LIST FOR EXACTLY THE REASON THE LIQUID WIRE ABOVE DOES, and the first version did
+    // not — which is the "some cells just keep burning indefinitely" reported from play. This repair names the
+    // cells that ARE alight, so it can light a cell and can never put one out: a fire that went out while you
+    // were away from that chunk is left behind as a PHANTOM, burning on your screen for ever, and no terrain
+    // edit clears it because the client does not infer anything from an edit — it waits to be told.
+    // That is word for word the fault the note on `liquid-fine-cells` describes for a pool that drained while you
+    // were away. Same bug, one wire over, written while reading the warning about the other one.
+    // ⚠️ SENT EVEN WHEN NOTHING IS ALIGHT, and that is the whole point: a chunk with no fire in it is precisely
+    // the case where a client may be holding a stale flame, so "zero these chunks" must go out on its own.
     const _fire = s.fineFire;
+    // ⚠️ The chunk id, spelled the way the paging table builds it (see `pageOf`): column-major cell index, then
+    // the chunk's column times `cy` plus the chunk's row. There is no shared helper for this — checked, rather
+    // than assumed — so it is written out here next to the geometry it uses.
+    const _fc = [];
     if (_fire && _fire.size) {
-      // ⚠️ The chunk id, spelled the way the paging table builds it (see `pageOf`): column-major cell index,
-      // then the chunk's column times `cy` plus the chunk's row. There is no shared helper for this — checked,
-      // rather than assumed — so it is written out here next to the geometry it uses.
-      const _want = new Set(chunks), _fc = [], _R = geom.rows, _CY = geom.cy;
+      const _want = new Set(chunks), _R = geom.rows, _CY = geom.cy;
       for (const i of _fire) {
         const _c = (i / _R) | 0, _r = i % _R;
         if (_want.has(((_c / CHUNK_SIDE) | 0) * _CY + ((_r / CHUNK_SIDE) | 0))) _fc.push(i, 1);
       }
-      if (_fc.length) sock.emit('fire-cells', { cells: _fc });
     }
+    sock.emit('fire-cells', { cells: _fc, clear: chunks.slice(), cy: geom.cy });
   }
   // ⭐⭐ AND THE PILES LYING IN THESE CHUNKS. This is what replaces the whole-list join replay: a socket is told
   // about the material on the ground where it can SEE it, on the same seam that brings it the terrain, so an
