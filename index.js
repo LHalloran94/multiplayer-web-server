@@ -4522,6 +4522,17 @@ function ChunkRec() {
   // The content hash as of the last time this chunk was written to the database. The periodic flush compares
   // against it so an untouched chunk costs one integer comparison rather than a regenerate-and-diff.
   this.savedHash = -1;
+  // ⭐⭐ WHICH OF THIS CHUNK'S CELLS WERE ALIGHT WHEN IT WENT TO SLEEP. Null unless it is asleep holding a fire.
+  // 🟥 THIS IS THE ONE REGISTRY `pruneChunkWork` CANNOT SIMPLY DROP, and dropping it is where the "flames hanging
+  // in mid-air for ever" came from. The other four are all RE-DERIVABLE from the cells themselves — `rewakeChunk`
+  // rebuilds the flowing liquid out of `fineTotal`, `queuePowderReseed` rebuilds the falling grains, and the
+  // contact sets re-seed the moment anything touches anything. "Is this cell alight" exists NOWHERE ELSE. Drop it
+  // and it cannot come back, and worse, the client is never told: it holds fire as a set it edits from a DIFF, so
+  // a cell that leaves the server's set without an "out" burns on that player's screen until they reload — which
+  // is exactly the reported symptom, right down to deleting the terrain not helping (the client infers nothing
+  // from an edit, it waits to be told). ⇒ parked here, put back by `rekindleChunk`, so quiescing keeps the
+  // promise it makes for everything else: nothing is lost, it is a WAKE and not a restore.
+  this.fire = null;
 }
 const NO_CHUNK_REC = Object.freeze(new ChunkRec());   // what `peek` answers for a chunk nothing has happened to
 function RoomChunks(nPages) {
@@ -4891,6 +4902,22 @@ function rewakeChunk(room, p) {
   queuePowderReseed(room, p);
   return true;
 }
+// …and the fire that was burning in it. A third "this chunk is live again" step alongside `rehydrateChunk` (an
+// EVICTED chunk's content) and `rewakeChunk` (a QUIESCED chunk's motion), because a chunk can go to sleep by
+// either road and both of them park the fire through `pruneChunkWork`. Self-noops, so the residency sweep can
+// call it on every resident chunk the way it already calls the other two.
+// ⚠️ NOTHING IS EMITTED. The client was never told these cells went out — that is the whole point, a sleeping
+// chunk's fire is FROZEN rather than extinguished, exactly as its water is — so it is still drawing them and
+// there is nothing to correct. A client that has meanwhile forgotten the chunk is told by `sendChunkContent`,
+// which reads this same parked list.
+function rekindleChunk(room, p) {
+  const ch = chunksOf(room), parked = ch.peek(p).fire;
+  if (!parked || !parked.length) return false;
+  ch.at(p).fire = null;
+  const f = fineFireSet(room);
+  for (const i of parked) f.add(i);
+  return true;
+}
 // The prune itself, shared by eviction and quiescing — one implementation, so the two cannot drift about which
 // work sets exist. (Split out 2026-08-06; the body and every comment below are unchanged.)
 function pruneChunkWork(room, p) {
@@ -4915,6 +4942,17 @@ function pruneChunkWork(room, p) {
     for (let lc = 0; lc < pcN; lc++) { const base = (pc0 + lc) * geom.rows + pr0; for (let lr = 0; lr < prN; lr++) del.delete(base + lr); }
   };
   const prune = (set, drop) => { if (!set) return; pruneKeys(set, set.size); if (!set.size) drop(room); };
+  // ⭐⭐ FIRE IS PARKED BEFORE IT IS PRUNED — see `ChunkRec.fire` for why this one registry is different.
+  // ⚠️ The burning set is walked and asked which cells belong to this chunk, rather than the chunk being walked
+  // and the set asked about each of its 4,096 cells. A room's fire is hundreds of cells at most, so this is the
+  // cheap direction — the same choice, for the same reason, that `sendChunkContent`'s repair makes.
+  // ⚠️ Only written when there is something to park, so a chunk that sleeps twice without waking (quiesced, then
+  // evicted while still quiet) keeps the list it took the FIRST time instead of overwriting it with nothing.
+  if (s.fineFire && s.fineFire.size) {
+    let keep = null;
+    for (const i of s.fineFire) if (geomPage(geom, i) === p) (keep || (keep = [])).push(i);
+    if (keep) chunksOf(room).at(p).fire = keep;
+  }
   prune(s.fineActive, dropFineActive); prune(s.fineReact, dropFineReact); prune(s.fineFire, dropFineFire);
   prune(s.powderActive, dropPowderSet); prune(s.soilActive, dropSoilSet);
   if (s.src) { pruneKeys(s.src, s.src.size); if (!s.src.size) dropSrcMap(room); }
@@ -8741,7 +8779,7 @@ restartLiquidLoop();
 // contain — a direct call is a ReferenceError in probe_chunking and nowhere else, which is exactly how it
 // presented. Declared as no-ops here and reassigned just past the end marker, so a sliced rig behaves precisely
 // as it did before quiescing existed and no existing check changes meaning.
-let quiesceChunkH = () => false, rewakeChunkH = () => false;
+let quiesceChunkH = () => false, rewakeChunkH = () => false, rekindleChunkH = () => false;
 const chunkCfg = {
   evict: true,         // master switch (see above); `chunkEvict` on the liquid-cfg wire toggles it live
   // Above this many per-chunk records in a room, the sweep starts dropping the ones that carry no information
@@ -8835,6 +8873,7 @@ function chunkResidencySweep() {
           const p = gx * geom.cy + gy; ch.at(p).lastNear = now;
           rehydrateChunk(room, p);           // no-op unless this chunk was put away (it checks its own blob)
           rewakeChunkH(room, p);             // …and no-op unless it was QUIESCED (still resident, but not ticking)
+          rekindleChunkH(room, p);           // …and no-op unless it went to sleep with something ALIGHT in it
         }
     };
     if (here) for (const v of here.values()) {
@@ -8877,7 +8916,7 @@ function chunkResidencySweep() {
     // explicit `ch.evicted[p]` test rather than relying on `gen`/`blob` being set.
     if (ch.rec.size > (chunkCfg.recPruneAt || 2048)) {
       for (const [p, r] of ch.rec) {
-        if (ch.evicted[p] || r.blob || r.gen || r.restoring || r.quiet) continue;
+        if (ch.evicted[p] || r.blob || r.gen || r.restoring || r.quiet || r.fire) continue;
         if (r.hash !== 0 || r.stamp !== -1 || r.evHash !== 0 || r.savedHash !== -1) continue;
         let live = false;
         for (const f of CHUNK_CONTENT) { const pa = s[f]; if (pa && pa.pageAt(p)) { live = true; break; } }
@@ -8895,7 +8934,7 @@ function chunkResidencySweep() {
     + (_pr ? `, ${_pr} empty chunk record(s) pruned` : ""));
 }
 // ==CHUNK_RESIDENCY_BLOCK_END==
-quiesceChunkH = quiesceChunk; rewakeChunkH = rewakeChunk;   // see the seam note at the block start
+quiesceChunkH = quiesceChunk; rewakeChunkH = rewakeChunk; rekindleChunkH = rekindleChunk;   // see the seam note at the block start
 setInterval(chunkResidencySweep, Math.max(1000, chunkCfg.sweepMs | 0));
 
 // ═══ INTEREST-LIMITED REPLICATION (SHARED-WORLD.md §7, Phase 4) ═════════════════════════════════════════════════
@@ -9069,6 +9108,13 @@ function sendChunkContent(sock, room, chunks) {
         if (_want.has(((_c / CHUNK_SIDE) | 0) * _CY + ((_r / CHUNK_SIDE) | 0))) _fc.push(i, 1);
       }
     }
+    // ⭐ AND THE FIRE THAT IS ASLEEP. A chunk nobody has been near for a sweep is quiesced, which takes its
+    // burning cells OUT of `s.fineFire` and parks them on the chunk (see `ChunkRec.fire`) — so the set above is
+    // not the whole answer, and a client arriving at a sleeping chunk would be told its fire is out and then see
+    // it reappear the moment the chunk wakes. `peek`, never `at`: this is a read, and a read must not create a
+    // record for a chunk nothing has happened to.
+    { const _ch = chunksOf(room);
+      for (const p of chunks) { const _pk = _ch.peek(p).fire; if (_pk) for (const i of _pk) _fc.push(i, 1); } }
     sock.emit('fire-cells', { cells: _fc, clear: chunks.slice(), cy: geom.cy });
   }
   // ⭐⭐ AND THE PILES LYING IN THESE CHUNKS. This is what replaces the whole-list join replay: a socket is told
