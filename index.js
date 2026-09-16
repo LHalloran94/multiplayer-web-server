@@ -5785,6 +5785,9 @@ const liquidCfg = {
   // 0.094 ⇒ 5 (the original). Below 0.021 nothing changes; a longer burn than that needs a bigger
   // `LIQUID_MAX`, not a smaller number here.
   fireBurn: 0.021,
+  // ⭐ …and the extension below that floor: passes BETWEEN spends. 1 = spend every pass (the floor above).
+  // MEASURED on a sealed slick: one unit a pass keeps a cell alight 0.55s; one unit every 4 passes, ~2.2s.
+  fireSlow: 4,
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7753,8 +7756,24 @@ function fineReactTickRoom(room, SUB, phase) {
     for (const i of list) {
       if (i < 0 || i >= N || amt.rp(i)[amt.o(i) + 5] <= 0) { if (fire.delete(i)) fireOut.push(i); continue; }   // burnt out (or the oil moved on)
       const p = amt.wp(i), b = amt.o(i);
-      const oburn = capFrac(liquidCfg.fireBurn * (liquidCfg.fireOnce ? 2 : 1));
-      p[b + 5] = p[b + 5] > oburn ? p[b + 5] - oburn : 0;
+      // ⭐⭐ BELOW ONE UNIT A PASS, SPEND ONE UNIT EVERY FEW PASSES. `capFrac` floors at one unit of a 24-unit
+      // cell, so 0.021 was as slow as a fire could burn and the slider did nothing under it — and "lower is
+      // better" was the report. A cell cannot spend less than a unit, but it can wait: `fireSlow` passes between
+      // spends, which extends the same dial smoothly past the floor and costs one modulo.
+      // ⚠️ IT DOES NOT STOP THE CELL BURNING — it is alight, it is drawn, it can still hurt you and it still
+      // lights its neighbours every pass. Only the fuel spend is paced. That is the difference between this and
+      // the spread dial that was reverted, which is the thing to keep straight if this is ever tuned again.
+      // ⚠️ Phased by the cell so a slick does not spend in lockstep, which would make a whole pool step down
+      // together and read as a pulse.
+      // ⚠️ `tick` IS `liquidTickCount`, WHICH ONLY ADVANCES IN `runLiquidTick`. A rig calling this function
+      // directly freezes it, so a cell whose phase does not match never spends and the fire never burns out at
+      // all — which reads as a broken sim and is a broken harness. Set `fireSlow` to 1 in a rig that does that;
+      // `probe_fire_budget` does, and says so.
+      const slow = liquidCfg.fireSlow | 0;
+      if (slow <= 1 || ((tick + (i % slow)) % slow) === 0) {
+        const oburn = capFrac(liquidCfg.fireBurn * (liquidCfg.fireOnce ? 2 : 1));
+        p[b + 5] = p[b + 5] > oburn ? p[b + 5] - oburn : 0;
+      }
       recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
       addFx(i, 7);                                                          // flame, every pass it is alight — not a one-shot
       if (p[b + 5] <= 0 && fire.delete(i)) fireOut.push(i);
@@ -16422,6 +16441,7 @@ io.on('connection', (socket) => {
     // ⚠️ A FRACTION, so it is clamped as one and never put through `| 0` the way every integer dial on this
     // wire is — that would floor it to 0 and stop oil burning at all.
     if ('fireBurn' in patch) liquidCfg.fireBurn = Math.max(0.002, Math.min(1, +patch.fireBurn || 0.021));
+    if ('fireSlow' in patch) liquidCfg.fireSlow = Math.max(1, Math.min(64, patch.fireSlow | 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
