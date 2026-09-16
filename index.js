@@ -5723,6 +5723,14 @@ const liquidCfg = {
   //     lava and water would starve the flow again and we would be back here.
   reactAnchorFilter: 1,  // 0 = old behaviour (anchor every candidate + neighbours, decide inside the phases)
   reactMaxCand: 20000,   // 0 = unlimited (old behaviour). Per room per tick, from a rotating cursor.
+  // ⭐⭐ FIRE. `fireOnce` stops the fire pass running on BOTH reaction calls (it is not a contact test and has
+  // no business running twice); the fuel spend is doubled to match, so the burn rate is unchanged and the cost
+  // halves. `fireMaxCells` is fire's own tier 2 — see the note at the fire loop for why tier 2 proper cannot
+  // ease a fire-dominated strip. MEASURED before either existed: 1.45µs per burning cell per PASS, so ~2.9µs a
+  // tick, against a 28ms budget shared with every liquid, powder and reaction in the world
+  // (`probe_fire_budget.js`). 6,000 is roughly a fifth of the budget at the measured rate.
+  fireOnce: 1,           // 0 = the old behaviour, fire on both reaction passes at half the spend
+  fireMaxCells: 6000,    // 0 = unlimited. Per room per turn, from a rotating cursor. A DELAY, never a skip.
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7324,6 +7332,11 @@ const roomReactCursor = {};   // room → where the capped reaction pass resumes
 // not help (one Overworld room ⇒ one shared queue) and why page worlds were fine (they never exceed 9,000
 // active cells, so the cap never binds).
 const roomFlowCursor = {};
+// ⭐ FIRE'S OWN PACING, DECLARED HERE AND NOT BELOW THE BLOCK. `fineReactTickRoom` lives inside the sliced
+// liquid-tick block, so anything it names must be inside it too — a module-level `const` further down the file
+// is a ReferenceError in every probe rig and nowhere else, which this track has now hit six times.
+const fireCursor = {};        // room → where the rotating burn cursor got to
+let liqFireThrottles = 0;     // turns on which the fire cap BIT — the mechanism counter, not an outcome one
 let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCand (⇒ it is biting; see the Perf tab)
 // ⚠️ A COUNT, NOT A CLOCK. `probe_react_budget` D2 first asserted "the flow moved liquid on most ticks", which
 // gave 18/30 and then 6/30 for identical code — the budget scheduler is `performance.now()`-driven, so any
@@ -7444,7 +7457,9 @@ const FREACT_ACID_COST_F = 0.09375; // acid spent per bite
 // so a slick lights from the point of contact and runs back through itself instead of quietly shrinking.
 // (`fineFire` on the cell store: Set<fine cell> currently burning.)
 function fineFireSet(room) { const s = cellsOf(room); if (!s.fineFire) { s.fineFire = new Set(); cellRooms.fire.add(room); } return s.fineFire; }
-function fineReactTickRoom(room, SUB) {
+// ⚠️ `phase` — 1 = the call BEFORE the flow, 2 = the call after it. Only the fire block reads it (see there).
+// Undefined when called directly, which is how the probe rigs call it, and undefined is not 1, so fire runs.
+function fineReactTickRoom(room, SUB, phase) {
   if (!liquidCfg.reactions) return;
   const st = cellsOf(room);
   SUB = SUB || st.fineSub || 1;
@@ -7460,6 +7475,11 @@ function fineReactTickRoom(room, SUB) {
   const mats = roomMats[room] || {}, T = LIQ_T, COLS = st.cols, ROWS = st.rows, N = grid.length;
   const tick = liquidTickCount, FLOOR_ROW = Math.floor(roomFloorTop(room) / TERRAIN_CELL);   // acid may not eat the bedrock row
   const act = fineSet(room), liqChanged = new Set(), terrCells = [], fx = [];
+  // ⭐⭐ WHICH CELLS STARTED AND STOPPED BURNING THIS PASS — layer (a). Until now the client was told only
+  // "a flame puffed at this cell" (fx code 7), a one-shot effect with no state behind it, so nothing on the
+  // client could be hurt by fire, collide with it or draw it as anything but a puff. These two lists are the
+  // state: a DIFF, in the same shape and on the same interest-filtered road as every other cell wire.
+  const fireLit = [], fireOut = [];
   // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
   // && gid === 2` ⇒ steam, etc). In fine mode liquid is not a grid id at all, so no transition can ever match and every
   // one of those effects is unreachable. The server knows exactly which reaction fired, so it says so: [cell, code].
@@ -7621,23 +7641,52 @@ function fineReactTickRoom(room, SUB) {
       // its own (see the fire phase), so a pool lights at the point of contact and runs back through itself.
       let oj = amt.rp(i)[amt.o(i) + 5] > 0 ? i : -1;
       if (oj < 0) for (const j of NB) { if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 5] > 0) { oj = j; break; } }
-      if (oj >= 0) fineFireSet(room).add(oj);
+      if (oj >= 0) { const fs = fineFireSet(room); if (!fs.has(oj)) { fs.add(oj); fireLit.push(oj); } }
   }
   // ── FIRE: every burning cell consumes its oil and lights any neighbour holding oil. Driven by its own set rather
   // than the anchors, so a slick keeps burning after everything has settled and stopped moving.
-  const fire = st.fineFire;
-  if (fire && fire.size) for (const i of Array.from(fire)) {
-    if (i < 0 || i >= N || amt.rp(i)[amt.o(i) + 5] <= 0) { fire.delete(i); continue; }   // burnt out (or the oil moved on)
-    const p = amt.wp(i), b = amt.o(i);
-    const oburn = capFrac(FREACT_OIL_BURN_F); p[b + 5] = p[b + 5] > oburn ? p[b + 5] - oburn : 0;
-    recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
-    addFx(i, 7);                                                            // flame, every pass it is alight — not a one-shot
-    if (p[b + 5] <= 0) fire.delete(i);
-    const r = i % ROWS;
-    for (const j of [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS])
-      if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 5] > 0) fire.add(j);      // the flame front
+  // ⭐⭐ ONCE PER TICK, NOT TWICE (liquidCfg.fireOnce). `fineReactTickRoom` is called TWICE per strip turn — before
+  // the flow and again after it, so chemistry sees the contacts the flow just made. That is right for contact
+  // reactions and simply wasteful for fire, which is not a contact test: it reads its own set, spends fuel and
+  // advances a front. Running it on both passes doubled its CPU and doubled the burn rate, so the "oil consumed
+  // per pass" constant meant half what it said. It runs on the POST-flow pass, which is the one that has seen
+  // oil move, and the fuel spend is doubled to compensate — so the burn RATE is unchanged and the cost halves.
+  // ⚠️ THE SPREAD RATE IS NOT COMPENSATED and cannot be by a constant: the front now advances one cell a tick
+  // instead of two. At 25Hz that is still ~400px/s through a slick. Flip `fireOnce` off to compare.
+  // ⚠️ `phase` is UNDEFINED when this function is called directly, as the probe rigs call it — and undefined is
+  // not 1, so fire runs. A rig that lost the fire pass would be measuring a sim that does not burn.
+  const fire = (liquidCfg.fireOnce && phase === 1) ? null : st.fineFire;
+  if (fire && fire.size) {
+    // ⭐ THE PACING LEVER, and it is the gap the costing found. Tier 2 eases an expensive strip by coarsening K,
+    // which is liquid-levelling work ONLY — so a strip whose cost is mostly FIRE cannot be eased at all and goes
+    // straight to tier 3, which skips its whole turn. This is fire's own tier 2: burn at most `fireMaxCells` a
+    // turn, from a ROTATING cursor so nothing is starved, and the rest simply burn on the next tick.
+    // ⚠️ A DELAY, NEVER A SKIP — the same contract `reactMaxCand` has, and for the same reason: a cell left out
+    // of this turn keeps its fuel and its place in the set, so a capped fire burns SLOWER, it does not go out.
+    const all = Array.from(fire);
+    const cap = liquidCfg.fireMaxCells | 0;
+    let list = all;
+    if (cap > 0 && all.length > cap) {
+      const cur = (fireCursor[room] || 0) % all.length;
+      list = all.slice(cur, cur + cap);
+      if (list.length < cap) list = list.concat(all.slice(0, cap - list.length));
+      fireCursor[room] = (cur + cap) % all.length;
+      liqFireThrottles++;
+    } else if (fireCursor[room]) fireCursor[room] = 0;
+    for (const i of list) {
+      if (i < 0 || i >= N || amt.rp(i)[amt.o(i) + 5] <= 0) { if (fire.delete(i)) fireOut.push(i); continue; }   // burnt out (or the oil moved on)
+      const p = amt.wp(i), b = amt.o(i);
+      const oburn = capFrac(FREACT_OIL_BURN_F * (liquidCfg.fireOnce ? 2 : 1));
+      p[b + 5] = p[b + 5] > oburn ? p[b + 5] - oburn : 0;
+      recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
+      addFx(i, 7);                                                          // flame, every pass it is alight — not a one-shot
+      if (p[b + 5] <= 0 && fire.delete(i)) fireOut.push(i);
+      const r = i % ROWS;
+      for (const j of [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS])
+        if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 5] > 0 && !fire.has(j)) { fire.add(j); fireLit.push(j); }   // the flame front
+    }
   }
-  if (fire && !fire.size) dropFineFire(room);
+  if (st.fineFire && !st.fineFire.size) dropFineFire(room);
   // ── PHASE 2: ACID. Transferred from the coarse liquidTickRoom block, same model: SOAK adjacent water into this cell's
   // dilution (consuming it) and CONVERT acid→water once saturated; with no water to neutralise against, DISSOLVE an
   // adjacent breakable solid instead (never bedrock, never glass). Both are GRADUAL, so — like the oil burn — they do
@@ -7726,6 +7775,15 @@ function fineReactTickRoom(room, SUB) {
   for (const j of liqChanged) fineSyncGrid(room, j);           // a drained/created stack changes the cell's representative id
   if (liquidQuiet) return;                                    // gen pre-settle: react, but don't broadcast
   if (fx.length) wireFanout(room, 'liquid-fx', { cells: fx });
+  // ⭐ THE BURNING-CELL DIFF. One flat [cell, 1|0, …] list so it rides `CELL_WIRE` unchanged — the same
+  // stride-2 shape `terrain-set` and `liquid-fx` use, which means it is interest-filtered per socket and
+  // batched into the tick's `world-batch` for free rather than needing a road of its own.
+  if (fireLit.length || fireOut.length) {
+    const cells = [];
+    for (const i of fireOut) cells.push(i, 0);
+    for (const i of fireLit) cells.push(i, 1);   // …lit AFTER out, so a cell that did both in one pass ends lit
+    wireFanout(room, 'fire-cells', { cells });
+  }
   // ORDER MATTERS now the grid carries fluid ids: a cell the reaction turned SOLID also appears in liqChanged with an
   // empty stack, and applying that after the terrain write would clear the new solid straight back to 0.
   if (liqChanged.size) {                                      // same encoding as the fine tick's own wire
@@ -8136,11 +8194,11 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
     msSince('flow');
     if (st.src && st.src.size) sourceTickRoom(room);
     msSince('src');
-    if (doReact && ((st.fineActive && st.fineActive.size) || (st.fineReact && st.fineReact.size) || (st.fineFire && st.fineFire.size))) fineReactTickRoom(room, SUB);
+    if (doReact && ((st.fineActive && st.fineActive.size) || (st.fineReact && st.fineReact.size) || (st.fineFire && st.fineFire.size))) fineReactTickRoom(room, SUB, 1);
     msSince('react');
     if (st.fineActive && st.fineActive.size) fineLiquidTickRoom(room, SUB);
     msSince('flow');
-    if (doReact && ((st.fineActive && st.fineActive.size) || (st.fineReact && st.fineReact.size) || (st.fineFire && st.fineFire.size))) fineReactTickRoom(room, SUB);
+    if (doReact && ((st.fineActive && st.fineActive.size) || (st.fineReact && st.fineReact.size) || (st.fineFire && st.fineFire.size))) fineReactTickRoom(room, SUB, 2);
     msSince('react');
     if (st.powderActive && st.powderActive.size) powderTickRoom(room);
     msSince('powder');
@@ -8374,24 +8432,24 @@ const runLiquidTick = () => {
   // reported ONE "liquid/tick" figure spanning pre-reactions + flow + post-reactions, so a reaction pass eating
   // 187ms and starving the flow completely was indistinguishable from a flow costing 187ms. `active=0` next to
   // it looked like an idle room. Two numbers say in one glance what took a whole session to isolate by hand.
-  const _react = () => {
+  const _react = (phase) => {
     const _rt0 = liquidCfg.perfLog ? performance.now() : 0;
-    const _gm = genPagesProduced; _reactInner(); liqGenBy.react += genPagesProduced - _gm; _genMark = genPagesProduced;
+    const _gm = genPagesProduced; _reactInner(phase); liqGenBy.react += genPagesProduced - _gm; _genMark = genPagesProduced;
     // ⚠️ The chemistry runs TWICE per tick (before the flow on last tick's movers, and after it on the contacts
     // the flow just made), so this accumulates rather than replacing — and the `_msMark` is pushed forward so
     // the flow either side of it is not charged for it.
     msSince('react');
     if (liquidCfg.perfLog) { const _rd = performance.now() - _rt0; liqPerf.reactMs += _rd; if (_rd > liqPerf.reactMsMax) liqPerf.reactMsMax = _rd; }
   };
-  const _reactInner = () => {
+  const _reactInner = (phase) => {
     const seenRooms = new Set();
     for (const reg of [cellRooms.fine, cellRooms.react, cellRooms.fire])   // a room may be quiet but still have a seeded contact or a burning slick
-      for (const room of Array.from(reg)) { if (!reg.has(room) || seenRooms.has(room) || (_deferred && _deferred.has(room)) || _secPlans.has(room)) continue; seenRooms.add(room); fineReactTickRoom(room, cellsOf(room).fineSub || 1); }
+      for (const room of Array.from(reg)) { if (!reg.has(room) || seenRooms.has(room) || (_deferred && _deferred.has(room)) || _secPlans.has(room)) continue; seenRooms.add(room); fineReactTickRoom(room, cellsOf(room).fineSub || 1, phase); }
   };
   // …and the same closing before the FIRST pass, so the budget roster and the strip planning between the sources
   // and here are charged to the flow they are scheduling rather than to the chemistry that happens to run next.
   msSince('flow');
-  if (liquidCfg.reactions) _react();
+  if (liquidCfg.reactions) _react(1);
   for (const room of Array.from(cellRooms.fine)) {
     if (!cellRooms.fine.has(room)) continue;
     // ⚠️ TALLIED BEFORE THE TWO `continue`s BELOW, NOT AFTER — the readout's second lie. This line sat under
@@ -8445,7 +8503,7 @@ const runLiquidTick = () => {
   // quantity, disagreeing by 14ms, in the readout's first outing — caught because the old measurement was still
   // there to contradict it. A breakdown that cannot be cross-checked against something is worth very little.
   msSince('flow');
-  if (liquidCfg.reactions) _react();
+  if (liquidCfg.reactions) _react(2);
   if (liquidCfg.perfLog) { const _fdt = performance.now() - _fine0; liqPerf.fineMs += _fdt; if (_fdt > liqPerf.fineMsMax) liqPerf.fineMsMax = _fdt; if (_fineActive > liqPerf.fineActive) liqPerf.fineActive = _fineActive; }
   // ⭐ HOW MUCH LIQUID IS PENDING, AND WHERE — COUNTED FOR EVERY ROOM, DEFERRED OR NOT.
   // 🟥 Both of the readout's blind spots were the same mistake, made twice: the tallies above only run for a
@@ -8562,7 +8620,7 @@ const runLiquidTick = () => {
         // that IS operating in a sectored world and it was console-only; `k2Throttles` is tier 2, whose stuck
         // `K=9` is what prompted this — a zero here with water plainly moving is the whole diagnosis in one
         // number. `rateSkips` is tier 3. Counters, so they reset per window and read as a rate.
-        k2Throttles: liqK2Throttles, rateSkips: liqRateSkips,
+        k2Throttles: liqK2Throttles, rateSkips: liqRateSkips, fireThrottles: liqFireThrottles,
         // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
         // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
         steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
@@ -8631,7 +8689,7 @@ const runLiquidTick = () => {
       // strip-turns was thrown away", which is the number to judge the throttle by.
       // ⚠️ Safe for the rigs: this whole block only runs with `perfLog` ON, and `probe_budget` explicitly turns
       // it off (it reads the same counters through the sliced module, cumulatively, and still can).
-      liqRateSkips = 0; liqK2Throttles = 0; liqSecTicks = 0; liqSecDeferred = 0; liqSecFallOnly = 0; liqReactSkips = 0;
+      liqRateSkips = 0; liqK2Throttles = 0; liqFireThrottles = 0; liqSecTicks = 0; liqSecDeferred = 0; liqSecFallOnly = 0; liqReactSkips = 0;
       // Same rule: the per-pass ms are a SUM over the window just reported, so they start again at zero. A
       // lifetime total here would answer "has the chemistry ever been expensive", which nobody is asking.
       for (const k in liqMsBy) liqMsBy[k] = 0;
@@ -8977,6 +9035,28 @@ function sendChunkContent(sock, room, chunks) {
   }
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
   sock.emit('liquid-fine-cells', { sub: 1, cols: geom.cols, cells, clear: chunks.slice() });
+  // ⭐⭐ AND WHAT IS ALIGHT IN THESE CHUNKS — layer (a)'s repair path, on the same seam and for the same reason
+  // the piles below use it: the live wire carries only a DIFF, and a windowed client forgets a chunk when it
+  // walks away, so "nothing has changed since you were last here" stops meaning "you still know". Without this a
+  // player who leaves a burning forest and comes back sees unlit trees that kill them.
+  // ⚠️ Sent UNCONDITIONALLY on every re-entry, exactly as increment 3d made chunk content unconditional.
+  // ⚠️ `peekCells`, and the burning set is walked rather than the chunks: a room's fire is hundreds of cells,
+  // never the 4,096 of a chunk, so asking "which of these few are in the chunks you want" is the cheap direction.
+  // Reading it the other way round would fault pages in — a read is not free on a generated world (F21).
+  {
+    const _fire = s.fineFire;
+    if (_fire && _fire.size) {
+      // ⚠️ The chunk id, spelled the way the paging table builds it (see `pageOf`): column-major cell index,
+      // then the chunk's column times `cy` plus the chunk's row. There is no shared helper for this — checked,
+      // rather than assumed — so it is written out here next to the geometry it uses.
+      const _want = new Set(chunks), _fc = [], _R = geom.rows, _CY = geom.cy;
+      for (const i of _fire) {
+        const _c = (i / _R) | 0, _r = i % _R;
+        if (_want.has(((_c / CHUNK_SIDE) | 0) * _CY + ((_r / CHUNK_SIDE) | 0))) _fc.push(i, 1);
+      }
+      if (_fc.length) sock.emit('fire-cells', { cells: _fc });
+    }
+  }
   // ⭐⭐ AND THE PILES LYING IN THESE CHUNKS. This is what replaces the whole-list join replay: a socket is told
   // about the material on the ground where it can SEE it, on the same seam that brings it the terrain, so an
   // unbounded number of piles in the world costs a joiner nothing.
@@ -9155,6 +9235,7 @@ const CELL_WIRE = {
   'liquid-fx':         () => 2,
   // [i, repId, flags, mask, ...one amount per set rank bit] — see the WIRE comment in fineLiquidTickRoom.
   'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n; },
+  'fire-cells':        () => 2,     // [cell, 1 = alight | 0 = out, …]
 };
 // avRoom → Map(socketId → { subs: Set<chunk>, pending: Set<chunk> })
 // (`mark` — the hash a chunk had when the socket left it — went with increment 3d; see updateSubs.)
@@ -12566,9 +12647,9 @@ function ensureWorldGenerated(avatarRoom, roomId, levelIndex) {
     if (!(fact && fact.size) && !(seeded && seeded.size) && !(burning && burning.size) && !(pact && pact.size)) break;
     liquidTickCount++;
     const SUB = _st.fineSub || 1;
-    if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
+    if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB, 1);
     fineLiquidTickRoom(avatarRoom, SUB);
-    if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB);
+    if (liquidCfg.reactions) fineReactTickRoom(avatarRoom, SUB, 2);
     // Powder runs in lockstep with liquid in the live tick (same gravity), so it does here too — otherwise a
     // grain sinking through water settles at a different rate before a joiner sees it than after.
     if (pact && pact.size) { powderTickCount++; powderTickRoom(avatarRoom); }
@@ -16232,6 +16313,8 @@ io.on('connection', (socket) => {
     if ('reactAnchorFilter' in patch) liquidCfg.reactAnchorFilter = patch.reactAnchorFilter ? 1 : 0;
     if ('reactMovedOnly' in patch) liquidCfg.reactMovedOnly = patch.reactMovedOnly ? 1 : 0;
     if ('reactMaxCand' in patch) liquidCfg.reactMaxCand = Math.max(0, Math.min(2000000, patch.reactMaxCand | 0));
+    if ('fireOnce' in patch) liquidCfg.fireOnce = patch.fireOnce ? 1 : 0;
+    if ('fireMaxCells' in patch) liquidCfg.fireMaxCells = Math.max(0, Math.min(2000000, patch.fireMaxCells | 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
