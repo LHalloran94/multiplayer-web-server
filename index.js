@@ -7641,7 +7641,7 @@ function fineReactTickRoom(room, SUB, phase) {
   // "a flame puffed at this cell" (fx code 7), a one-shot effect with no state behind it, so nothing on the
   // client could be hurt by fire, collide with it or draw it as anything but a puff. These two lists are the
   // state: a DIFF, in the same shape and on the same interest-filtered road as every other cell wire.
-  const fireLit = [], fireOut = [];
+  const fireLit = [], fireOut = [], fireRelit = [];   // `fireRelit`: alight already, but now made of something else
   // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
   // && gid === 2` ⇒ steam, etc). In fine mode liquid is not a grid id at all, so no transition can ever match and every
   // one of those effects is unreachable. The server knows exactly which reaction fired, so it says so: [cell, code].
@@ -7918,10 +7918,18 @@ function fineReactTickRoom(room, SUB, phase) {
           // ⚠️ A FLASH CELL IS CONSUMED WHOLE, at either stage — that is what opens the gaps inside a burning trunk.
           const left = flash ? 0 : FIRE_ASH[gPeek(i)];
           const relit = left > 0 && FIRE_RATE[left] > 0;
+          // ⭐⭐ A COLUMN CRUMBLES FROM THE TOP DOWN, so nothing is left hovering. Ash FALLS and charcoal does not,
+          // so a charcoal cell whose turn comes first drops out from under the charcoal above it and leaves it in
+          // mid-air — seen in play at 105s, a few dark cells floating over the ash mound. The user asked for
+          // exactly this cure: *"maybe by making the charcoal turn to ash from the top down."*
+          // ⚠️ THE HOLD IS BOUNDED BY THE FIRE ITSELF: it only waits on a cell that is ALIGHT, and its own timer
+          // has already expired, so it crumbles the pass after the one above it does. It is not waiting on unlit
+          // terrain, which would smoulder for ever under a tree nobody set light to.
+          if (!relit && left > 0 && isPowderId(left) && rI > 0 && fire.has(i - 1)) continue;
           if (relit) {
             // Still burning, as something else now. `fireLit` carries it again so the client restarts its char
             // clock against the NEW material's burn length — it is only ever set for a cell that was not alight.
-            setSolid(i, left); ages.set(i, 0); fireLit.push(i);
+            setSolid(i, left); ages.set(i, 0); fireRelit.push(i);
           } else {
             fire.delete(i); ages.delete(i); fireOut.push(i);
             // Dense fuel leaves Ash (a powder — it is woken so it falls); foliage and flash cells leave nothing.
@@ -8084,10 +8092,15 @@ function fineReactTickRoom(room, SUB, phase) {
   // ⭐ THE BURNING-CELL DIFF. One flat [cell, 1|0, …] list so it rides `CELL_WIRE` unchanged — the same
   // stride-2 shape `terrain-set` and `liquid-fx` use, which means it is interest-filtered per socket and
   // batched into the tick's `world-batch` for free rather than needing a road of its own.
-  if (fireLit.length || fireOut.length) {
+  if (fireLit.length || fireOut.length || fireRelit.length) {
     const cells = [];
     for (const i of fireOut) cells.push(i, 0);
     for (const i of fireLit) cells.push(i, 1);   // …lit AFTER out, so a cell that did both in one pass ends lit
+    // ⭐ 2 = STILL ALIGHT, BUT IT IS SOMETHING ELSE NOW — wood that has finished and become charcoal where it
+    // stands. The client needs to restart its char clock against the new material's much longer burn, but this is
+    // NOT an ignition: sending it as `1` fired the just-caught flash, and a cell of a smouldering trunk flared
+    // white every time another one charred (seen in play at 105s). Rides the same stride-2 wire.
+    for (const i of fireRelit) cells.push(i, 2);
     wireFanout(room, 'fire-cells', { cells });
   }
   // ORDER MATTERS now the grid carries fluid ids: a cell the reaction turned SOLID also appears in liqChanged with an
