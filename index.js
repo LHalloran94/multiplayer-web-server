@@ -5806,7 +5806,10 @@ const liquidCfg = {
   fireSolidCatch: 10,    // passes a cell must have burned before a rate-1 solid NEIGHBOUR catches (wood: 20 ≈ 0.8s)
   fireQuench: 1,         // a NEGATIVE-rate liquid (water, brine) puts fire out. 0 = water does nothing to fire
   fireVary: 0.7,         // how different one cell of a material is from the next (see `fireVar`). 0 = identical
-  fireFlash: 0.08,       // share of cells that burn away to NOTHING in a fifth of the time (see `isFlash`) — the gaps
+  // ⚠️ OFF BY DEFAULT — the user tried it in play and did not want it (*"the fast-burning cells aren't really any
+  // good"*). It was asked for to open gaps for flames to show through, and the flames are not to depend on gaps.
+  // The mechanism is three lines and a dial, kept so it can be tried again; 0 is exactly the behaviour without it.
+  fireFlash: 0,          // share of cells that burn away to NOTHING in a fifth of the time (see `isFlash`)
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
