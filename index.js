@@ -5810,6 +5810,8 @@ const liquidCfg = {
   // good"*). It was asked for to open gaps for flames to show through, and the flames are not to depend on gaps.
   // The mechanism is three lines and a dial, kept so it can be tried again; 0 is exactly the behaviour without it.
   fireFlash: 0,          // share of cells that burn away to NOTHING in a fifth of the time (see `isFlash`)
+  fireAshOrder: 1,       // a column crumbles TOP DOWN so nothing hovers. 0 = every cell crumbles on its own clock
+  fireAshJitter: 45,     // …and up to this many passes of per-cell delay on top, so the cascade is not a streak
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7913,7 +7915,15 @@ function fineReactTickRoom(room, SUB, phase) {
         addFx(i, 7);
         spread(i, rI, age);
         const flash = isFlash(i);
-        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i) * (flash ? FLASH_MUL : 1)))) {
+        // ⭐⭐ WHEN A CELL CRUMBLES TO POWDER, IT WAITS A LITTLE LONGER THAN ITS NEIGHBOUR — reported from play as
+        // *"long vertical streaks of ash as it triggers downwards"*. The top-down rule below crumbles a column one
+        // cell per pass, so a whole trunk's worth of ash left in a single tick-by-tick line: a streak is what a
+        // perfectly ordered cascade looks like. A per-cell hashed delay (`fireAshJitter` passes) breaks the order
+        // up without touching the rule that keeps the column standing while it happens.
+        // ⚠️ Only for the stage that leaves POWDER. Wood becoming charcoal is not what streaks — it does not fall.
+        const ashJit = (j) => Math.round(fireVar(j, salt, 4) * Math.max(0, liquidCfg.fireAshJitter | 0));
+        const leavesPowder = !flash && isPowderId(FIRE_ASH[gPeek(i)] || 0);
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i) * (flash ? FLASH_MUL : 1))) + (leavesPowder ? ashJit(i) : 0)) {
           // ⭐⭐ WHAT A BURNT SOLID LEAVES, AND WHETHER IT IS STILL ALIGHT. Wood leaves CHARCOAL, which is itself a
           // fuel, so the cell does not go out: it changes material where it stands and goes on smouldering, which
           // is what keeps a burnt tree's shape (charcoal burns ~10× longer than the wood did). Charcoal in turn
@@ -7928,7 +7938,9 @@ function fineReactTickRoom(room, SUB, phase) {
           // ⚠️ THE HOLD IS BOUNDED BY THE FIRE ITSELF: it only waits on a cell that is ALIGHT, and its own timer
           // has already expired, so it crumbles the pass after the one above it does. It is not waiting on unlit
           // terrain, which would smoulder for ever under a tree nobody set light to.
-          if (!relit && left > 0 && isPowderId(left) && rI > 0 && fire.has(i - 1)) continue;
+          // ⚠️ `fireAshOrder` 0 turns the whole "a cell behaves differently because of what is above it" idea off —
+          // the user asked for the switch, because ordering is exactly what made the ash predictable.
+          if (liquidCfg.fireAshOrder && !relit && left > 0 && isPowderId(left) && rI > 0 && fire.has(i - 1)) continue;
           if (relit) {
             // Still burning, as something else now. `fireLit` carries it again so the client restarts its char
             // clock against the NEW material's burn length — it is only ever set for a cell that was not alight.
@@ -16666,6 +16678,8 @@ io.on('connection', (socket) => {
     if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
     if ('fireVary' in patch) liquidCfg.fireVary = Math.max(0, Math.min(1, +patch.fireVary || 0));
     if ('fireFlash' in patch) liquidCfg.fireFlash = Math.max(0, Math.min(0.5, +patch.fireFlash || 0));
+    if ('fireAshOrder' in patch) liquidCfg.fireAshOrder = patch.fireAshOrder ? 1 : 0;
+    if ('fireAshJitter' in patch) liquidCfg.fireAshJitter = Math.max(0, Math.min(400, patch.fireAshJitter | 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
