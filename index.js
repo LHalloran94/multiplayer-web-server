@@ -7570,6 +7570,32 @@ const FREACT_ACID_COST_F = 0.09375; // acid spent per bite
 // so a slick lights from the point of contact and runs back through itself instead of quietly shrinking.
 // (`fineFire` on the cell store: Set<fine cell> currently burning.)
 function fineFireSet(room) { const s = cellsOf(room); if (!s.fineFire) { s.fineFire = new Set(); cellRooms.fire.add(room); } return s.fineFire; }
+// ⭐ THE FIRE TOOL (build menu → Terrain → Misc → Fire). Sets alight everything that can burn in a square of
+// half-size `r` around (x, y), plus ONE CELL around it — so a brush dragged just above a log or across the top of
+// an oil slick still lights it, which is what "drop fire onto things" means. Nothing that cannot burn is touched,
+// and a stroke through open air does nothing at all.
+// ⚠️ `peekCellAt`, never `grid.g`: a read must not build unproduced world (`feedback_a_read_is_not_free`).
+function igniteBox(room, x, y, r) {
+  const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt;
+  if (!grid || !amt || (st.fineSub || 1) !== 1) return 0;
+  const ROWS = st.rows, COLS = st.cols, pad = r + TERRAIN_CELL;
+  const c0 = Math.max(0, Math.floor((x - pad) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((x + pad) / TERRAIN_CELL));
+  const r0 = Math.max(0, Math.floor((y - pad) / TERRAIN_CELL)), r1 = Math.min(ROWS - 1, Math.floor((y + pad) / TERRAIN_CELL));
+  if ((c1 - c0 + 1) * (r1 - r0 + 1) > 4096) return 0;          // a brush is at most 160px; anything bigger is not one
+  const fs = fineFireSet(room), lit = [];
+  for (let c = c0; c <= c1; c++) for (let rw = r0; rw <= r1; rw++) {
+    const i = c * ROWS + rw;
+    if (fs.has(i)) continue;
+    const g = peekCellAt(grid, i);
+    if (g < 0) continue;                                        // not produced: nothing there to set alight
+    const solid = liquidCfg.fireSolids && g > 0 && FIRE_RATE[g] > 0;
+    const oil = !solid && amt.rp(i)[amt.o(i) + 5] > 0;
+    if (!solid && !oil) continue;
+    fs.add(i); lit.push(i, 1);
+  }
+  if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
+  return lit.length / 2;
+}
 // ⚠️ `phase` — 1 = the call BEFORE the flow, 2 = the call after it. Only the fire block reads it (see there).
 // Undefined when called directly, which is how the probe rigs call it, and undefined is not 1, so fire runs.
 function fineReactTickRoom(room, SUB, phase) {
@@ -18859,6 +18885,16 @@ io.on('connection', (socket) => {
     // arrived" from "a guard rejected it", and those need completely different fixes — which cost a whole round
     // of wrong theories on 2026-08-27.
     if (worldCfg.trace) console.log(`[trace] terrain-edit IN op=${op} mat=${mat} @${x | 0},${y | 0} r=${r} room=${currentAvatarRoom ? 'yes' : 'NONE'}`);
+    // ⭐ THE FIRE TOOL: not a paint and not a carve — it changes no terrain, it only sets alight what is there.
+    // Same room / permission / finiteness / clamp rules as the edits below, and nothing is echoed: the lit cells
+    // travel on the `fire-cells` wire to every socket that can see them, the sender included.
+    if (op === 'ignite') {
+      if (!currentAvatarRoom || !canBuild() || !isFinite(x) || !isFinite(y) || !isFinite(r)) return;
+      const _d = roomDims(currentAvatarRoom);
+      igniteBox(currentAvatarRoom, Math.max(0, Math.min(_d.cols * TERRAIN_CELL, x)), Math.max(0, Math.min(_d.rows * TERRAIN_CELL, y)),
+        Math.max(TERRAIN_CELL / 2, Math.min(160, r)));
+      return;
+    }
     if (!currentAvatarRoom || (op !== 'paint' && op !== 'carve')) return;
     if (!canBuild()) return;                                // Phase 3: L2 build permission
     if (!isFinite(x) || !isFinite(y) || !isFinite(r)) return;
