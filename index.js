@@ -4460,6 +4460,7 @@ function RoomCells(cols, rows) {
   this.fineLevelAcc = null; this.fineStill = null;       // levelling carry + quiescence counters
   this.fineActive = null; this.fineReact = null; this.fineFire = null;   // Sets of cell indices
   this.fireAge = null;                                   // Map(burning cell → passes it has been alight) — fire layer (c)
+  this.fireSalt = 0;                                     // per-fire seed for each cell's susceptibility (`fireVar`); 0 = not burning
   this.fineFluxSeen = null; this.fineFluxStack = null;   // flux-levelling flood-fill scratch
   this.powderActive = null; this.soilActive = null;      // Sets of cell indices
   this.src = null;                                       // Map(cell → {rank, rate}) of liquid source cells
@@ -5804,6 +5805,7 @@ const liquidCfg = {
   fireSolidBurn: 80,     // passes a rate-1 solid stays alight (wood, rate 0.5, is 160 ≈ 6.4s at 25Hz)
   fireSolidCatch: 10,    // passes a cell must have burned before a rate-1 solid NEIGHBOUR catches (wood: 20 ≈ 0.8s)
   fireQuench: 1,         // a NEGATIVE-rate liquid (water, brine) puts fire out. 0 = water does nothing to fire
+  fireVary: 0.7,         // how different one cell of a material is from the next (see `fireVar`). 0 = identical
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7448,6 +7450,23 @@ for (const [id, rate, ash] of [
   [50, 1.5, 0],    // Fungus
   [31, 0.8, 0],    // Cactus — wet flesh, catches reluctantly
 ]) { FIRE_RATE[id] = rate; FIRE_ASH[id] = ash; }
+// ⭐⭐ NOT EVERY PIECE OF WOOD IS THE SAME PIECE OF WOOD. The user, on the first burning tree: *"it needs some
+// stochasticity… because fire does not really spread in this predictable pattern… rather than randomness in the
+// spreading, there could be some variation in how easily a particular material burns, perhaps assigned between some
+// range… things burn at different speeds because of their different susceptibility, even within the same material."*
+// ⇒ every cell has its OWN susceptibility (how soon it catches) and its own burn length, hashed from the cell and a
+// per-fire salt. `fireVary` sets the width of the range; 0 is the uniform front exactly.
+// 🟥 A FIXED PER-CELL DELAY, NOT A PER-PASS CHANCE, AND THAT IS THE WHOLE POINT: a probability of catching each pass
+// was tried for oil and stopped a fire spreading EIGHT RUNS IN EIGHT (`feedback_a_random_rate_can_kill_the_process`).
+// A delay always arrives, so the front is irregular but can never fizzle out by bad luck.
+// ⚠️ THE SALT is drawn when a room's fire STARTS and cleared when it goes out, so rebuilding the same tree and lighting
+// it again burns differently, while one fire stays consistent with itself.
+function fireVar(i, salt, k) {
+  let h = Math.imul((i ^ salt) | 0, 0x9E3779B1) ^ Math.imul(k, 0x7FEB352D);
+  h ^= h >>> 15; h = Math.imul(h, 0x85EBCA77); h ^= h >>> 13; h = Math.imul(h, 0xC2B2AE3D); h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function fireSaltOf(st) { if (!st.fireSalt) st.fireSalt = ((Math.random() * 0x7ffffffe) | 0) + 1; return st.fireSalt; }
 // ranks: lava0 quicksand1 brine2 acid3 water4 oil5. Brine and water put fire out; oil burns.
 const FIRE_RATE_RANK = [0, 0, -1, 0, -1, 1];
 let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCand (⇒ it is biting; see the Perf tab)
@@ -7828,6 +7847,10 @@ function fineReactTickRoom(room, SUB, phase) {
     // a burning log would have been "burnt out" by the audit on its first look.
     // ⚠️ `gPeek`, not `grid.g`: a neighbour one cell past produced world must not build it (see the note on gPeek).
     const ages = st.fireAge || (st.fireAge = new Map());
+    const salt = fireSaltOf(st), vary = Math.max(0, Math.min(1, +liquidCfg.fireVary || 0));
+    // susceptibility: how soon this cell catches (×), and how long it burns (×). Centred on 1 so the dials keep meaning.
+    const catchMul = (j) => vary ? Math.max(0.25, 1 + vary * 0.9 * (2 * fireVar(j, salt, 1) - 1)) : 1;
+    const burnMul = (j) => vary ? 1 + vary * 0.5 * (2 * fireVar(j, salt, 2) - 1) : 1;
     const solidsOn = !!liquidCfg.fireSolids;
     const oilAt = (j) => amt.rp(j)[amt.o(j) + 5];
     const solidRate = (j) => { if (!solidsOn) return 0; const g = gPeek(j); return g > 0 ? FIRE_RATE[g] : 0; };
@@ -7854,7 +7877,7 @@ function fineReactTickRoom(room, SUB, phase) {
         if (liquidCfg.fireQuench && quenched(j, j % ROWS)) continue;
         if (oilAt(j) > 0) { fire.add(j); fireLit.push(j); continue; }
         const sr = solidRate(j); if (sr <= 0) continue;
-        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1)))) { fire.add(j); ages.set(j, 0); fireLit.push(j); }
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1) * catchMul(j)))) { fire.add(j); ages.set(j, 0); fireLit.push(j); }
       }
     };
     if ((tick % FIRE_AUDIT_TICKS) === 0) {
@@ -7871,7 +7894,7 @@ function fineReactTickRoom(room, SUB, phase) {
       if (sRate > 0) {
         addFx(i, 7);
         spread(i, rI, age);
-        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate))) {
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i)))) {
           const ash = FIRE_ASH[gPeek(i)];
           fire.delete(i); ages.delete(i); fireOut.push(i);
           // Dense fuel leaves Ash (a powder — it is woken so it falls); foliage leaves nothing.
@@ -7941,7 +7964,7 @@ function fineReactTickRoom(room, SUB, phase) {
       spread(i, rI, age);                                                   // the flame front — oil at once, solids after a delay
     }
   }
-  if (st.fineFire && !st.fineFire.size) dropFineFire(room);
+  if (st.fineFire && !st.fineFire.size) { dropFineFire(room); st.fireSalt = 0; }   // the fire is out: the next one burns differently
   // ── PHASE 2: ACID. Transferred from the coarse liquidTickRoom block, same model: SOAK adjacent water into this cell's
   // dilution (consuming it) and CONVERT acid→water once saturated; with no water to neutralise against, DISSOLVE an
   // adjacent breakable solid instead (never bedrock, never glass). Both are GRADUAL, so — like the oil burn — they do
@@ -16597,6 +16620,7 @@ io.on('connection', (socket) => {
     if ('fireSolidBurn' in patch) liquidCfg.fireSolidBurn = Math.max(1, Math.min(4000, patch.fireSolidBurn | 0));
     if ('fireSolidCatch' in patch) liquidCfg.fireSolidCatch = Math.max(1, Math.min(1000, patch.fireSolidCatch | 0));
     if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
+    if ('fireVary' in patch) liquidCfg.fireVary = Math.max(0, Math.min(1, +patch.fireVary || 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
