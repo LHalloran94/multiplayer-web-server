@@ -145,6 +145,12 @@
     // they are safe; a raw stored id in the old custom range is not, which is the price of the "never insert"
     // rule and is why this is appended rather than filed beside Wood.
     ['Timber', '#7a5a3a', 'solid', 2], // 91 timber — sawn wood. Solid, unlike the Wood a tree is made of.
+    // ⭐⭐ CHARCOAL — WHAT BURNT WOOD LEAVES SO A BURNT TREE KEEPS ITS SHAPE. Wood used to burn away to Ash, a
+    // POWDER, so lighting a trunk's base left the rest of the tree hovering while it burned. Wood, Timber and
+    // Driftwood now convert in place to this and go on smouldering for about a minute before crumbling to Ash.
+    // ⚠️ SOLID, not powder: the whole point is that it stands where the wood stood. It is soft (1 hit) because it
+    // is what is left of something burnt, and it is a fuel in its own right — see `FIRE_RATE` in index.js.
+    ['Charcoal', '#2a2420', 'solid', 1, 'dusty'], // 92 charcoal — burnt wood; smoulders a long time, then ash
   ];
 
   const GEN_MAT_MIN = 18;

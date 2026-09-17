@@ -5806,6 +5806,7 @@ const liquidCfg = {
   fireSolidCatch: 10,    // passes a cell must have burned before a rate-1 solid NEIGHBOUR catches (wood: 20 ≈ 0.8s)
   fireQuench: 1,         // a NEGATIVE-rate liquid (water, brine) puts fire out. 0 = water does nothing to fire
   fireVary: 0.7,         // how different one cell of a material is from the next (see `fireVar`). 0 = identical
+  fireFlash: 0.08,       // share of cells that burn away to NOTHING in a fifth of the time (see `isFlash`) — the gaps
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7434,9 +7435,12 @@ const FIRE_AUDIT_TICKS = 32;   // ~1.3s at the 40ms tick
 // `FIRE_ASH` — what a burnt solid leaves: dense fuel leaves Ash (38, a powder, so it falls); foliage leaves nothing.
 const FIRE_RATE = new Float32Array(256), FIRE_ASH = new Uint8Array(256);
 for (const [id, rate, ash] of [
-  [28, 0.5, 38],   // Wood — a tree's trunk: slow, the thing that makes a forest burn for a while
-  [91, 0.5, 38],   // Timber — sawn wood
-  [40, 0.6, 38],   // Driftwood — dry
+  [28, 0.5, 92],   // Wood — a tree's trunk: slow, the thing that makes a forest burn for a while
+  [91, 0.5, 92],   // Timber — sawn wood (a player's build chars in place too)
+  [40, 0.6, 92],   // Driftwood — dry
+  // ⭐ Charcoal is what the three above leave, and it is a fuel itself: at 0.05 it smoulders for 1,600 passes
+  // (about a minute) before crumbling to Ash, which is the window a player has to come and dig it out.
+  [92, 0.05, 38],  // Charcoal — smoulders a long time, then ash
   [41, 0.15, 38],  // Coal — very slow, very long
   [20, 0.25, 38],  // Peat — smoulders
   [29, 3, 0],      // Leaves
@@ -7851,6 +7855,17 @@ function fineReactTickRoom(room, SUB, phase) {
     // susceptibility: how soon this cell catches (×), and how long it burns (×). Centred on 1 so the dials keep meaning.
     const catchMul = (j) => vary ? Math.max(0.25, 1 + vary * 0.9 * (2 * fireVar(j, salt, 1) - 1)) : 1;
     const burnMul = (j) => vary ? 1 + vary * 0.5 * (2 * fireVar(j, salt, 2) - 1) : 1;
+    // ⭐⭐ A FEW CELLS BURN RIGHT AWAY TO NOTHING — the user, once wood stopped leaving a hole at all: *"it would be
+    // good to have a small amount of cells that burn away much faster than the others so that this produces gaps as
+    // it burns through the interior of the tree and thus leaves spaces for the flames to appear."* Everything else
+    // a burning solid leaves (charcoal, then ash) still FILLS its cell, so without this the inside of a burning
+    // trunk never opens and the only flames possible are on its outside. A flash cell burns in a fifth of the time
+    // AND LEAVES NOTHING — that second half is the point; leaving ash would open no gap.
+    // ⚠️ Hashed per cell like the rest of the susceptibility, off the same per-fire salt, so a tree burns its own
+    // pattern of holes each time it is lit — and it is a FIXED property of the cell, not a per-pass dice roll.
+    const flashFrac = Math.max(0, Math.min(0.5, +liquidCfg.fireFlash || 0));
+    const isFlash = (j) => flashFrac > 0 && fireVar(j, salt, 3) < flashFrac;
+    const FLASH_MUL = 0.2;
     const solidsOn = !!liquidCfg.fireSolids;
     const oilAt = (j) => amt.rp(j)[amt.o(j) + 5];
     const solidRate = (j) => { if (!solidsOn) return 0; const g = gPeek(j); return g > 0 ? FIRE_RATE[g] : 0; };
@@ -7894,12 +7909,25 @@ function fineReactTickRoom(room, SUB, phase) {
       if (sRate > 0) {
         addFx(i, 7);
         spread(i, rI, age);
-        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i)))) {
-          const ash = FIRE_ASH[gPeek(i)];
-          fire.delete(i); ages.delete(i); fireOut.push(i);
-          // Dense fuel leaves Ash (a powder — it is woken so it falls); foliage leaves nothing.
-          if (ash) { setSolid(i, ash); powderSet(room).add(i); }
-          else { grid.s(i, 0); hp.s(i, 0); terrCells.push(i, 0); if (st.sat) st.sat.s(i, 0); wakeN(i); }
+        const flash = isFlash(i);
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i) * (flash ? FLASH_MUL : 1)))) {
+          // ⭐⭐ WHAT A BURNT SOLID LEAVES, AND WHETHER IT IS STILL ALIGHT. Wood leaves CHARCOAL, which is itself a
+          // fuel, so the cell does not go out: it changes material where it stands and goes on smouldering, which
+          // is what keeps a burnt tree's shape (charcoal burns ~10× longer than the wood did). Charcoal in turn
+          // leaves Ash, which is not a fuel, so that is where the chain ends and the powder falls.
+          // ⚠️ A FLASH CELL IS CONSUMED WHOLE, at either stage — that is what opens the gaps inside a burning trunk.
+          const left = flash ? 0 : FIRE_ASH[gPeek(i)];
+          const relit = left > 0 && FIRE_RATE[left] > 0;
+          if (relit) {
+            // Still burning, as something else now. `fireLit` carries it again so the client restarts its char
+            // clock against the NEW material's burn length — it is only ever set for a cell that was not alight.
+            setSolid(i, left); ages.set(i, 0); fireLit.push(i);
+          } else {
+            fire.delete(i); ages.delete(i); fireOut.push(i);
+            // Dense fuel leaves Ash (a powder — it is woken so it falls); foliage and flash cells leave nothing.
+            if (left) { setSolid(i, left); powderSet(room).add(i); }
+            else { grid.s(i, 0); hp.s(i, 0); terrCells.push(i, 0); if (st.sat) st.sat.s(i, 0); wakeN(i); }
+          }
           if (rI > 0 && isPowderId(gPeek(i - 1))) powderSet(room).add(i - 1);   // grains resting on it may now fall
         }
         continue;
@@ -16621,6 +16649,7 @@ io.on('connection', (socket) => {
     if ('fireSolidCatch' in patch) liquidCfg.fireSolidCatch = Math.max(1, Math.min(1000, patch.fireSolidCatch | 0));
     if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
     if ('fireVary' in patch) liquidCfg.fireVary = Math.max(0, Math.min(1, +patch.fireVary || 0));
+    if ('fireFlash' in patch) liquidCfg.fireFlash = Math.max(0, Math.min(0.5, +patch.fireFlash || 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
