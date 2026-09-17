@@ -4459,6 +4459,7 @@ function RoomCells(cols, rows) {
   this.fineAmt = null; this.fineTotal = null;            // THE LIQUID: per-rank units per cell + cached per-cell total
   this.fineLevelAcc = null; this.fineStill = null;       // levelling carry + quiescence counters
   this.fineActive = null; this.fineReact = null; this.fineFire = null;   // Sets of cell indices
+  this.fireAge = null;                                   // Map(burning cell → passes it has been alight) — fire layer (c)
   this.fineFluxSeen = null; this.fineFluxStack = null;   // flux-levelling flood-fill scratch
   this.powderActive = null; this.soilActive = null;      // Sets of cell indices
   this.src = null;                                       // Map(cell → {rank, rate}) of liquid source cells
@@ -5798,6 +5799,11 @@ const liquidCfg = {
   // 55 columns, this spreads 180, and the front at tick 12 goes 55 → 87. Higher shares burn the body away
   // before it can go anywhere (0.15 leaves nothing at all).
   fireBurnShare: 0.042,
+  // ⭐ FIRE LAYER (c): solids burn by `FIRE_RATE` (see there). 0 = oil is the only fuel, exactly as before.
+  fireSolids: 1,
+  fireSolidBurn: 80,     // passes a rate-1 solid stays alight (wood, rate 0.5, is 160 ≈ 6.4s at 25Hz)
+  fireSolidCatch: 10,    // passes a cell must have burned before a rate-1 solid NEIGHBOUR catches (wood: 20 ≈ 0.8s)
+  fireQuench: 1,         // a NEGATIVE-rate liquid (water, brine) puts fire out. 0 = water does nothing to fire
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7413,6 +7419,37 @@ let liqFireThrottles = 0;     // turns on which the fire cap BIT — the mechani
 // papering over it. A counter for a mechanism that is meant never to fire is how the next one gets found.
 let liqFireStale = 0;
 const FIRE_AUDIT_TICKS = 32;   // ~1.3s at the 40ms tick
+// ⭐⭐ WHAT BURNS, AND HOW FAST — ONE SIGNED NUMBER PER MATERIAL (fire layer (c), 2026-09-17). The user's framing:
+// *"some materials will have no burn rate, i.e. they are not flammable, and you could similarly view some materials as
+// having a NEGATIVE burn rate if they extinguish flames, like water."* So: > 0 burns (higher = faster), 0 is inert,
+// < 0 puts fire out. Before this every branch of the fire loop read the OIL rank and nothing else could catch.
+// ⚠️ SOLIDS by material id; LIQUIDS by rank (`FIRE_RATE_RANK`). Oil keeps its own tuned spend rules (`fireBurn`,
+// `fireSlow`, `fireBurnShare`) — its rate here only says "it burns"; the solid numbers below do not retune it.
+// How long a solid stays alight is `fireSolidBurn / rate` passes, and how long a burning cell must have been alight
+// before a solid neighbour catches is `fireSolidCatch / rate` (half that upward — fire climbs). Both are dials.
+// ⚠️ The client's `FUEL` table (16d) is the LOOK for the same ids and must name every id here, or a burning cell
+// draws nothing (`fireHasFuel` asks it). `probe_fire_budget` checks the two agree.
+// `FIRE_ASH` — what a burnt solid leaves: dense fuel leaves Ash (38, a powder, so it falls); foliage leaves nothing.
+const FIRE_RATE = new Float32Array(256), FIRE_ASH = new Uint8Array(256);
+for (const [id, rate, ash] of [
+  [28, 0.5, 38],   // Wood — a tree's trunk: slow, the thing that makes a forest burn for a while
+  [91, 0.5, 38],   // Timber — sawn wood
+  [40, 0.6, 38],   // Driftwood — dry
+  [41, 0.15, 38],  // Coal — very slow, very long
+  [20, 0.25, 38],  // Peat — smoulders
+  [29, 3, 0],      // Leaves
+  [46, 3, 0],      // Needle
+  [47, 3, 0],      // Frond
+  [48, 2.5, 0],    // Reed
+  [30, 2.5, 0],    // Scrub
+  [83, 2.5, 0],    // Vine
+  [82, 2, 0],      // Lichen
+  [32, 2, 0],      // Moss
+  [50, 1.5, 0],    // Fungus
+  [31, 0.8, 0],    // Cactus — wet flesh, catches reluctantly
+]) { FIRE_RATE[id] = rate; FIRE_ASH[id] = ash; }
+// ranks: lava0 quicksand1 brine2 acid3 water4 oil5. Brine and water put fire out; oil burns.
+const FIRE_RATE_RANK = [0, 0, -1, 0, -1, 1];
 let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCand (⇒ it is biting; see the Perf tab)
 // ⚠️ A COUNT, NOT A CLOCK. `probe_react_budget` D2 first asserted "the flow moved liquid on most ticks", which
 // gave 18/30 and then 6/30 for identical code — the budget scheduler is `performance.now()`-driven, so any
@@ -7686,6 +7723,8 @@ function fineReactTickRoom(room, SUB, phase) {
         if (g === 8 || g === 4) { setLiquid(j, 4, capFrac(FREACT_MELT_AMT_F)); spendLava(i, capFrac(FREACT_MELT_COST_F)); addFx(j, 1); }   // snow/ice melt → water
         else if (g === 5) { setSolid(j, 1); spendLava(i, capFrac(FREACT_BAKE_COST_F)); addFx(j, 4); }                          // mud baked dry → earth
         else if (g === 3) { convertSolid(j, 16, 3); spendLava(i, capFrac(FREACT_FUSE_COST_F)); }                                                       // sand fused → glass, BOTH consumed
+        // ⭐ ANYTHING FLAMMABLE TOUCHING LAVA CATCHES (fire layer (c)). No lava is spent: lava lights, it does not burn.
+        else if (liquidCfg.fireSolids && g > 0 && FIRE_RATE[g] > 0) { const fs = fineFireSet(room); if (!fs.has(j)) { fs.add(j); fireLit.push(j); } }
       }
       if (lavaAt() <= 0) continue;                            // the lava spent itself on the terrain
       // ── (B) QUICKSAND fuses to GLASS. Checked before the quench so it wins over the generic crust.
@@ -7759,12 +7798,63 @@ function fineReactTickRoom(room, SUB, phase) {
     // nobody has found as well as the ones they have. Cheap by construction — a room's fire is hundreds of
     // cells, once every `FIRE_AUDIT_TICKS`, one already-resident read each.
     // ⚠️ Deleting from a Set while iterating it is defined behaviour: a deleted entry is simply not revisited.
+    // ⭐⭐ FUEL IS OIL OR A FLAMMABLE SOLID NOW (fire layer (c)). Every test here used to read the oil rank alone, so
+    // a burning log would have been "burnt out" by the audit on its first look.
+    // ⚠️ `gPeek`, not `grid.g`: a neighbour one cell past produced world must not build it (see the note on gPeek).
+    const ages = st.fireAge || (st.fireAge = new Map());
+    const solidsOn = !!liquidCfg.fireSolids;
+    const oilAt = (j) => amt.rp(j)[amt.o(j) + 5];
+    const solidRate = (j) => { if (!solidsOn) return 0; const g = gPeek(j); return g > 0 ? FIRE_RATE[g] : 0; };
+    const fuelHere = (j) => j >= 0 && j < N && (oilAt(j) > 0 || solidRate(j) > 0);
+    // Is a NEGATIVE-rate liquid (water, brine) on this burning cell? In the cell or above it always counts. From the
+    // side or below only for a SOLID fire: burning oil FLOATS on water, and a slick alight on a lake is the classic
+    // case this must not put out.
+    const wetBy = (j) => { if (j < 0 || j >= N || tot.g(j) <= 0) return false; const pw = amt.rp(j), bw = amt.o(j);
+      for (let k = 0; k < T; k++) if (pw[bw + k] > 0 && FIRE_RATE_RANK[k] < 0) return true; return false; };
+    const quenched = (j, rj) => {
+      if (wetBy(j) || (rj > 0 && wetBy(j - 1))) return true;
+      if (oilAt(j) > 0) return false;
+      return (rj < ROWS - 1 && wetBy(j + 1)) || wetBy(j - ROWS) || wetBy(j + ROWS);
+    };
+    // The flame front. Oil catches at once, as it always has; a solid catches once this cell has been alight for
+    // `fireSolidCatch / rate` passes — half that for the cell ABOVE, because fire climbs.
+    // ⚠️ A DELAY, NOT A CHANCE. `feedback_a_random_rate_can_kill_the_process`: a per-pass probability of catching
+    // stopped a fire spreading eight runs in eight. A count cannot fail to arrive.
+    const spread = (j0, rj, age) => {
+      for (const j of [rj < ROWS - 1 ? j0 + 1 : -1, rj > 0 ? j0 - 1 : -1, j0 - ROWS, j0 + ROWS]) {
+        if (j < 0 || j >= N || fire.has(j)) continue;
+        // 🟥 A WET CELL CANNOT CATCH. Without this, water on a burning block put out the top row and the row under
+        // it relit it on the very next pass, for ever — measured in `diag_fire_solids` scene C.
+        if (liquidCfg.fireQuench && quenched(j, j % ROWS)) continue;
+        if (oilAt(j) > 0) { fire.add(j); fireLit.push(j); continue; }
+        const sr = solidRate(j); if (sr <= 0) continue;
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1)))) { fire.add(j); ages.set(j, 0); fireLit.push(j); }
+      }
+    };
     if ((tick % FIRE_AUDIT_TICKS) === 0) {
       for (const i of fire)
-        if (i < 0 || i >= N || amt.rp(i)[amt.o(i) + 5] <= 0) { fire.delete(i); fireOut.push(i); liqFireStale++; }
+        if (!fuelHere(i)) { fire.delete(i); ages.delete(i); fireOut.push(i); liqFireStale++; }
     }
     for (const i of list) {
-      if (i < 0 || i >= N || amt.rp(i)[amt.o(i) + 5] <= 0) { if (fire.delete(i)) fireOut.push(i); continue; }   // burnt out (or the oil moved on)
+      if (!fuelHere(i)) { if (fire.delete(i)) fireOut.push(i); ages.delete(i); continue; }   // burnt out (or the oil moved on)
+      const age = (ages.get(i) || 0) + 1; ages.set(i, age);
+      const rI = i % ROWS;
+      if (liquidCfg.fireQuench && quenched(i, rI)) { fire.delete(i); ages.delete(i); fireOut.push(i); addFx(i, 1); continue; }   // put out: a puff of steam
+      // ── A BURNING SOLID: it has no stack to spend, so its fuel is its AGE against `fireSolidBurn / rate`.
+      const sRate = solidRate(i);
+      if (sRate > 0) {
+        addFx(i, 7);
+        spread(i, rI, age);
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate))) {
+          const ash = FIRE_ASH[gPeek(i)];
+          fire.delete(i); ages.delete(i); fireOut.push(i);
+          // Dense fuel leaves Ash (a powder — it is woken so it falls); foliage leaves nothing.
+          if (ash) { setSolid(i, ash); powderSet(room).add(i); }
+          else { grid.s(i, 0); hp.s(i, 0); terrCells.push(i, 0); if (st.sat) st.sat.s(i, 0); wakeN(i); }
+          if (rI > 0 && isPowderId(gPeek(i - 1))) powderSet(room).add(i - 1);   // grains resting on it may now fall
+        }
+        continue;
+      }
       const p = amt.wp(i), b = amt.o(i);
       // ⭐⭐ BELOW ONE UNIT A PASS, SPEND ONE UNIT EVERY FEW PASSES. `capFrac` floors at one unit of a 24-unit
       // cell, so 0.021 was as slow as a fire could burn and the slider did nothing under it — and "lower is
@@ -7807,7 +7897,7 @@ function fineReactTickRoom(room, SUB, phase) {
         recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
       }
       addFx(i, 7);                                                          // flame, every pass it is alight — not a one-shot
-      if (p[b + 5] <= 0 && fire.delete(i)) fireOut.push(i);
+      if (p[b + 5] <= 0 && fire.delete(i)) { fireOut.push(i); ages.delete(i); }
       // 🟥 A SLOWER FLAME FRONT WAS BUILT HERE ON 2026-09-16 AND REVERTED ON THE 17th, ON THE USER'S CALL AFTER
       // PLAYING IT: *"the oil just disappears without much animation and it's all out of sync"*. Two dials — a
       // per-cell delay before a cell handed the flame on, and a slower fuel spend — took the front from 205px/s
@@ -7822,9 +7912,7 @@ function fineReactTickRoom(room, SUB, phase) {
       // able to light. MEASURED over thresholds 0, 4, 8, 12, 16 and 20 of a 24-unit cell, the visible body
       // of a big burning pour came out at 101, 103, 100, 102, 101, 103 columns — no effect whatever. Do
       // not re-add it without a measurement that says something different.
-      const r = i % ROWS;
-      for (const j of [r < ROWS - 1 ? i + 1 : -1, r > 0 ? i - 1 : -1, i - ROWS, i + ROWS])
-        if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 5] > 0 && !fire.has(j)) { fire.add(j); fireLit.push(j); }   // the flame front
+      spread(i, rI, age);                                                   // the flame front — oil at once, solids after a delay
     }
   }
   if (st.fineFire && !st.fineFire.size) dropFineFire(room);
@@ -16479,6 +16567,10 @@ io.on('connection', (socket) => {
     if ('fireBurn' in patch) liquidCfg.fireBurn = Math.max(0.002, Math.min(1, +patch.fireBurn || 0.021));
     if ('fireSlow' in patch) liquidCfg.fireSlow = Math.max(1, Math.min(64, patch.fireSlow | 0));
     if ('fireBurnShare' in patch) liquidCfg.fireBurnShare = Math.max(0, Math.min(1, +patch.fireBurnShare || 0));
+    if ('fireSolids' in patch) liquidCfg.fireSolids = patch.fireSolids ? 1 : 0;
+    if ('fireSolidBurn' in patch) liquidCfg.fireSolidBurn = Math.max(1, Math.min(4000, patch.fireSolidBurn | 0));
+    if ('fireSolidCatch' in patch) liquidCfg.fireSolidCatch = Math.max(1, Math.min(1000, patch.fireSolidCatch | 0));
+    if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
