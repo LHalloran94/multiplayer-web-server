@@ -150,7 +150,11 @@
     // Driftwood now convert in place to this and go on smouldering for about a minute before crumbling to Ash.
     // ⚠️ SOLID, not powder: the whole point is that it stands where the wood stood. It is soft (1 hit) because it
     // is what is left of something burnt, and it is a fuel in its own right — see `FIRE_RATE` in index.js.
-    ['Charcoal', '#2a2420', 'solid', 1, 'dusty'], // 92 charcoal — burnt wood; smoulders a long time, then ash
+    // ⚠️ NEARLY BLACK. It shipped at #2a2420, a brown-grey, and read as "the standard charcoal colour" the moment
+    // the flames passed — charcoal is carbon, and what makes a piece of it look hot is the HEAT still in it, not
+    // its own colour. The heat is drawn separately and fades over half a minute (`fireCoolMs`); this is what is
+    // left underneath when it has gone cold.
+    ['Charcoal', '#16120f', 'solid', 1, 'dusty'], // 92 charcoal — burnt wood; smoulders a long time, then ash
   ];
 
   const GEN_MAT_MIN = 18;
