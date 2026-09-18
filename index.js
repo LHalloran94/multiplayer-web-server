@@ -5830,7 +5830,9 @@ const liquidCfg = {
   fireReach: 6,
   fireReachMin: 2,
   fireReachSlow: 0.6,
-  fireEmbers: 10,   // the user's call from play 2026-09-19, after seeing 1
+  // ⚠️ 10 → 1 on 2026-09-19: raised to 10 before embers could leave a cell's SIDE faces, which multiplied how many
+  // a fire throws all by itself. At 1 with side faces the rate in play is about what 10 looked like without them.
+  fireEmbers: 1,
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
