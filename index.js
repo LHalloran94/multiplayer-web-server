@@ -3756,12 +3756,14 @@ function forgetWorldHits(avRoom) { delete roomWorldHit[avRoom]; }
 // ⚠️ ONLY SOMETHING THAT CAN BREAK CAN BURN. The user's rule for shots — *"if the player doesn't want an item to be
 // damaged … they can just make it so that it doesn't break"* — is the same rule here, so a wooden crate set to
 // Breaks · No is fireproof and there is no second switch to keep in step with the first.
-// `catchS` — seconds in the heat before it lights · `burnS` — how long a 64×64 one burns (scaled by its area).
+// `catchS` — seconds in the heat before it lights · `burnS` — how long a 64×64 one burns (scaled by its area) ·
+// `ashK` — how much of its area it leaves as ash and charcoal: a crate and a gate are mostly air between planks, a
+// log is solid wood (the user: *"the amount of residue does not line up with the size of the object burned"*).
 const OBJ_FIRE = {
-  crate:  { catchS: 1.0, burnS: 16 },
-  barrel: { catchS: 1.5, burnS: 22 },   // thick staves: slower to take, longer to go
-  log:    { catchS: 2.5, burnS: 30 },   // a solid log is the slowest thing here to catch and the longest to burn
-  gate:   { catchS: 1.5, burnS: 20 },   // a WOODEN gate only (style 'wood') — bars and metal do not burn
+  crate:  { catchS: 1.0, burnS: 16, ashK: 0.14 },
+  barrel: { catchS: 1.5, burnS: 22, ashK: 0.18 },   // thick staves: slower to take, longer to go
+  log:    { catchS: 2.5, burnS: 30, ashK: 0.35 },   // a solid log is the slowest thing here to catch and the longest to burn
+  gate:   { catchS: 1.5, burnS: 20, ashK: 0.12 },   // a WOODEN gate only (style 'wood') — bars and metal do not burn
 };
 function objFireSpec(obj) {
   if (!obj || typeof obj.hp !== 'number') return null;
@@ -3819,7 +3821,16 @@ function objFireExpose(room, obj, x, y) {
   if (!h || now - h.last > OBJ_HEAT_GAP) h = { sum: 0, last: now }; else { h.sum += now - h.last; h.last = now; }
   hm.set(obj.id, h);
   if (h.sum < spec.catchS * 1000) return true;
-  hm.delete(obj.id);
+  objFireLight(room, obj, x, y);
+  return true;
+}
+// Set it alight NOW. Reached by exposure passing the catch time, and directly by the Fire tool (`obj-ignite`).
+function objFireLight(room, obj, x, y) {
+  const spec = objFireSpec(obj); if (!spec) return false;
+  const st = objStOf(room), rec = st.get(obj.id);
+  if (rec && rec.fb) return false;
+  const now = Date.now();
+  const hm = roomObjHeat[room]; if (hm) hm.delete(obj.id);
   const r2 = rec || {};
   // ⭐ A THING THAT WAS PUT OUT AND CATCHES AGAIN CARRIES ON FROM WHERE IT GOT TO: `ch` is how charred it was, and
   // `ms` is the burn it has LEFT — progress is `ch0 + (1 - ch0) × elapsed / ms` (`objFireProg`, and the client's copy).
@@ -3849,33 +3860,60 @@ function objFireDouse(room, obj) {
 // ⚠️ Written straight into the grid and fanned out, the way the Fire tool lights cells: this runs outside the tick.
 // ⚠️ Only into AIR with no liquid in it — a remains heap never overwrites anything, and `peekCellAt` so a read
 // cannot build unproduced world.
-function objBurntRemains(room, P) {
+// 🟥🟥 THE FIRST VERSION BUILT THE HEAP WHERE THE OBJECT'S BOTTOM WAS, AND PLAYED IT LOOKED WRONG IN TWO WAYS (user,
+// 2026-09-19: *"the residue leftover from burnt crates forms odd shapes, some hovering in mid air still burning while
+// the residue has fallen down"*). A crate on a rope, a platform or another crate has AIR under it — so the ash fell
+// and the charcoal (a solid) stayed hanging, still alight; and a charcoal lump could sit on an ash cell that then
+// fell away from under it. Now each column of the heap finds ITS OWN ground, straight down, and charcoal is only
+// ever the bottom cell of a column resting on firm, non-powder ground. Ash is everything else.
+// ⚠️ THE AMOUNT IS THE OBJECT'S OWN AREA × `ashK` (a hollow crate leaves less than a solid log), with no cap
+// but a sanity one — it was capped at 90 and floored at 4, so small and large things left much the same heap.
+function objBurntRemains(room, P, obj) {
   const st = cellsOf(room), grid = st.terrain, hp = st.terrainHp, tot = st.fineTotal;
   if (!grid || !hp || (st.fineSub || 1) !== 1) return 0;
   const ROWS = st.rows, COLS = st.cols, mats = roomMats[room] || {};
-  const c0 = Math.max(0, Math.floor((P.x - P.hw) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((P.x + P.hw - 1) / TERRAIN_CELL));
-  const rb = Math.min(ROWS - 1, Math.floor((P.y + P.hh - 1) / TERRAIN_CELL));
-  const fpW = c1 - c0 + 1, fpH = Math.max(1, Math.round(2 * P.hh / TERRAIN_CELL));
-  if (fpW <= 0 || rb < 0) return 0;
-  // ⚠️ A THIRD OF ITS AREA, not an eighth: at 0.12 a 48px crate left four cells, which read as a speck of dirt rather
-  // than as the crate that stood there.
-  const want = Math.max(4, Math.min(90, Math.round(fpW * fpH * 0.33)));
-  const free = (i) => peekCellAt(grid, i) === 0 && !(tot && tot.g(i) > 0);
+  const spec = objFireSpec(obj) || OBJ_FIRE.crate;
+  const own = Math.max(1, ((obj && obj.w) || 64) / TERRAIN_CELL) * Math.max(1, ((obj && obj.h) || 64) / TERRAIN_CELL);
+  const want = Math.max(3, Math.min(600, Math.round(own * spec.ashK)));
+  // a triangular heap about as wide as the thing was, never narrower than it needs to be to hold `want`
+  const W = Math.max(3, Math.min(Math.round(2 * P.hw / TERRAIN_CELL) + 2, Math.round(2 * Math.sqrt(want)) + 1));
+  const mid = Math.floor(P.x / TERRAIN_CELL), c0 = mid - Math.floor(W / 2);
+  const wt = [], half = W / 2;
+  let wsum = 0;
+  for (let k = 0; k < W; k++) { const v = Math.max(0.15, half + 0.5 - Math.abs(k + 0.5 - half)); wt.push(v); wsum += v; }
+  // 🟥 AN ABSENT PAGE IS AIR IN A PAGE ROOM. `peekCellAt` answers -1 for a page that does not exist, and in a room that
+  // is not generated a page that holds nothing is simply never made — so the first version read "not produced, stop"
+  // for the empty sky over a crate on a stand and left NO remains for it (the tilted and the hovering crate, both
+  // higher up, in the page above the ground's). Only a GENERATED room has pages that genuinely are not made yet, and
+  // there `skyAt` still knows sky. Same rule as `gPeek` in the reaction pass. The liquid is peeked too, never `.g()`:
+  // on a generated world a read can produce a chunk (`feedback_a_read_is_not_free`).
+  const gen = !!grid.seedFn;
+  const cellAt = (i) => { const v = peekCellAt(grid, i); return v >= 0 ? v : (!gen || (grid.skyAt && grid.skyAt(i)) ? 0 : -1); };
+  const liqAt = (i) => !!tot && peekCellAt(tot, i) > 0;
+  const air = (i) => cellAt(i) === 0 && !liqAt(i);
+  const rStart = Math.max(0, Math.floor((P.y - P.hh) / TERRAIN_CELL));
   const cells = [], lit = [], fs = fineFireSet(room);
-  let placed = 0;
-  const mid = (c0 + c1) / 2;
-  for (let j = 0; placed < want && j < fpH; j++) {
-    const r = rb - j; if (r < 0) break;
-    const half = Math.max(0.5, (Math.min(fpW, Math.max(3, Math.round(Math.sqrt(want) * 1.7))) - 2 * j) / 2);
-    for (let c = Math.ceil(mid - half + 0.5); c <= Math.floor(mid + half - 0.5) && placed < want; c++) {
-      if (c < c0 || c > c1) continue;
+  let placed = 0, carry = 0;
+  for (let k = 0; k < W; k++) {
+    const c = c0 + k; if (c < 0 || c >= COLS) continue;
+    carry += want * wt[k] / wsum;
+    let n = Math.floor(carry); carry -= n;
+    if (n <= 0) continue;
+    // this column's ground: the first thing that is not air, below the top of where the object was
+    let g = -1;
+    for (let r = rStart; r < Math.min(ROWS, rStart + 160); r++) {
+      const i = c * ROWS + r, v = cellAt(i);
+      if (v < 0) break;                                   // not produced — nothing to rest on that we know of
+      if (!air(i)) { g = r; break; }
+    }
+    if (g <= 0) continue;
+    const gi = c * ROWS + g, gv = cellAt(gi);
+    const firm = gv > 0 && !isFluidId(gv) && !isPowderId(gv) && !liqAt(gi);
+    for (let j = 0, r = g - 1; j < n && r >= 0; j++, r--) {
       const i = c * ROWS + r;
-      if (!free(i)) continue;
-      const below = r + 1 < ROWS ? peekCellAt(grid, i + 1) : 1;
-      // charcoal only where it is held up — it is solid and would hang; ash is a powder and finds its own rest
-      const held = below > 0 && !isFluidId(below);
-      const lump = held && (j === 0 ? (c + r) % 3 !== 1 : ((c * 7 + r * 3) % 3 === 0));
-      const m = lump ? 92 : 38;
+      if (!air(i)) break;
+      // charcoal: only the BOTTOM cell of a column, only on firm ground, and not every column — it is lumps in ash
+      const m = (j === 0 && firm && ((c * 7 + g * 3) % 5) < 3) ? 92 : 38;
       grid.s(i, m); hp.s(i, matStrengthSrv(mats, m)); if (st.sat) st.sat.s(i, 0);
       cells.push(i, m); placed++;
       if (m === 38) powderSet(room).add(i);
@@ -3897,7 +3935,7 @@ function objBurnOut(room, obj, P) {
     if (obj.cost > 0 && invGatedRoom(room)) scatterMatter(room, P.x, P.y - 12, [], obj.cost | 0, 1);
     emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id, burnt: 1 });
   }
-  objBurntRemains(room, P);
+  objBurntRemains(room, P, obj);
   broadcastObjSt(room);
 }
 function objFireTick() {
@@ -19656,6 +19694,18 @@ io.on('connection', (socket) => {
     delete mats[id | 0];
     io.to(currentAvatarRoom).emit('mat-undefined', { id: id | 0 });
     ok(true);
+  });
+  // ⭐ THE FIRE TOOL, ON AN OBJECT (user, 2026-09-19: *"the fire tool doesn't seem to work to ignite things"*). The
+  // brush's own message (`terrain-edit` op 'ignite') can only light TERRAIN — the server cannot see a moving object
+  // under a brush — so the client names the objects its stroke touched and they catch at once, no exposure delay: the
+  // tool is a match, not a heat source. Same permission as the brush (`canBuild`).
+  socket.on('obj-ignite', ({ id, x, y }) => {
+    const room = currentAvatarRoom; if (!room || !canBuild()) return;
+    const obj = roomObjects[room] && roomObjects[room].get(id);
+    if (!obj) return;
+    if (objFireSpec(obj)) { objFireLight(room, obj, x, y); return; }
+    // …and a thing that answers to heat without burning goes up or melts the way lava sets it off
+    if (obj.boom > 0) armBomb(room, id, socket.id, { x, y });
   });
   socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
