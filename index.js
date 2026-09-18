@@ -3740,6 +3740,199 @@ function worldHitOk(avRoom, id, src, obj) {
   return true;
 }
 function forgetWorldHits(avRoom) { delete roomWorldHit[avRoom]; }
+// ── ⭐⭐ FIRE ON OBJECTS (list 13 step 6, fire layer (c) part 2, 2026-09-19) ─────────────────────────────────────
+// A wooden object CATCHES, BURNS for a while, SPREADS fire to what is around it, and leaves ash and charcoal where
+// it stood. The split, agreed with the user before any of this was written:
+//   · THE CLIENT DETECTS. Only a client knows where a loose or moving object actually is — nothing on this end
+//     records where a crate came to rest — so "this crate is in a fire" can only be seen there. It arrives on the
+//     hit message every heat hazard already uses (`fire: 1`, collapsed per source by `worldHitOk`), which is why
+//     five people watching one crate catch it once, not five times as fast.
+//   · THE SERVER DECIDES, RUNS THE CLOCK AND SPREADS IT. "This crate is alight" has to be one fact for everybody and
+//     for whoever joins halfway through, so it lives in the per-object record (`rec.fb`), broadcast and replayed like
+//     a lit bomb's `lit`. Spreading into the ground is here too, because terrain fire is server state.
+// ⚠️ CATCHING IS A DELAY, NEVER A CHANCE. Exposure accumulates while reports keep arriving and the thing lights once
+// it has been in the heat for its material's catch time. A per-pass probability once stopped fire spreading eight
+// runs in eight (`feedback_a_random_rate_can_kill_the_process`); a delay always arrives.
+// ⚠️ ONLY SOMETHING THAT CAN BREAK CAN BURN. The user's rule for shots — *"if the player doesn't want an item to be
+// damaged … they can just make it so that it doesn't break"* — is the same rule here, so a wooden crate set to
+// Breaks · No is fireproof and there is no second switch to keep in step with the first.
+// `catchS` — seconds in the heat before it lights · `burnS` — how long a 64×64 one burns (scaled by its area).
+const OBJ_FIRE = {
+  crate:  { catchS: 1.0, burnS: 16 },
+  barrel: { catchS: 1.5, burnS: 22 },   // thick staves: slower to take, longer to go
+  log:    { catchS: 2.5, burnS: 30 },   // a solid log is the slowest thing here to catch and the longest to burn
+  gate:   { catchS: 1.5, burnS: 20 },   // a WOODEN gate only (style 'wood') — bars and metal do not burn
+};
+function objFireSpec(obj) {
+  if (!obj || typeof obj.hp !== 'number') return null;
+  if (obj.type === 'stamp') return (obj.look !== 'gate' && OBJ_FIRE[obj.look]) || null;
+  if (obj.type === 'platform' && obj.look === 'gate' && obj.style === 'wood') return OBJ_FIRE.gate;
+  return null;
+}
+const OBJ_HEAT_GAP = 1500;        // ms without a report before accumulated exposure is forgotten (reports come ~2/s)
+const OBJ_SPREAD_AFTER = 3000;    // ms alight before it starts lighting what is around it — it has to take hold first
+const OBJ_SPREAD_EVERY = 1000;    // …and how often it lights what is around it after that
+const OBJ_FIRE_TICK = 250;
+const roomObjHeat = {};           // room → Map<id, { sum, last }>   exposure so far, server-only
+const roomObjBurning = {};        // room → Map<id, { x, y, hw, hh, tk, sp, zz }>   where it is + server-only clocks
+function objFireMs(obj, spec) {
+  const k = Math.sqrt(Math.max(1, (obj.w || 64) * (obj.h || 64)) / (64 * 64));
+  return Math.round(spec.burnS * 1000 * Math.max(0.5, Math.min(3, k)));
+}
+// Where a burning thing is, as best this end knows: the last position a client reported for it, or where it was
+// placed. ⚠️ Clamped to the world and to the neighbourhood of its placement, the rule `armBomb` uses, so a forged
+// report can only lie locally.
+function objFirePos(room, obj, x, y) {
+  const m = roomObjBurning[room] || (roomObjBurning[room] = new Map());
+  let P = m.get(obj.id);
+  if (!P) { P = { x: obj.x, y: obj.y, hw: 0, hh: 0, tk: 0, sp: 0, zz: 0 }; m.set(obj.id, P); }
+  if (isFinite(x) && isFinite(y)) {
+    const d = roomDims(room), WW = d.cols * TERRAIN_CELL, WH = d.rows * TERRAIN_CELL;
+    P.x = Math.max(obj.x - 4000, Math.min(obj.x + 4000, Math.max(0, Math.min(WW, x))));
+    P.y = Math.max(obj.y - 4000, Math.min(obj.y + 4000, Math.max(0, Math.min(WH, y))));
+  }
+  P.hw = Math.min(240, (obj.w || 64) / 2); P.hh = Math.min(240, (obj.h || 64) / 2);
+  return P;
+}
+// ⚠️ A BURNING THING IN GROUND NOBODY CAN SEE IS FROZEN, not burning on. Terrain fire in a chunk that has gone to
+// sleep is parked and put back untouched (`rekindleChunk`), so an object that went on burning there would finish,
+// drop its ash and light the ground beside a fire that is standing still. Same contract as the chunk's water.
+function objFireAsleep(room, x, y) {
+  const s = roomCells.get(room); if (!s || !s.terrain) return false;
+  const g = worldGeom(room);
+  const c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL);
+  if (c < 0 || r < 0 || c >= g.cols || r >= g.rows) return false;
+  const p = ((c / CHUNK_SIDE) | 0) * g.cy + ((r / CHUNK_SIDE) | 0);
+  const ch = chunksOf(room);
+  return !!(ch.evicted[p] || ch.peek(p).quiet);
+}
+// How far through its burn it is, 0..1 — `ch0` is how charred it already was when it (re)lit.
+function objFireProg(f, now) { return Math.min(1, (f.ch0 || 0) + (1 - (f.ch0 || 0)) * Math.max(0, now - f.at) / f.ms); }
+// Somebody saw it in the heat. Returns true if this was the fire path (so the caller does not also DAMAGE it).
+function objFireExpose(room, obj, x, y) {
+  const spec = objFireSpec(obj); if (!spec) return false;
+  const st = objStOf(room), rec = st.get(obj.id);
+  if (rec && rec.fb) { objFirePos(room, obj, x, y); return true; }   // already alight: that report only says where it is
+  const now = Date.now();
+  const hm = roomObjHeat[room] || (roomObjHeat[room] = new Map());
+  let h = hm.get(obj.id);
+  if (!h || now - h.last > OBJ_HEAT_GAP) h = { sum: 0, last: now }; else { h.sum += now - h.last; h.last = now; }
+  hm.set(obj.id, h);
+  if (h.sum < spec.catchS * 1000) return true;
+  hm.delete(obj.id);
+  const r2 = rec || {};
+  // ⭐ A THING THAT WAS PUT OUT AND CATCHES AGAIN CARRIES ON FROM WHERE IT GOT TO: `ch` is how charred it was, and
+  // `ms` is the burn it has LEFT — progress is `ch0 + (1 - ch0) × elapsed / ms` (`objFireProg`, and the client's copy).
+  const ch0 = Math.max(0, Math.min(0.95, r2.ch || 0));
+  delete r2.ch;
+  r2.fb = { at: now, ms: Math.max(1500, Math.round(objFireMs(obj, spec) * (1 - ch0))), ch0 };
+  st.set(obj.id, r2);
+  const P = objFirePos(room, obj, x, y);
+  P.tk = now; P.sp = 0; P.zz = 0;
+  broadcastObjSt(room);
+  return true;
+}
+// Water reached it. Put out, and it KEEPS its char — a doused crate is a blackened crate, not a new one.
+function objFireDouse(room, obj) {
+  const hm = roomObjHeat[room]; if (hm) hm.delete(obj.id);
+  const st = objStOf(room), rec = st.get(obj.id);
+  if (!rec || !rec.fb) return;
+  rec.ch = objFireProg(rec.fb, Date.now());
+  delete rec.fb;
+  const m = roomObjBurning[room]; if (m) m.delete(obj.id);
+  broadcastObjSt(room);
+}
+// ⭐⭐ WHAT A BURNT OBJECT LEAVES: a low heap where it stood — CHARCOAL on the bottom where the ground holds it up,
+// ASH over it — and the charcoal is left SMOULDERING, so it glows and crumbles to ash through the ordinary terrain
+// fire (and the oxygen rule decides that, exactly as it does for a burnt tree). That is what makes a burnt crate
+// read as BURNT rather than as having vanished.
+// ⚠️ Written straight into the grid and fanned out, the way the Fire tool lights cells: this runs outside the tick.
+// ⚠️ Only into AIR with no liquid in it — a remains heap never overwrites anything, and `peekCellAt` so a read
+// cannot build unproduced world.
+function objBurntRemains(room, P) {
+  const st = cellsOf(room), grid = st.terrain, hp = st.terrainHp, tot = st.fineTotal;
+  if (!grid || !hp || (st.fineSub || 1) !== 1) return 0;
+  const ROWS = st.rows, COLS = st.cols, mats = roomMats[room] || {};
+  const c0 = Math.max(0, Math.floor((P.x - P.hw) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((P.x + P.hw - 1) / TERRAIN_CELL));
+  const rb = Math.min(ROWS - 1, Math.floor((P.y + P.hh - 1) / TERRAIN_CELL));
+  const fpW = c1 - c0 + 1, fpH = Math.max(1, Math.round(2 * P.hh / TERRAIN_CELL));
+  if (fpW <= 0 || rb < 0) return 0;
+  // ⚠️ A THIRD OF ITS AREA, not an eighth: at 0.12 a 48px crate left four cells, which read as a speck of dirt rather
+  // than as the crate that stood there.
+  const want = Math.max(4, Math.min(90, Math.round(fpW * fpH * 0.33)));
+  const free = (i) => peekCellAt(grid, i) === 0 && !(tot && tot.g(i) > 0);
+  const cells = [], lit = [], fs = fineFireSet(room);
+  let placed = 0;
+  const mid = (c0 + c1) / 2;
+  for (let j = 0; placed < want && j < fpH; j++) {
+    const r = rb - j; if (r < 0) break;
+    const half = Math.max(0.5, (Math.min(fpW, Math.max(3, Math.round(Math.sqrt(want) * 1.7))) - 2 * j) / 2);
+    for (let c = Math.ceil(mid - half + 0.5); c <= Math.floor(mid + half - 0.5) && placed < want; c++) {
+      if (c < c0 || c > c1) continue;
+      const i = c * ROWS + r;
+      if (!free(i)) continue;
+      const below = r + 1 < ROWS ? peekCellAt(grid, i + 1) : 1;
+      // charcoal only where it is held up — it is solid and would hang; ash is a powder and finds its own rest
+      const held = below > 0 && !isFluidId(below);
+      const lump = held && (j === 0 ? (c + r) % 3 !== 1 : ((c * 7 + r * 3) % 3 === 0));
+      const m = lump ? 92 : 38;
+      grid.s(i, m); hp.s(i, matStrengthSrv(mats, m)); if (st.sat) st.sat.s(i, 0);
+      cells.push(i, m); placed++;
+      if (m === 38) powderSet(room).add(i);
+      else if (liquidCfg.fireSolids && !fs.has(i)) { fs.add(i); lit.push(i, 1); }
+    }
+  }
+  if (cells.length) wireFanout(room, 'terrain-set', { cells });
+  if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
+  return placed;
+}
+// It has burnt through (or was smashed while alight): gone, with its remains left behind. Mirrors the hp ≤ 0 path
+// in `avatar-object-hit` so a burnt deposit is scattered exactly as a smashed one is.
+function objBurnOut(room, obj, P) {
+  const m = roomObjBurning[room]; if (m) m.delete(obj.id);
+  const hm = roomObjHeat[room]; if (hm) hm.delete(obj.id);
+  const st = roomObjSt[room]; if (st) st.delete(obj.id);
+  if (roomObjects[room] && roomObjects[room].get(obj.id) === obj) {
+    objUnindex(room, obj);
+    if (obj.cost > 0 && invGatedRoom(room)) scatterMatter(room, P.x, P.y - 12, [], obj.cost | 0, 1);
+    emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id, burnt: 1 });
+  }
+  objBurntRemains(room, P);
+  broadcastObjSt(room);
+}
+function objFireTick() {
+  const now = Date.now();
+  // exposure that stopped building (the thing left the heat) is forgotten, so the map cannot grow for a session
+  for (const room of Object.keys(roomObjHeat)) {
+    const hm = roomObjHeat[room];
+    for (const [id, h] of hm) if (now - h.last > OBJ_HEAT_GAP) hm.delete(id);
+    if (!hm.size) delete roomObjHeat[room];
+  }
+  for (const room of Object.keys(roomObjBurning)) {
+    const bm = roomObjBurning[room], map = roomObjects[room], st = roomObjSt[room];
+    let changed = false;
+    for (const [id, P] of [...bm]) {
+      const obj = map && map.get(id), rec = st && st.get(id);
+      if (!obj || !rec || !rec.fb) { bm.delete(id); continue; }   // removed, smashed or put out
+      const f = rec.fb;
+      if (objFireAsleep(room, P.x, P.y)) { f.at += now - (P.tk || now); P.tk = now; P.zz = 1; continue; }
+      if (P.zz) { P.zz = 0; changed = true; }           // its clock was held while it slept: tell everyone the new start
+      P.tk = now;
+      const el = now - f.at;
+      if (el >= f.ms) { objBurnOut(room, obj, P); continue; }
+      // ⭐ IT LIGHTS WHAT IT IS TOUCHING, and what is just above it (flames climb): the box, one cell round it, and
+      // three more cells up. Terrain only — other OBJECTS catch from it on the clients, the only end that can see
+      // two moving things touching.
+      if (el >= OBJ_SPREAD_AFTER && now - P.sp >= OBJ_SPREAD_EVERY) {
+        P.sp = now;
+        igniteBox(room, P.x, P.y - 12, P.hw, P.hh + 12);
+      }
+    }
+    if (!bm.size) delete roomObjBurning[room];
+    if (changed) broadcastObjSt(room);
+  }
+}
+setInterval(objFireTick, OBJ_FIRE_TICK);
 function bombFuseMs(obj) { return Math.max(200, (obj.fuse == null ? (obj.boom > 0 ? obj.boom : 2.5) : obj.fuse) * 1000); }
 function armBomb(avRoom, id, sid, data) {
   const map = roomObjects[avRoom]; if (!map) return false;
@@ -3819,9 +4012,12 @@ function sweepObjSt(avRoom) {
       const bk = (b && b.back > 0) ? b.back * 1000 : 0;
       if (!bk || now < s.lit.at + fuseMs + bk + 2000) continue;
       delete s.lit;
-      if (!s.a && !s.hid && !s.pose && !s.sw && !s.bl && s.rev == null) { st.delete(id); continue; }
+      if (!s.a && !s.hid && !s.pose && !s.sw && !s.bl && !s.fb && s.ch == null && s.rev == null) { st.delete(id); continue; }
     }
-    if (s.hid || s.pose || s.sw || s.bl) continue;               // a rule put this here, somebody flipped a lever, or somebody died there; not ours to sweep
+    // 🟥 …AND THE SAME TRAP FOR FIRE: `fb` is the only thing that says an object is alight, and `ch` the only thing
+    // that says it is charred. A crate has no `reacts`, so without this any trigger anywhere in the Level would
+    // sweep its record and the fire on it would simply stop.
+    if (s.hid || s.pose || s.sw || s.bl || s.fb || s.ch != null) continue;   // a rule put this here, a lever, blood, or fire; not ours to sweep
     const obj = map && map.get(id);
     if (!obj) { st.delete(id); continue; }                       // the object itself is gone
     const list = obj.reacts, acts = s.a;
@@ -7649,12 +7845,14 @@ function fineFireSet(room) { const s = cellsOf(room); if (!s.fineFire) { s.fineF
 // an oil slick still lights it, which is what "drop fire onto things" means. Nothing that cannot burn is touched,
 // and a stroke through open air does nothing at all.
 // ⚠️ `peekCellAt`, never `grid.g`: a read must not build unproduced world (`feedback_a_read_is_not_free`).
-function igniteBox(room, x, y, r) {
+// ⭐ `ry` (optional) makes it a RECTANGLE — a burning OBJECT lights the ground around its own box, and a crate
+// is rarely square. Omitted, it is the brush's square exactly as before.
+function igniteBox(room, x, y, r, ry) {
   const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt;
   if (!grid || !amt || (st.fineSub || 1) !== 1) return 0;
-  const ROWS = st.rows, COLS = st.cols, pad = r + TERRAIN_CELL;
+  const ROWS = st.rows, COLS = st.cols, pad = r + TERRAIN_CELL, padY = (ry === undefined ? r : ry) + TERRAIN_CELL;
   const c0 = Math.max(0, Math.floor((x - pad) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((x + pad) / TERRAIN_CELL));
-  const r0 = Math.max(0, Math.floor((y - pad) / TERRAIN_CELL)), r1 = Math.min(ROWS - 1, Math.floor((y + pad) / TERRAIN_CELL));
+  const r0 = Math.max(0, Math.floor((y - padY) / TERRAIN_CELL)), r1 = Math.min(ROWS - 1, Math.floor((y + padY) / TERRAIN_CELL));
   if ((c1 - c0 + 1) * (r1 - r0 + 1) > 4096) return 0;          // a brush is at most 160px; anything bigger is not one
   const fs = fineFireSet(room), lit = [];
   for (let c = c0; c <= c1; c++) for (let rw = r0; rw <= r1; rw++) {
@@ -19459,7 +19657,7 @@ io.on('connection', (socket) => {
     io.to(currentAvatarRoom).emit('mat-undefined', { id: id | 0 });
     ok(true);
   });
-  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, src }) => {
+  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     const obj = roomObjects[currentAvatarRoom].get(id);
     // ⭐⭐ #183 — HITTING A BOMB SETS IT OFF; it does not damage it. This is deliberately the SAME message a
@@ -19477,8 +19675,17 @@ io.on('connection', (socket) => {
     // ⚠️ A drum that is punched to bits is therefore simply destroyed, not detonated. That is the rule as asked
     // for; if smashing one should spill burning oil, that is a different thing and wants saying out loud.
     if (obj && (obj.look === 'bomb' || (fire && obj.boom > 0))) { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy }); return; }
+    // ⭐⭐ A WOODEN THING IN THE HEAT CATCHES RATHER THAN BEING CHIPPED AWAY (fire on objects, see `objFireExpose`).
+    // Heat on it is exposure towards catching, and water on it puts it out; neither damages it. A punch still does.
+    if (obj && objFireSpec(obj)) {
+      if (douse) { objFireDouse(currentAvatarRoom, obj); return; }
+      if (fire) { objFireExpose(currentAvatarRoom, obj, x, y); return; }
+    }
     if (!obj || typeof obj.hp !== 'number') return;
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
+    // ⭐ SMASHED WHILE ALIGHT: it goes the way a burnt one does — ash, and embers still glowing on the ground.
+    { const rf = obj.hp <= 0 && roomObjSt[currentAvatarRoom] && roomObjSt[currentAvatarRoom].get(id);
+      if (rf && rf.fb) { objBurnOut(currentAvatarRoom, obj, objFirePos(currentAvatarRoom, obj, x, y)); return; } }
     if (obj.hp <= 0) {
       objUnindex(currentAvatarRoom, obj);
       // ⭐ SMASHED, SO THE DEPOSIT FALLS ON THE GROUND rather than being handed to whoever hit it — the same
