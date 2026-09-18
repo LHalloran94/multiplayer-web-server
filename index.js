@@ -5830,7 +5830,7 @@ const liquidCfg = {
   fireReach: 6,
   fireReachMin: 2,
   fireReachSlow: 0.6,
-  fireEmbers: 1,
+  fireEmbers: 10,   // the user's call from play 2026-09-19, after seeing 1
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7502,7 +7502,7 @@ for (const [id, k] of [[28, 1], [91, 1], [40, 1], [92, 1.4], [41, 1], [20, 0.7],
 // back into its own fire. At these, launched from the ground: median 3.2 cells, 95% within 6.3, the longest ~8.
 const EMB_G = 6, EMB_DRAG = 0.8, EMB_FLUTTER = 3, EMB_FREQ = 5;
 const EMB_P = 0.0015;          // launch chance per pass for an open-topped burning cell at ember rate 1, before fuel and mass
-const EMB_MAX = 60;            // embers in flight or smouldering, per room
+const EMB_MAX = 120;           // embers in flight or smouldering, per room (raised with the rate: at 10 a big fire keeps ~45 in the air)
 // ⭐⭐ NOT EVERY PIECE OF WOOD IS THE SAME PIECE OF WOOD. The user, on the first burning tree: *"it needs some
 // stochasticity… because fire does not really spread in this predictable pattern… rather than randomness in the
 // spreading, there could be some variation in how easily a particular material burns, perhaps assigned between some
@@ -8013,15 +8013,24 @@ function fineReactTickRoom(room, SUB, phase) {
     // unlucky run means fewer embers, never a fire that stops.
     const pend = st.fireEmbers || (st.fireEmbers = []);
     const dt = Math.max(0.005, (liquidCfg.tickMs || 40) / 1000);
-    const throwEmber = (i, rI, m, mat) => {
+    // ⚠️ OUT OF ANY OPEN FACE, NOT JUST THE TOP. The first version launched only where there was air straight ABOVE,
+    // so a burning wall threw embers off its top edge and nothing off its face — reported from play. A side face
+    // throws outward and still upward (the ember is hot), from the middle of that face.
+    const throwEmber = (i, rI, m, mat, faces) => {
       if (pend.length >= EMB_MAX) return;
       const p = EMB_P * emberK * (FIRE_EMBER[mat] || 0.3) * (0.25 + m);
       if (fireVar(i, salt, 5000 + (tick & 0xfffff)) >= p) return;
       const h1 = fireVar(i, salt, 6001 + tick), h2 = fireVar(i, salt, 6002 + tick), h3 = fireVar(i, salt, 6003 + tick);
-      const h4 = fireVar(i, salt, 6004 + tick), h5 = fireVar(i, salt, 6005 + tick);
-      const vx0 = Math.round((2 * h1 - 1) * 700) / 100, vy0 = -Math.round(400 + 500 * h2) / 100, ph = Math.round(h4 * 1000);
+      const h4 = fireVar(i, salt, 6004 + tick), h5 = fireVar(i, salt, 6005 + tick), h6 = fireVar(i, salt, 6006 + tick);
+      // which face it leaves by: the top when there is one (most embers rise off the top of a fire), else a side
+      const sides = ((faces & 2) ? 1 : 0) + ((faces & 4) ? 1 : 0);
+      let dir = 0;                                           // 0 = up, -1 = left, 1 = right
+      if (!(faces & 1) || (sides && h6 < 0.35)) dir = (faces & 2) && (!(faces & 4) || h6 < 0.175) ? -1 : 1;
+      const vx0 = dir === 0 ? Math.round((2 * h1 - 1) * 700) / 100 : dir * Math.round(200 + 500 * h1) / 100;
+      const vy0 = -Math.round((dir === 0 ? 400 + 500 * h2 : 200 + 500 * h2)) / 100;
+      const ph = Math.round(h4 * 1000);
       const maxSteps = Math.ceil((2 + 2 * h3) / dt);         // it burns out in the air after 2–4s if it has not come down
-      let x = ((i / ROWS) | 0) + 0.5, y = rI + 0.05, vx = vx0, vy = vy0, t = 0, steps = 0, land = -1;
+      let x = ((i / ROWS) | 0) + 0.5 + dir * 0.55, y = rI + (dir === 0 ? 0.05 : 0.5), vx = vx0, vy = vy0, t = 0, steps = 0, land = -1;
       while (steps < maxSteps) {
         steps++; t += dt;
         vx += (Math.sin(t * EMB_FREQ + ph * 0.00628) * EMB_FLUTTER - vx * EMB_DRAG) * dt;
@@ -8058,10 +8067,14 @@ function fineReactTickRoom(room, SUB, phase) {
     }
     // Both channels, for one burning cell — only when it has clear air straight above (see `reachUp`).
     const jump = (i, rI, age, mat) => {
-      if (!blk || rI === 0 || !airCell(i - 1)) return;
+      if (!blk) return;
+      // which faces are open: 1 = up, 2 = left, 4 = right. The REACH needs the top one (a flame goes up); an EMBER
+      // can leave by any of them.
+      const faces = (rI > 0 && airCell(i - 1) ? 1 : 0) | (airCell(i - ROWS) ? 2 : 0) | (airCell(i + ROWS) ? 4 : 0);
+      if (!faces) return;
       const m = massAt(i);
-      if (reachMax > 1) reachUp(i, rI, age, m);
-      if (emberK > 0) throwEmber(i, rI, m, mat);
+      if (reachMax > 1 && (faces & 1)) reachUp(i, rI, age, m);
+      if (emberK > 0) throwEmber(i, rI, m, mat, faces);
     };
     if ((tick % FIRE_AUDIT_TICKS) === 0) {
       for (const i of fire)
@@ -16891,7 +16904,7 @@ io.on('connection', (socket) => {
     if ('fireReach' in patch) liquidCfg.fireReach = Math.max(0, Math.min(16, patch.fireReach | 0));
     if ('fireReachMin' in patch) liquidCfg.fireReachMin = Math.max(0, Math.min(16, patch.fireReachMin | 0));
     if ('fireReachSlow' in patch) liquidCfg.fireReachSlow = Math.max(0, Math.min(4, +patch.fireReachSlow || 0));
-    if ('fireEmbers' in patch) liquidCfg.fireEmbers = Math.max(0, Math.min(10, +patch.fireEmbers || 0));
+    if ('fireEmbers' in patch) liquidCfg.fireEmbers = Math.max(0, Math.min(20, +patch.fireEmbers || 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
