@@ -5813,6 +5813,7 @@ const liquidCfg = {
   // ⚠️ OFF: the user's call after seeing it in play — *"I think the position based ash behaviour should just be
   // turned off."* Pieces of charcoal can be left hovering over the mound their base flowed out of; the ordering
   // that prevented it is what made the ash predictable, and predictable was the worse of the two.
+  fireOxygen: 1,         // a cell that finishes its burn with no open face is STARVED: charcoal, out (see there)
   fireAshOrder: 0,       // 1 = a column crumbles TOP DOWN so nothing hovers
   fireAshJitter: 45,     // per-cell delay before a cell finishes burning, so a mass does not turn over all at once
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
@@ -7462,6 +7463,15 @@ for (const [id, rate, ash] of [
   [50, 1.5, 0],    // Fungus
   [31, 0.8, 0],    // Cactus — wet flesh, catches reluctantly
 ]) { FIRE_RATE[id] = rate; FIRE_ASH[id] = ash; }
+// ⭐⭐ WHICH FUELS NEED AIR TO CATCH AT ALL. Wood does not: heat alone drives the volatiles out of it, which is
+// why a fire eats into the middle of a log. Charcoal does: it is what is LEFT after the volatiles have gone, and
+// it burns by its surface oxidising — no air, no burn.
+// 🟥 IT IS ALSO WHAT STOPS A PERPETUAL FIRE, and the first build of the oxygen rule had one. A buried cell that
+// finishes its burn becomes charcoal and goes out; without this its still-burning neighbour simply lights it
+// again, it burns another 1,600 passes, starves again, and so on for ever — `diag_fire_solids` A4 ("the fire goes
+// out on its own") ran to its 4,000-tick limit and never did.
+const FIRE_AIR = new Uint8Array(256);
+FIRE_AIR[92] = 1;   // Charcoal
 // ⭐⭐ NOT EVERY PIECE OF WOOD IS THE SAME PIECE OF WOOD. The user, on the first burning tree: *"it needs some
 // stochasticity… because fire does not really spread in this predictable pattern… rather than randomness in the
 // spreading, there could be some variation in how easily a particular material burns, perhaps assigned between some
@@ -7892,6 +7902,10 @@ function fineReactTickRoom(room, SUB, phase) {
     // `fireSolidCatch / rate` passes — half that for the cell ABOVE, because fire climbs.
     // ⚠️ A DELAY, NOT A CHANCE. `feedback_a_random_rate_can_kill_the_process`: a per-pass probability of catching
     // stopped a fire spreading eight runs in eight. A count cannot fail to arrive.
+    // Is there open air against this cell? The oxygen rule's one primitive — used both by the catch test above and
+    // by what a finished cell leaves behind. ⚠️ A cell holding liquid is not air.
+    const airCell = (j) => j >= 0 && j < N && gPeek(j) === 0 && tot.g(j) <= 0;
+    const airAround = (j) => { const rj = j % ROWS; return airCell(j - ROWS) || airCell(j + ROWS) || (rj > 0 && airCell(j - 1)) || (rj < ROWS - 1 && airCell(j + 1)); };
     const spread = (j0, rj, age) => {
       for (const j of [rj < ROWS - 1 ? j0 + 1 : -1, rj > 0 ? j0 - 1 : -1, j0 - ROWS, j0 + ROWS]) {
         if (j < 0 || j >= N || fire.has(j)) continue;
@@ -7900,6 +7914,11 @@ function fineReactTickRoom(room, SUB, phase) {
         if (liquidCfg.fireQuench && quenched(j, j % ROWS)) continue;
         if (oilAt(j) > 0) { fire.add(j); fireLit.push(j); continue; }
         const sr = solidRate(j); if (sr <= 0) continue;
+        // ⚠️ CHARCOAL NEEDS AIR TO CATCH (see FIRE_AIR). Wood does not — heat drives its volatiles out, which is
+        // what lets a fire eat into a trunk — but charcoal burns by its surface oxidising, and a piece with no
+        // open face has no surface to oxidise. It is also what keeps the fire finite: without it a starved cell
+        // is re-lit by its neighbour for ever.
+        if (liquidCfg.fireOxygen && FIRE_AIR[gPeek(j)] && !airAround(j)) continue;
         if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1) * catchMul(j)))) { fire.add(j); ages.set(j, 0); fireLit.push(j); }
       }
     };
@@ -7937,7 +7956,27 @@ function fineReactTickRoom(room, SUB, phase) {
           // leaves Ash, which is not a fuel, so that is where the chain ends and the powder falls.
           // ⚠️ A FLASH CELL IS CONSUMED WHOLE, at either stage — that is what opens the gaps inside a burning trunk.
           const left = flash ? 0 : FIRE_ASH[gPeek(i)];
-          const relit = left > 0 && FIRE_RATE[left] > 0;
+          // ⭐⭐ OXYGEN IS WHAT DECIDES CHARCOAL FROM ASH, and it is the difference in the real world too: wood
+          // heated WITHOUT enough air pyrolyses to charcoal and stops there — the volatiles cook off and a carbon
+          // skeleton is left — and charcoal only becomes ash when it actually BURNS, which needs air. That is why
+          // a real fire leaves both: ash where the air got in, charcoal inside logs and under the pile.
+          // ⭐ In a grid the test is free, because "air" is just an open face. A cell that finishes its burn with
+          // an open side is consumed and goes on down the chain; one that finishes buried is STARVED — it becomes
+          // charcoal (or stays charcoal) and GOES OUT, and it will only finish if something later exposes it and
+          // a neighbour lights it again.
+          // ⚠️ Spreading is deliberately NOT gated on this: fire still travels into the middle of a trunk, and it
+          // is only the RESULT that changes. Gating the catch as well would leave a log with a charred skin and
+          // an untouched core, which is a different and much smaller fire than anyone asked for.
+          // ⚠️ A cell with liquid in it counts as buried — that is the same rule as `fireBlocked` on the client.
+          const exposed = !liquidCfg.fireOxygen || airAround(i);
+          const relit = left > 0 && FIRE_RATE[left] > 0 && exposed;
+          // ⭐ STARVED: the chain stops here. Wood becomes charcoal and goes out; charcoal stays charcoal and goes
+          // out. Either way the cell keeps its shape and can be dug for what it is, which is how charcoal is made.
+          if (!flash && !exposed && left > 0) {
+            fire.delete(i); ages.delete(i); fireOut.push(i);
+            if (FIRE_RATE[left] > 0) setSolid(i, left);       // wood → charcoal; charcoal → left alone, it IS charcoal
+            continue;
+          }
           // ⭐⭐ A COLUMN CRUMBLES FROM THE TOP DOWN, so nothing is left hovering. Ash FALLS and charcoal does not,
           // so a charcoal cell whose turn comes first drops out from under the charcoal above it and leaves it in
           // mid-air — seen in play at 105s, a few dark cells floating over the ash mound. The user asked for
@@ -16685,6 +16724,7 @@ io.on('connection', (socket) => {
     if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
     if ('fireVary' in patch) liquidCfg.fireVary = Math.max(0, Math.min(1, +patch.fireVary || 0));
     if ('fireFlash' in patch) liquidCfg.fireFlash = Math.max(0, Math.min(0.5, +patch.fireFlash || 0));
+    if ('fireOxygen' in patch) liquidCfg.fireOxygen = patch.fireOxygen ? 1 : 0;
     if ('fireAshOrder' in patch) liquidCfg.fireAshOrder = patch.fireAshOrder ? 1 : 0;
     if ('fireAshJitter' in patch) liquidCfg.fireAshJitter = Math.max(0, Math.min(400, patch.fireAshJitter | 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
