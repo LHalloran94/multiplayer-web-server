@@ -4460,6 +4460,7 @@ function RoomCells(cols, rows) {
   this.fineLevelAcc = null; this.fineStill = null;       // levelling carry + quiescence counters
   this.fineActive = null; this.fineReact = null; this.fineFire = null;   // Sets of cell indices
   this.fireAge = null;                                   // Map(burning cell → passes it has been alight) — fire layer (c)
+  this.fireRoom = null;                                  // the WHOLE room's burning set, during a sectored tick only (liqTickSectors)
   this.fireSalt = 0;                                     // per-fire seed for each cell's susceptibility (`fireVar`); 0 = not burning
   this.fineFluxSeen = null; this.fineFluxStack = null;   // flux-levelling flood-fill scratch
   this.powderActive = null; this.soilActive = null;      // Sets of cell indices
@@ -5816,6 +5817,20 @@ const liquidCfg = {
   fireOxygen: 1,         // a cell that finishes its burn with no open face is STARVED: charcoal, out (see there)
   fireAshOrder: 0,       // 1 = a column crumbles TOP DOWN so nothing hovers
   fireAshJitter: 45,     // per-cell delay before a cell finishes burning, so a mass does not turn over all at once
+  // ⭐⭐ FIRE JUMPS GAPS (2026-09-18, the user's idea). Before this fire spread ONLY to the four touching cells, so a
+  // one-cell gap stopped it dead. Two channels, both switchable:
+  //  · REACH — a flame lights fuel a few cells ABOVE it through clear air (heat and flame rise), and the cells beside
+  //    that column (a flame leans). How far grows with how much is burning around it: a lone cell reaches
+  //    `fireReachMin`, a big fire `fireReach`. A cell further away takes longer (`fireReachSlow`). A DELAY, like the
+  //    touching spread — never a per-pass chance, which is the rule that stopped oil fires fizzling out.
+  //  · EMBERS — a burning face throws the occasional ember in an arc; one that lands on exposed fuel smoulders for
+  //    a moment and lights it. This is the long-range, unpredictable channel. `fireEmbers` scales the rate; 0 = none.
+  //    Wind and fans do not carry them yet — they scatter on their own (the user's call: baseline dispersal first).
+  // 0 in `fireReach` is exactly the old rule (touching cells only).
+  fireReach: 6,
+  fireReachMin: 2,
+  fireReachSlow: 0.6,
+  fireEmbers: 1,
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7426,6 +7441,8 @@ const roomFlowCursor = {};
 // is a ReferenceError in every probe rig and nowhere else, which this track has now hit six times.
 const fireCursor = {};        // room → where the rotating burn cursor got to
 let liqFireThrottles = 0;     // turns on which the fire cap BIT — the mechanism counter, not an outcome one
+// …and the gap-jumping mechanisms' own counters: cells lit by a flame's REACH, embers THROWN, cells lit by an EMBER.
+let liqFireReachLit = 0, liqFireEmbersThrown = 0, liqFireEmberLit = 0;
 // ⭐ How many burning cells the audit found with no fuel left in them. It SHOULD be zero: anything but zero
 // says something is still removing a cell's fuel without taking it out of the burning set, and the audit is
 // papering over it. A counter for a mechanism that is meant never to fire is how the next one gets found.
@@ -7472,6 +7489,20 @@ for (const [id, rate, ash] of [
 // out on its own") ran to its 4,000-tick limit and never did.
 const FIRE_AIR = new Uint8Array(256);
 FIRE_AIR[92] = 1;   // Charcoal
+// ⭐ HOW READILY EACH FUEL THROWS EMBERS (× the ember rate). Charcoal and wood are the classic ember-makers; foliage
+// throws a few burning flakes; oil barely any (it flames, it does not crumble). Id 15 is oil (a liquid's id).
+const FIRE_EMBER = new Float32Array(256);
+for (const [id, k] of [[28, 1], [91, 1], [40, 1], [92, 1.4], [41, 1], [20, 0.7], [29, 0.6], [46, 0.8], [47, 0.5],
+  [48, 0.5], [30, 0.6], [83, 0.4], [82, 0.3], [32, 0.3], [50, 0.3], [31, 0.2], [15, 0.35]]) FIRE_EMBER[id] = k;
+// ⭐ AN EMBER'S FLIGHT, in cells and seconds. ⚠️ THE CLIENT RUNS THE SAME INTEGRATOR to draw it (16d, `EMB_*`) from
+// the launch the server sends, so these numbers are duplicated there and must stay in step — the ember you see
+// should come down where the fire starts. Light and draggy on purpose: embers loft and drift, they are not shot.
+// ⚠️ TUNED BY SIMULATING THE FLIGHT ALONE (`scratchpad` note in kickoff_list13_next.md, twentieth round): the first
+// numbers (drag 1.2, a ±4.5 cells/s throw) landed a median 1.5 cells away and never past 3.7 — almost every ember fell
+// back into its own fire. At these, launched from the ground: median 3.2 cells, 95% within 6.3, the longest ~8.
+const EMB_G = 6, EMB_DRAG = 0.8, EMB_FLUTTER = 3, EMB_FREQ = 5;
+const EMB_P = 0.0015;          // launch chance per pass for an open-topped burning cell at ember rate 1, before fuel and mass
+const EMB_MAX = 60;            // embers in flight or smouldering, per room
 // ⭐⭐ NOT EVERY PIECE OF WOOD IS THE SAME PIECE OF WOOD. The user, on the first burning tree: *"it needs some
 // stochasticity… because fire does not really spread in this predictable pattern… rather than randomness in the
 // spreading, there could be some variation in how easily a particular material burns, perhaps assigned between some
@@ -7660,6 +7691,18 @@ function fineReactTickRoom(room, SUB, phase) {
   // client could be hurt by fire, collide with it or draw it as anything but a puff. These two lists are the
   // state: a DIFF, in the same shape and on the same interest-filtered road as every other cell wire.
   const fireLit = [], fireOut = [], fireRelit = [];   // `fireRelit`: alight already, but now made of something else
+  // 🟥🟥 "IS THIS CELL BURNING?" HAS TO BE ASKED OF THE WHOLE ROOM, NOT OF THE STRIP. In a sectored room each strip's
+  // turn sees a `SectorSet` holding only ITS OWN burning cells, so a neighbour across the strip edge read as NOT
+  // alight — and the spread "lit" it again every pass: its age reset to 0 (so it never finished burning while the
+  // fire went past it) and the client was sent a fresh ignition each time (so it looked different). That is the
+  // column of wood reported standing at column 1024 = 4 × the 256-column strip width, while chunk edges at 960 and
+  // 1088 burned normally. `st.fireRoom` is the room's whole burning set for the duration of a sectored tick (set by
+  // `liqTickSectors`), null otherwise; every "lit?" test and every lighting here goes through these two.
+  const fireAll = st.fireRoom || null;
+  // Embers thrown this pass, stride 7: [launch cell, vx×100, vy×100, flight ticks, landing cell or -1, smoulder ticks, phase].
+  const emberWire = [];
+  const burningAny = (fs, j) => fs.has(j) || (fireAll !== null && fireAll.has(j));
+  const lightCell = (fs, j) => { fs.add(j); if (fireAll !== null) fireAll.add(j); fireLit.push(j); };
   // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
   // && gid === 2` ⇒ steam, etc). In fine mode liquid is not a grid id at all, so no transition can ever match and every
   // one of those effects is unreachable. The server knows exactly which reaction fired, so it says so: [cell, code].
@@ -7791,7 +7834,7 @@ function fineReactTickRoom(room, SUB, phase) {
         else if (g === 5) { setSolid(j, 1); spendLava(i, capFrac(FREACT_BAKE_COST_F)); addFx(j, 4); }                          // mud baked dry → earth
         else if (g === 3) { convertSolid(j, 16, 3); spendLava(i, capFrac(FREACT_FUSE_COST_F)); }                                                       // sand fused → glass, BOTH consumed
         // ⭐ ANYTHING FLAMMABLE TOUCHING LAVA CATCHES (fire layer (c)). No lava is spent: lava lights, it does not burn.
-        else if (liquidCfg.fireSolids && g > 0 && FIRE_RATE[g] > 0) { const fs = fineFireSet(room); if (!fs.has(j)) { fs.add(j); fireLit.push(j); } }
+        else if (liquidCfg.fireSolids && g > 0 && FIRE_RATE[g] > 0) { const fs = fineFireSet(room); if (!burningAny(fs, j)) lightCell(fs, j); }
       }
       if (lavaAt() <= 0) continue;                            // the lava spent itself on the terrain
       // ── (B) QUICKSAND fuses to GLASS. Checked before the quench so it wins over the generic crust.
@@ -7823,7 +7866,7 @@ function fineReactTickRoom(room, SUB, phase) {
       // its own (see the fire phase), so a pool lights at the point of contact and runs back through itself.
       let oj = amt.rp(i)[amt.o(i) + 5] > 0 ? i : -1;
       if (oj < 0) for (const j of NB) { if (j >= 0 && j < N && amt.rp(j)[amt.o(j) + 5] > 0) { oj = j; break; } }
-      if (oj >= 0) { const fs = fineFireSet(room); if (!fs.has(oj)) { fs.add(oj); fireLit.push(oj); } }
+      if (oj >= 0) { const fs = fineFireSet(room); if (!burningAny(fs, oj)) lightCell(fs, oj); }
   }
   // ── FIRE: every burning cell consumes its oil and lights any neighbour holding oil. Driven by its own set rather
   // than the anchors, so a slick keeps burning after everything has settled and stopped moving.
@@ -7908,19 +7951,117 @@ function fineReactTickRoom(room, SUB, phase) {
     const airAround = (j) => { const rj = j % ROWS; return airCell(j - ROWS) || airCell(j + ROWS) || (rj > 0 && airCell(j - 1)) || (rj < ROWS - 1 && airCell(j + 1)); };
     const spread = (j0, rj, age) => {
       for (const j of [rj < ROWS - 1 ? j0 + 1 : -1, rj > 0 ? j0 - 1 : -1, j0 - ROWS, j0 + ROWS]) {
-        if (j < 0 || j >= N || fire.has(j)) continue;
+        if (j < 0 || j >= N || burningAny(fire, j)) continue;   // ⚠️ the ROOM's set — see `burningAny`
         // 🟥 A WET CELL CANNOT CATCH. Without this, water on a burning block put out the top row and the row under
         // it relit it on the very next pass, for ever — measured in `diag_fire_solids` scene C.
         if (liquidCfg.fireQuench && quenched(j, j % ROWS)) continue;
-        if (oilAt(j) > 0) { fire.add(j); fireLit.push(j); continue; }
+        if (oilAt(j) > 0) { lightCell(fire, j); continue; }
         const sr = solidRate(j); if (sr <= 0) continue;
         // ⚠️ CHARCOAL NEEDS AIR TO CATCH (see FIRE_AIR). Wood does not — heat drives its volatiles out, which is
         // what lets a fire eat into a trunk — but charcoal burns by its surface oxidising, and a piece with no
         // open face has no surface to oxidise. It is also what keeps the fire finite: without it a starved cell
         // is re-lit by its neighbour for ever.
         if (liquidCfg.fireOxygen && FIRE_AIR[gPeek(j)] && !airAround(j)) continue;
-        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1) * catchMul(j)))) { fire.add(j); ages.set(j, 0); fireLit.push(j); }
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1) * catchMul(j)))) { lightCell(fire, j); ages.set(j, 0); }
       }
+    };
+    // ── FIRE JUMPS GAPS (see `fireReach` / `fireEmbers` in liquidCfg for the design).
+    // HOW MUCH IS BURNING AROUND A CELL, 0..1: burning cells in its 4×4 block and the block under it (a fire feeds
+    // the flames above it). One pass over this turn's set. ⚠️ Strips are 256 columns and blocks 4, so a block never
+    // straddles two strips and counting this strip's set alone is exact — no seam from it.
+    const reachMax = Math.max(0, liquidCfg.fireReach | 0), reachMin = Math.max(0, Math.min(reachMax, liquidCfg.fireReachMin | 0));
+    const emberK = Math.max(0, +liquidCfg.fireEmbers || 0);
+    const blk = (reachMax > 1 || emberK > 0) ? new Map() : null;
+    if (blk) for (const j of fire) { const k = (((j / ROWS) | 0) >> 2) * 4096 + ((j % ROWS) >> 2); blk.set(k, (blk.get(k) || 0) + 1); }
+    const massAt = (i) => { const k = (((i / ROWS) | 0) >> 2) * 4096 + ((i % ROWS) >> 2); return Math.min(1, ((blk.get(k) || 0) + (blk.get(k + 1) || 0)) / 20); };
+    // Can this cell be lit from a distance `d` away by a flame whose cell has been alight `age` passes?
+    // The same tests as the touching spread — not burning ANYWHERE in the room, not wet, fuel, charcoal needs air —
+    // and a delay that grows with the distance.
+    const catchFrom = (j, d, age) => {
+      if (j < 0 || j >= N || burningAny(fire, j)) return false;
+      if (liquidCfg.fireQuench && quenched(j, j % ROWS)) return false;
+      if (oilAt(j) > 0) { if (age < Math.round(2 * d)) return false; lightCell(fire, j); return true; }
+      const sr = solidRate(j); if (sr <= 0) return false;
+      if (liquidCfg.fireOxygen && FIRE_AIR[gPeek(j)] && !airAround(j)) return false;
+      const thr = liquidCfg.fireSolidCatch / sr / 2 * catchMul(j) * (1 + Math.max(0, +liquidCfg.fireReachSlow || 0) * (d - 1));
+      if (age < Math.max(1, Math.round(thr))) return false;
+      lightCell(fire, j); ages.set(j, 0); return true;
+    };
+    // ⭐ REACH. Up the cell's own column through clear air: the first thing that is not air, if it is fuel, is
+    // within the flame; and at every height the flame passes, the cells either side of it (a flame leans and
+    // widens). The touching neighbour (d = 1 straight up) is the ordinary spread's, not this.
+    // ⚠️ Nothing is scanned for a cell with no clear air straight above it — which is every cell buried in a
+    // burning mass — so the cost is paid only along a fire's open top.
+    const reachUp = (i, rI, age, m) => {
+      const R = Math.round(reachMin + (reachMax - reachMin) * m);
+      if (R < 2) return;
+      for (let d = 1; d <= R; d++) {
+        if (rI - d < 0) break;
+        const j = i - d;
+        if (!airCell(j)) { if (d >= 2 && catchFrom(j, d, age)) liqFireReachLit++; break; }
+        if (d < R) {
+          if (catchFrom(j - ROWS, d + 0.5, age)) liqFireReachLit++;
+          if (catchFrom(j + ROWS, d + 0.5, age)) liqFireReachLit++;
+        }
+      }
+    };
+    // ⭐ EMBERS. An open-topped burning cell throws one now and then — how often by its fuel (`FIRE_EMBER`), by how
+    // much is burning around it, and by `fireEmbers`. The flight is worked out WHOLE at launch (a few dozen steps
+    // of the same integrator the client draws with), so the server knows at once where it comes down; what it lands
+    // on is lit after it has smouldered a moment. ⚠️ Hashed per cell per tick, not `Math.random`, so a rig replays.
+    // ⚠️ It is a chance, and that is safe HERE: this is a second channel on top of a spread that is a delay, so an
+    // unlucky run means fewer embers, never a fire that stops.
+    const pend = st.fireEmbers || (st.fireEmbers = []);
+    const dt = Math.max(0.005, (liquidCfg.tickMs || 40) / 1000);
+    const throwEmber = (i, rI, m, mat) => {
+      if (pend.length >= EMB_MAX) return;
+      const p = EMB_P * emberK * (FIRE_EMBER[mat] || 0.3) * (0.25 + m);
+      if (fireVar(i, salt, 5000 + (tick & 0xfffff)) >= p) return;
+      const h1 = fireVar(i, salt, 6001 + tick), h2 = fireVar(i, salt, 6002 + tick), h3 = fireVar(i, salt, 6003 + tick);
+      const h4 = fireVar(i, salt, 6004 + tick), h5 = fireVar(i, salt, 6005 + tick);
+      const vx0 = Math.round((2 * h1 - 1) * 700) / 100, vy0 = -Math.round(400 + 500 * h2) / 100, ph = Math.round(h4 * 1000);
+      const maxSteps = Math.ceil((2 + 2 * h3) / dt);         // it burns out in the air after 2–4s if it has not come down
+      let x = ((i / ROWS) | 0) + 0.5, y = rI + 0.05, vx = vx0, vy = vy0, t = 0, steps = 0, land = -1;
+      while (steps < maxSteps) {
+        steps++; t += dt;
+        vx += (Math.sin(t * EMB_FREQ + ph * 0.00628) * EMB_FLUTTER - vx * EMB_DRAG) * dt;
+        vy += (EMB_G - vy * EMB_DRAG) * dt;
+        x += vx * dt; y += vy * dt;
+        const cc = Math.floor(x), rr = Math.floor(y);
+        if (cc < 0 || cc >= COLS || rr < 0 || rr >= ROWS) break;
+        const j = cc * ROWS + rr;
+        if (j === i || airCell(j)) continue;
+        // it has hit something: fuel that is not already alight and not wet is where it comes down; anything else
+        // (rock, water, a burning cell) and it is simply gone
+        if (!burningAny(fire, j) && (oilAt(j) > 0 || solidRate(j) > 0) && !(liquidCfg.fireQuench && quenched(j, rr))) land = j;
+        break;
+      }
+      const smoulder = land >= 0 ? Math.round((0.4 + 1.1 * h5) / dt) : 0;
+      pend.push({ j: land, at: tick + steps + smoulder });
+      // the wire: the launch cell first (so it is interest-filtered like every cell wire), then what the client needs
+      // to fly the same arc and show it smouldering where it lands
+      emberWire.push(i, Math.round(vx0 * 100), Math.round(vy0 * 100), steps, land, smoulder, ph);
+      liqFireEmbersThrown++;
+    };
+    // …and the embers that have come down and smouldered long enough. ⚠️ `tick` is `liquidTickCount`, which only
+    // advances inside `runLiquidTick` — a rig calling this function directly freezes it and no ember ever lands.
+    // ⚠️ Processed only while this room has something alight (this whole block is). An ember in the air when the
+    // last cell goes out dies with the fire — rare, and the client shows the arc either way.
+    if (pend.length) {
+      let keep = 0;
+      for (let n = 0; n < pend.length; n++) {
+        const E = pend[n];
+        if (E.at > tick) { pend[keep++] = E; continue; }
+        if (E.j >= 0 && catchFrom(E.j, 1, 1e9)) liqFireEmberLit++;
+      }
+      pend.length = keep;
+    }
+    // Both channels, for one burning cell — only when it has clear air straight above (see `reachUp`).
+    const jump = (i, rI, age, mat) => {
+      if (!blk || rI === 0 || !airCell(i - 1)) return;
+      const m = massAt(i);
+      if (reachMax > 1) reachUp(i, rI, age, m);
+      if (emberK > 0) throwEmber(i, rI, m, mat);
     };
     if ((tick % FIRE_AUDIT_TICKS) === 0) {
       for (const i of fire)
@@ -7936,6 +8077,7 @@ function fineReactTickRoom(room, SUB, phase) {
       if (sRate > 0) {
         addFx(i, 7);
         spread(i, rI, age);
+        jump(i, rI, age, gPeek(i));                         // …and across a gap: reach and embers
         const flash = isFlash(i);
         // ⭐⭐ WHEN A CELL CRUMBLES TO POWDER, IT WAITS A LITTLE LONGER THAN ITS NEIGHBOUR — reported from play as
         // *"long vertical streaks of ash as it triggers downwards"*. The top-down rule below crumbles a column one
@@ -8059,9 +8201,14 @@ function fineReactTickRoom(room, SUB, phase) {
       // of a big burning pour came out at 101, 103, 100, 102, 101, 103 columns — no effect whatever. Do
       // not re-add it without a measurement that says something different.
       spread(i, rI, age);                                                   // the flame front — oil at once, solids after a delay
+      jump(i, rI, age, 15);                                                 // …and across a gap (15 = oil, for its ember rate)
     }
   }
-  if (st.fineFire && !st.fineFire.size) { dropFineFire(room); st.fireSalt = 0; }   // the fire is out: the next one burns differently
+  // The fire is out: the next one burns differently. 🟥 …BUT NOT MID-TICK IN A SECTORED ROOM: there this set is ONE
+  // STRIP'S, and it being empty says nothing about the room. Resetting here re-hashed every burning cell's
+  // susceptibility and burn length in the middle of a fire whenever a strip ran out of burning cells. The sector
+  // executor resets it once the WHOLE room is out.
+  if (st.fineFire && !st.fineFire.size) { dropFineFire(room); if (!fireAll) st.fireSalt = 0; }
   // ── PHASE 2: ACID. Transferred from the coarse liquidTickRoom block, same model: SOAK adjacent water into this cell's
   // dilution (consuming it) and CONVERT acid→water once saturated; with no water to neutralise against, DISSOLVE an
   // adjacent breakable solid instead (never bedrock, never glass). Both are GRADUAL, so — like the oil burn — they do
@@ -8164,6 +8311,8 @@ function fineReactTickRoom(room, SUB, phase) {
     for (const i of fireRelit) cells.push(i, 2);
     wireFanout(room, 'fire-cells', { cells });
   }
+  // ⭐ EMBERS THROWN THIS PASS — on the same interest-filtered, batched road (keyed on the LAUNCH cell).
+  if (emberWire.length) wireFanout(room, 'fire-embers', { cells: emberWire });
   // ORDER MATTERS now the grid carries fluid ids: a cell the reaction turned SOLID also appears in liqChanged with an
   // empty stack, and applying that after the terrain write would clear the new solid straight back to 0.
   if (liqChanged.size) {                                      // same encoding as the fine tick's own wire
@@ -8452,6 +8601,11 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
   const _hi = (s) => gRange.get(s)[1] * W + W - 1;
   const nReg = SEC_REGS.length;
   const saved = [], leftover = [];
+  // 🟥 THE ROOM'S WHOLE BURNING SET, FOR THE STRIPS TO ASK "IS THIS CELL ALIGHT?" — see `burningAny` in
+  // fineReactTickRoom. Taken BEFORE the registries are cleared below; cells lit during the tick are added to it as
+  // they catch. Cells that go OUT this tick are deliberately not removed: the worst that does is make a cell wait
+  // one tick longer to be relit, where a missing entry relit a burning cell every pass (the column-1024 fault).
+  st.fireRoom = new Set(st.fineFire || EMPTY_CELLS);
   for (let n = 0; n < nReg; n++) { const s = st[SEC_REGS[n].f]; saved.push(s); leftover.push([]); if (s) s.clear(); }
   const savedSrc = st.src;
   // ⭐⭐ WHERE THIS TICK'S STRIPS START. Without it the busiest strip is starved FOR EVER, and it is the exact
@@ -8608,6 +8762,9 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
     const s = st[d.f];
     if (s && s.size) cellRooms[d.reg].add(room); else if (s) d.drop(room);
   }
+  st.fireRoom = null;
+  // …and the fire's salt is reset HERE, once the whole room is out — not by a strip that merely ran dry.
+  if (!st.fineFire || !st.fineFire.size) st.fireSalt = 0;
   st.src = savedSrc;
   if (savedSrc) { if (savedSrc.size) cellRooms.src.add(room); else dropSrcMap(room); }
 }
@@ -9001,6 +9158,9 @@ const runLiquidTick = () => {
         // `K=9` is what prompted this — a zero here with water plainly moving is the whole diagnosis in one
         // number. `rateSkips` is tier 3. Counters, so they reset per window and read as a rate.
         k2Throttles: liqK2Throttles, rateSkips: liqRateSkips, fireThrottles: liqFireThrottles, fireStale: liqFireStale,
+        // fire jumping gaps — TOTALS since the server started (not reset per window): cells a flame lit across a
+        // gap, embers thrown, and cells an ember lit. Proof each mechanism fired, as for the throttles above.
+        fireReachLit: liqFireReachLit, fireEmbersThrown: liqFireEmbersThrown, fireEmberLit: liqFireEmberLit,
         // LIQUID breakout: the flow tick's own ms, its wire KB/s, active-cell peak, mean changed/tick and the K
         // sub-step count — isolated from the whole-tick numbers above, which also carry powder, soil and reactions.
         steps: liquidCfg.fineLevelSteps, fineActive: liqPerf.fineActive, fineAvgMs: +(liqPerf.fineMs / liqPerf.ticks).toFixed(2), fineMaxMs: +liqPerf.fineMsMax.toFixed(2), fineKbs: +(liqPerf.fineBytes * _hz / liqPerf.ticks / 1024).toFixed(1), fineChanged: Math.round(liqPerf.fineChanged / liqPerf.ticks),
@@ -9634,6 +9794,7 @@ const CELL_WIRE = {
   // [i, repId, flags, mask, ...one amount per set rank bit] — see the WIRE comment in fineLiquidTickRoom.
   'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n; },
   'fire-cells':        () => 2,     // [cell, 1 = alight | 0 = out, …]
+  'fire-embers':       () => 7,     // [launch cell, vx×100, vy×100, flight ticks, landing cell | -1, smoulder ticks, phase, …]
 };
 // avRoom → Map(socketId → { subs: Set<chunk>, pending: Set<chunk> })
 // (`mark` — the hash a chunk had when the socket left it — went with increment 3d; see updateSubs.)
@@ -16727,6 +16888,10 @@ io.on('connection', (socket) => {
     if ('fireOxygen' in patch) liquidCfg.fireOxygen = patch.fireOxygen ? 1 : 0;
     if ('fireAshOrder' in patch) liquidCfg.fireAshOrder = patch.fireAshOrder ? 1 : 0;
     if ('fireAshJitter' in patch) liquidCfg.fireAshJitter = Math.max(0, Math.min(400, patch.fireAshJitter | 0));
+    if ('fireReach' in patch) liquidCfg.fireReach = Math.max(0, Math.min(16, patch.fireReach | 0));
+    if ('fireReachMin' in patch) liquidCfg.fireReachMin = Math.max(0, Math.min(16, patch.fireReachMin | 0));
+    if ('fireReachSlow' in patch) liquidCfg.fireReachSlow = Math.max(0, Math.min(4, +patch.fireReachSlow || 0));
+    if ('fireEmbers' in patch) liquidCfg.fireEmbers = Math.max(0, Math.min(10, +patch.fireEmbers || 0));
     if ('genWakeAll' in patch) liquidCfg.genWakeAll = patch.genWakeAll ? 1 : 0;
     if ('heat' in patch) liquidCfg.heat = patch.heat ? 1 : 0;
     if ('strips' in patch) { liquidCfg.strips = patch.strips ? 1 : 0; if (!liquidCfg.strips) secStatus.clear(); }
