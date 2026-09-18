@@ -5810,8 +5810,11 @@ const liquidCfg = {
   // good"*). It was asked for to open gaps for flames to show through, and the flames are not to depend on gaps.
   // The mechanism is three lines and a dial, kept so it can be tried again; 0 is exactly the behaviour without it.
   fireFlash: 0,          // share of cells that burn away to NOTHING in a fifth of the time (see `isFlash`)
-  fireAshOrder: 1,       // a column crumbles TOP DOWN so nothing hovers. 0 = every cell crumbles on its own clock
-  fireAshJitter: 45,     // …and up to this many passes of per-cell delay on top, so the cascade is not a streak
+  // ⚠️ OFF: the user's call after seeing it in play — *"I think the position based ash behaviour should just be
+  // turned off."* Pieces of charcoal can be left hovering over the mound their base flowed out of; the ordering
+  // that prevented it is what made the ash predictable, and predictable was the worse of the two.
+  fireAshOrder: 0,       // 1 = a column crumbles TOP DOWN so nothing hovers
+  fireAshJitter: 45,     // per-cell delay before a cell finishes burning, so a mass does not turn over all at once
   // ⭐⭐ Take reaction candidates ONLY from cells whose contents actually CHANGED (which the flow already seeds),
   // not additionally from every cell that might still move. See the note at the candidate list in
   // fineReactTickRoom for the measurement — five of six real scenes examined 106k–565k cells a second and fired
@@ -7920,10 +7923,14 @@ function fineReactTickRoom(room, SUB, phase) {
         // cell per pass, so a whole trunk's worth of ash left in a single tick-by-tick line: a streak is what a
         // perfectly ordered cascade looks like. A per-cell hashed delay (`fireAshJitter` passes) breaks the order
         // up without touching the rule that keeps the column standing while it happens.
-        // ⚠️ Only for the stage that leaves POWDER. Wood becoming charcoal is not what streaks — it does not fall.
+        // ⭐⭐ IT APPLIES TO BOTH STAGES, and confining it to the ash was wrong. Reported from play: a whole
+        // connected mass of burning wood *"does this stark transition to a red glow… it just appears all of a
+        // sudden, rather than being something that just emerges naturally out of the behaviour of each cell."*
+        // That is every cell turning to charcoal at once — they all caught within a few seconds of each other and
+        // they all burn for the same time — and charcoal looks quite different from burning wood. A per-cell
+        // delay staggers the changeover so it travels through the mass instead of happening to all of it.
         const ashJit = (j) => Math.round(fireVar(j, salt, 4) * Math.max(0, liquidCfg.fireAshJitter | 0));
-        const leavesPowder = !flash && isPowderId(FIRE_ASH[gPeek(i)] || 0);
-        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i) * (flash ? FLASH_MUL : 1))) + (leavesPowder ? ashJit(i) : 0)) {
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i) * (flash ? FLASH_MUL : 1))) + (flash ? 0 : ashJit(i))) {
           // ⭐⭐ WHAT A BURNT SOLID LEAVES, AND WHETHER IT IS STILL ALIGHT. Wood leaves CHARCOAL, which is itself a
           // fuel, so the cell does not go out: it changes material where it stands and goes on smouldering, which
           // is what keeps a burnt tree's shape (charcoal burns ~10× longer than the wood did). Charcoal in turn
