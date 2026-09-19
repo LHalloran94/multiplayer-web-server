@@ -3622,7 +3622,9 @@ function objLinkDrop(room, o) {
   const dm = roomObjDrv[room];
   const drv = dm && dm.delete(o.id);
   if (dm && !dm.size) delete roomObjDrv[room];
-  if (o.link || held || drv || (o.part === 'switch')) broadcastObjSt(room);
+  // …and a CELL BODY takes its cells out of the world with it (erased, smashed or burnt) — same seam, same reason.
+  const body = bodyDrop(room, o);
+  if (o.link || held || drv || body || (o.part === 'switch')) broadcastObjSt(room);
 }
 // ⭐⭐ WHICH NAMES ARE SHUT AWAY BY A PLATE OR A SWITCH — the whole of the no-rules wiring, in one function.
 // A link says "Opens" (`hide`: while this is held, those things are not there) or "Closes" (`show`: those
@@ -3740,65 +3742,308 @@ function worldHitOk(avRoom, id, src, obj) {
   return true;
 }
 function forgetWorldHits(avRoom) { delete roomWorldHit[avRoom]; }
-// ── ⭐⭐ FIRE ON OBJECTS (list 13 step 6, fire layer (c) part 2, 2026-09-19) ─────────────────────────────────────
-// A wooden object CATCHES, BURNS for a while, SPREADS fire to what is around it, and leaves ash and charcoal where
-// it stood. The split, agreed with the user before any of this was written:
-//   · THE CLIENT DETECTS. Only a client knows where a loose or moving object actually is — nothing on this end
-//     records where a crate came to rest — so "this crate is in a fire" can only be seen there. It arrives on the
-//     hit message every heat hazard already uses (`fire: 1`, collapsed per source by `worldHitOk`), which is why
-//     five people watching one crate catch it once, not five times as fast.
-//   · THE SERVER DECIDES, RUNS THE CLOCK AND SPREADS IT. "This crate is alight" has to be one fact for everybody and
-//     for whoever joins halfway through, so it lives in the per-object record (`rec.fb`), broadcast and replayed like
-//     a lit bomb's `lit`. Spreading into the ground is here too, because terrain fire is server state.
-// ⚠️ CATCHING IS A DELAY, NEVER A CHANCE. Exposure accumulates while reports keep arriving and the thing lights once
-// it has been in the heat for its material's catch time. A per-pass probability once stopped fire spreading eight
-// runs in eight (`feedback_a_random_rate_can_kill_the_process`); a delay always arrives.
-// ⚠️ ONLY SOMETHING THAT CAN BREAK CAN BURN. The user's rule for shots — *"if the player doesn't want an item to be
-// damaged … they can just make it so that it doesn't break"* — is the same rule here, so a wooden crate set to
-// Breaks · No is fireproof and there is no second switch to keep in step with the first.
-// `catchS` — seconds in the heat before it lights · `burnS` — how long a 64×64 one burns (scaled by its area) ·
-// `ashK` — how much of its area it leaves as ash and charcoal: a crate and a gate are mostly air between planks, a
-// log is solid wood (the user: *"the amount of residue does not line up with the size of the object burned"*).
-const OBJ_FIRE = {
-  crate:  { catchS: 1.0, burnS: 16, ashK: 0.14 },
-  barrel: { catchS: 1.5, burnS: 22, ashK: 0.18 },   // thick staves: slower to take, longer to go
-  log:    { catchS: 2.5, burnS: 30, ashK: 0.35 },   // a solid log is the slowest thing here to catch and the longest to burn
-  gate:   { catchS: 1.5, burnS: 20, ashK: 0.12 },   // a WOODEN gate only (style 'wood') — bars and metal do not burn
-};
-function objFireSpec(obj) {
+// ── ⭐⭐ CELL BODIES, STEP 1 (2026-09-19) — A WOODEN OBJECT IS WOOD CELLS WHILE IT IS AT REST ─────────────────────
+// Read `scratchpad/kickoff_cell_bodies.md` before changing anything here. This REPLACES the round-23/24 object
+// fire, which ran a CLOCK per object (`rec.fb`) and drew the burn as a picture: fire did not start where it was put,
+// a crate on a burnt crate hung in mid-air, and the remains appeared all at once at the end (user, 2026-09-19).
+// ⭐ THE MODEL. A wooden object carries a small grid of cells in its OWN frame, at the terrain's cell size — the
+// object's `rec.bc`, absent while it is whole. While it is AT REST the server writes those cells into the world grid
+// as BODY materials (250 wood, 251 charcoal). Those burn, char, go to ash and are put out by water exactly as terrain
+// wood does, because to the fire, the liquid and the falling-sand passes they ARE terrain — one fire simulation, not
+// two. The CLIENT treats them as open air: nothing collides with them (the object's own collider does that, so
+// pushing keeps working), nothing digs them, and the ground renderer does not paint them (the object draws its own
+// picture, clipped to the cells it has left). The flag is in the id, so no second wire says which cells are whose.
+// ⭐ WHEN IT IS DISTURBED its cells are READ BACK into the grid — burnt away → gone, charred → charcoal, still alight →
+// alight — and cleared from the world. The ash the fire already left is ordinary terrain and STAYS where it fell,
+// which is how remains now come out of each part as it burns rather than all at once.
+// ⚠️ STEP 1 LIMITS, on purpose: collision is still the object's WHOLE ORIGINAL SHAPE (step 2 builds it from the
+// cells), a body burns down only while it is stamped (§3c — a moving one keeps its alight flags and resumes at rest),
+// and a body burnt through the middle stays one object (step 4).
+// ⚠️ ONLY SOMETHING THAT CAN BREAK IS A BODY — the user's Breaks rule from shots, carried over from the fire it
+// replaces, so Breaks · No is still fireproof and there is no second switch. Wooden things only (user, 2026-09-19).
+const BODY_WOOD = 250, BODY_CHAR = 251;       // ⚠️ the fire tables inside the sliced liquid block name these as literals
+function isBodyId(v) { return v === 250 || v === 251; }
+const BODY_LOOKS = { crate: 'box', barrel: 'round', log: 'round' };
+function bodySpec(obj) {
   if (!obj || typeof obj.hp !== 'number') return null;
-  if (obj.type === 'stamp') return (obj.look !== 'gate' && OBJ_FIRE[obj.look]) || null;
-  if (obj.type === 'platform' && obj.look === 'gate' && obj.style === 'wood') return OBJ_FIRE.gate;
+  if (obj.type === 'stamp') return BODY_LOOKS[obj.look] || null;
+  if (obj.type === 'platform' && obj.look === 'gate' && obj.style === 'wood') return 'box';
   return null;
 }
-const OBJ_HEAT_GAP = 1500;        // ms without a report before accumulated exposure is forgotten (reports come ~2/s)
-const OBJ_SPREAD_AFTER = 3000;    // ms alight before it starts lighting what is around it — it has to take hold first
-const OBJ_SPREAD_EVERY = 1000;    // …and how often it lights what is around it after that
-const OBJ_FIRE_TICK = 250;
-const roomObjHeat = {};           // room → Map<id, { sum, last }>   exposure so far, server-only
-const roomObjBurning = {};        // room → Map<id, { x, y, hw, hh, tk, sp, zz }>   where it is + server-only clocks
-function objFireMs(obj, spec) {
-  const k = Math.sqrt(Math.max(1, (obj.w || 64) * (obj.h || 64)) / (64 * 64));
-  return Math.round(spec.burnS * 1000 * Math.max(0.5, Math.min(3, k)));
+function bodyLoose(obj) { return !!(obj && obj.type === 'stamp' && obj.loose && !(obj.path && obj.path.pts && obj.path.pts.length >= 2)); }
+// The grid's shape: one cell per terrain cell of the object's own size. ⚠️ The CLIENT computes the same (16b
+// `bodyDims`) to draw an untouched body without anything on the wire — keep the two in step.
+function bodyDims(obj) {
+  return { c: Math.max(1, Math.min(40, Math.round((obj.w || 64) / TERRAIN_CELL))),
+           r: Math.max(1, Math.min(40, Math.round((obj.h || 64) / TERRAIN_CELL))) };
 }
-// Where a burning thing is, as best this end knows: the last position a client reported for it, or where it was
-// placed. ⚠️ Clamped to the world and to the neighbourhood of its placement, the rule `armBomb` uses, so a forged
-// report can only lie locally.
-function objFirePos(room, obj, x, y) {
-  const m = roomObjBurning[room] || (roomObjBurning[room] = new Map());
-  let P = m.get(obj.id);
-  if (!P) { P = { x: obj.x, y: obj.y, hw: 0, hh: 0, tk: 0, sp: 0, zz: 0 }; m.set(obj.id, P); }
-  if (isFinite(x) && isFinite(y)) {
-    const d = roomDims(room), WW = d.cols * TERRAIN_CELL, WH = d.rows * TERRAIN_CELL;
-    P.x = Math.max(obj.x - 4000, Math.min(obj.x + 4000, Math.max(0, Math.min(WW, x))));
-    P.y = Math.max(obj.y - 4000, Math.min(obj.y + 4000, Math.max(0, Math.min(WH, y))));
+// A whole one. Codes: 0 gone · 1 wood · 2 charcoal, +4 alight. A round thing (barrel, log) has its four corner cells
+// missing — its outline at cell resolution. ⚠️ Mirrored on the client (`bodyFresh`).
+function bodyFresh(D, kind) {
+  const a = new Uint8Array(D.c * D.r).fill(1);
+  if (kind === 'round' && D.c >= 3 && D.r >= 3) a[0] = a[D.c - 1] = a[(D.r - 1) * D.c] = a[D.r * D.c - 1] = 0;
+  return a;
+}
+// This object's cells as they stand: the record's own if it has been changed, a fresh one if not.
+function bodyCellsOf(rec, obj) {
+  const D = bodyDims(obj);
+  if (rec && rec.bc && rec.bc.c === D.c && rec.bc.r === D.r && typeof rec.bc.s === 'string' && rec.bc.s.length === D.c * D.r) {
+    const a = new Uint8Array(D.c * D.r); for (let k = 0; k < a.length; k++) a[k] = rec.bc.s.charCodeAt(k) - 48;
+    return a;
   }
-  P.hw = Math.min(240, (obj.w || 64) / 2); P.hh = Math.min(240, (obj.h || 64) / 2);
-  return P;
+  return bodyFresh(D, bodySpec(obj));
 }
-// ⚠️ A BURNING THING IN GROUND NOBODY CAN SEE IS FROZEN, not burning on. Terrain fire in a chunk that has gone to
-// sleep is parked and put back untouched (`rekindleChunk`), so an object that went on burning there would finish,
-// drop its ash and light the ground beside a fire that is standing still. Same contract as the chunk's water.
+// …and written back. A grid that is whole again (nothing burnt, nothing alight) drops out of the record, so a room
+// of untouched crates sends nothing for them.
+function bodyCellsSet(rec, obj, a) {
+  const D = bodyDims(obj), f = bodyFresh(D, bodySpec(obj));
+  let same = true; for (let k = 0; k < a.length; k++) if (a[k] !== f[k]) { same = false; break; }
+  if (same) { delete rec.bc; return; }
+  let s = ''; for (let k = 0; k < a.length; k++) s += String.fromCharCode(48 + a[k]);
+  rec.bc = { c: D.c, r: D.r, s };
+}
+function bodyAny(a) { for (let k = 0; k < a.length; k++) if (a[k] & 3) return true; return false; }
+// ⭐ WHICH WORLD CELLS A BODY COVERS AT A POSE, and which of its own cells each one is. World-cell-centric: every
+// world cell whose CENTRE lies inside the rotated box belongs to exactly one body cell, so a stamp never writes a
+// world cell twice. The rounding is at most half a cell, which the user judged invisible (*"the cells are fairly
+// small"*). ⚠️ The CLIENT runs the same arithmetic (16b `bodyRaster`) to read a stamped body's state back out of its
+// own terrain mirror — keep the two in step, or the picture is clipped by the wrong cells.
+function bodyRaster(obj, D, x, y, a, fn) {
+  const C = TERRAIN_CELL, w = obj.w || 64, h = obj.h || 64, hw = w / 2, hh = h / 2;
+  const ca = Math.cos(a), sa = Math.sin(a), cw = w / D.c, chh = h / D.r;
+  const ex = Math.abs(hw * ca) + Math.abs(hh * sa), ey = Math.abs(hw * sa) + Math.abs(hh * ca);
+  const c0 = Math.floor((x - ex) / C), c1 = Math.floor((x + ex) / C), r0 = Math.floor((y - ey) / C), r1 = Math.floor((y + ey) / C);
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) {
+    const px = (c + 0.5) * C - x, py = (r + 0.5) * C - y;
+    const u = px * ca + py * sa + hw, v = -px * sa + py * ca + hh;
+    if (u < 0 || v < 0 || u >= w || v >= h) continue;
+    fn(c, r, Math.min(D.r - 1, Math.floor(v / chh)) * D.c + Math.min(D.c - 1, Math.floor(u / cw)));
+  }
+}
+// …and the world cell a body cell's CENTRE is in, at a pose — how a body is READ back (see `bodyUnstamp`). Mirrored by the
+// client's `bodyCellCentre`, which reads a stamped body's picture out of its own terrain the same way.
+function bodyCellCentre(obj, D, x, y, a, k) {
+  const w = obj.w || 64, h = obj.h || 64, ca = Math.cos(a), sa = Math.sin(a);
+  const lx = -w / 2 + ((k % D.c) + 0.5) * w / D.c, ly = -h / 2 + (((k / D.c) | 0) + 0.5) * h / D.r;
+  return { c: Math.floor((x + lx * ca - ly * sa) / TERRAIN_CELL), r: Math.floor((y + lx * sa + ly * ca) / TERRAIN_CELL) };
+}
+// room → Map<id, { x, y, a, dc, dr (the grid's shape when stamped), idx: Int32Array world cells, k: Int16Array body cell of each, g: the grid it went into,
+//                  fire: the body has had a cell alight since it was stamped }>. Server-only.
+const roomBodyStamp = {};
+let bodyStamps = 0, bodyUnstamps = 0, bodyBurnt = 0;   // mechanism counters — see `mwObjFire` / the rigs
+// Is this thing sitting still where the server can say where it is? A route, a spin, a swing, an open door, a pose a
+// rule put it in, something a plate shut away — any of those and it is not stamped (it simply does not burn there).
+function bodyStill(room, obj, rec, hidden) {
+  if (obj.path && obj.path.pts && obj.path.pts.length >= 2) return false;
+  if (obj.spin || obj.osc || obj.free) return false;
+  if (rec && (rec.hid || rec.pose || rec.lit || (rec.a && Object.keys(rec.a).length))) return false;
+  if (hidden && obj.tag && hidden.has(obj.tag)) return false;
+  return true;
+}
+// Write a body into the world at a pose. Only into AIR holding no liquid — a crate never overwrites ground or deletes
+// water; a cell that lands on something is simply not stamped. Returns whether anything was written.
+// ⚠️ ON A GENERATED WORLD A PAGE THAT IS NOT MADE YET IS NOT AIR, so nothing is stamped until it exists: a read must not
+// build world (`feedback_a_read_is_not_free`), and this runs for every body in the room.
+function bodyStamp(room, obj, x, y, a) {
+  const st = roomCells.get(room); if (!st || !st.terrain || !st.terrainHp) return false;
+  const grid = st.terrain, hp = st.terrainHp, tot = st.fineTotal, ROWS = st.rows, COLS = st.cols, gen = !!grid.seedFn;
+  const ost = objStOf(room), rec = ost.get(obj.id) || {};
+  const cells = bodyCellsOf(rec, obj);
+  if (!bodyAny(cells)) return false;
+  const D = bodyDims(obj);
+  let unmade = false;
+  if (gen) bodyRaster(obj, D, x, y, a, (c, r) => { if (!unmade && c >= 0 && r >= 0 && c < COLS && r < ROWS && peekCellAt(grid, c * ROWS + r) < 0) unmade = true; });
+  if (unmade) return false;
+  const idx = [], ks = [], set = [], lit = [];
+  bodyRaster(obj, D, x, y, a, (c, r, k) => {
+    if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return;
+    const code = cells[k]; if (!(code & 3)) return;
+    const i = c * ROWS + r, v = peekCellAt(grid, i);
+    if (v > 0) return;                                         // ground, another body, anything: not ours to overwrite
+    if (tot && peekCellAt(tot, i) > 0) return;                 // …or water
+    const m = (code & 3) === 2 ? BODY_CHAR : BODY_WOOD;
+    grid.s(i, m); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
+    idx.push(i); ks.push(k); set.push(i, m);
+    if (code & 4) lit.push(i);
+  });
+  if (!idx.length) return false;
+  const m = roomBodyStamp[room] || (roomBodyStamp[room] = new Map());
+  m.set(obj.id, { x, y, a, dc: D.c, dr: D.r, idx: Int32Array.from(idx), k: Int16Array.from(ks), g: grid, fire: lit.length > 0 });
+  wireFanout(room, 'terrain-set', { cells: set });
+  // ⭐ …AND THE CHEMISTRY LOOKS AT IT ONCE, the way it looks at a player's edit. Lava lights the fuel beside it only when
+  // the reaction pass visits that lava, and a settled pool is never visited — so a crate set down on still lava sat
+  // there unlit until something stirred the pool (21s in `e2e_fire_live --objlook`).
+  for (const i of idx) seedFineReactAround(room, i);
+  // ⭐ WHAT WAS ALIGHT WHEN IT STOPPED CATCHES AGAIN WHERE IT STANDS — `fireLitAge` 0, the same as a freshly lit cell.
+  if (lit.length && liquidCfg.fireSolids) {
+    const fs = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map()), wire = [];
+    for (const i of lit) if (!fs.has(i)) { fs.add(i); ages.set(i, 0); wire.push(i, 1); }
+    if (wire.length) wireFanout(room, 'fire-cells', { cells: wire });
+  }
+  // A stamped body is SOLID to the liquid and the sand, so anything that was about to fall through where it now stands
+  // rests on it instead; nothing needs waking for that. What it covers is recorded for the client (`bs`): 1 = where it
+  // was placed (every client already knows that pose), or the pose it came to rest at.
+  rec.bs = bodyLoose(obj) ? [Math.round(x * 10) / 10, Math.round(y * 10) / 10, Math.round(a * 1000)] : 1;
+  ost.set(obj.id, rec);
+  bodyStamps++;
+  return true;
+}
+// Take a body back out of the world. `readBack` — whether what the fire did to its cells is kept (a body being moved)
+// or not (a body that is gone). Returns the rebuilt grid, or null.
+// ⚠️ ONLY FIRE CHANGES A BODY'S CELLS, so a body that has never had a cell alight since it was stamped reads back
+// UNCHANGED, whatever its world cells now say. That is the guard against something else rewriting terrain wholesale
+// (a Level reload, a clear) being mistaken for a crate that burnt away — which would delete every crate in the room.
+// ⚠️ A STAMP INTO A GRID THAT HAS SINCE BEEN REPLACED is void: those cells are not in the world any more.
+function bodyUnstamp(room, id, readBack) {
+  const m = roomBodyStamp[room]; const S = m && m.get(id); if (!S) return null;
+  m.delete(id); if (!m.size) delete roomBodyStamp[room];
+  bodyUnstamps++;
+  const st = roomCells.get(room);
+  const ost = objStOf(room), rec = ost.get(id);
+  const obj = roomObjects[room] && roomObjects[room].get(id);
+  if (rec) { delete rec.bs; if (!Object.keys(rec).length) ost.delete(id); }
+  if (!st || st.terrain !== S.g) return null;
+  const grid = st.terrain, hp = st.terrainHp, fs = st.fineFire, ages = st.fireAge;
+  const ROWS = st.rows;
+  const D = obj && bodySpec(obj) ? bodyDims(obj) : null;
+  const old = (readBack && D && D.c === S.dc && D.r === S.dr) ? bodyCellsOf(rec, obj) : null;
+  // ⭐ EACH BODY CELL IS READ FROM THE WORLD CELL UNDER ITS OWN CENTRE — not from the world cells that were written for it.
+  // The stamp is world-cell-centric (every covered world cell belongs to exactly one body cell, so there are no holes in
+  // the world), and on a TURNED body that leaves some body cells with no world cell of their own. Read back through the
+  // stamp's own list, those cells were never burnt, never gone, and a tilted crate burnt to a lattice of untouched
+  // squares. Every body cell's centre lies in SOME world cell, and a neighbour's state is the right answer for it.
+  // ⚠️ Read BEFORE the loop below clears them. A centre in a cell the stamp did not write (ground, water) keeps its state.
+  let nw = null;
+  if (old && S.fire) {
+    const stamped = new Set(S.idx);
+    nw = new Uint8Array(old.length);
+    for (let k = 0; k < old.length; k++) {
+      if (!(old[k] & 3)) continue;                          // gone stays gone
+      const q = bodyCellCentre(obj, D, S.x, S.y, S.a, k), i = q.c * ROWS + q.r;
+      if (q.c < 0 || q.r < 0 || q.c >= st.cols || q.r >= ROWS || !stamped.has(i)) { nw[k] = old[k]; continue; }
+      // ⚠️ A REAL READ, NOT A PEEK: a chunk put away since is faulted back in — rare, a client near the body moved it.
+      const v = grid.g(i), code = v === BODY_WOOD ? 1 : v === BODY_CHAR ? 2 : 0;
+      nw[k] = code ? (code | (fs && fs.has(i) ? 4 : 0)) : 0;
+    }
+  }
+  const set = [], out = [];
+  let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
+  for (let q = 0; q < S.idx.length; q++) {
+    const i = S.idx[q];
+    const v = grid.g(i), alight = !!(fs && fs.has(i));
+    if (!isBodyId(v)) continue;                               // ash, air, whatever the fire left: that stays
+    grid.s(i, 0); hp.s(i, 0); set.push(i, 0); if (st.sat) st.sat.s(i, 0);
+    if (alight) { fs.delete(i); out.push(i, 0); }
+    if (ages) ages.delete(i);
+    const c = (i / ROWS) | 0, r = i % ROWS;
+    if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r;
+  }
+  if (set.length) wireFanout(room, 'terrain-set', { cells: set });
+  if (out.length) wireFanout(room, 'fire-cells', { cells: out });
+  // what was resting on it — sand, water — now has nothing under it
+  if (c1 >= c0) { fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1); }
+  if (!old) return null;
+  if (!nw) return old;                                        // never burned while stamped ⇒ nothing about it changed
+  const r2 = ost.get(id) || {};
+  bodyCellsSet(r2, obj, nw);
+  if (Object.keys(r2).length) ost.set(id, r2); else ost.delete(id);
+  return nw;
+}
+// The removal seam (`objUnindex` → `objLinkDrop`): an object that is erased, smashed or burnt takes its cells with it.
+function bodyDrop(room, o) {
+  if (!o || !roomBodyStamp[room] || !roomBodyStamp[room].has(o.id)) return false;
+  bodyUnstamp(room, o.id, false);
+  const ost = roomObjSt[room], rec = ost && ost.get(o.id);
+  if (rec) { delete rec.bc; delete rec.bs; if (!Object.keys(rec).length) ost.delete(o.id); }
+  return true;
+}
+// Every cell of it is gone: the fire has finished it. Removed exactly as a smashed one is (its deposit scattered),
+// and nothing is left behind here — the ash is already on the ground, cell by cell, where each part burned.
+function bodyBurnOut(room, obj) {
+  bodyBurnt++;
+  bodyUnstamp(room, obj.id, false);
+  const ost = roomObjSt[room]; if (ost) ost.delete(obj.id);
+  if (roomObjects[room] && roomObjects[room].get(obj.id) === obj) {
+    objUnindex(room, obj);
+    if (obj.cost > 0 && invGatedRoom(room)) scatterMatter(room, obj.x, obj.y - 12, [], obj.cost | 0, 1);
+    emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id, burnt: 1 });
+  }
+}
+// Somebody's machine says this loose body came to rest here (`obj-rest`), or started moving (`obj-move`). ⚠️ CLAMPED to
+// the world and to the neighbourhood of where it was placed — the rule `armBomb` uses — so a forged report can only lie
+// locally.
+function bodyRestAt(room, obj, x, y, a) {
+  const d = roomDims(room), WW = d.cols * TERRAIN_CELL, WH = d.rows * TERRAIN_CELL;
+  x = Math.max(obj.x - 4000, Math.min(obj.x + 4000, Math.max(0, Math.min(WW, x))));
+  y = Math.max(obj.y - 4000, Math.min(obj.y + 4000, Math.max(0, Math.min(WH, y))));
+  const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id);
+  let da = S ? a - S.a : 0; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+  if (S && Math.abs(S.x - x) < 2 && Math.abs(S.y - y) < 2 && Math.abs(da) < 0.02) return false;   // already there
+  if (!bodyStill(room, obj, roomObjSt[room] && roomObjSt[room].get(obj.id), null)) return false;
+  if (S) bodyUnstamp(room, obj.id, true);
+  bodyStamp(room, obj, x, y, a);
+  return true;
+}
+// ⭐ ONE LOOP KEEPS THE WORLD IN STEP WITH THE OBJECTS, rather than a line in each of the dozen places an object can be
+// placed, moved, loaded, hidden or posed. Every ~1s it stamps every still, pinned body that is not stamped yet, takes
+// out any stamp whose object has gone, stopped being still, or been moved by its author, and — every 250ms in a room
+// with fire — notices a body that has burnt away completely.
+let _bodyTickN = 0;
+function bodyTick() {
+  const full = (_bodyTickN++ & 3) === 0;
+  for (const room of Object.keys(roomBodyStamp)) {
+    const m = roomBodyStamp[room], st = roomCells.get(room), fs = st && st.fineFire;
+    if (!st) continue;
+    const fire = !!(fs && fs.size), map = roomObjects[room];
+    for (const [id, S] of [...m]) {
+      // ⚠️ A BODY THAT HAS BURNED IS CHECKED EVEN WHEN NOTHING IN THE ROOM IS ALIGHT: its last cells crumble to ash
+      // as the last flame goes out, and skipping fire-less rooms would never see it finish.
+      if (!fire && !S.fire) continue;
+      const obj = map && map.get(id); if (!obj) continue;       // the reconcile below clears it
+      if (!st.terrain || st.terrain !== S.g) continue;
+      let left = 0, lit = false, unmade = false;
+      for (let q = 0; q < S.idx.length; q++) {
+        const i = S.idx[q], v = peekCellAt(st.terrain, i);
+        if (v < 0) { unmade = true; break; }                    // put away while nobody looks — frozen with its chunk
+        if (isBodyId(v)) left++;
+        if (!lit && fire && fs.has(i)) lit = true;
+      }
+      if (unmade) continue;
+      if (lit) S.fire = true;
+      if (!left && S.fire) bodyBurnOut(room, obj);
+    }
+  }
+  if (!full) return;
+  for (const room of Object.keys(roomObjects)) {
+    const map = roomObjects[room], st = roomCells.get(room);
+    if (!map || !map.size || !st || !st.terrain) continue;
+    const m = roomBodyStamp[room], ost = roomObjSt[room];
+    let changed = false, hidden;
+    const hid = () => { if (hidden === undefined) { const h = objLinkHidden(room); hidden = h ? new Set(h) : null; } return hidden; };
+    if (m) for (const [id, S] of [...m]) {
+      const obj = map.get(id), rec = ost && ost.get(id);
+      if (!obj || !bodySpec(obj) || st.terrain !== S.g) { bodyUnstamp(room, id, !!obj && st.terrain === S.g); changed = true; continue; }
+      // ⚠️ SOMETHING OTHER THAN FIRE REWROTE ITS GROUND (a Level reload into the same grid, a clear): the stamp points at
+      // cells that are no longer the body's. It is void — forgotten without touching the world — and put back below.
+      if (!S.fire && S.idx.length) { const v0 = peekCellAt(st.terrain, S.idx[0]); if (v0 >= 0 && !isBodyId(v0)) { m.delete(id); changed = true; continue; } }
+      if (!bodyStill(room, obj, rec, hid())) { bodyUnstamp(room, id, true); changed = true; continue; }
+      // an author moved or turned a pinned one: take it out here, and the pass below puts it back where it now is
+      if (!bodyLoose(obj) && (S.x !== obj.x || S.y !== obj.y || S.a !== (obj.angle || 0))) { bodyUnstamp(room, id, true); changed = true; }
+    }
+    for (const obj of map.values()) {
+      if (bodyLoose(obj) || !bodySpec(obj)) continue;           // a loose one is stamped where a client says it came to rest
+      if (roomBodyStamp[room] && roomBodyStamp[room].has(obj.id)) continue;
+      const rec = ost && ost.get(obj.id);
+      if (!bodyStill(room, obj, rec, hid())) continue;
+      if (objFireAsleep(room, obj.x, obj.y)) continue;           // ground nobody is near: wait until somebody is
+      if (bodyStamp(room, obj, obj.x, obj.y, obj.angle || 0)) changed = true;
+    }
+    if (changed) broadcastObjSt(room);
+  }
+}
+setInterval(bodyTick, 250);
+// Is this ground put away or asleep? Nothing is stamped into it until somebody is near (same contract as the chunk's
+// water and its parked fire).
 function objFireAsleep(room, x, y) {
   const s = roomCells.get(room); if (!s || !s.terrain) return false;
   const g = worldGeom(room);
@@ -3808,169 +4053,29 @@ function objFireAsleep(room, x, y) {
   const ch = chunksOf(room);
   return !!(ch.evicted[p] || ch.peek(p).quiet);
 }
-// How far through its burn it is, 0..1 — `ch0` is how charred it already was when it (re)lit.
-function objFireProg(f, now) { return Math.min(1, (f.ch0 || 0) + (1 - (f.ch0 || 0)) * Math.max(0, now - f.at) / f.ms); }
-// Somebody saw it in the heat. Returns true if this was the fire path (so the caller does not also DAMAGE it).
-function objFireExpose(room, obj, x, y) {
-  const spec = objFireSpec(obj); if (!spec) return false;
-  const st = objStOf(room), rec = st.get(obj.id);
-  if (rec && rec.fb) { objFirePos(room, obj, x, y); return true; }   // already alight: that report only says where it is
-  const now = Date.now();
-  const hm = roomObjHeat[room] || (roomObjHeat[room] = new Map());
-  let h = hm.get(obj.id);
-  if (!h || now - h.last > OBJ_HEAT_GAP) h = { sum: 0, last: now }; else { h.sum += now - h.last; h.last = now; }
-  hm.set(obj.id, h);
-  if (h.sum < spec.catchS * 1000) return true;
-  objFireLight(room, obj, x, y);
+// The Fire tool on a body. Stamped: it is terrain, and the brush's own `ignite` has already lit the cells under it —
+// this only makes sure. Not stamped (it is moving): the cells nearest the brush are flagged alight, in the pose the
+// client that saw it reports, and they catch in the world the moment it comes to rest.
+function bodyIgnite(room, obj, x, y, r, px, py, pa) {
+  const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id);
+  if (S) { igniteBox(room, x, y, Math.max(TERRAIN_CELL / 2, Math.min(160, r || 16))); return false; }   // nothing in the record changed
+  if (!isFinite(px) || !isFinite(py)) { px = obj.x; py = obj.y; pa = obj.angle || 0; }
+  px = Math.max(obj.x - 4000, Math.min(obj.x + 4000, px)); py = Math.max(obj.y - 4000, Math.min(obj.y + 4000, py));
+  const ost = objStOf(room), rec = ost.get(obj.id) || {};
+  const cells = bodyCellsOf(rec, obj), D = bodyDims(obj), w = obj.w || 64, h = obj.h || 64;
+  const ca = Math.cos(pa || 0), sa = Math.sin(pa || 0), R = Math.max(TERRAIN_CELL, Math.min(160, r || 16)) + TERRAIN_CELL;
+  let any = false;
+  for (let k = 0; k < cells.length; k++) {
+    if (!(cells[k] & 3) || (cells[k] & 4)) continue;
+    const lx = ((k % D.c) + 0.5) * w / D.c - w / 2, ly = (((k / D.c) | 0) + 0.5) * h / D.r - h / 2;
+    const wx = px + lx * ca - ly * sa, wy = py + lx * sa + ly * ca;
+    if (Math.abs(wx - x) <= R && Math.abs(wy - y) <= R) { cells[k] |= 4; any = true; }
+  }
+  if (!any) return false;
+  bodyCellsSet(rec, obj, cells);
+  ost.set(obj.id, rec);
   return true;
 }
-// Set it alight NOW. Reached by exposure passing the catch time, and directly by the Fire tool (`obj-ignite`).
-function objFireLight(room, obj, x, y) {
-  const spec = objFireSpec(obj); if (!spec) return false;
-  const st = objStOf(room), rec = st.get(obj.id);
-  if (rec && rec.fb) return false;
-  const now = Date.now();
-  const hm = roomObjHeat[room]; if (hm) hm.delete(obj.id);
-  const r2 = rec || {};
-  // ⭐ A THING THAT WAS PUT OUT AND CATCHES AGAIN CARRIES ON FROM WHERE IT GOT TO: `ch` is how charred it was, and
-  // `ms` is the burn it has LEFT — progress is `ch0 + (1 - ch0) × elapsed / ms` (`objFireProg`, and the client's copy).
-  const ch0 = Math.max(0, Math.min(0.95, r2.ch || 0));
-  delete r2.ch;
-  r2.fb = { at: now, ms: Math.max(1500, Math.round(objFireMs(obj, spec) * (1 - ch0))), ch0 };
-  st.set(obj.id, r2);
-  const P = objFirePos(room, obj, x, y);
-  P.tk = now; P.sp = 0; P.zz = 0;
-  broadcastObjSt(room);
-  return true;
-}
-// Water reached it. Put out, and it KEEPS its char — a doused crate is a blackened crate, not a new one.
-function objFireDouse(room, obj) {
-  const hm = roomObjHeat[room]; if (hm) hm.delete(obj.id);
-  const st = objStOf(room), rec = st.get(obj.id);
-  if (!rec || !rec.fb) return;
-  rec.ch = objFireProg(rec.fb, Date.now());
-  delete rec.fb;
-  const m = roomObjBurning[room]; if (m) m.delete(obj.id);
-  broadcastObjSt(room);
-}
-// ⭐⭐ WHAT A BURNT OBJECT LEAVES: a low heap where it stood — CHARCOAL on the bottom where the ground holds it up,
-// ASH over it — and the charcoal is left SMOULDERING, so it glows and crumbles to ash through the ordinary terrain
-// fire (and the oxygen rule decides that, exactly as it does for a burnt tree). That is what makes a burnt crate
-// read as BURNT rather than as having vanished.
-// ⚠️ Written straight into the grid and fanned out, the way the Fire tool lights cells: this runs outside the tick.
-// ⚠️ Only into AIR with no liquid in it — a remains heap never overwrites anything, and `peekCellAt` so a read
-// cannot build unproduced world.
-// 🟥🟥 THE FIRST VERSION BUILT THE HEAP WHERE THE OBJECT'S BOTTOM WAS, AND PLAYED IT LOOKED WRONG IN TWO WAYS (user,
-// 2026-09-19: *"the residue leftover from burnt crates forms odd shapes, some hovering in mid air still burning while
-// the residue has fallen down"*). A crate on a rope, a platform or another crate has AIR under it — so the ash fell
-// and the charcoal (a solid) stayed hanging, still alight; and a charcoal lump could sit on an ash cell that then
-// fell away from under it. Now each column of the heap finds ITS OWN ground, straight down, and charcoal is only
-// ever the bottom cell of a column resting on firm, non-powder ground. Ash is everything else.
-// ⚠️ THE AMOUNT IS THE OBJECT'S OWN AREA × `ashK` (a hollow crate leaves less than a solid log), with no cap
-// but a sanity one — it was capped at 90 and floored at 4, so small and large things left much the same heap.
-function objBurntRemains(room, P, obj) {
-  const st = cellsOf(room), grid = st.terrain, hp = st.terrainHp, tot = st.fineTotal;
-  if (!grid || !hp || (st.fineSub || 1) !== 1) return 0;
-  const ROWS = st.rows, COLS = st.cols, mats = roomMats[room] || {};
-  const spec = objFireSpec(obj) || OBJ_FIRE.crate;
-  const own = Math.max(1, ((obj && obj.w) || 64) / TERRAIN_CELL) * Math.max(1, ((obj && obj.h) || 64) / TERRAIN_CELL);
-  const want = Math.max(3, Math.min(600, Math.round(own * spec.ashK)));
-  // a triangular heap about as wide as the thing was, never narrower than it needs to be to hold `want`
-  const W = Math.max(3, Math.min(Math.round(2 * P.hw / TERRAIN_CELL) + 2, Math.round(2 * Math.sqrt(want)) + 1));
-  const mid = Math.floor(P.x / TERRAIN_CELL), c0 = mid - Math.floor(W / 2);
-  const wt = [], half = W / 2;
-  let wsum = 0;
-  for (let k = 0; k < W; k++) { const v = Math.max(0.15, half + 0.5 - Math.abs(k + 0.5 - half)); wt.push(v); wsum += v; }
-  // 🟥 AN ABSENT PAGE IS AIR IN A PAGE ROOM. `peekCellAt` answers -1 for a page that does not exist, and in a room that
-  // is not generated a page that holds nothing is simply never made — so the first version read "not produced, stop"
-  // for the empty sky over a crate on a stand and left NO remains for it (the tilted and the hovering crate, both
-  // higher up, in the page above the ground's). Only a GENERATED room has pages that genuinely are not made yet, and
-  // there `skyAt` still knows sky. Same rule as `gPeek` in the reaction pass. The liquid is peeked too, never `.g()`:
-  // on a generated world a read can produce a chunk (`feedback_a_read_is_not_free`).
-  const gen = !!grid.seedFn;
-  const cellAt = (i) => { const v = peekCellAt(grid, i); return v >= 0 ? v : (!gen || (grid.skyAt && grid.skyAt(i)) ? 0 : -1); };
-  const liqAt = (i) => !!tot && peekCellAt(tot, i) > 0;
-  const air = (i) => cellAt(i) === 0 && !liqAt(i);
-  const rStart = Math.max(0, Math.floor((P.y - P.hh) / TERRAIN_CELL));
-  const cells = [], lit = [], fs = fineFireSet(room);
-  let placed = 0, carry = 0;
-  for (let k = 0; k < W; k++) {
-    const c = c0 + k; if (c < 0 || c >= COLS) continue;
-    carry += want * wt[k] / wsum;
-    let n = Math.floor(carry); carry -= n;
-    if (n <= 0) continue;
-    // this column's ground: the first thing that is not air, below the top of where the object was
-    let g = -1;
-    for (let r = rStart; r < Math.min(ROWS, rStart + 160); r++) {
-      const i = c * ROWS + r, v = cellAt(i);
-      if (v < 0) break;                                   // not produced — nothing to rest on that we know of
-      if (!air(i)) { g = r; break; }
-    }
-    if (g <= 0) continue;
-    const gi = c * ROWS + g, gv = cellAt(gi);
-    const firm = gv > 0 && !isFluidId(gv) && !isPowderId(gv) && !liqAt(gi);
-    for (let j = 0, r = g - 1; j < n && r >= 0; j++, r--) {
-      const i = c * ROWS + r;
-      if (!air(i)) break;
-      // charcoal: only the BOTTOM cell of a column, only on firm ground, and not every column — it is lumps in ash
-      const m = (j === 0 && firm && ((c * 7 + g * 3) % 5) < 3) ? 92 : 38;
-      grid.s(i, m); hp.s(i, matStrengthSrv(mats, m)); if (st.sat) st.sat.s(i, 0);
-      cells.push(i, m); placed++;
-      if (m === 38) powderSet(room).add(i);
-      else if (liquidCfg.fireSolids && !fs.has(i)) { fs.add(i); lit.push(i, 1); }
-    }
-  }
-  if (cells.length) wireFanout(room, 'terrain-set', { cells });
-  if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
-  return placed;
-}
-// It has burnt through (or was smashed while alight): gone, with its remains left behind. Mirrors the hp ≤ 0 path
-// in `avatar-object-hit` so a burnt deposit is scattered exactly as a smashed one is.
-function objBurnOut(room, obj, P) {
-  const m = roomObjBurning[room]; if (m) m.delete(obj.id);
-  const hm = roomObjHeat[room]; if (hm) hm.delete(obj.id);
-  const st = roomObjSt[room]; if (st) st.delete(obj.id);
-  if (roomObjects[room] && roomObjects[room].get(obj.id) === obj) {
-    objUnindex(room, obj);
-    if (obj.cost > 0 && invGatedRoom(room)) scatterMatter(room, P.x, P.y - 12, [], obj.cost | 0, 1);
-    emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id, burnt: 1 });
-  }
-  objBurntRemains(room, P, obj);
-  broadcastObjSt(room);
-}
-function objFireTick() {
-  const now = Date.now();
-  // exposure that stopped building (the thing left the heat) is forgotten, so the map cannot grow for a session
-  for (const room of Object.keys(roomObjHeat)) {
-    const hm = roomObjHeat[room];
-    for (const [id, h] of hm) if (now - h.last > OBJ_HEAT_GAP) hm.delete(id);
-    if (!hm.size) delete roomObjHeat[room];
-  }
-  for (const room of Object.keys(roomObjBurning)) {
-    const bm = roomObjBurning[room], map = roomObjects[room], st = roomObjSt[room];
-    let changed = false;
-    for (const [id, P] of [...bm]) {
-      const obj = map && map.get(id), rec = st && st.get(id);
-      if (!obj || !rec || !rec.fb) { bm.delete(id); continue; }   // removed, smashed or put out
-      const f = rec.fb;
-      if (objFireAsleep(room, P.x, P.y)) { f.at += now - (P.tk || now); P.tk = now; P.zz = 1; continue; }
-      if (P.zz) { P.zz = 0; changed = true; }           // its clock was held while it slept: tell everyone the new start
-      P.tk = now;
-      const el = now - f.at;
-      if (el >= f.ms) { objBurnOut(room, obj, P); continue; }
-      // ⭐ IT LIGHTS WHAT IT IS TOUCHING, and what is just above it (flames climb): the box, one cell round it, and
-      // three more cells up. Terrain only — other OBJECTS catch from it on the clients, the only end that can see
-      // two moving things touching.
-      if (el >= OBJ_SPREAD_AFTER && now - P.sp >= OBJ_SPREAD_EVERY) {
-        P.sp = now;
-        igniteBox(room, P.x, P.y - 12, P.hw, P.hh + 12);
-      }
-    }
-    if (!bm.size) delete roomObjBurning[room];
-    if (changed) broadcastObjSt(room);
-  }
-}
-setInterval(objFireTick, OBJ_FIRE_TICK);
 function bombFuseMs(obj) { return Math.max(200, (obj.fuse == null ? (obj.boom > 0 ? obj.boom : 2.5) : obj.fuse) * 1000); }
 function armBomb(avRoom, id, sid, data) {
   const map = roomObjects[avRoom]; if (!map) return false;
@@ -4050,12 +4155,12 @@ function sweepObjSt(avRoom) {
       const bk = (b && b.back > 0) ? b.back * 1000 : 0;
       if (!bk || now < s.lit.at + fuseMs + bk + 2000) continue;
       delete s.lit;
-      if (!s.a && !s.hid && !s.pose && !s.sw && !s.bl && !s.fb && s.ch == null && s.rev == null) { st.delete(id); continue; }
+      if (!s.a && !s.hid && !s.pose && !s.sw && !s.bl && !s.bc && !s.bs && s.rev == null) { st.delete(id); continue; }
     }
-    // 🟥 …AND THE SAME TRAP FOR FIRE: `fb` is the only thing that says an object is alight, and `ch` the only thing
-    // that says it is charred. A crate has no `reacts`, so without this any trigger anywhere in the Level would
-    // sweep its record and the fire on it would simply stop.
-    if (s.hid || s.pose || s.sw || s.bl || s.fb || s.ch != null) continue;   // a rule put this here, a lever, blood, or fire; not ours to sweep
+    // 🟥 …AND THE SAME TRAP FOR A CELL BODY: `bc` is the only record of what fire has done to a wooden object, and `bs`
+    // the only one of where it is stamped into the world. A crate has no `reacts`, so without this any trigger anywhere
+    // in the Level would sweep its record and a half-burnt crate would come back whole.
+    if (s.hid || s.pose || s.sw || s.bl || s.bc || s.bs) continue;   // a rule put this here, a lever, blood, or a burnt body; not ours to sweep
     const obj = map && map.get(id);
     if (!obj) { st.delete(id); continue; }                       // the object itself is gone
     const list = obj.reacts, acts = s.a;
@@ -5618,6 +5723,9 @@ function matBreakableSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return !BUILTIN_UNBR
 // `hard` (the editor Carve tool) removes any cell outright; without it (gameplay slam) the rules apply.
 function carveCellSrv(grid, hp, mats, i, hard) {
   const v = grid.g(i); if (!v) return false;
+  // ⭐ A CELL BODY IS NOT DUG (user, 2026-09-19: objects keep their hit-point breaking) — not even by the editor's
+  // hard delete, which would leave an object with a hole in it that nothing but fire is meant to make.
+  if (v === 250 || v === 251) return false;
   if (!hard) {
     if (!matBreakableSrv(mats, v)) return false;
     const s = matStrengthSrv(mats, v);
@@ -5643,7 +5751,8 @@ function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard, cap) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) > r2) continue;
     const i = cx * ROWS + ry;
-    if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
+    if (val) { const was = grid.g(i); if (was === 250 || was === 251) continue;   // a cell body: not paintable over (see carveCellSrv)
+      if (was !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
   }
   return changed;
@@ -5660,7 +5769,8 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard, cap) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if (Math.abs(ccx - wx) > r || Math.abs(ccy - wy) > r) continue;
     const i = cx * ROWS + ry;
-    if (val) { if (grid.g(i) !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
+    if (val) { const was = grid.g(i); if (was === 250 || was === 251) continue;   // a cell body: not paintable over (see carveCellSrv)
+      if (was !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
   }
   return changed;
@@ -7715,7 +7825,25 @@ for (const [id, rate, ash] of [
   [32, 2, 0],      // Moss
   [50, 1.5, 0],    // Fungus
   [31, 0.8, 0],    // Cactus — wet flesh, catches reluctantly
+  // ⭐⭐ CELL BODIES (step 1) — a wooden OBJECT's cells while it is written into the world (see `bodyStamp`). Its own
+  // wood → its own charcoal → ordinary Ash, so a crate keeps being a crate while it chars, and only the ash it finally
+  // crumbles to is left in the world as terrain. ⚠️ LITERAL IDS: `BODY_WOOD`/`BODY_CHAR` are declared outside this
+  // sliced block. A crate is planks, not a trunk, so it takes and goes a little quicker than Wood; its charcoal is
+  // thin and does not smoulder for a minute the way a trunk's does.
+  [250, 0.8, 251], // Body wood — ~4s alight, then its own charcoal
+  [251, 0.3, 38],  // Body charcoal — ~11s, then ash (a trunk's charcoal smoulders a minute)
 ]) { FIRE_RATE[id] = rate; FIRE_ASH[id] = ash; }
+// ⭐ HOW MUCH OF A BURNT-OUT CELL IS LEFT AS ASH, 0..1 (default 1 — every cell). A crate is mostly air between planks
+// (the user, on the old heaps: *"the amount of residue does not line up with the size of the object burned"*), so a
+// body's charcoal leaves ash in only some of its cells — hashed per cell off the fire's salt, like every other
+// per-cell property here, so it is a fixed fact about the cell and never a per-pass chance. What does not leave ash
+// leaves AIR, which is also what opens the object up for the flames inside it.
+const FIRE_ASH_K = new Float32Array(256).fill(1);
+FIRE_ASH_K[251] = 0.35;
+// ⭐ WHICH FUELS NEVER STARVE — they finish their burn as if open to the air even when buried. Only a cell body's: its
+// charcoal always goes on to ash or air, so there is no perpetual fire (that needs a cell that goes OUT still charcoal).
+const FIRE_NOSTARVE = new Uint8Array(256);
+FIRE_NOSTARVE[250] = FIRE_NOSTARVE[251] = 1;
 // ⭐⭐ WHICH FUELS NEED AIR TO CATCH AT ALL. Wood does not: heat alone drives the volatiles out of it, which is
 // why a fire eats into the middle of a log. Charcoal does: it is what is LEFT after the volatiles have gone, and
 // it burns by its surface oxidising — no air, no burn.
@@ -7725,11 +7853,12 @@ for (const [id, rate, ash] of [
 // out on its own") ran to its 4,000-tick limit and never did.
 const FIRE_AIR = new Uint8Array(256);
 FIRE_AIR[92] = 1;   // Charcoal
+FIRE_AIR[251] = 1;  // Body charcoal — the same rule, or a crate's buried middle would relight itself for ever
 // ⭐ HOW READILY EACH FUEL THROWS EMBERS (× the ember rate). Charcoal and wood are the classic ember-makers; foliage
 // throws a few burning flakes; oil barely any (it flames, it does not crumble). Id 15 is oil (a liquid's id).
 const FIRE_EMBER = new Float32Array(256);
 for (const [id, k] of [[28, 1], [91, 1], [40, 1], [92, 1.4], [41, 1], [20, 0.7], [29, 0.6], [46, 0.8], [47, 0.5],
-  [48, 0.5], [30, 0.6], [83, 0.4], [82, 0.3], [32, 0.3], [50, 0.3], [31, 0.2], [15, 0.35]]) FIRE_EMBER[id] = k;
+  [48, 0.5], [30, 0.6], [83, 0.4], [82, 0.3], [32, 0.3], [50, 0.3], [31, 0.2], [15, 0.35], [250, 1], [251, 1.4]]) FIRE_EMBER[id] = k;
 // ⭐ AN EMBER'S FLIGHT, in cells and seconds. ⚠️ THE CLIENT RUNS THE SAME INTEGRATOR to draw it (16d, `EMB_*`) from
 // the launch the server sends, so these numbers are duplicated there and must stay in step — the ember you see
 // should come down where the fire starts. Light and draggy on purpose: embers loft and drift, they are not shot.
@@ -8348,7 +8477,9 @@ function fineReactTickRoom(room, SUB, phase) {
           // is what keeps a burnt tree's shape (charcoal burns ~10× longer than the wood did). Charcoal in turn
           // leaves Ash, which is not a fuel, so that is where the chain ends and the powder falls.
           // ⚠️ A FLASH CELL IS CONSUMED WHOLE, at either stage — that is what opens the gaps inside a burning trunk.
-          const left = flash ? 0 : FIRE_ASH[gPeek(i)];
+          let left = flash ? 0 : FIRE_ASH[gPeek(i)];
+          // …and only a share of a body's charcoal leaves ash at all (`FIRE_ASH_K`) — the rest leaves air.
+          if (left && FIRE_ASH_K[gPeek(i)] < 1 && fireVar(i, salt, 7) >= FIRE_ASH_K[gPeek(i)]) left = 0;
           // ⭐⭐ OXYGEN IS WHAT DECIDES CHARCOAL FROM ASH, and it is the difference in the real world too: wood
           // heated WITHOUT enough air pyrolyses to charcoal and stops there — the volatiles cook off and a carbon
           // skeleton is left — and charcoal only becomes ash when it actually BURNS, which needs air. That is why
@@ -8361,7 +8492,9 @@ function fineReactTickRoom(room, SUB, phase) {
           // is only the RESULT that changes. Gating the catch as well would leave a log with a charred skin and
           // an untouched core, which is a different and much smaller fire than anyone asked for.
           // ⚠️ A cell with liquid in it counts as buried — that is the same rule as `fireBlocked` on the client.
-          const exposed = !liquidCfg.fireOxygen || airAround(i);
+          // ⚠️ …EXCEPT A CELL BODY'S (`FIRE_NOSTARVE`): a crate is planks with air between them, and starving its middle left
+          // a third of it as a black lump that nothing ever relit — and that, until step 2, still collides as a whole crate.
+          const exposed = !liquidCfg.fireOxygen || airAround(i) || FIRE_NOSTARVE[gPeek(i)] === 1;
           const relit = left > 0 && FIRE_RATE[left] > 0 && exposed;
           // ⭐ STARVED: the chain stops here. Wood becomes charcoal and goes out; charcoal stays charcoal and goes
           // out. Either way the cell keeps its shape and can be dug for what it is, which is how charcoal is made.
@@ -12771,6 +12904,18 @@ saveChunkBlob = function (room, p, blob, pristine) {
     if (storedFor(room).delete(p | 0)) { try { _delChunkRow.run(room, p); } catch (e) { /* best effort */ } }
     return;
   }
+  // ⭐ A CELL BODY'S CELLS ARE NEVER STORED AS GROUND. They belong to an object that is saved on its own
+  // (`world_objects`) and re-stamped when it is next still, so writing them here would put a second, invisible,
+  // ownerless copy of the crate into the world on the next restart. Stored as AIR — which is what they were
+  // stamped into — and only on the way to DISK: the in-memory eviction blob keeps them, because the object is
+  // still stamped there and will read them back.
+  let hasBody = false;
+  for (let k = 0; k < blob.m.length; k++) if (blob.m[k] === 250 || blob.m[k] === 251) { hasBody = true; break; }
+  if (hasBody) {
+    const m2 = Uint8Array.from(blob.m), hp2 = Uint8Array.from(blob.hp);
+    for (let k = 0; k < m2.length; k++) if (m2[k] === 250 || m2[k] === 251) { m2[k] = 0; hp2[k] = 0; }
+    blob = Object.assign({}, blob, { m: m2, hp: hp2 });
+  }
   persistChunkBlob(room, p, blob, genVersion(room));
   storedFor(room).set(p | 0, blob);                    // keep memory and disk agreeing without a re-read
 };
@@ -14990,7 +15135,11 @@ function captureRoomBlob(avRoom) {                      // → a Lvl blob (terra
   if (sig < 0 || !cached || cached.sig !== sig) {
     const mats = {}, mm = roomMats[avRoom] || {};
     if (hasTerr) { const used = new Set(); g.scan((_i, o, page) => { const v = page[o]; if (v >= CUSTOM_MAT_MIN) used.add(v); }); for (const v of used) if (mm[v]) mats[v] = mm[v]; }
-    cached = { sig, mats, terrain: { cols: g.geom.cols, rows: g.geom.rows, cell: TERRAIN_CELL, runs: terrainRLE(g).runs, hpRuns: peekCells(avRoom).terrainHp ? terrainRLE(peekCells(avRoom).terrainHp).runs : undefined } };
+    // ⭐ A CELL BODY'S CELLS ARE SAVED AS AIR — they are the object's, and the object is saved on its own and
+    // re-stamped when it is loaded (see `saveChunkBlob` for the same rule on the Overworld's side).
+    const _runs = terrainRLE(g).runs;
+    for (const run of _runs) if (run[0] === 250 || run[0] === 251) run[0] = 0;   // runs are [value, count] pairs
+    cached = { sig, mats, terrain: { cols: g.geom.cols, rows: g.geom.rows, cell: TERRAIN_CELL, runs: _runs, hpRuns: peekCells(avRoom).terrainHp ? terrainRLE(peekCells(avRoom).terrainHp).runs : undefined } };
     if (sig >= 0) _terrBlobCache.set(avRoom, cached); else _terrBlobCache.delete(avRoom);
   }
   return {
@@ -19461,6 +19610,7 @@ io.on('connection', (socket) => {
     // material id 1..255 (carve = 0). ⭐ A custom LIQUID resolves to the built-in it flows as before anything
     // else looks at it — see `liqBaseSrv`. Everything below this line therefore only ever handles the six.
     const m = (op === 'paint') ? liqBaseSrv(roomMats[currentAvatarRoom], Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1) : 0;
+    if (isBodyId(m)) return;                                // a cell body's material is the object's, never a paint
     const sq = shape === 'square';
     // ⭐ ARM THE DRAIN CHECK BY USING ONE. `liquidCfg.sinks` ships off because drain blocks are a test tool and
     // looking for them costs ~3% of the liquid tick in every world that has none (see `sinkOn`). Painting one
@@ -19628,6 +19778,8 @@ io.on('connection', (socket) => {
       // predates the fix or one written straight from a material id.
       const v = liqBaseSrv(mats, Math.max(0, Math.min(TERRAIN_MAT_HI, cells[k + 1] | 0)));
       cells[k + 1] = v;                                     // …and the rebroadcast below carries what was STORED, not what was asked for
+      // ⭐ A CELL BODY'S CELLS ARE THE OBJECT'S: an undo or a paste neither writes one nor overwrites one (see `bodyStamp`).
+      if (i >= 0 && i < grid.length && (isBodyId(v) || isBodyId(grid.g(i)))) { cells[k + 1] = grid.g(i); continue; }
       if (i >= 0 && i < grid.length) { if (grid.g(i) !== v) { grid.s(i, v); changed = true; } hp.s(i, v ? matStrengthSrv(mats, v) : 0); }
       // Same rule for an explicit cell write (undo / paste / a test scene): anything that is no longer the liquid it
       // was drops its source flag. Only a cell that stays a liquid keeps refilling.
@@ -19699,15 +19851,17 @@ io.on('connection', (socket) => {
   // brush's own message (`terrain-edit` op 'ignite') can only light TERRAIN — the server cannot see a moving object
   // under a brush — so the client names the objects its stroke touched and they catch at once, no exposure delay: the
   // tool is a match, not a heat source. Same permission as the brush (`canBuild`).
-  socket.on('obj-ignite', ({ id, x, y }) => {
+  // ⭐ CELL BODIES: a stamped body is terrain, so the brush has already lit the cells under it; a moving one has the
+  // cells nearest the brush flagged alight, in the pose (`px`,`py`,`pa`) the client that drew the stroke saw it at.
+  socket.on('obj-ignite', ({ id, x, y, r, px, py, pa }) => {
     const room = currentAvatarRoom; if (!room || !canBuild()) return;
     const obj = roomObjects[room] && roomObjects[room].get(id);
-    if (!obj) return;
-    if (objFireSpec(obj)) { objFireLight(room, obj, x, y); return; }
+    if (!obj || !isFinite(x) || !isFinite(y)) return;
+    if (bodySpec(obj)) { if (bodyIgnite(room, obj, x, y, r, px, py, pa)) broadcastObjSt(room); return; }
     // …and a thing that answers to heat without burning goes up or melts the way lava sets it off
     if (obj.boom > 0) armBomb(room, id, socket.id, { x, y });
   });
-  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src }) => {
+  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     const obj = roomObjects[currentAvatarRoom].get(id);
     // ⭐⭐ #183 — HITTING A BOMB SETS IT OFF; it does not damage it. This is deliberately the SAME message a
@@ -19725,17 +19879,20 @@ io.on('connection', (socket) => {
     // ⚠️ A drum that is punched to bits is therefore simply destroyed, not detonated. That is the rule as asked
     // for; if smashing one should spill burning oil, that is a different thing and wants saying out loud.
     if (obj && (obj.look === 'bomb' || (fire && obj.boom > 0))) { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy }); return; }
-    // ⭐⭐ A WOODEN THING IN THE HEAT CATCHES RATHER THAN BEING CHIPPED AWAY (fire on objects, see `objFireExpose`).
-    // Heat on it is exposure towards catching, and water on it puts it out; neither damages it. A punch still does.
-    if (obj && objFireSpec(obj)) {
-      if (douse) { objFireDouse(currentAvatarRoom, obj); return; }
-      if (fire) { objFireExpose(currentAvatarRoom, obj, x, y); return; }
+    // ⭐⭐ A WOODEN THING IS NOT CHIPPED AWAY BY HEAT OR WATER — it is a CELL BODY, and the terrain fire burns it where
+    // it is touched (see `bodyStamp`). A hot SHOT names the point it hit (`hx`,`hy`) and lights the cells there — a
+    // flame jet is a match, like the Fire tool. Anything else (water, an older client's heat report) is dropped. A punch
+    // still damages. ⚠️ Collapsed per source above, so five clients watching one jet light it once.
+    if (obj && bodySpec(obj) && (fire || douse)) {
+      if (fire && isFinite(hx) && isFinite(hy)) {
+        const _d = roomDims(currentAvatarRoom);
+        const px = isFinite(x) ? x : obj.x, py = isFinite(y) ? y : obj.y;
+        if (bodyIgnite(currentAvatarRoom, obj, Math.max(0, Math.min(_d.cols * TERRAIN_CELL, hx)), Math.max(0, Math.min(_d.rows * TERRAIN_CELL, hy)), TERRAIN_CELL, px, py, isFinite(pa) ? pa : 0)) broadcastObjSt(currentAvatarRoom);
+      }
+      return;
     }
     if (!obj || typeof obj.hp !== 'number') return;
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
-    // ⭐ SMASHED WHILE ALIGHT: it goes the way a burnt one does — ash, and embers still glowing on the ground.
-    { const rf = obj.hp <= 0 && roomObjSt[currentAvatarRoom] && roomObjSt[currentAvatarRoom].get(id);
-      if (rf && rf.fb) { objBurnOut(currentAvatarRoom, obj, objFirePos(currentAvatarRoom, obj, x, y)); return; } }
     if (obj.hp <= 0) {
       objUnindex(currentAvatarRoom, obj);
       // ⭐ SMASHED, SO THE DEPOSIT FALLS ON THE GROUND rather than being handed to whoever hit it — the same
@@ -19818,6 +19975,35 @@ io.on('connection', (socket) => {
     const m = roomObjDrv[room] || (roomObjDrv[room] = new Map());
     if (m.get(id) === socket.id) return;
     m.set(id, socket.id);
+    broadcastObjSt(room);
+  });
+  // ⭐⭐ CELL BODIES — A LOOSE WOODEN THING CAME TO REST HERE (`obj-rest`), OR STARTED MOVING (`obj-move`). Nothing on this
+  // end knows where a loose object is (its motion rides its driver's position stream), so the machine that worked the
+  // motion out says so, and the body is written into the world there (`bodyStamp`) or taken back out (`bodyUnstamp`).
+  // ⚠️ ONLY THE DRIVER, OR ANYBODY WHEN NOBODY DRIVES IT — and a report from nobody's crate makes the reporter its
+  // driver. Without that, two players who each simulated an untouched crate to slightly different rests would take
+  // turns re-stamping it at their own answer for ever. "The last person to touch it drives it" already decides who is
+  // right about a loose thing; this only extends it to the person who first watched it settle.
+  const bodyReportOk = (room, obj) => {
+    if (!obj || !bodySpec(obj) || !bodyLoose(obj)) return false;
+    const m = roomObjDrv[room] || (roomObjDrv[room] = new Map());
+    const drv = m.get(obj.id);
+    if (drv && drv !== socket.id) return false;
+    if (!drv) m.set(obj.id, socket.id);
+    return true;
+  };
+  socket.on('obj-rest', ({ id, x, y, a }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const obj = roomObjects[room] && roomObjects[room].get(id);
+    if (!isFinite(x) || !isFinite(y) || !isFinite(a) || !bodyReportOk(room, obj)) return;
+    if (bodyRestAt(room, obj, +x, +y, +a)) broadcastObjSt(room);
+  });
+  socket.on('obj-move', ({ id }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const obj = roomObjects[room] && roomObjects[room].get(id);
+    if (!bodyReportOk(room, obj)) return;
+    if (!roomBodyStamp[room] || !roomBodyStamp[room].has(obj.id)) return;
+    bodyUnstamp(room, obj.id, true);
     broadcastObjSt(room);
   });
   // ⭐⭐ #347 — SOMEBODY PRESSED A SWITCH. Unlike a plate this is a fact about the WORLD and outlives the person
