@@ -908,6 +908,11 @@ app.get('/debug/voice-prox', (req, res) => {
   if (req.query.reset) { voiceProxStats.passes = 0; voiceProxStats.compared = 0; }
   res.json(out);
 });
+// Cell bodies — how often bodies go in, come out, and move while kept in (step 3), and what moving them displaced.
+app.get('/debug/bodies', (req, res) => {
+  res.json({ stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
+             liqPushed: bodyLiqPushed, grainsNudged: bodyGrainsNudged, cfg: bodyPosCfg });
+});
 app.get('/debug/cpu-profile', (req, res) => {
   const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
   if (ip !== '127.0.0.1' && ip !== '::1') return res.status(403).json({ error: 'localhost only' });
@@ -4092,20 +4097,201 @@ function bodyBurnOut(room, obj) {
 // Somebody's machine says this loose body came to rest here (`obj-rest`), or started moving (`obj-move`). ⚠️ CLAMPED to
 // the world and to the neighbourhood of where it was placed — the rule `armBomb` uses — so a forged report can only lie
 // locally.
-function bodyRestAt(room, obj, x, y, a) {
+function bodyPoseClamp(room, obj, x, y, a) {
   const d = roomDims(room), WW = d.cols * TERRAIN_CELL, WH = d.rows * TERRAIN_CELL;
   x = Math.max(obj.x - 4000, Math.min(obj.x + 4000, Math.max(0, Math.min(WW, x))));
   y = Math.max(obj.y - 4000, Math.min(obj.y + 4000, Math.max(0, Math.min(WH, y))));
   // ⚠️ ROUNDED TO WHAT `bs` CARRIES, before it is stamped: the client works out which world cell each body cell reads from
   // the pose it is sent (`bodyRep`), and a different last digit can put a boundary cell on the other side.
-  x = Math.round(x * 10) / 10; y = Math.round(y * 10) / 10; a = Math.round(a * 1000) / 1000;
+  return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10, a: Math.round(a * 1000) / 1000 };
+}
+function bodyRestAt(room, obj, x, y, a) {
+  ({ x, y, a } = bodyPoseClamp(room, obj, x, y, a));
   const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id);
   let da = S ? a - S.a : 0; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
   if (S && Math.abs(S.x - x) < 2 && Math.abs(S.y - y) < 2 && Math.abs(da) < 0.02) return false;   // already there
   if (!bodyStill(room, obj, roomObjSt[room] && roomObjSt[room].get(obj.id), null)) return false;
-  if (S) bodyUnstamp(room, obj.id, true);
-  bodyStamp(room, obj, x, y, a);
+  bodyMoveTo(room, obj, x, y, a);
   return true;
+}
+// ── ⭐⭐ CELL BODIES, STEP 3 (2026-09-19) — A MOVING BODY STAYS IN THE WORLD ──────────────────────────────────────────────
+// Steps 1–2 took a body OUT of the world the moment it moved and wrote it back where it landed, so in between it was not
+// solid to ash or water, dropped no ash where it burned, lit nothing it passed, and burnt on a clock of its own (user: a
+// crate on a pivot was not solid to ash — it swings to each new balance angle as it burns, and was out of the world for
+// 22 of 30 seconds). Now the machine working out its motion reports its pose ten times a second (`obj-pos`) and the
+// server changes ONLY the world cells that differ between where it was and where it is — the user's own suggestion, the
+// Noita way. A slide rewrites its leading and trailing edges; wood replacing wood is no change, so even a turn rewrites
+// only the outline, plus wherever a charred or burning cell has moved to.
+// ⭐ THE FIRE RIDES ALONG. Each body cell's state is read back from the world at the old pose (`bodyRep`, the readback's
+//    own rule) and written at the new one, an alight cell keeping how long it has burned — so there is ONE fire whether it
+//    moves or not, and what crumbles off a moving crate is ash left where it crumbled.
+// ⭐ LIQUID IS PUSHED ASIDE (user): a newly covered cell's pool moves into a cell the body has just left — the water closes
+//    in behind it, as when wading — else into the nearest open air, else the cell is not taken. POWDER IS NOT PUSHED ASIDE:
+//    a body rests ON powder (the client's solver counts it as solid), and a grain its footprint overlaps by rounding is
+//    nudged up or sideways, never down, so it settles back on top (user: *"it would sort of push it around a bit but would
+//    still ultimately settle on top of it"*).
+// ⚠️ THE NEW POSE RIDES THE SAME `terrain-set` AS THE CELLS IT DESCRIBES (`bp`). Two messages would let a client read the
+//    moved cells at the old pose for a moment, and cut the picture by cells that are not the body's.
+// ⚠️ A body that cannot be kept in (its new ground is not made yet, its grid was replaced) falls back to step 1's way: out
+//    of the world, burning on its own clock (`bodyBurnMoving`), stamped again where it rests.
+const bodyPosCfg = { on: 1, hz: 10, liquid: 1, powder: 1 };
+let bodyMoves = 0, bodyMoveCells = 0, bodyLiqPushed = 0, bodyGrainsNudged = 0;   // mechanism counters (`mwObjFire`)
+// Each body cell's state as the world has it at stamp `S` — `bodyUnstamp`'s readback, without clearing anything.
+// Returns { cells, age (ms alight per body cell), changed }. ⚠️ Only fire changes a body's cells (see `bodyUnstamp`).
+function bodyReadCells(st, obj, D, S, rec) {
+  const old = bodyCellsOf(rec, obj), age = new Float32Array(old.length);
+  if (!S.fire) return { cells: old, age, changed: false };
+  const grid = st.terrain, fs = st.fineFire, ages = st.fireAge, ROWS = st.rows, tk = liquidCfg.tickMs || 40;
+  const nw = new Uint8Array(old.length);
+  let changed = false;
+  for (let k = 0; k < old.length; k++) {
+    if (!(old[k] & 3)) continue;
+    if (S.skip[k]) { nw[k] = old[k]; continue; }
+    const q = bodyRep(obj, D, S.x, S.y, S.a, k);
+    if (!q) { nw[k] = old[k]; continue; }
+    const i = q.c * ROWS + q.r;
+    const v = grid.g(i), code = v === BODY_WOOD ? 1 : v === BODY_CHAR ? 2 : 0, lit = !!(code && fs && fs.has(i));
+    nw[k] = code ? (code | (lit ? 4 : 0)) : 0;
+    if (lit) age[k] = ((ages && ages.get(i)) || 0) * tk;
+    if (nw[k] !== old[k]) changed = true;
+  }
+  return { cells: nw, age, changed };
+}
+// Move a stamped body to a new pose, touching only the world cells that differ. Returns 0 nothing changed · 1 moved ·
+// 2 newly in the world · 3 taken out (the room's object state must be re-sent for 2 and 3).
+function bodyMoveTo(room, obj, x, y, a) {
+  const m = roomBodyStamp[room], S = m && m.get(obj.id);
+  if (!S) return bodyStamp(room, obj, x, y, a) ? 2 : 0;
+  const st = roomCells.get(room), D = bodyDims(obj);
+  if (!bodyPosCfg.on || !st || st.terrain !== S.g || D.c !== S.dc || D.r !== S.dr) {
+    bodyUnstamp(room, obj.id, true);
+    return bodyStamp(room, obj, x, y, a) ? 2 : 3;
+  }
+  const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows, COLS = st.cols, nn = grid.length;
+  const peek = grid.seedFn ? (j) => peekCellAt(grid, j) : (j) => grid.g(j);
+  let unmade = false;
+  if (grid.seedFn) bodyRaster(obj, D, x, y, a, (c, r) => { if (!unmade && c >= 0 && r >= 0 && c < COLS && r < ROWS && peekCellAt(grid, c * ROWS + r) < 0) unmade = true; });
+  if (unmade) { bodyUnstamp(room, obj.id, true); return 3; }
+  const ost = objStOf(room), rec = ost.get(obj.id) || {};
+  const R = bodyReadCells(st, obj, D, S, rec), cells = R.cells;
+  const tk = liquidCfg.tickMs || 40, fireOk = !!liquidCfg.fireSolids;
+  const fs = st.fineFire, ages = st.fireAge || (st.fireAge = new Map());
+  const tot = st.fineTotal, famt = st.fineAmt, src = st.src;
+  // where it was: the cells still holding one of its materials are its own (ash the fire left there stays)
+  const was = new Set();
+  for (let q = 0; q < S.idx.length; q++) { const i = S.idx[q]; if (isBodyId(peek(i))) was.add(i); }
+  // where it is going: world cell → body cell
+  const want = new Map();
+  bodyRaster(obj, D, x, y, a, (c, r, k) => { if (c >= 0 && r >= 0 && c < COLS && r < ROWS && (cells[k] & 3)) want.set(c * ROWS + r, k); });
+  const set = [], fireOut = [], fireIn = [], fineCh = [], fresh = [];
+  let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
+  const box = (i) => { const c = (i / ROWS) | 0, r = i - c * ROWS; if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; };
+  const fireOff = (i) => { if (fs && fs.delete(i)) fireOut.push(i, 0); ages.delete(i); };
+  // 1 · leave the cells it no longer covers
+  const freed = [];
+  for (const i of was) if (!want.has(i)) {
+    grid.s(i, 0); hp.s(i, 0); if (st.sat) st.sat.s(i, 0); set.push(i, 0); fireOff(i); freed.push(i); box(i);
+  }
+  const open = (j) => j >= 0 && j < nn && peek(j) === 0 && !(tot && tot.g(j) > 0) && !want.has(j) && !(src && src.has(j));
+  // a pool in `i` goes to the nearest cell the body has just left, else the nearest open air within three cells
+  const pushPool = (i) => {
+    if (!famt || !tot) return false;
+    const ic = (i / ROWS) | 0, ir = i - ic * ROWS;
+    let to = -1, bd = Infinity;
+    for (const j of freed) { if (!open(j)) continue; const jc = (j / ROWS) | 0, jr = j - jc * ROWS, d = (jc - ic) * (jc - ic) + (jr - ir) * (jr - ir); if (d < bd) { bd = d; to = j; } }
+    for (let rad = 1; to < 0 && rad <= 3; rad++) for (let dr = -rad; dr <= rad && to < 0; dr++) for (let dc = -rad; dc <= rad; dc++) {
+      if (Math.max(Math.abs(dc), Math.abs(dr)) !== rad) continue;
+      const nc = ic + dc, nr = ir + dr; if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS) continue;
+      const j = nc * ROWS + nr; if (open(j)) { to = j; break; }
+    }
+    if (to < 0) return false;
+    const pf = famt.wp(i), bf = famt.o(i), pt = famt.wp(to), bt = famt.o(to);
+    for (let q = 0; q < LIQ_T; q++) { pt[bt + q] = pf[bf + q]; pf[bf + q] = 0; }
+    tot.s(to, tot.g(i)); tot.s(i, 0);
+    grid.s(i, 0); hp.s(i, 0);
+    fineSyncGrid(room, to); set.push(to, grid.g(to));
+    fineSet(room).add(to); fineCh.push(i, to); box(to);
+    bodyLiqPushed++;
+    return true;
+  };
+  // a grain in `i` is nudged up or sideways — never down, so it settles back ON the body
+  const NUDGE = [[0, -1], [-1, 0], [1, 0], [-1, -1], [1, -1], [0, -2], [-2, 0], [2, 0], [-1, -2], [1, -2]];
+  const nudgeGrain = (i) => {
+    const ic = (i / ROWS) | 0, ir = i - ic * ROWS, v = peek(i), h = hp.g(i);
+    for (const [dc, dr] of NUDGE) {
+      const nc = ic + dc, nr = ir + dr; if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS) continue;
+      const j = nc * ROWS + nr; if (!open(j)) continue;
+      grid.s(j, v); hp.s(j, h); grid.s(i, 0); hp.s(i, 0);
+      set.push(j, v); box(j); bodyGrainsNudged++;
+      return true;
+    }
+    return false;
+  };
+  // 2 · take the cells it now covers
+  const idx = [];
+  let litAny = false;
+  for (const [i, k] of want) {
+    const code = cells[k], mat = (code & 3) === 2 ? BODY_CHAR : BODY_WOOD, lit = fireOk && !!(code & 4);
+    if (lit) litAny = true;
+    if (was.has(i)) {                                           // already one of its cells: only its state can differ
+      idx.push(i);
+      if (peek(i) !== mat) { grid.s(i, mat); set.push(i, mat); box(i); }
+      const on = !!(fs && fs.has(i));
+      if (lit) { ages.set(i, Math.round(R.age[k] / tk)); if (!on) { fineFireSet(room).add(i); fireIn.push(i, 1); box(i); } }
+      else if (on) { fireOff(i); box(i); }
+      continue;
+    }
+    const v = peek(i);
+    if (v < 0 || (src && src.has(i))) continue;
+    if (isFluidId(v) || (tot && tot.g(i) > 0)) { if (!bodyPosCfg.liquid || !pushPool(i)) continue; }
+    else if (isPowderId(v)) { if (!bodyPosCfg.powder || !nudgeGrain(i)) continue; }
+    else if (v > 0) continue;                                    // ground, another body: not ours to overwrite
+    grid.s(i, mat); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
+    set.push(i, mat); idx.push(i); fresh.push(i); box(i);
+    if (lit) { fineFireSet(room).add(i); ages.set(i, Math.round(R.age[k] / tk)); fireIn.push(i, 1); }
+  }
+  // which body cells' READ cell was not written — they keep their own state (and are smothered: see `bodyStamp`)
+  const written = new Set(idx), skip = new Uint8Array(cells.length);
+  let skips = '', smothered = false;
+  for (let k = 0; k < cells.length; k++) {
+    if (!(cells[k] & 3)) { skips += '0'; continue; }
+    const q = bodyRep(obj, D, x, y, a, k);
+    if (!q || q.c < 0 || q.r < 0 || q.c >= COLS || q.r >= ROWS || !written.has(q.c * ROWS + q.r)) {
+      skip[k] = 1; skips += '1';
+      if (cells[k] & 4) { cells[k] &= 3; smothered = true; }
+    } else skips += '0';
+  }
+  if (R.changed || smothered) bodyCellsSet(rec, obj, cells);
+  if (!idx.length) {                                            // nowhere left to be: out, as step 1 would have it
+    m.delete(obj.id); if (!m.size) delete roomBodyStamp[room];
+    delete rec.bs; if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
+    if (set.length) wireFanout(room, 'terrain-set', { cells: set });
+    if (fireOut.length) wireFanout(room, 'fire-cells', { cells: fireOut, lift: 1 });
+    if (fineCh.length) emitFineCells(room, fineCh);
+    let lit = false; for (let k = 0; k < cells.length; k++) if (cells[k] & 4) { lit = true; break; }
+    if (lit) (roomBodyBurn[room] || (roomBodyBurn[room] = new Map())).set(obj.id, { age: R.age, last: Date.now() });
+    return 3;
+  }
+  // ⚠️ A MOVE THAT CHANGED NOTHING IN THE WORLD KEEPS ITS OLD POSE. The pose reaches a client only on the `terrain-set` that
+  //    carries cells for it — with no cells there is no message — and a server pose the client never heard of maps its body
+  //    cells onto the wrong world cells: the crate that settled a few pixels under water was drawn cut to its bottom rows.
+  //    The old pose describes the world exactly as well, since the world did not change.
+  if (!set.length && !fireIn.length && !fireOut.length && !fineCh.length && !smothered) { ost.set(obj.id, rec); return 0; }
+  // …and one whose only change was WHICH cells are alight still needs its pose delivered: a cell of its own, re-sent
+  if (!set.length) set.push(idx[0], peek(idx[0]));
+  S.x = x; S.y = y; S.a = a; S.idx = Int32Array.from(idx); S.skip = skip; S.fire = S.fire || litAny;
+  const sk = skips.indexOf('1') >= 0;
+  rec.bs = [x, y, Math.round(a * 1000)]; if (sk) rec.bs.push(skips);
+  ost.set(obj.id, rec);
+  bodyMoves++; bodyMoveCells += set.length / 2;
+  wireFanout(room, 'terrain-set', { cells: set, bp: [obj.id, x, y, Math.round(a * 1000), sk ? skips : 0] });
+  if (fireOut.length) wireFanout(room, 'fire-cells', { cells: fireOut, lift: 1 });
+  if (fireIn.length) wireFanout(room, 'fire-cells', { cells: fireIn });
+  if (fineCh.length) emitFineCells(room, fineCh);
+  // what rested on it, or flowed round it, has something new beside it
+  if (c1 >= c0) { fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 2, c1 + 1, r1 + 1); }
+  for (const i of fresh) seedFineReactAround(room, i);
+  return 1;
 }
 // ⭐ ONE LOOP KEEPS THE WORLD IN STEP WITH THE OBJECTS, rather than a line in each of the dozen places an object can be
 // placed, moved, loaded, hidden or posed. Every ~1s it stamps every still, pinned body that is not stamped yet, takes
@@ -20139,6 +20325,27 @@ io.on('connection', (socket) => {
     const obj = roomObjects[room] && roomObjects[room].get(id);
     if (!isFinite(x) || !isFinite(y) || !isFinite(a) || !bodyReportOk(room, obj)) return;
     if (bodyRestAt(room, obj, +x, +y, +a)) broadcastObjSt(room);
+  });
+  // ⭐⭐ STEP 3 — WHERE THE MOVING BODIES I AM WORKING OUT HAVE GOT TO, ten times a second: `b` is flat
+  // [id, x, y, angle×1000, …]. Each one is kept IN the world at its new pose, only the differing cells rewritten
+  // (`bodyMoveTo`). Same authority rule as a rest report; a report arriving faster than the rate is dropped.
+  const _bodyPosAt = new Map();
+  socket.on('obj-pos', ({ b } = {}) => {
+    const room = currentAvatarRoom; if (!room || !Array.isArray(b) || !bodyPosCfg.on) return;
+    const map = roomObjects[room]; if (!map) return;
+    const now = Date.now(), gap = 700 / Math.max(1, bodyPosCfg.hz);
+    let restate = false;
+    for (let q = 0; q + 3 < b.length && q < 4 * 48; q += 4) {
+      const obj = map.get(b[q]), x = +b[q + 1], y = +b[q + 2], a = +b[q + 3] / 1000;
+      if (!isFinite(x) || !isFinite(y) || !isFinite(a) || !bodyReportOk(room, obj)) continue;
+      if (now - (_bodyPosAt.get(obj.id) || 0) < gap) continue;
+      _bodyPosAt.set(obj.id, now);
+      if (!bodyStill(room, obj, roomObjSt[room] && roomObjSt[room].get(obj.id), null)) continue;
+      const P = bodyPoseClamp(room, obj, x, y, a);
+      if (bodyMoveTo(room, obj, P.x, P.y, P.a) >= 2) restate = true;
+    }
+    if (_bodyPosAt.size > 512) for (const [id, t] of _bodyPosAt) if (now - t > 10000) _bodyPosAt.delete(id);
+    if (restate) broadcastObjSt(room);
   });
   socket.on('obj-move', ({ id }) => {
     const room = currentAvatarRoom; if (!room) return;
