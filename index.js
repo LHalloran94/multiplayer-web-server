@@ -3779,8 +3779,23 @@ function bodyDims(obj) {
 }
 // A whole one. Codes: 0 gone · 1 wood · 2 charcoal, +4 alight. A round thing (barrel, log) has its four corner cells
 // missing — its outline at cell resolution. ⚠️ Mirrored on the client (`bodyFresh`).
-function bodyFresh(D, kind) {
+function bodyFresh(D, kind, obj) {
   const a = new Uint8Array(D.c * D.r).fill(1);
+  // ⭐ A BARREL'S CELLS ARE THE ONES INSIDE ITS OUTLINE (cell bodies step 2, round 3): a cell whose centre lies inside the
+  //   shape it is DRAWN as — the client's `cylPts` bulge, x = fx + k·√(1 − (y/b)²). The four-corner cut left whole edge cells
+  //   standing out past the curve, and the fire burnt them as a rectangle of flames in the air round the barrel.
+  // ⚠️ Mirrored on the client (`bodyFresh`, 16b) — the same test on the same numbers, or the picture is cut by the wrong cells.
+  if (obj && (obj.shape === 'cyl' || obj.shape === 'ellipse') && D.c >= 3 && D.r >= 3) {
+    const w = obj.w || 64, h = obj.h || 64, A = w / 2, B = h / 2, fx = A * (obj.cflat > 0 ? obj.cflat : 0.55), k = A - fx;
+    let any = 0;
+    for (let r = 0; r < D.r; r++) for (let c = 0; c < D.c; c++) {
+      const x = Math.abs(-A + (c + 0.5) * w / D.c), y = -B + (r + 0.5) * h / D.r;
+      const inside = obj.shape === 'cyl' ? x <= fx + k * Math.sqrt(Math.max(0, 1 - (y / B) * (y / B))) : (x / A) * (x / A) + (y / B) * (y / B) <= 1;
+      a[r * D.c + c] = inside ? 1 : 0; any |= inside;
+    }
+    if (any) return a;
+    a.fill(1);
+  }
   if (kind === 'round' && D.c >= 3 && D.r >= 3) a[0] = a[D.c - 1] = a[(D.r - 1) * D.c] = a[D.r * D.c - 1] = 0;
   return a;
 }
@@ -3791,12 +3806,12 @@ function bodyCellsOf(rec, obj) {
     const a = new Uint8Array(D.c * D.r); for (let k = 0; k < a.length; k++) a[k] = rec.bc.s.charCodeAt(k) - 48;
     return a;
   }
-  return bodyFresh(D, bodySpec(obj));
+  return bodyFresh(D, bodySpec(obj), obj);
 }
 // …and written back. A grid that is whole again (nothing burnt, nothing alight) drops out of the record, so a room
 // of untouched crates sends nothing for them.
 function bodyCellsSet(rec, obj, a) {
-  const D = bodyDims(obj), f = bodyFresh(D, bodySpec(obj));
+  const D = bodyDims(obj), f = bodyFresh(D, bodySpec(obj), obj);
   let same = true; for (let k = 0; k < a.length; k++) if (a[k] !== f[k]) { same = false; break; }
   if (same) { delete rec.bc; return; }
   let s = ''; for (let k = 0; k < a.length; k++) s += String.fromCharCode(48 + a[k]);
