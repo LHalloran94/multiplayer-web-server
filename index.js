@@ -911,6 +911,7 @@ app.get('/debug/voice-prox', (req, res) => {
 // Cell bodies — how often bodies go in, come out, and move while kept in (step 3), and what moving them displaced.
 app.get('/debug/bodies', (req, res) => {
   for (const k of ['on']) if (req.query[k] != null) bodyPosCfg[k] = +req.query[k] ? 1 : 0;   // A/B from a rig
+  for (const k of ['min', 'max']) if (req.query[k] != null && isFinite(+req.query[k])) fallCfg[k] = Math.max(1, +req.query[k] | 0);
   // `?check=1`: liquid that is sitting INSIDE something solid (a body cell, ground) — a state the flow never makes itself
   const bad = {};
   if (req.query.check) for (const [room, st] of roomCells) {
@@ -920,7 +921,7 @@ app.get('/debug/bodies', (req, res) => {
     if (total) bad[room] = { total, inBody, inSolid };
   }
   res.json({ stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
-             fallCuts, fallRefused, fallPiled, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg, rooms: bad });
+             fallCuts, fallRefused, fallPiled, fallSmall, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg, rooms: bad });
 });
 app.get('/debug/cpu-profile', (req, res) => {
   const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
@@ -4442,7 +4443,7 @@ function bodyIgnite(room, obj, x, y, r, px, py, pa) {
 // `min`: a clump smaller than this drops as PICKUPS (#108's old way) instead of becoming an object — a burning crown sheds
 // one- and two-cell specks every few seconds, and a forest fire would otherwise fill the world with tiny loose bodies.
 const fallCfg = { on: 1, max: 2000, min: 6 };
-let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
+let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallSmall = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
 const FALL_ASH = 38;
 function fallCand(v) { return v > 0 && (isPlantId(v) || v === 91 || v === 92); }
 // the cells the fire has finished since the last look, per room (`fireGone` → here; `bodyTick` drains it)
@@ -4494,7 +4495,11 @@ function fallCheck(room, c0, r0, c1, r1, seenIn) {
     for (const i of mark) seen.add(i);
     if (supported || !region.length) continue;
     if (overflow) { fallRefused++; continue; }
-    if (region.length < fallCfg.min) { fallPile(room, region); continue; }
+    // ⚠️ A CLUMP UNDER `min` CELLS STAYS WHERE IT IS (user, 2026-09-20: no pickups — not for trees any more, and not in a
+    //    sandbox at all; ideally these would fall as objects too, but many small bodies are the lag they already see). A
+    //    burning one burns away where it hangs. `min` 1 makes every clump an object (`/debug/bodies?min=1`). `fallPile` is
+    //    kept, unused, for the `fallCfg.on = 0` era's behaviour.
+    if (region.length < fallCfg.min) { fallSmall++; continue; }
     if (fallCut(room, region)) cut++;
   }
   return cut;
