@@ -910,7 +910,7 @@ app.get('/debug/voice-prox', (req, res) => {
 });
 // Cell bodies — how often bodies go in, come out, and move while kept in (step 3), and what moving them displaced.
 app.get('/debug/bodies', (req, res) => {
-  for (const k of ['on']) if (req.query[k] != null) bodyPosCfg[k] = +req.query[k] ? 1 : 0;   // A/B from a rig
+  for (const k of ['on', 'skipChar']) if (req.query[k] != null) bodyPosCfg[k] = +req.query[k] ? 1 : 0;   // A/B from a rig
   for (const k of ['min', 'max']) if (req.query[k] != null && isFinite(+req.query[k])) fallCfg[k] = Math.max(1, +req.query[k] | 0);
   // `?check=1`: liquid that is sitting INSIDE something solid (a body cell, ground) — a state the flow never makes itself
   const bad = {};
@@ -4192,7 +4192,7 @@ function bodyRestAt(room, obj, x, y, a) {
 //    moved cells at the old pose for a moment, and cut the picture by cells that are not the body's.
 // ⚠️ A body that cannot be kept in (its new ground is not made yet, its grid was replaced) falls back to step 1's way: out
 //    of the world, burning on its own clock (`bodyBurnMoving`), stamped again where it rests.
-const bodyPosCfg = { on: 1, hz: 10 };
+const bodyPosCfg = { on: 1, hz: 10, skipChar: 1 };   // `skipChar`: buried cells char — see `bodySkipChar`
 let bodyMoves = 0, bodyMoveCells = 0;   // mechanism counters (`mwObjFire`)
 // Each body cell's state as the world has it at stamp `S` — `bodyUnstamp`'s readback, without clearing anything.
 // Returns { cells, age (ms alight per body cell), changed }. ⚠️ Only fire changes a body's cells (see `bodyUnstamp`).
@@ -4312,6 +4312,57 @@ function bodyMoveTo(room, obj, x, y, a) {
   for (const i of fresh) seedFineReactAround(room, i);
   return 1;
 }
+// ⭐⭐ THE CELLS THAT ARE NOT IN THE WORLD CHAR TOO (user, step 3 round 5: *"the cells pushed over ash turn orange"*).
+// A body cell whose world cell could not be written — it is buried in the body's own ash, in ground, in water — is
+// `skip`ped: it keeps its own state, and the fire cannot reach it because the fire lives in the WORLD. So while the
+// rest of a crate charred, its buried base stayed the bright unburnt planks it had always been, and read as an orange
+// band at the bottom of a black crate. Round 4 made the drawn state TRUE to the record; this makes the record true to
+// what is happening to it.
+// ⭐ IT IS ONE TIMER PER BURIED CELL AND NO FLAME. Buried is buried: there is no air down there, so a cell touching
+//   fire does not catch and flare — it CHARS, which is the same "starved" outcome the terrain fire already gives a
+//   cell with no open face (wood → charcoal, and charcoal stays charcoal). Leaves leave nothing, as everywhere else.
+// ⚠️ NEIGHBOURS ARE IN THE BODY'S OWN FRAME, and "next to fire" counts a neighbour that is ALIGHT or already CHARRED:
+//    by the time the cell above it has become charcoal the heat has certainly been there, and waiting only for a live
+//    flame would leave a stripe of fresh wood under a burnt-through crate.
+// ⚠️ Rate-limited by the same clock as everything else about a body (bodyTick, 250ms), and the state rides the skip
+//    string it already had — so a change here costs one `obj-state` for the room, not one per body.
+function bodySkipChar(room, obj, S, now) {
+  if (!bodyPosCfg.skipChar || !S || !S.skip || !liquidCfg.fireSolids) return false;
+  const st = roomCells.get(room); if (!st || st.terrain !== S.g) return false;
+  const ost = objStOf(room), rec = ost.get(obj.id); if (!rec) return false;
+  const D = bodyDims(obj), R = bodyReadCells(st, obj, D, S, rec), cells = R.cells;
+  const n = cells.length;
+  let any = false;
+  for (let k = 0; k < n; k++) if (S.skip[k] && (cells[k] & 3) !== 0 && (cells[k] & 3) !== 2) { any = true; break; }
+  if (!any) { S.sat = 0; return false; }
+  const dt = S.sat ? Math.max(0, Math.min(1000, now - S.sat)) : 0;
+  S.sat = now;
+  if (!dt) return false;
+  if (!S.sage || S.sage.length !== n) S.sage = new Float32Array(n);
+  const tk = liquidCfg.tickMs || 40;
+  const rateOf = (code) => FIRE_RATE[bodyCodeMat(code)] || 0.1;
+  const has = (c, r) => c >= 0 && r >= 0 && c < D.c && r < D.r;
+  const hot = (c, r) => { if (!has(c, r)) return false; const v = cells[r * D.c + c]; return !!(v & 4) || (v & 3) === 2; };
+  let changed = false;
+  for (let k = 0; k < n; k++) {
+    const code = cells[k] & 3;
+    if (!S.skip[k] || !code || code === 2) continue;              // …in the world, empty, or already charcoal
+    const c = k % D.c, r = (k / D.c) | 0;
+    if (!hot(c - 1, r) && !hot(c + 1, r) && !hot(c, r - 1) && !hot(c, r + 1)) continue;
+    S.sage[k] += dt;
+    // the same two numbers the terrain fire uses, for this material: how long to take, then how long to burn
+    if (S.sage[k] < (liquidCfg.fireSolidCatch + liquidCfg.fireSolidBurn) / rateOf(code) * tk) continue;
+    cells[k] = code === 3 ? 0 : 2;                                // foliage leaves nothing · wood becomes charcoal, out
+    S.sage[k] = 0; changed = true;
+  }
+  if (!changed) return false;
+  bodyCellsSet(rec, obj, cells);
+  // …and the mark the client reads those cells from carries the new state (`bodySkipStr`)
+  const skips = bodySkipStr(S.skip, cells);
+  if (Array.isArray(rec.bs)) { rec.bs.length = 3; if (skips) rec.bs.push(skips); }
+  if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
+  return true;
+}
 // ⭐ ONE LOOP KEEPS THE WORLD IN STEP WITH THE OBJECTS, rather than a line in each of the dozen places an object can be
 // placed, moved, loaded, hidden or posed. Every ~1s it stamps every still, pinned body that is not stamped yet, takes
 // out any stamp whose object has gone, stopped being still, or been moved by its author, and — every 250ms in a room
@@ -4339,6 +4390,7 @@ function bodyTick() {
     const m = roomBodyStamp[room], st = roomCells.get(room), fs = st && st.fineFire;
     if (!st) continue;
     const fire = !!(fs && fs.size), map = roomObjects[room];
+    let skipCh = false;
     for (const [id, S] of [...m]) {
       // ⚠️ A BODY THAT HAS BURNED IS CHECKED EVEN WHEN NOTHING IN THE ROOM IS ALIGHT: its last cells crumble to ash
       // as the last flame goes out, and skipping fire-less rooms would never see it finish.
@@ -4354,8 +4406,11 @@ function bodyTick() {
       }
       if (unmade) continue;
       if (lit) S.fire = true;
+      // ⭐ …and the cells that are NOT in the world char along with the rest — see `bodySkipChar`.
+      if (bodySkipChar(room, obj, S, now)) skipCh = true;
       if (!left && S.fire) bodyBurnOut(room, obj);
     }
+    if (skipCh) broadcastObjSt(room);
   }
   if (!full) return;
   for (const room of Object.keys(roomObjects)) {
