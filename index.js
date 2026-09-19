@@ -3899,6 +3899,13 @@ function bodyStamp(room, obj, x, y, a) {
     if (!q || q.c < 0 || q.r < 0 || q.c >= COLS || q.r >= ROWS || !written.has(q.c * ROWS + q.r)) { skip[k] = 1; skips += '1'; }
     else skips += '0';
   }
+  // ⭐ A CELL THAT COULD NOT BE WRITTEN BECAUSE IT IS BURIED IN SOMETHING (the ash it came to rest in, the ground, water)
+  // IS SMOTHERED — its alight flag goes. It was kept, and since a skipped cell is in neither the world nor the moving burn,
+  // nothing ever advanced it: a crate that settled into its own ash was drawn burning for ever, and could never burn out
+  // (user, 2026-09-19). Loose objects do not collide with powder, so a crate sinks into an ash heap — this is common.
+  let smothered = false;
+  for (let k = 0; k < cells.length; k++) if (skip[k] && (cells[k] & 4)) { cells[k] &= 3; smothered = true; }
+  if (smothered) bodyCellsSet(rec, obj, cells);
   const m = roomBodyStamp[room] || (roomBodyStamp[room] = new Map());
   m.set(obj.id, { x, y, a, dc: D.c, dr: D.r, idx: Int32Array.from(idx), skip, g: grid, fire: litAt.size > 0 });
   wireFanout(room, 'terrain-set', { cells: set });
@@ -7936,7 +7943,7 @@ for (const [id, rate, ash] of [
   // sliced block. A crate is planks, not a trunk, so it takes and goes a little quicker than Wood; its charcoal is
   // thin and does not smoulder for a minute the way a trunk's does.
   [250, 0.8, 251], // Body wood — ~4s alight, then its own charcoal (starves like a trunk's when buried)
-  [251, 0.3, 38],  // Body charcoal — ~11s, then ash (a trunk's charcoal smoulders a minute)
+  [251, 0.16, 38], // Body charcoal — ~20s, then ash (user's number; a trunk's charcoal smoulders a minute)
 ]) { FIRE_RATE[id] = rate; FIRE_ASH[id] = ash; }
 // 🟥 A "ONLY A SHARE OF A BODY'S CHARCOAL LEAVES ASH, THE REST AIR" TABLE WAS HERE AND IS GONE (2026-09-19, user: *"the
 // crate charcoal shouldn't be turning into air any more than normal wood does, it should be turning into ash like wood
@@ -8415,7 +8422,11 @@ function fineReactTickRoom(room, SUB, phase) {
     // stopped a fire spreading eight runs in eight. A count cannot fail to arrive.
     // Is there open air against this cell? The oxygen rule's one primitive — used both by the catch test above and
     // by what a finished cell leaves behind. ⚠️ A cell holding liquid is not air.
-    const airCell = (j) => j >= 0 && j < N && gPeek(j) === 0 && tot.g(j) <= 0;
+    // ⚠️ THE LEVEL'S FLOOR IS NOT AIR. It is a virtual surface below `FLOOR_ROW` — the cells there read 0 — and the liquid
+    // and the sand already treat it as solid. The fire did not, so anything standing on the floor (a crate, a trunk) had
+    // its underside open to the air and burnt away from below first (user, 2026-09-19: *"the ash still appears on the
+    // bottom of non-moving crates"* — found with `e2e_fire_live --objash`: 0/0/0 under a crate resting on the floor).
+    const airCell = (j) => j >= 0 && j < N && (j % ROWS) < FLOOR_ROW && gPeek(j) === 0 && tot.g(j) <= 0;
     const airAround = (j) => { const rj = j % ROWS; return airCell(j - ROWS) || airCell(j + ROWS) || (rj > 0 && airCell(j - 1)) || (rj < ROWS - 1 && airCell(j + 1)); };
     const spread = (j0, rj, age) => {
       for (const j of [rj < ROWS - 1 ? j0 + 1 : -1, rj > 0 ? j0 - 1 : -1, j0 - ROWS, j0 + ROWS]) {
