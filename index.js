@@ -4002,7 +4002,10 @@ function bodyBurnMoving(room, obj, B, now) {
   const dt = Math.max(0, Math.min(1000, now - B.last)); B.last = now;
   const tk = liquidCfg.tickMs || 40, oxy = !!liquidCfg.fireOxygen;
   const has = (c, r) => c >= 0 && r >= 0 && c < D.c && r < D.r && (cells[r * D.c + c] & 3) !== 0;
-  const open = (k) => { const c = k % D.c, r = (k / D.c) | 0; return !has(c - 1, r) || !has(c + 1, r) || !has(c, r - 1) || !has(c, r + 1); };
+  // ⚠️ ITS BOTTOM EDGE IS NOT OPEN: a thing being pushed or dragged is nearly always sitting on something, and counting
+  // that face as air let a moving crate burn away from underneath as readily as from its sides (user, 2026-09-19: *"they
+  // burn just as well on the bottom as on the exposed sides"*). A cell gone from INSIDE the grid still opens it.
+  const open = (k) => { const c = k % D.c, r = (k / D.c) | 0; return !has(c - 1, r) || !has(c + 1, r) || !has(c, r - 1) || (r + 1 < D.r && !has(c, r + 1)); };
   const rateOf = (code) => FIRE_RATE[(code & 3) === 1 ? BODY_WOOD : BODY_CHAR] || 0.1;
   let hs = 0; const sid = String(obj.id); for (let q = 0; q < sid.length; q++) hs = (Math.imul(hs, 31) + sid.charCodeAt(q)) | 0;
   const next = cells.slice();
@@ -7932,16 +7935,13 @@ for (const [id, rate, ash] of [
   // crumbles to is left in the world as terrain. ⚠️ LITERAL IDS: `BODY_WOOD`/`BODY_CHAR` are declared outside this
   // sliced block. A crate is planks, not a trunk, so it takes and goes a little quicker than Wood; its charcoal is
   // thin and does not smoulder for a minute the way a trunk's does.
-  [250, 0.8, 251], // Body wood — ~4s alight, then its own charcoal
+  [250, 0.8, 251], // Body wood — ~4s alight, then its own charcoal (starves like a trunk's when buried)
   [251, 0.3, 38],  // Body charcoal — ~11s, then ash (a trunk's charcoal smoulders a minute)
 ]) { FIRE_RATE[id] = rate; FIRE_ASH[id] = ash; }
-// ⭐ HOW MUCH OF A BURNT-OUT CELL IS LEFT AS ASH, 0..1 (default 1 — every cell). A crate is mostly air between planks
-// (the user, on the old heaps: *"the amount of residue does not line up with the size of the object burned"*), so a
-// body's charcoal leaves ash in only some of its cells — hashed per cell off the fire's salt, like every other
-// per-cell property here, so it is a fixed fact about the cell and never a per-pass chance. What does not leave ash
-// leaves AIR, which is also what opens the object up for the flames inside it.
-const FIRE_ASH_K = new Float32Array(256).fill(1);
-FIRE_ASH_K[251] = 0.35;
+// 🟥 A "ONLY A SHARE OF A BODY'S CHARCOAL LEAVES ASH, THE REST AIR" TABLE WAS HERE AND IS GONE (2026-09-19, user: *"the
+// crate charcoal shouldn't be turning into air any more than normal wood does, it should be turning into ash like wood
+// does, or remaining charcoal"*). Two thirds of a crate turning to AIR opened every neighbour to the air, so the bottom
+// and middle burnt away as readily as the exposed faces — nothing like a trunk.
 // 🟥 A "NEVER STARVES" RULE FOR BODY FUEL WAS BUILT HERE AND TAKEN OUT (2026-09-19): the user wants a crate's buried
 // middle to go out as charcoal exactly as a trunk's does (*"we don't want to artificially make crates behave differently"*),
 // and burning every cell through left charred bits hanging in the air as the ones under them went first.
@@ -8578,9 +8578,7 @@ function fineReactTickRoom(room, SUB, phase) {
           // is what keeps a burnt tree's shape (charcoal burns ~10× longer than the wood did). Charcoal in turn
           // leaves Ash, which is not a fuel, so that is where the chain ends and the powder falls.
           // ⚠️ A FLASH CELL IS CONSUMED WHOLE, at either stage — that is what opens the gaps inside a burning trunk.
-          let left = flash ? 0 : FIRE_ASH[gPeek(i)];
-          // …and only a share of a body's charcoal leaves ash at all (`FIRE_ASH_K`) — the rest leaves air.
-          if (left && FIRE_ASH_K[gPeek(i)] < 1 && fireVar(i, salt, 7) >= FIRE_ASH_K[gPeek(i)]) left = 0;
+          const left = flash ? 0 : FIRE_ASH[gPeek(i)];
           // ⭐⭐ OXYGEN IS WHAT DECIDES CHARCOAL FROM ASH, and it is the difference in the real world too: wood
           // heated WITHOUT enough air pyrolyses to charcoal and stops there — the volatiles cook off and a carbon
           // skeleton is left — and charcoal only becomes ash when it actually BURNS, which needs air. That is why
@@ -8611,11 +8609,7 @@ function fineReactTickRoom(room, SUB, phase) {
           // terrain, which would smoulder for ever under a tree nobody set light to.
           // ⚠️ `fireAshOrder` 0 turns the whole "a cell behaves differently because of what is above it" idea off —
           // the user asked for the switch, because ordering is exactly what made the ash predictable.
-          // ⭐ …AND A CELL BODY'S CHARCOAL THAT LEAVES AIR (`FIRE_ASH_K` < 1) WAITS THE SAME WAY. It is the case the rule was
-          // written for, one step removed: vanishing out from under the charcoal above it leaves that hanging, which is
-          // exactly what the user saw — *"charred bits floating in mid-air before they finish burning away"*.
-          const crumbles = left > 0 ? isPowderId(left) : (!flash && FIRE_ASH_K[gPeek(i)] < 1);
-          if (liquidCfg.fireAshOrder && !relit && crumbles && rI > 0 && fire.has(i - 1)) continue;
+          if (liquidCfg.fireAshOrder && !relit && left > 0 && isPowderId(left) && rI > 0 && fire.has(i - 1)) continue;
           if (relit) {
             // Still burning, as something else now. `fireLit` carries it again so the client restarts its char
             // clock against the NEW material's burn length — it is only ever set for a cell that was not alight.
