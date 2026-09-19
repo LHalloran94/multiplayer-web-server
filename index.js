@@ -910,7 +910,7 @@ app.get('/debug/voice-prox', (req, res) => {
 });
 // Cell bodies — how often bodies go in, come out, and move while kept in (step 3), and what moving them displaced.
 app.get('/debug/bodies', (req, res) => {
-  for (const k of ['on', 'powder']) if (req.query[k] != null) bodyPosCfg[k] = +req.query[k] ? 1 : 0;   // A/B from a rig
+  for (const k of ['on']) if (req.query[k] != null) bodyPosCfg[k] = +req.query[k] ? 1 : 0;   // A/B from a rig
   // `?check=1`: liquid that is sitting INSIDE something solid (a body cell, ground) — a state the flow never makes itself
   const bad = {};
   if (req.query.check) for (const [room, st] of roomCells) {
@@ -920,7 +920,7 @@ app.get('/debug/bodies', (req, res) => {
     if (total) bad[room] = { total, inBody, inSolid };
   }
   res.json({ stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
-             grainsNudged: bodyGrainsNudged, cfg: bodyPosCfg, rooms: bad });
+             cfg: bodyPosCfg, rooms: bad });
 });
 app.get('/debug/cpu-profile', (req, res) => {
   const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
@@ -4141,16 +4141,17 @@ function bodyRestAt(room, obj, x, y, a) {
 //    ~2%. The user also saw water go chaotic in an Earth cup and stay so after the crates were deleted — not reproduced, but
 //    the likeliest cause. And the look is wrong anyway: a pool has depth into the screen, so a thing in it should be drawn
 //    UNDER the water, which the fluid pass already does to anything whose cells the water still holds. ⇒ a cell holding
-//    liquid is simply not taken (it is `skip`ped, and an alight one is put out). POWDER IS NOT PUSHED ASIDE EITHER:
-//    a body rests ON powder (the client's solver counts it as solid), and a grain its footprint overlaps by rounding is
-//    nudged up or sideways, never down, so it settles back on top (user: *"it would sort of push it around a bit but would
-//    still ultimately settle on top of it"*).
+//    liquid is simply not taken (it is `skip`ped, and an alight one is put out).
+// 🟥 …AND POWDER IS BACKGROUND, the same way (user, round 3). For two rounds a body RESTED ON powder and nudged grains out of
+//    its footprint; a burning crate then fought its own ash (it crumbles in the cells the crate covers) and moved erratically
+//    in play. User: *"treat ash like a background thing, though one that can still be mined, like trees."* A cell holding
+//    powder is not taken, exactly as before step 3.
 // ⚠️ THE NEW POSE RIDES THE SAME `terrain-set` AS THE CELLS IT DESCRIBES (`bp`). Two messages would let a client read the
 //    moved cells at the old pose for a moment, and cut the picture by cells that are not the body's.
 // ⚠️ A body that cannot be kept in (its new ground is not made yet, its grid was replaced) falls back to step 1's way: out
 //    of the world, burning on its own clock (`bodyBurnMoving`), stamped again where it rests.
-const bodyPosCfg = { on: 1, hz: 10, powder: 1 };
-let bodyMoves = 0, bodyMoveCells = 0, bodyGrainsNudged = 0;   // mechanism counters (`mwObjFire`)
+const bodyPosCfg = { on: 1, hz: 10 };
+let bodyMoves = 0, bodyMoveCells = 0;   // mechanism counters (`mwObjFire`)
 // Each body cell's state as the world has it at stamp `S` — `bodyUnstamp`'s readback, without clearing anything.
 // Returns { cells, age (ms alight per body cell), changed }. ⚠️ Only fire changes a body's cells (see `bodyUnstamp`).
 function bodyReadCells(st, obj, D, S, rec) {
@@ -4206,20 +4207,6 @@ function bodyMoveTo(room, obj, x, y, a) {
   for (const i of was) if (!want.has(i)) {
     grid.s(i, 0); hp.s(i, 0); if (st.sat) st.sat.s(i, 0); set.push(i, 0); fireOff(i); box(i);
   }
-  const open = (j) => j >= 0 && j < nn && peek(j) === 0 && !(tot && tot.g(j) > 0) && !want.has(j) && !(src && src.has(j));
-  // a grain in `i` is nudged up or sideways — never down, so it settles back ON the body
-  const NUDGE = [[0, -1], [-1, 0], [1, 0], [-1, -1], [1, -1], [0, -2], [-2, 0], [2, 0], [-1, -2], [1, -2]];
-  const nudgeGrain = (i) => {
-    const ic = (i / ROWS) | 0, ir = i - ic * ROWS, v = peek(i), h = hp.g(i);
-    for (const [dc, dr] of NUDGE) {
-      const nc = ic + dc, nr = ir + dr; if (nc < 0 || nr < 0 || nc >= COLS || nr >= ROWS) continue;
-      const j = nc * ROWS + nr; if (!open(j)) continue;
-      grid.s(j, v); hp.s(j, h); grid.s(i, 0); hp.s(i, 0);
-      set.push(j, v); box(j); bodyGrainsNudged++;
-      return true;
-    }
-    return false;
-  };
   // 2 · take the cells it now covers
   const idx = [];
   let litAny = false;
@@ -4237,8 +4224,7 @@ function bodyMoveTo(room, obj, x, y, a) {
     const v = peek(i);
     if (v < 0 || (src && src.has(i))) continue;
     if (isFluidId(v) || (tot && tot.g(i) > 0)) continue;       // water: not taken — see the note above `bodyPosCfg`
-    if (isPowderId(v)) { if (!bodyPosCfg.powder || !nudgeGrain(i)) continue; }
-    else if (v > 0) continue;                                    // ground, another body: not ours to overwrite
+    if (v > 0) continue;                                         // ground, powder, another body: not ours to overwrite
     grid.s(i, mat); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
     set.push(i, mat); idx.push(i); fresh.push(i); box(i);
     if (lit) { fineFireSet(room).add(i); ages.set(i, Math.round(R.age[k] / tk)); fireIn.push(i, 1); }
