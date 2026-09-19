@@ -3820,16 +3820,39 @@ function bodyRaster(obj, D, x, y, a, fn) {
     fn(c, r, Math.min(D.r - 1, Math.floor(v / chh)) * D.c + Math.min(D.c - 1, Math.floor(u / cw)));
   }
 }
-// …and the world cell a body cell's CENTRE is in, at a pose — how a body is READ back (see `bodyUnstamp`). Mirrored by the
-// client's `bodyCellCentre`, which reads a stamped body's picture out of its own terrain the same way.
-function bodyCellCentre(obj, D, x, y, a, k) {
-  const w = obj.w || 64, h = obj.h || 64, ca = Math.cos(a), sa = Math.sin(a);
-  const lx = -w / 2 + ((k % D.c) + 0.5) * w / D.c, ly = -h / 2 + (((k / D.c) | 0) + 0.5) * h / D.r;
-  return { c: Math.floor((x + lx * ca - ly * sa) / TERRAIN_CELL), r: Math.floor((y + lx * sa + ly * ca) / TERRAIN_CELL) };
+// ⭐ WHICH WORLD CELL A BODY CELL IS READ FROM, at a pose — how a body is READ back (`bodyUnstamp`), and how the client
+// draws a stamped one out of its own terrain (16b `bodyRep`, the SAME arithmetic — keep them in step).
+// It is the COVERED world cell (centre inside the box — the only kind the stamp ever writes) nearest the body cell's
+// centre, from the 3×3 around it. Two wrong answers came first, both found by `e2e_fire_live`:
+//   · the world cells written FOR each body cell — a turned crate has body cells with none, which never burnt (a lattice);
+//   · the world cell under the body cell's centre — a crate resting exactly half a cell off the grid puts that centre ON
+//     the boundary of a world cell that is not covered, never written, and reads as AIR: a whole edge column drawn as
+//     burnt away on an untouched crate (`--objedge`).
+// ⚠️ The pose must be bit-identical on both ends: a pinned body uses its placement, a loose one the ROUNDED pose that is
+// both stamped with and sent (`bodyRestAt`).
+function bodyRep(obj, D, x, y, a, k) {
+  const C = TERRAIN_CELL, w = obj.w || 64, h = obj.h || 64, hw = w / 2, hh = h / 2, ca = Math.cos(a), sa = Math.sin(a);
+  const lx = -hw + ((k % D.c) + 0.5) * w / D.c, ly = -hh + (((k / D.c) | 0) + 0.5) * h / D.r;
+  const wx = x + lx * ca - ly * sa, wy = y + lx * sa + ly * ca;
+  const c0 = Math.floor(wx / C), r0 = Math.floor(wy / C);
+  let best = null, bd = Infinity;
+  for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) {
+    const c = c0 + dc, r = r0 + dr, px = (c + 0.5) * C - x, py = (r + 0.5) * C - y;
+    const u = px * ca + py * sa + hw, v = -px * sa + py * ca + hh;
+    if (u < 0 || v < 0 || u >= w || v >= h) continue;
+    const d = ((c + 0.5) * C - wx) * ((c + 0.5) * C - wx) + ((r + 0.5) * C - wy) * ((r + 0.5) * C - wy);
+    if (d < bd) { bd = d; best = { c, r }; }
+  }
+  return best;
 }
-// room → Map<id, { x, y, a, dc, dr (the grid's shape when stamped), idx: Int32Array world cells, k: Int16Array body cell of each, g: the grid it went into,
-//                  fire: the body has had a cell alight since it was stamped }>. Server-only.
+// room → Map<id, { x, y, a, dc, dr (the grid's shape when stamped), idx: Int32Array world cells written, skip: Uint8Array
+//                  per body cell (1 = its read cell could not be written — ground or water was there — so it keeps its
+//                  own state), g: the grid it went into, fire: a cell has been alight since it was stamped }>. Server-only.
 const roomBodyStamp = {};
+// ⭐ room → Map<id, { age: Float32Array ms each body cell has been alight, last: ms }> — a body burning while it is NOT in
+// the world (being pushed, dragged on a rope). User, on step 1: *"when you move crates they stop burning until they sit
+// still"* — so the grid burns on its own clock between stamps, with the terrain fire's own numbers (`bodyBurnMoving`).
+const roomBodyBurn = {};
 let bodyStamps = 0, bodyUnstamps = 0, bodyBurnt = 0;   // mechanism counters — see `mwObjFire` / the rigs
 // Is this thing sitting still where the server can say where it is? A route, a spin, a swing, an open door, a pose a
 // rule put it in, something a plate shut away — any of those and it is not stamped (it simply does not burn there).
@@ -3854,7 +3877,7 @@ function bodyStamp(room, obj, x, y, a) {
   let unmade = false;
   if (gen) bodyRaster(obj, D, x, y, a, (c, r) => { if (!unmade && c >= 0 && r >= 0 && c < COLS && r < ROWS && peekCellAt(grid, c * ROWS + r) < 0) unmade = true; });
   if (unmade) return false;
-  const idx = [], ks = [], set = [], lit = [];
+  const idx = [], set = [], litAt = new Map();                  // world cell → body cell, for the alight ones
   bodyRaster(obj, D, x, y, a, (c, r, k) => {
     if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return;
     const code = cells[k]; if (!(code & 3)) return;
@@ -3863,27 +3886,40 @@ function bodyStamp(room, obj, x, y, a) {
     if (tot && peekCellAt(tot, i) > 0) return;                 // …or water
     const m = (code & 3) === 2 ? BODY_CHAR : BODY_WOOD;
     grid.s(i, m); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
-    idx.push(i); ks.push(k); set.push(i, m);
-    if (code & 4) lit.push(i);
+    idx.push(i); set.push(i, m);
+    if (code & 4) litAt.set(i, k);
   });
   if (!idx.length) return false;
+  // which body cells' READ cell (`bodyRep`) was not written — they keep their own state, on both ends
+  const written = new Set(idx), skip = new Uint8Array(cells.length);
+  let skips = '';
+  for (let k = 0; k < cells.length; k++) {
+    if (!(cells[k] & 3)) { skips += '0'; continue; }
+    const q = bodyRep(obj, D, x, y, a, k);
+    if (!q || q.c < 0 || q.r < 0 || q.c >= COLS || q.r >= ROWS || !written.has(q.c * ROWS + q.r)) { skip[k] = 1; skips += '1'; }
+    else skips += '0';
+  }
   const m = roomBodyStamp[room] || (roomBodyStamp[room] = new Map());
-  m.set(obj.id, { x, y, a, dc: D.c, dr: D.r, idx: Int32Array.from(idx), k: Int16Array.from(ks), g: grid, fire: lit.length > 0 });
+  m.set(obj.id, { x, y, a, dc: D.c, dr: D.r, idx: Int32Array.from(idx), skip, g: grid, fire: litAt.size > 0 });
   wireFanout(room, 'terrain-set', { cells: set });
   // ⭐ …AND THE CHEMISTRY LOOKS AT IT ONCE, the way it looks at a player's edit. Lava lights the fuel beside it only when
   // the reaction pass visits that lava, and a settled pool is never visited — so a crate set down on still lava sat
   // there unlit until something stirred the pool (21s in `e2e_fire_live --objlook`).
   for (const i of idx) seedFineReactAround(room, i);
-  // ⭐ WHAT WAS ALIGHT WHEN IT STOPPED CATCHES AGAIN WHERE IT STANDS — `fireLitAge` 0, the same as a freshly lit cell.
-  if (lit.length && liquidCfg.fireSolids) {
-    const fs = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map()), wire = [];
-    for (const i of lit) if (!fs.has(i)) { fs.add(i); ages.set(i, 0); wire.push(i, 1); }
+  // ⭐ WHAT WAS ALIGHT WHEN IT STOPPED BURNS ON WHERE IT STANDS — at the age it had reached, so a crate moved half-way
+  // through a burn does not start every cell again (it was burning while it moved, `bodyBurnMoving`).
+  const bm = roomBodyBurn[room], B = bm && bm.get(obj.id);
+  if (litAt.size && liquidCfg.fireSolids) {
+    const fs = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map()), wire = [], tk = liquidCfg.tickMs || 40;
+    for (const [i, k] of litAt) if (!fs.has(i)) { fs.add(i); ages.set(i, B && B.age ? Math.round(B.age[k] / tk) : 0); wire.push(i, 1); }
     if (wire.length) wireFanout(room, 'fire-cells', { cells: wire });
   }
-  // A stamped body is SOLID to the liquid and the sand, so anything that was about to fall through where it now stands
-  // rests on it instead; nothing needs waking for that. What it covers is recorded for the client (`bs`): 1 = where it
-  // was placed (every client already knows that pose), or the pose it came to rest at.
-  rec.bs = bodyLoose(obj) ? [Math.round(x * 10) / 10, Math.round(y * 10) / 10, Math.round(a * 1000)] : 1;
+  if (bm) { bm.delete(obj.id); if (!bm.size) delete roomBodyBurn[room]; }
+  // What it covers is recorded for the client (`bs`): 1 = where it was placed (every client already knows that pose), or
+  // [x, y, angle×1000] for where it came to rest — plus, only when there are any, which cells kept their own state.
+  const sk = skips.indexOf('1') >= 0;
+  rec.bs = (bodyLoose(obj) || sk) ? [x, y, Math.round(a * 1000)] : 1;
+  if (sk) rec.bs.push(skips);
   ost.set(obj.id, rec);
   bodyStamps++;
   return true;
@@ -3904,26 +3940,24 @@ function bodyUnstamp(room, id, readBack) {
   if (rec) { delete rec.bs; if (!Object.keys(rec).length) ost.delete(id); }
   if (!st || st.terrain !== S.g) return null;
   const grid = st.terrain, hp = st.terrainHp, fs = st.fineFire, ages = st.fireAge;
-  const ROWS = st.rows;
+  const ROWS = st.rows, tk = liquidCfg.tickMs || 40;
   const D = obj && bodySpec(obj) ? bodyDims(obj) : null;
   const old = (readBack && D && D.c === S.dc && D.r === S.dr) ? bodyCellsOf(rec, obj) : null;
-  // ⭐ EACH BODY CELL IS READ FROM THE WORLD CELL UNDER ITS OWN CENTRE — not from the world cells that were written for it.
-  // The stamp is world-cell-centric (every covered world cell belongs to exactly one body cell, so there are no holes in
-  // the world), and on a TURNED body that leaves some body cells with no world cell of their own. Read back through the
-  // stamp's own list, those cells were never burnt, never gone, and a tilted crate burnt to a lattice of untouched
-  // squares. Every body cell's centre lies in SOME world cell, and a neighbour's state is the right answer for it.
-  // ⚠️ Read BEFORE the loop below clears them. A centre in a cell the stamp did not write (ground, water) keeps its state.
-  let nw = null;
+  // ⭐ EACH BODY CELL FROM ITS READ CELL (`bodyRep`) — read BEFORE the loop below clears them. A cell whose read cell the
+  // stamp could not write (`skip`) keeps its own state. …and how long each alight one has been burning, so it can go on.
+  let nw = null, age = null;
   if (old && S.fire) {
-    const stamped = new Set(S.idx);
-    nw = new Uint8Array(old.length);
+    nw = new Uint8Array(old.length); age = new Float32Array(old.length);
     for (let k = 0; k < old.length; k++) {
       if (!(old[k] & 3)) continue;                          // gone stays gone
-      const q = bodyCellCentre(obj, D, S.x, S.y, S.a, k), i = q.c * ROWS + q.r;
-      if (q.c < 0 || q.r < 0 || q.c >= st.cols || q.r >= ROWS || !stamped.has(i)) { nw[k] = old[k]; continue; }
+      if (S.skip[k]) { nw[k] = old[k]; continue; }
+      const q = bodyRep(obj, D, S.x, S.y, S.a, k);
+      if (!q) { nw[k] = old[k]; continue; }
+      const i = q.c * ROWS + q.r;
       // ⚠️ A REAL READ, NOT A PEEK: a chunk put away since is faulted back in — rare, a client near the body moved it.
-      const v = grid.g(i), code = v === BODY_WOOD ? 1 : v === BODY_CHAR ? 2 : 0;
-      nw[k] = code ? (code | (fs && fs.has(i) ? 4 : 0)) : 0;
+      const v = grid.g(i), code = v === BODY_WOOD ? 1 : v === BODY_CHAR ? 2 : 0, lit = !!(code && fs && fs.has(i));
+      nw[k] = code ? (code | (lit ? 4 : 0)) : 0;
+      if (lit) age[k] = ((ages && ages.get(i)) || 0) * tk;
     }
   }
   const set = [], out = [];
@@ -3939,7 +3973,9 @@ function bodyUnstamp(room, id, readBack) {
     if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r;
   }
   if (set.length) wireFanout(room, 'terrain-set', { cells: set });
-  if (out.length) wireFanout(room, 'fire-cells', { cells: out });
+  // ⭐ `lift`: these cells did not go OUT, they LEFT with the object — so no fading flame and no cooling glow is left
+  // where it stood (user: *"sometimes the flame lags behind it after you move it"*).
+  if (out.length) wireFanout(room, 'fire-cells', { cells: out, lift: 1 });
   // what was resting on it — sand, water — now has nothing under it
   if (c1 >= c0) { fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1); }
   if (!old) return null;
@@ -3947,12 +3983,58 @@ function bodyUnstamp(room, id, readBack) {
   const r2 = ost.get(id) || {};
   bodyCellsSet(r2, obj, nw);
   if (Object.keys(r2).length) ost.set(id, r2); else ost.delete(id);
+  // …still alight: it goes on burning while it moves
+  let lit = false; for (let k = 0; k < nw.length; k++) if (nw[k] & 4) { lit = true; break; }
+  if (lit) (roomBodyBurn[room] || (roomBodyBurn[room] = new Map())).set(id, { age, last: Date.now() });
   return nw;
+}
+// ⭐⭐ A BODY BURNING WHILE IT IS NOT IN THE WORLD — its own grid, on the terrain fire's own numbers: a cell catches from an
+// alight neighbour after `fireSolidCatch / rate` passes (half that for the one above), burns for `fireSolidBurn / rate`,
+// wood becomes charcoal and charcoal crumbles away — and a cell with no open face finishes STARVED (charcoal, out), the
+// same air rule as the ground's (the user: crate middles that do not burn through are right; do not make them special).
+// ⚠️ "Above" and "open" are in the body's own frame, and its edge counts as open — a moving thing is in the air.
+// ⚠️ What crumbles off a moving thing is simply gone: this end does not know where it is, so there is nowhere to put ash.
+// ⚠️ Water does not reach it while it moves. It does the moment it lands.
+function bodyBurnMoving(room, obj, B, now) {
+  const ost = objStOf(room), rec = ost.get(obj.id) || {};
+  const cells = bodyCellsOf(rec, obj), D = bodyDims(obj), n = cells.length;
+  if (!B.age || B.age.length !== n) B.age = new Float32Array(n);
+  const dt = Math.max(0, Math.min(1000, now - B.last)); B.last = now;
+  const tk = liquidCfg.tickMs || 40, oxy = !!liquidCfg.fireOxygen;
+  const has = (c, r) => c >= 0 && r >= 0 && c < D.c && r < D.r && (cells[r * D.c + c] & 3) !== 0;
+  const open = (k) => { const c = k % D.c, r = (k / D.c) | 0; return !has(c - 1, r) || !has(c + 1, r) || !has(c, r - 1) || !has(c, r + 1); };
+  const rateOf = (code) => FIRE_RATE[(code & 3) === 1 ? BODY_WOOD : BODY_CHAR] || 0.1;
+  let hs = 0; const sid = String(obj.id); for (let q = 0; q < sid.length; q++) hs = (Math.imul(hs, 31) + sid.charCodeAt(q)) | 0;
+  const next = cells.slice();
+  let changed = false;
+  for (let k = 0; k < n; k++) {
+    if (!(cells[k] & 4) || !(cells[k] & 3)) continue;
+    B.age[k] += dt;
+    const c = k % D.c, r = (k / D.c) | 0;
+    for (const [nc, nr, up] of [[c - 1, r, 0], [c + 1, r, 0], [c, r - 1, 1], [c, r + 1, 0]]) {
+      if (!has(nc, nr)) continue;
+      const kk = nr * D.c + nc; if ((next[kk] & 4) || !(next[kk] & 3)) continue;   // ⚠️ `next`: it may have crumbled this pass
+      if (oxy && (next[kk] & 3) === 2 && !open(kk)) continue;          // charcoal needs air to catch
+      if (B.age[k] >= liquidCfg.fireSolidCatch / rateOf(next[kk]) / (up ? 2 : 1) * tk) { next[kk] |= 4; B.age[kk] = 0; changed = true; }
+    }
+    const burn = liquidCfg.fireSolidBurn / rateOf(cells[k]) * tk * (0.8 + 0.4 * fireVar(k, hs, 2));
+    if (B.age[k] < burn) continue;
+    const ex = !oxy || open(k);
+    if ((cells[k] & 3) === 1) next[k] = ex ? (2 | 4) : 2;            // wood → charcoal, alight if it has air, else out
+    else next[k] = ex ? 0 : 2;                                        // charcoal → gone, or starved and out
+    B.age[k] = 0; changed = true;
+  }
+  if (!changed) return false;
+  bodyCellsSet(rec, obj, next);
+  if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
+  return true;
 }
 // The removal seam (`objUnindex` → `objLinkDrop`): an object that is erased, smashed or burnt takes its cells with it.
 function bodyDrop(room, o) {
+  if (o && roomBodyBurn[room]) { roomBodyBurn[room].delete(o.id); if (!roomBodyBurn[room].size) delete roomBodyBurn[room]; }
   if (!o || !roomBodyStamp[room] || !roomBodyStamp[room].has(o.id)) return false;
   bodyUnstamp(room, o.id, false);
+  if (roomBodyBurn[room]) roomBodyBurn[room].delete(o.id);
   const ost = roomObjSt[room], rec = ost && ost.get(o.id);
   if (rec) { delete rec.bc; delete rec.bs; if (!Object.keys(rec).length) ost.delete(o.id); }
   return true;
@@ -3976,6 +4058,9 @@ function bodyRestAt(room, obj, x, y, a) {
   const d = roomDims(room), WW = d.cols * TERRAIN_CELL, WH = d.rows * TERRAIN_CELL;
   x = Math.max(obj.x - 4000, Math.min(obj.x + 4000, Math.max(0, Math.min(WW, x))));
   y = Math.max(obj.y - 4000, Math.min(obj.y + 4000, Math.max(0, Math.min(WH, y))));
+  // ⚠️ ROUNDED TO WHAT `bs` CARRIES, before it is stamped: the client works out which world cell each body cell reads from
+  // the pose it is sent (`bodyRep`), and a different last digit can put a boundary cell on the other side.
+  x = Math.round(x * 10) / 10; y = Math.round(y * 10) / 10; a = Math.round(a * 1000) / 1000;
   const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id);
   let da = S ? a - S.a : 0; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
   if (S && Math.abs(S.x - x) < 2 && Math.abs(S.y - y) < 2 && Math.abs(da) < 0.02) return false;   // already there
@@ -3990,7 +4075,22 @@ function bodyRestAt(room, obj, x, y, a) {
 // with fire — notices a body that has burnt away completely.
 let _bodyTickN = 0;
 function bodyTick() {
-  const full = (_bodyTickN++ & 3) === 0;
+  const full = (_bodyTickN++ & 3) === 0, now = Date.now();
+  for (const room of Object.keys(roomBodyBurn)) {
+    const bm = roomBodyBurn[room], map = roomObjects[room], sm = roomBodyStamp[room];
+    let ch = false;
+    for (const [id, B] of [...bm]) {
+      const obj = map && map.get(id);
+      if (!obj || !bodySpec(obj) || !liquidCfg.fireSolids || (sm && sm.has(id))) { bm.delete(id); continue; }
+      if (bodyBurnMoving(room, obj, B, now)) ch = true;
+      const cells = bodyCellsOf(roomObjSt[room] && roomObjSt[room].get(id), obj);
+      if (!bodyAny(cells)) { bm.delete(id); bodyBurnOut(room, obj); ch = true; continue; }
+      let lit = false; for (let k = 0; k < cells.length; k++) if (cells[k] & 4) { lit = true; break; }
+      if (!lit) bm.delete(id);
+    }
+    if (!bm.size) delete roomBodyBurn[room];
+    if (ch) broadcastObjSt(room);
+  }
   for (const room of Object.keys(roomBodyStamp)) {
     const m = roomBodyStamp[room], st = roomCells.get(room), fs = st && st.fineFire;
     if (!st) continue;
@@ -4074,6 +4174,8 @@ function bodyIgnite(room, obj, x, y, r, px, py, pa) {
   if (!any) return false;
   bodyCellsSet(rec, obj, cells);
   ost.set(obj.id, rec);
+  const bm = roomBodyBurn[room] || (roomBodyBurn[room] = new Map());
+  if (!bm.has(obj.id)) bm.set(obj.id, { age: new Float32Array(cells.length), last: Date.now() });
   return true;
 }
 function bombFuseMs(obj) { return Math.max(200, (obj.fuse == null ? (obj.boom > 0 ? obj.boom : 2.5) : obj.fuse) * 1000); }
@@ -7840,10 +7942,9 @@ for (const [id, rate, ash] of [
 // leaves AIR, which is also what opens the object up for the flames inside it.
 const FIRE_ASH_K = new Float32Array(256).fill(1);
 FIRE_ASH_K[251] = 0.35;
-// ⭐ WHICH FUELS NEVER STARVE — they finish their burn as if open to the air even when buried. Only a cell body's: its
-// charcoal always goes on to ash or air, so there is no perpetual fire (that needs a cell that goes OUT still charcoal).
-const FIRE_NOSTARVE = new Uint8Array(256);
-FIRE_NOSTARVE[250] = FIRE_NOSTARVE[251] = 1;
+// 🟥 A "NEVER STARVES" RULE FOR BODY FUEL WAS BUILT HERE AND TAKEN OUT (2026-09-19): the user wants a crate's buried
+// middle to go out as charcoal exactly as a trunk's does (*"we don't want to artificially make crates behave differently"*),
+// and burning every cell through left charred bits hanging in the air as the ones under them went first.
 // ⭐⭐ WHICH FUELS NEED AIR TO CATCH AT ALL. Wood does not: heat alone drives the volatiles out of it, which is
 // why a fire eats into the middle of a log. Charcoal does: it is what is LEFT after the volatiles have gone, and
 // it burns by its surface oxidising — no air, no burn.
@@ -8492,9 +8593,7 @@ function fineReactTickRoom(room, SUB, phase) {
           // is only the RESULT that changes. Gating the catch as well would leave a log with a charred skin and
           // an untouched core, which is a different and much smaller fire than anyone asked for.
           // ⚠️ A cell with liquid in it counts as buried — that is the same rule as `fireBlocked` on the client.
-          // ⚠️ …EXCEPT A CELL BODY'S (`FIRE_NOSTARVE`): a crate is planks with air between them, and starving its middle left
-          // a third of it as a black lump that nothing ever relit — and that, until step 2, still collides as a whole crate.
-          const exposed = !liquidCfg.fireOxygen || airAround(i) || FIRE_NOSTARVE[gPeek(i)] === 1;
+          const exposed = !liquidCfg.fireOxygen || airAround(i);
           const relit = left > 0 && FIRE_RATE[left] > 0 && exposed;
           // ⭐ STARVED: the chain stops here. Wood becomes charcoal and goes out; charcoal stays charcoal and goes
           // out. Either way the cell keeps its shape and can be dug for what it is, which is how charcoal is made.
@@ -8512,7 +8611,11 @@ function fineReactTickRoom(room, SUB, phase) {
           // terrain, which would smoulder for ever under a tree nobody set light to.
           // ⚠️ `fireAshOrder` 0 turns the whole "a cell behaves differently because of what is above it" idea off —
           // the user asked for the switch, because ordering is exactly what made the ash predictable.
-          if (liquidCfg.fireAshOrder && !relit && left > 0 && isPowderId(left) && rI > 0 && fire.has(i - 1)) continue;
+          // ⭐ …AND A CELL BODY'S CHARCOAL THAT LEAVES AIR (`FIRE_ASH_K` < 1) WAITS THE SAME WAY. It is the case the rule was
+          // written for, one step removed: vanishing out from under the charcoal above it leaves that hanging, which is
+          // exactly what the user saw — *"charred bits floating in mid-air before they finish burning away"*.
+          const crumbles = left > 0 ? isPowderId(left) : (!flash && FIRE_ASH_K[gPeek(i)] < 1);
+          if (liquidCfg.fireAshOrder && !relit && crumbles && rI > 0 && fire.has(i - 1)) continue;
           if (relit) {
             // Still burning, as something else now. `fireLit` carries it again so the client restarts its char
             // clock against the NEW material's burn length — it is only ever set for a cell that was not alight.
