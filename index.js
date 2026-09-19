@@ -920,7 +920,7 @@ app.get('/debug/bodies', (req, res) => {
     if (total) bad[room] = { total, inBody, inSolid };
   }
   res.json({ stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
-             cfg: bodyPosCfg, rooms: bad });
+             fallCuts, fallRefused, fallPiled, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg, rooms: bad });
 });
 app.get('/debug/cpu-profile', (req, res) => {
   const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
@@ -3776,9 +3776,18 @@ function forgetWorldHits(avRoom) { delete roomWorldHit[avRoom]; }
 // ⚠️ ONLY SOMETHING THAT CAN BREAK IS A BODY — the user's Breaks rule from shots, carried over from the fire it
 // replaces, so Breaks · No is still fireproof and there is no second switch. Wooden things only (user, 2026-09-19).
 const BODY_WOOD = 250, BODY_CHAR = 251;       // ⚠️ the fire tables inside the sliced liquid block name these as literals
-function isBodyId(v) { return v === 250 || v === 251; }
+// ⭐ STEP 3 — BODY FOLIAGE (252). A piece of a TREE that falls (`fallCut`) carries leaves as well as wood, and leaves burn
+// fast and leave nothing, exactly as terrain leaves do. Code 3 in a body's grid.
+const BODY_LEAF = 252;
+function isBodyId(v) { return v === 250 || v === 251 || v === 252; }
+// a body cell's code (0 gone · 1 wood · 2 charcoal · 3 foliage, +4 alight) ↔ the material it is written into the world as
+function bodyCodeMat(code) { const c = code & 3; return c === 2 ? BODY_CHAR : c === 3 ? BODY_LEAF : BODY_WOOD; }
+function bodyMatCode(v) { return v === BODY_WOOD ? 1 : v === BODY_CHAR ? 2 : v === BODY_LEAF ? 3 : 0; }
 const BODY_LOOKS = { crate: 'box', barrel: 'round', log: 'round' };
 function bodySpec(obj) {
+  // ⭐ STEP 3 — A FALLEN PIECE OF TERRAIN (`fallCut`) is a body whatever its hit points: it is MINED cell by cell (user),
+  //    never broken by hits, so it carries `hp: null` and its cells in `fm`.
+  if (obj && obj.type === 'stamp' && obj.look === 'fallen' && typeof obj.fm === 'string') return 'fallen';
   if (!obj || typeof obj.hp !== 'number') return null;
   if (obj.type === 'stamp') return BODY_LOOKS[obj.look] || null;
   if (obj.type === 'platform' && obj.look === 'gate' && obj.style === 'wood') return 'box';
@@ -3788,12 +3797,31 @@ function bodyLoose(obj) { return !!(obj && obj.type === 'stamp' && obj.loose && 
 // The grid's shape: one cell per terrain cell of the object's own size. ⚠️ The CLIENT computes the same (16b
 // `bodyDims`) to draw an untouched body without anything on the wire — keep the two in step.
 function bodyDims(obj) {
-  return { c: Math.max(1, Math.min(40, Math.round((obj.w || 64) / TERRAIN_CELL))),
-           r: Math.max(1, Math.min(40, Math.round((obj.h || 64) / TERRAIN_CELL))) };
+  const cap = obj && obj.look === 'fallen' ? FALL_DIM : 40;      // a fallen tree is bigger than any crate
+  return { c: Math.max(1, Math.min(cap, Math.round((obj.w || 64) / TERRAIN_CELL))),
+           r: Math.max(1, Math.min(cap, Math.round((obj.h || 64) / TERRAIN_CELL))) };
 }
+// ⭐ STEP 3 — A FALLEN PIECE'S CELLS: `fm` is base64 of one MATERIAL id per cell (row-major, its own frame, 0 = none). It is
+// what the piece is MADE of, for good — what it looks like, what mining it gives, whether a player can walk through it —
+// while the grid's codes (`rec.bc`) say what the fire has done to it. ⚠️ Mirrored on the client (`fallMats`, 16b).
+const FALL_DIM = 96;
+function fallMats(obj) {
+  if (obj._fmS === obj.fm && obj._fmA) return obj._fmA;
+  const a = new Uint8Array(Buffer.from(obj.fm || '', 'base64'));
+  Object.defineProperty(obj, '_fmA', { value: a, writable: true, enumerable: false, configurable: true });
+  Object.defineProperty(obj, '_fmS', { value: obj.fm, writable: true, enumerable: false, configurable: true });
+  return a;
+}
+// what a material is as a body: charcoal chars, woody things are wood, every other plant is foliage (burns fast, leaves nothing)
+function fallCode(m) { return !m ? 0 : m === 92 ? 2 : (m === 28 || m === 91 || m === 40) ? 1 : 3; }
 // A whole one. Codes: 0 gone · 1 wood · 2 charcoal, +4 alight. A round thing (barrel, log) has its four corner cells
 // missing — its outline at cell resolution. ⚠️ Mirrored on the client (`bodyFresh`).
 function bodyFresh(D, kind, obj) {
+  if (kind === 'fallen') {
+    const fm = fallMats(obj), a = new Uint8Array(D.c * D.r);
+    for (let k = 0; k < a.length && k < fm.length; k++) a[k] = fallCode(fm[k]);
+    return a;
+  }
   const a = new Uint8Array(D.c * D.r).fill(1);
   // ⭐ A BARREL'S CELLS ARE THE ONES INSIDE ITS OUTLINE (cell bodies step 2, round 3): a cell whose centre lies inside the
   //   shape it is DRAWN as — the client's `cylPts` bulge, x = fx + k·√(1 − (y/b)²). The four-corner cut left whole edge cells
@@ -3832,6 +3860,19 @@ function bodyCellsSet(rec, obj, a) {
   rec.bc = { c: D.c, r: D.r, s };
 }
 function bodyAny(a) { for (let k = 0; k < a.length; k++) if (a[k] & 3) return true; return false; }
+// ⭐ WHICH BODY CELLS KEEP THEIR OWN STATE, AND WHAT THAT STATE IS — the string that rides `bs` / `bp`. Per body cell: '0' =
+// read it from the world; otherwise 'A' + its code (so 'B' wood, 'C' charcoal, +4 alight). 🟥 It used to be a bare '1',
+// meaning "use the RECORD", and the client's record is only what the last `obj-state` said — which a body moving under its
+// own steam never re-sends (`bodyMoveTo` updates the record silently). A burnt crate shoved over its own ash drew those
+// cells from its UNBURNT record: the bright planks of a fresh crate showing as an orange band at its base (user, step 3
+// round 4). The state is carried with the mark now, so the two can never disagree.
+function bodySkipStr(skip, cells) {
+  let s = '', any = false;
+  for (let k = 0; k < cells.length; k++) {
+    if (skip[k] && (cells[k] & 3)) { s += String.fromCharCode(65 + cells[k]); any = true; } else s += '0';
+  }
+  return any ? s : '';
+}
 // ⭐ WHICH WORLD CELLS A BODY COVERS AT A POSE, and which of its own cells each one is. World-cell-centric: every
 // world cell whose CENTRE lies inside the rotated box belongs to exactly one body cell, so a stamp never writes a
 // world cell twice. The rounding is at most half a cell, which the user judged invisible (*"the cells are fairly
@@ -3926,7 +3967,7 @@ function bodyStamp(room, obj, x, y, a) {
     const i = c * ROWS + r, v = peekCellAt(grid, i);
     if (v > 0) return;                                         // ground, another body, anything: not ours to overwrite
     if (tot && peekCellAt(tot, i) > 0) return;                 // …or water
-    const m = (code & 3) === 2 ? BODY_CHAR : BODY_WOOD;
+    const m = bodyCodeMat(code);
     grid.s(i, m); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
     idx.push(i); set.push(i, m);
     if (code & 4) litAt.set(i, k);
@@ -3934,12 +3975,10 @@ function bodyStamp(room, obj, x, y, a) {
   if (!idx.length) return false;
   // which body cells' READ cell (`bodyRep`) was not written — they keep their own state, on both ends
   const written = new Set(idx), skip = new Uint8Array(cells.length);
-  let skips = '';
   for (let k = 0; k < cells.length; k++) {
-    if (!(cells[k] & 3)) { skips += '0'; continue; }
+    if (!(cells[k] & 3)) continue;
     const q = bodyRep(obj, D, x, y, a, k);
-    if (!q || q.c < 0 || q.r < 0 || q.c >= COLS || q.r >= ROWS || !written.has(q.c * ROWS + q.r)) { skip[k] = 1; skips += '1'; }
-    else skips += '0';
+    if (!q || q.c < 0 || q.r < 0 || q.c >= COLS || q.r >= ROWS || !written.has(q.c * ROWS + q.r)) skip[k] = 1;
   }
   // ⭐ A CELL THAT COULD NOT BE WRITTEN BECAUSE IT IS BURIED IN SOMETHING (the ash it came to rest in, the ground, water)
   // IS SMOTHERED — its alight flag goes. It was kept, and since a skipped cell is in neither the world nor the moving burn,
@@ -3966,9 +4005,9 @@ function bodyStamp(room, obj, x, y, a) {
   if (bm) { bm.delete(obj.id); if (!bm.size) delete roomBodyBurn[room]; }
   // What it covers is recorded for the client (`bs`): 1 = where it was placed (every client already knows that pose), or
   // [x, y, angle×1000] for where it came to rest — plus, only when there are any, which cells kept their own state.
-  const sk = skips.indexOf('1') >= 0;
-  rec.bs = (bodyLoose(obj) || sk) ? [x, y, Math.round(a * 1000)] : 1;
-  if (sk) rec.bs.push(skips);
+  const skips = bodySkipStr(skip, cells);
+  rec.bs = (bodyLoose(obj) || skips) ? [x, y, Math.round(a * 1000)] : 1;
+  if (skips) rec.bs.push(skips);
   ost.set(obj.id, rec);
   bodyStamps++;
   return true;
@@ -4004,7 +4043,7 @@ function bodyUnstamp(room, id, readBack) {
       if (!q) { nw[k] = old[k]; continue; }
       const i = q.c * ROWS + q.r;
       // ⚠️ A REAL READ, NOT A PEEK: a chunk put away since is faulted back in — rare, a client near the body moved it.
-      const v = grid.g(i), code = v === BODY_WOOD ? 1 : v === BODY_CHAR ? 2 : 0, lit = !!(code && fs && fs.has(i));
+      const v = grid.g(i), code = bodyMatCode(v), lit = !!(code && fs && fs.has(i));
       nw[k] = code ? (code | (lit ? 4 : 0)) : 0;
       if (lit) age[k] = ((ages && ages.get(i)) || 0) * tk;
     }
@@ -4055,7 +4094,7 @@ function bodyBurnMoving(room, obj, B, now) {
   // that face as air let a moving crate burn away from underneath as readily as from its sides (user, 2026-09-19: *"they
   // burn just as well on the bottom as on the exposed sides"*). A cell gone from INSIDE the grid still opens it.
   const open = (k) => { const c = k % D.c, r = (k / D.c) | 0; return !has(c - 1, r) || !has(c + 1, r) || !has(c, r - 1) || (r + 1 < D.r && !has(c, r + 1)); };
-  const rateOf = (code) => FIRE_RATE[(code & 3) === 1 ? BODY_WOOD : BODY_CHAR] || 0.1;
+  const rateOf = (code) => FIRE_RATE[bodyCodeMat(code)] || 0.1;
   let hs = 0; const sid = String(obj.id); for (let q = 0; q < sid.length; q++) hs = (Math.imul(hs, 31) + sid.charCodeAt(q)) | 0;
   const next = cells.slice();
   let changed = false;
@@ -4073,6 +4112,7 @@ function bodyBurnMoving(room, obj, B, now) {
     if (B.age[k] < burn) continue;
     const ex = !oxy || open(k);
     if ((cells[k] & 3) === 1) next[k] = ex ? (2 | 4) : 2;            // wood → charcoal, alight if it has air, else out
+    else if ((cells[k] & 3) === 3) next[k] = 0;                       // foliage → gone, as leaves leave nothing
     else next[k] = ex ? 0 : 2;                                        // charcoal → gone, or starved and out
     B.age[k] = 0; changed = true;
   }
@@ -4121,6 +4161,7 @@ function bodyRestAt(room, obj, x, y, a) {
   if (S && Math.abs(S.x - x) < 2 && Math.abs(S.y - y) < 2 && Math.abs(da) < 0.02) return false;   // already there
   if (!bodyStill(room, obj, roomObjSt[room] && roomObjSt[room].get(obj.id), null)) return false;
   bodyMoveTo(room, obj, x, y, a);
+  fallRestAt(room, obj, x, y, a);
   return true;
 }
 // ── ⭐⭐ CELL BODIES, STEP 3 (2026-09-19) — A MOVING BODY STAYS IN THE WORLD ──────────────────────────────────────────────
@@ -4166,7 +4207,7 @@ function bodyReadCells(st, obj, D, S, rec) {
     const q = bodyRep(obj, D, S.x, S.y, S.a, k);
     if (!q) { nw[k] = old[k]; continue; }
     const i = q.c * ROWS + q.r;
-    const v = grid.g(i), code = v === BODY_WOOD ? 1 : v === BODY_CHAR ? 2 : 0, lit = !!(code && fs && fs.has(i));
+    const v = grid.g(i), code = bodyMatCode(v), lit = !!(code && fs && fs.has(i));
     nw[k] = code ? (code | (lit ? 4 : 0)) : 0;
     if (lit) age[k] = ((ages && ages.get(i)) || 0) * tk;
     if (nw[k] !== old[k]) changed = true;
@@ -4211,7 +4252,7 @@ function bodyMoveTo(room, obj, x, y, a) {
   const idx = [];
   let litAny = false;
   for (const [i, k] of want) {
-    const code = cells[k], mat = (code & 3) === 2 ? BODY_CHAR : BODY_WOOD, lit = fireOk && !!(code & 4);
+    const code = cells[k], mat = bodyCodeMat(code), lit = fireOk && !!(code & 4);
     if (lit) litAny = true;
     if (was.has(i)) {                                           // already one of its cells: only its state can differ
       idx.push(i);
@@ -4231,15 +4272,16 @@ function bodyMoveTo(room, obj, x, y, a) {
   }
   // which body cells' READ cell was not written — they keep their own state (and are smothered: see `bodyStamp`)
   const written = new Set(idx), skip = new Uint8Array(cells.length);
-  let skips = '', smothered = false;
+  let smothered = false;
   for (let k = 0; k < cells.length; k++) {
-    if (!(cells[k] & 3)) { skips += '0'; continue; }
+    if (!(cells[k] & 3)) continue;
     const q = bodyRep(obj, D, x, y, a, k);
     if (!q || q.c < 0 || q.r < 0 || q.c >= COLS || q.r >= ROWS || !written.has(q.c * ROWS + q.r)) {
-      skip[k] = 1; skips += '1';
+      skip[k] = 1;
       if (cells[k] & 4) { cells[k] &= 3; smothered = true; }
-    } else skips += '0';
+    }
   }
+  const skips = bodySkipStr(skip, cells);
   if (R.changed || smothered) bodyCellsSet(rec, obj, cells);
   if (!idx.length) {                                            // nowhere left to be: out, as step 1 would have it
     m.delete(obj.id); if (!m.size) delete roomBodyStamp[room];
@@ -4258,11 +4300,10 @@ function bodyMoveTo(room, obj, x, y, a) {
   // …and one whose only change was WHICH cells are alight still needs its pose delivered: a cell of its own, re-sent
   if (!set.length) set.push(idx[0], peek(idx[0]));
   S.x = x; S.y = y; S.a = a; S.idx = Int32Array.from(idx); S.skip = skip; S.fire = S.fire || litAny;
-  const sk = skips.indexOf('1') >= 0;
-  rec.bs = [x, y, Math.round(a * 1000)]; if (sk) rec.bs.push(skips);
+  rec.bs = [x, y, Math.round(a * 1000)]; if (skips) rec.bs.push(skips);
   ost.set(obj.id, rec);
   bodyMoves++; bodyMoveCells += set.length / 2;
-  wireFanout(room, 'terrain-set', { cells: set, bp: [obj.id, x, y, Math.round(a * 1000), sk ? skips : 0] });
+  wireFanout(room, 'terrain-set', { cells: set, bp: [obj.id, x, y, Math.round(a * 1000), skips || 0] });
   if (fireOut.length) wireFanout(room, 'fire-cells', { cells: fireOut, lift: 1 });
   if (fireIn.length) wireFanout(room, 'fire-cells', { cells: fireIn });
   // what rested on it, or flowed round it, has something new beside it
@@ -4277,6 +4318,7 @@ function bodyMoveTo(room, obj, x, y, a) {
 let _bodyTickN = 0;
 function bodyTick() {
   const full = (_bodyTickN++ & 3) === 0, now = Date.now();
+  fallDrain();
   for (const room of Object.keys(roomBodyBurn)) {
     const bm = roomBodyBurn[room], map = roomObjects[room], sm = roomBodyStamp[room];
     let ch = false;
@@ -4384,6 +4426,174 @@ function bodyIgnite(room, obj, x, y, r, px, py, pa) {
   const bm = roomBodyBurn[room] || (roomBodyBurn[room] = new Map());
   if (!bm.has(obj.id)) bm.set(obj.id, { age: new Float32Array(cells.length), last: Date.now() });
   return true;
+}
+// ══ ⭐⭐ CELL BODIES STEP 3 — TERRAIN THAT FALLS (`scratchpad/kickoff_cell_bodies.md` §3f, §20) ═══════════════════════════
+// Wood, plants, Timber and Charcoal that a dig or a fire has left with NOTHING HOLDING THEM UP are cut out of the world and
+// become one loose body, which falls, tumbles and comes to rest under the physics every loose thing uses — and, being a
+// body, stays written into the world as it goes (`bodyMoveTo`), burns on in the one fire, and is MINED cell by cell for its
+// materials (`body-dig`). This replaces #108's "a cut tree comes down as a shower of pickups" (`collapsePlants`, kept
+// behind `fallCfg.on = 0`).
+// ⭐ SUPPORT is #108's rule, widened: walking through falling-capable cells (8-neighbour), can you reach something solid that
+//    is not itself falling-capable? The ground, rock, a placed block. Three things are NOT support: a body (it moves), ASH
+//    (a burnt trunk's base crumbles to it, and a trunk does not stand on its own ash), and liquid. An unbuilt neighbour IS
+//    (never fell into ground nobody has made — a read must not build world), and so is the level's floor.
+// ⚠️ USER'S LIMITS: up to `fallCfg.max` (~2,000) cells and `FALL_DIM` a side; anything bigger stays standing, as a
+//    >600-cell tree always has.
+// `min`: a clump smaller than this drops as PICKUPS (#108's old way) instead of becoming an object — a burning crown sheds
+// one- and two-cell specks every few seconds, and a forest fire would otherwise fill the world with tiny loose bodies.
+const fallCfg = { on: 1, max: 2000, min: 6 };
+let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
+const FALL_ASH = 38;
+function fallCand(v) { return v > 0 && (isPlantId(v) || v === 91 || v === 92); }
+// the cells the fire has finished since the last look, per room (`fireGone` → here; `bodyTick` drains it)
+const roomFallGone = {};
+// (`fireGone` is pointed here beside `wireFanout = interestFanout` — it is declared inside the sliced liquid block, further down,
+// and assigning a `let` before its declaration has run is a ReferenceError at startup.)
+function fallDrain() {
+  for (const room of Object.keys(roomFallGone)) {
+    const gone = roomFallGone[room]; delete roomFallGone[room];
+    if (!fallCfg.on || !gone.size) continue;
+    const st = roomCells.get(room); if (!st || !st.terrain) continue;
+    const ROWS = st.rows;
+    const seen = new Set();
+    for (const i of gone) { const c = (i / ROWS) | 0, r = i - c * ROWS; fallCheck(room, c, r, c, r, seen); }
+  }
+}
+// Look for unsupported falling-capable regions touching a rectangle of cells (a dig, or a cell the fire finished).
+function fallCheck(room, c0, r0, c1, r1, seenIn) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return 0;
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows, nn = grid.length;
+  c0 = Math.max(0, c0 - 1); r0 = Math.max(0, r0 - 1); c1 = Math.min(COLS - 1, c1 + 1); r1 = Math.min(ROWS - 1, r1 + 1);
+  const gen = !!grid.seedFn;
+  const peek = gen ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
+  const FLOOR_ROW = Math.floor(roomFloorTop(room) / TERRAIN_CELL);
+  const seen = seenIn || new Set();
+  let cut = 0;
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) {
+    const start = c * ROWS + r;
+    if (seen.has(start) || !fallCand(peek(start))) continue;
+    const region = [], stack = [start], mark = new Set([start]);
+    let supported = false, overflow = false;
+    while (stack.length && !supported) {
+      const i = stack.pop();
+      region.push(i);
+      if (region.length > fallCfg.max) { overflow = true; break; }
+      const ic = (i / ROWS) | 0, ir = i - ic * ROWS;
+      for (let dc = -1; dc <= 1 && !supported; dc++) for (let dr = -1; dr <= 1; dr++) {
+        if (!dc && !dr) continue;
+        const nc = ic + dc, nr = ir + dr;
+        if (nr >= FLOOR_ROW) { supported = true; fallLast = { why: 'floor', nc, nr, region: region.length }; break; }        // the level's floor
+        if (nc < 0 || nc >= COLS || nr < 0 || nr >= ROWS) continue;
+        const j = nc * ROWS + nr; if (j < 0 || j >= nn) continue;
+        const v = peek(j);
+        if (v < 0) { supported = true; fallLast = { why: 'unbuilt', nc, nr, region: region.length }; break; }                  // unbuilt — never fall into the unknown
+        if (fallCand(v)) { if (!mark.has(j)) { mark.add(j); stack.push(j); } continue; }
+        if (isSolidCell(v) && !isBodyId(v) && v !== FALL_ASH) { supported = true; fallLast = { why: 'solid', v, nc, nr, region: region.length }; break; }
+      }
+    }
+    for (const i of mark) seen.add(i);
+    if (supported || !region.length) continue;
+    if (overflow) { fallRefused++; continue; }
+    if (region.length < fallCfg.min) { fallPile(room, region); continue; }
+    if (fallCut(room, region)) cut++;
+  }
+  return cut;
+}
+// A clump too small to be worth an object: its material as a pickup where it was (what #108 did with every cut tree).
+function fallPile(room, region) {
+  const st = roomCells.get(room); if (!st || !st.terrain) return;
+  const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows, fs = st.fineFire, bunch = new Map(), set = [], out = [];
+  let sx = 0, sy = 0, n = 0;
+  for (const i of region) {
+    const v = grid.g(i); if (!fallCand(v)) continue;
+    const y = MATGEN.yieldOf(v); bunch.set(y, (bunch.get(y) || 0) + 1);
+    const c = (i / ROWS) | 0, r = i - c * ROWS; sx += c; sy += r; n++;
+    if (fs && fs.delete(i)) { out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); }
+    grid.s(i, 0); hp.s(i, 0); if (st.sat) st.sat.s(i, 0); set.push(i, 0);
+  }
+  if (!n) return;
+  wireFanout(room, 'terrain-set', { cells: set });
+  if (out.length) wireFanout(room, 'fire-cells', { cells: out });
+  spawnDrop(room, (sx / n + 0.5) * TERRAIN_CELL, (sy / n + 0.5) * TERRAIN_CELL, Array.from(bunch), 0);
+  fallPiled++;
+}
+// Cut a region out of the world and make it one loose body, written straight back in where it was — so it is solid the
+// whole time, and simply starts to move when the physics lets go of it.
+function fallCut(room, region) {
+  const st = roomCells.get(room); if (!st || !st.terrain) return false;
+  const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows, fs = st.fineFire, C = TERRAIN_CELL;
+  let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
+  for (const i of region) { const c = (i / ROWS) | 0, r = i - c * ROWS; if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
+  const W = c1 - c0 + 1, H = r1 - r0 + 1;
+  if (W > FALL_DIM || H > FALL_DIM) { fallRefused++; return false; }
+  const fm = new Uint8Array(W * H), codes = new Uint8Array(W * H), set = [], out = [];
+  let lit = false;
+  for (const i of region) {
+    const v = grid.g(i); if (!fallCand(v)) continue;
+    const c = (i / ROWS) | 0, r = i - c * ROWS, k = (r - r0) * W + (c - c0);
+    fm[k] = v; codes[k] = fallCode(v);
+    if (fs && fs.has(i)) { codes[k] |= 4; lit = true; fs.delete(i); out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); }
+    grid.s(i, 0); hp.s(i, 0); if (st.sat) st.sat.s(i, 0); set.push(i, 0);
+  }
+  if (!set.length) return false;
+  const obj = { id: 'fall-' + (++fallSeq) + '-' + (Date.now() % 1e8).toString(36), type: 'stamp', look: 'fallen', content: '🪵',
+                shape: 'rect', ownerId: 'world', owner: 'world', x: c0 * C + W * C / 2, y: r0 * C + H * C / 2, w: W * C, h: H * C,
+                angle: 0, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64') };
+  wireFanout(room, 'terrain-set', { cells: set });
+  if (out.length) wireFanout(room, 'fire-cells', { cells: out, lift: 1 });
+  objIndex(room, obj);
+  emitObjToChunks(room, obj, 'avatar-object-add', obj);
+  if (lit) { const ost = objStOf(room), rec = ost.get(obj.id) || {}; bodyCellsSet(rec, obj, codes); ost.set(obj.id, rec); }
+  bodyStamp(room, obj, obj.x, obj.y, 0);
+  broadcastObjSt(room);
+  fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
+  fallCuts++;
+  return true;
+}
+// ⭐ STEP 3 — MINING A FALLEN PIECE (`body-dig`): the named cells leave the piece for good (its `fm`), and the world if it is
+// written in. What they yield is the digger's client's business, exactly as a dig of the ground is (`terrain-drop`).
+// A piece with nothing left is removed.
+let fallMined = 0;
+function bodyMine(room, obj, ks) {
+  const D = bodyDims(obj), n = D.c * D.r, fm = fallMats(obj).slice();
+  const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id), pose = S ? { x: S.x, y: S.y, a: S.a } : null;
+  const cells = S ? bodyUnstamp(room, obj.id, true) : null;
+  const ost = objStOf(room), rec = ost.get(obj.id) || {};
+  const codes = cells || bodyCellsOf(rec, obj);
+  let took = 0;
+  for (const k of ks) { const kk = k | 0; if (kk < 0 || kk >= n || !fm[kk]) continue; fm[kk] = 0; codes[kk] = 0; took++; }
+  if (!took) { if (pose) bodyStamp(room, obj, pose.x, pose.y, pose.a); return 0; }
+  fallMined += took;
+  let any = false; for (let k = 0; k < n; k++) if (fm[k]) { any = true; break; }
+  if (!any) {
+    ost.delete(obj.id);
+    objUnindex(room, obj);
+    emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id });
+    broadcastObjSt(room);
+    return took;
+  }
+  obj.fm = Buffer.from(fm).toString('base64');
+  bodyCellsSet(rec, obj, codes);
+  if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
+  if (objChunked(room)) objsTouch(room, obj.ch);
+  emitObjToChunks(room, obj, 'body-fm', { id: obj.id, fm: obj.fm });
+  if (pose) bodyStamp(room, obj, pose.x, pose.y, pose.a);
+  broadcastObjSt(room);
+  return took;
+}
+// A fallen piece has no author's position to keep, so where it CAME TO REST is where it is: a player who arrives later
+// simulates it from here, not from the branch it fell off (they would watch it fall again). ⚠️ Re-filed under its new
+// chunk in the shared world, without `objUnindex` — that seam also drops the body's stamp.
+function fallRestAt(room, obj, x, y, a) {
+  if (!obj || obj.look !== 'fallen') return;
+  obj.x = x; obj.y = y; obj.angle = a;
+  if (!objChunked(room)) return;
+  const by = roomObjectChunk[room] || (roomObjectChunk[room] = new Map());
+  for (const ch of (obj.chs || [obj.ch])) { const st = by.get(ch); if (st) { st.delete(obj.id); if (!st.size) by.delete(ch); } }
+  objsTouch(room, obj.ch);
+  obj.ch = dropChunkOf(room, obj); obj.chs = objChunksOf(room, obj);
+  for (const ch of obj.chs) { let st = by.get(ch); if (!st) by.set(ch, st = new Set()); st.add(obj.id); }
+  objsTouch(room, obj.ch);
 }
 function bombFuseMs(obj) { return Math.max(200, (obj.fuse == null ? (obj.boom > 0 ? obj.boom : 2.5) : obj.fuse) * 1000); }
 function armBomb(avRoom, id, sid, data) {
@@ -6034,7 +6244,7 @@ function carveCellSrv(grid, hp, mats, i, hard) {
   const v = grid.g(i); if (!v) return false;
   // ⭐ A CELL BODY IS NOT DUG (user, 2026-09-19: objects keep their hit-point breaking) — not even by the editor's
   // hard delete, which would leave an object with a hole in it that nothing but fire is meant to make.
-  if (v === 250 || v === 251) return false;
+  if (v >= 250 && v <= 252) return false;
   if (!hard) {
     if (!matBreakableSrv(mats, v)) return false;
     const s = matStrengthSrv(mats, v);
@@ -6060,7 +6270,7 @@ function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard, cap) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) > r2) continue;
     const i = cx * ROWS + ry;
-    if (val) { const was = grid.g(i); if (was === 250 || was === 251) continue;   // a cell body: not paintable over (see carveCellSrv)
+    if (val) { const was = grid.g(i); if (was >= 250 && was <= 252) continue;   // a cell body: not paintable over (see carveCellSrv)
       if (was !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
   }
@@ -6078,7 +6288,7 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard, cap) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if (Math.abs(ccx - wx) > r || Math.abs(ccy - wy) > r) continue;
     const i = cx * ROWS + ry;
-    if (val) { const was = grid.g(i); if (was === 250 || was === 251) continue;   // a cell body: not paintable over (see carveCellSrv)
+    if (val) { const was = grid.g(i); if (was >= 250 && was <= 252) continue;   // a cell body: not paintable over (see carveCellSrv)
       if (was !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
   }
@@ -8115,6 +8325,10 @@ const FIRE_AUDIT_TICKS = 32;   // ~1.3s at the 40ms tick
 // draws nothing (`fireHasFuel` asks it). `probe_fire_budget` checks the two agree.
 // `FIRE_ASH` — what a burnt solid leaves: dense fuel leaves Ash (38, a powder, so it falls); foliage leaves nothing.
 const FIRE_RATE = new Float32Array(256), FIRE_ASH = new Uint8Array(256);
+// ⭐ CELL BODIES STEP 3 — told of every cell the fire has finished (left ash or nothing), so a tree burnt through can come
+// down (`fallNote`). ⚠️ A NO-OP-AND-REASSIGN SEAM, like `wireFanout`: the rigs slice this block and run it alone, and a
+// bare call to something declared outside it throws in a guard and nowhere else.
+let fireGone = null;
 for (const [id, rate, ash] of [
   [28, 0.5, 92],   // Wood — a tree's trunk: slow, the thing that makes a forest burn for a while
   [91, 0.5, 92],   // Timber — sawn wood (a player's build chars in place too)
@@ -8141,6 +8355,7 @@ for (const [id, rate, ash] of [
   // thin and does not smoulder for a minute the way a trunk's does.
   [250, 0.8, 251], // Body wood — ~4s alight, then its own charcoal (starves like a trunk's when buried)
   [251, 0.16, 38], // Body charcoal — ~20s, then ash (user's number; a trunk's charcoal smoulders a minute)
+  [252, 3, 0],     // Body foliage (step 3) — a fallen tree's leaves: burn as Leaves do, and leave nothing
 ]) { FIRE_RATE[id] = rate; FIRE_ASH[id] = ash; }
 // 🟥 A "ONLY A SHARE OF A BODY'S CHARCOAL LEAVES ASH, THE REST AIR" TABLE WAS HERE AND IS GONE (2026-09-19, user: *"the
 // crate charcoal shouldn't be turning into air any more than normal wood does, it should be turning into ash like wood
@@ -8163,7 +8378,7 @@ FIRE_AIR[251] = 1;  // Body charcoal — the same rule, or a crate's buried midd
 // throws a few burning flakes; oil barely any (it flames, it does not crumble). Id 15 is oil (a liquid's id).
 const FIRE_EMBER = new Float32Array(256);
 for (const [id, k] of [[28, 1], [91, 1], [40, 1], [92, 1.4], [41, 1], [20, 0.7], [29, 0.6], [46, 0.8], [47, 0.5],
-  [48, 0.5], [30, 0.6], [83, 0.4], [82, 0.3], [32, 0.3], [50, 0.3], [31, 0.2], [15, 0.35], [250, 1], [251, 1.4]]) FIRE_EMBER[id] = k;
+  [48, 0.5], [30, 0.6], [83, 0.4], [82, 0.3], [32, 0.3], [50, 0.3], [31, 0.2], [15, 0.35], [250, 1], [251, 1.4], [252, 0.6]]) FIRE_EMBER[id] = k;
 // ⭐ AN EMBER'S FLIGHT, in cells and seconds. ⚠️ THE CLIENT RUNS THE SAME INTEGRATOR to draw it (16d, `EMB_*`) from
 // the launch the server sends, so these numbers are duplicated there and must stay in step — the ember you see
 // should come down where the fire starts. Light and draggy on purpose: embers loft and drift, they are not shot.
@@ -8827,6 +9042,7 @@ function fineReactTickRoom(room, SUB, phase) {
             // Dense fuel leaves Ash (a powder — it is woken so it falls); foliage and flash cells leave nothing.
             if (left) { setSolid(i, left); powderSet(room).add(i); }
             else { grid.s(i, 0); hp.s(i, 0); terrCells.push(i, 0); if (st.sat) st.sat.s(i, 0); wakeN(i); }
+            if (fireGone) fireGone(room, i);
           }
           if (rI > 0 && isPowderId(gPeek(i - 1))) powderSet(room).add(i - 1);   // grains resting on it may now fall
         }
@@ -10768,6 +10984,8 @@ function flushRoomBatch(room, evs) {
 // ==INTEREST_BLOCK_END==
 // ⇓ the three lines that turn the sim's broadcasts into interest-limited, per-tick-batched fan-out
 wireFanout = interestFanout;
+// …and the fire pass tells the falling-terrain code which cells it has finished (cell bodies step 3, `fallDrain`)
+fireGone = (room, i) => { (roomFallGone[room] || (roomFallGone[room] = new Set())).add(i); };
 // ⚠️ A LEFTOVER BATCH IS FLUSHED, NEVER DISCARDED. runLiquidTick's only early return is above beginWireBatch, so
 // the pair is balanced on every normal path — but an exception mid-tick would leave a batch open, and simply
 // overwriting it would silently drop diffs the sim had already produced. Delivering them one tick late is strictly
@@ -13215,10 +13433,10 @@ saveChunkBlob = function (room, p, blob, pristine) {
   // stamped into — and only on the way to DISK: the in-memory eviction blob keeps them, because the object is
   // still stamped there and will read them back.
   let hasBody = false;
-  for (let k = 0; k < blob.m.length; k++) if (blob.m[k] === 250 || blob.m[k] === 251) { hasBody = true; break; }
+  for (let k = 0; k < blob.m.length; k++) if (blob.m[k] >= 250 && blob.m[k] <= 252) { hasBody = true; break; }
   if (hasBody) {
     const m2 = Uint8Array.from(blob.m), hp2 = Uint8Array.from(blob.hp);
-    for (let k = 0; k < m2.length; k++) if (m2[k] === 250 || m2[k] === 251) { m2[k] = 0; hp2[k] = 0; }
+    for (let k = 0; k < m2.length; k++) if (m2[k] >= 250 && m2[k] <= 252) { m2[k] = 0; hp2[k] = 0; }
     blob = Object.assign({}, blob, { m: m2, hp: hp2 });
   }
   persistChunkBlob(room, p, blob, genVersion(room));
@@ -15443,7 +15661,7 @@ function captureRoomBlob(avRoom) {                      // → a Lvl blob (terra
     // ⭐ A CELL BODY'S CELLS ARE SAVED AS AIR — they are the object's, and the object is saved on its own and
     // re-stamped when it is loaded (see `saveChunkBlob` for the same rule on the Overworld's side).
     const _runs = terrainRLE(g).runs;
-    for (const run of _runs) if (run[0] === 250 || run[0] === 251) run[0] = 0;   // runs are [value, count] pairs
+    for (const run of _runs) if (run[0] >= 250 && run[0] <= 252) run[0] = 0;   // runs are [value, count] pairs
     cached = { sig, mats, terrain: { cols: g.geom.cols, rows: g.geom.rows, cell: TERRAIN_CELL, runs: _runs, hpRuns: peekCells(avRoom).terrainHp ? terrainRLE(peekCells(avRoom).terrainHp).runs : undefined } };
     if (sig >= 0) _terrBlobCache.set(avRoom, cached); else _terrBlobCache.delete(avRoom);
   }
@@ -20054,7 +20272,7 @@ io.on('connection', (socket) => {
       activatePowderRect(currentAvatarRoom, grid, Math.floor((cx - rr) / TERRAIN_CELL) - 1, Math.floor((cy - rr) / TERRAIN_CELL) - 1, Math.floor((cx + rr) / TERRAIN_CELL) + 1, Math.floor((cy + rr) / TERRAIN_CELL) + 1);   // dig removes support / paint drops grains
       // #108 — and whatever plant the edit just cut free comes down as material. AFTER the powder wake, so
       // the two never argue about the same cell: a plant is not powder any more, so nothing here overlaps.
-      if (op === 'carve') collapsePlants(currentAvatarRoom, Math.floor((cx - rr) / TERRAIN_CELL), Math.floor((cy - rr) / TERRAIN_CELL), Math.floor((cx + rr) / TERRAIN_CELL), Math.floor((cy + rr) / TERRAIN_CELL));
+      if (op === 'carve') (fallCfg.on ? fallCheck : collapsePlants)(currentAvatarRoom, Math.floor((cx - rr) / TERRAIN_CELL), Math.floor((cy - rr) / TERRAIN_CELL), Math.floor((cx + rr) / TERRAIN_CELL), Math.floor((cy + rr) / TERRAIN_CELL));
       // `hits`/`keepLiq` ride the rebroadcast too, or every OTHER client lands a different number of chips
       // than the sender did and their hp drifts apart — the same desync, one step removed.
       socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd, hits: nHits, keepLiq: keepLiq ? 1 : undefined });
@@ -20114,7 +20332,7 @@ io.on('connection', (socket) => {
         const c = (i / SR) | 0, r = i - c * SR;
         if (c < bc0) bc0 = c; if (c > bc1) bc1 = c; if (r < br0) br0 = r; if (r > br1) br1 = r;
       }
-      if (bc1 >= 0) collapsePlants(currentAvatarRoom, bc0, br0, bc1, br1);
+      if (bc1 >= 0) (fallCfg.on ? fallCheck : collapsePlants)(currentAvatarRoom, bc0, br0, bc1, br1);
     }
   });
   // Custom material registry: define a new custom mat (or match an identical existing one). Dedups by signature,
@@ -20323,6 +20541,13 @@ io.on('connection', (socket) => {
     }
     if (_bodyPosAt.size > 512) for (const [id, t] of _bodyPosAt) if (now - t > 10000) _bodyPosAt.delete(id);
     if (restate) broadcastObjSt(room);
+  });
+  // ⭐ STEP 3 — MINE CELLS OUT OF A FALLEN PIECE. Same gate as digging the ground (build rights), a bounded list.
+  socket.on('body-dig', ({ id, ks } = {}) => {
+    const room = currentAvatarRoom; if (!room || !canBuild() || !Array.isArray(ks) || !ks.length || ks.length > 64) return;
+    const obj = roomObjects[room] && roomObjects[room].get(id);
+    if (!obj || bodySpec(obj) !== 'fallen') return;
+    bodyMine(room, obj, ks);
   });
   socket.on('obj-move', ({ id }) => {
     const room = currentAvatarRoom; if (!room) return;
