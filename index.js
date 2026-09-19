@@ -3805,7 +3805,12 @@ function bodyDims(obj) {
 // ⭐ STEP 3 — A FALLEN PIECE'S CELLS: `fm` is base64 of one MATERIAL id per cell (row-major, its own frame, 0 = none). It is
 // what the piece is MADE of, for good — what it looks like, what mining it gives, whether a player can walk through it —
 // while the grid's codes (`rec.bc`) say what the fire has done to it. ⚠️ Mirrored on the client (`fallMats`, 16b).
-const FALL_DIM = 96;
+// ⭐ HOW BIG A FALLEN PIECE MAY BE, A SIDE. 96 refused every large tree — 1,129 refusals in one of the user's
+// sessions — so a big tree simply would not come down (round 5 item 3). The user's call: raise it, and break a piece
+// up on IMPACT rather than pre-splitting it, *"so that it would sort of be like it was breaking apart"*.
+// ⚠ THE PRICE OF A SIDE IS AREA: every cell of the box is a character in the record the room is sent (`bc`) and a
+//    byte in the piece's materials (`fm`), so 192 is 4× 96, not twice. It covers the trees this generator makes.
+const FALL_DIM = 192;
 function fallMats(obj) {
   if (obj._fmS === obj.fm && obj._fmA) return obj._fmA;
   const a = new Uint8Array(Buffer.from(obj.fm || '', 'base64'));
@@ -4493,11 +4498,14 @@ function bodyIgnite(room, obj, x, y, r, px, py, pa) {
 //    is not itself falling-capable? The ground, rock, a placed block. Three things are NOT support: a body (it moves), ASH
 //    (a burnt trunk's base crumbles to it, and a trunk does not stand on its own ash), and liquid. An unbuilt neighbour IS
 //    (never fell into ground nobody has made — a read must not build world), and so is the level's floor.
-// ⚠️ USER'S LIMITS: up to `fallCfg.max` (~2,000) cells and `FALL_DIM` a side; anything bigger stays standing, as a
-//    >600-cell tree always has.
+// ⚠️ LIMITS: up to `fallCfg.max` cells and `FALL_DIM` a side; anything bigger stays standing. The user set 2,000
+//    originally and raised it after big trees would not come down at all (round 5 item 3).
 // `min`: a clump smaller than this drops as PICKUPS (#108's old way) instead of becoming an object — a burning crown sheds
 // one- and two-cell specks every few seconds, and a forest fire would otherwise fill the world with tiny loose bodies.
-const fallCfg = { on: 1, max: 2000, min: 6 };
+// ⚠ `max` 2,000 → 12,000 with the same reasoning as FALL_DIM: the limit, not the mechanism, was stopping big trees.
+// `min` 6 → 1 now that a hundred pieces cost 0.5ms a frame instead of 256 (the reason it was 6 is gone — see the note
+// on the clause that uses it). Every clump the fire frees is a piece you can mine, and nothing drops pickups any more.
+const fallCfg = { on: 1, max: 12000, min: 1 };
 let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallSmall = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
 const FALL_ASH = 38;
 function fallCand(v) { return v > 0 && (isPlantId(v) || v === 91 || v === 92); }
@@ -4550,10 +4558,10 @@ function fallCheck(room, c0, r0, c1, r1, seenIn) {
     for (const i of mark) seen.add(i);
     if (supported || !region.length) continue;
     if (overflow) { fallRefused++; continue; }
-    // ⚠️ A CLUMP UNDER `min` CELLS STAYS WHERE IT IS (user, 2026-09-20: no pickups — not for trees any more, and not in a
-    //    sandbox at all; ideally these would fall as objects too, but many small bodies are the lag they already see). A
-    //    burning one burns away where it hangs. `min` 1 makes every clump an object (`/debug/bodies?min=1`). `fallPile` is
-    //    kept, unused, for the `fallCfg.on = 0` era's behaviour.
+    // ⭐ EVERY CLUMP IS A PIECE NOW (`min` 1). It was 6 because a burning crown sheds one- and two-cell specks and many
+    //    small bodies were the lag the user was seeing — which was measured and fixed: the solver's cost with a hundred
+    //    pieces went from 256ms a frame to 0.5. The user asked for these to fall *"once performance allows"*, and it does.
+    //    `fallPile` is kept, unused, for the `fallCfg.on = 0` era's behaviour; nothing drops pickups in a sandbox.
     if (region.length < fallCfg.min) { fallSmall++; continue; }
     if (fallCut(room, region)) cut++;
   }
