@@ -3882,8 +3882,21 @@ function bodyStill(room, obj, rec, hidden) {
 // water; a cell that lands on something is simply not stamped. Returns whether anything was written.
 // ⚠️ ON A GENERATED WORLD A PAGE THAT IS NOT MADE YET IS NOT AIR, so nothing is stamped until it exists: a read must not
 // build world (`feedback_a_read_is_not_free`), and this runs for every body in the room.
+// ⭐ A ROOM WITH NO GROUND YET STILL HAS SOMEWHERE TO PUT A BODY. A page room makes its terrain on its first edit, and a server
+// restart empties it — so in a room nobody has dug or painted since, there was no grid to stamp into: every wooden thing
+// stayed OUT of the world, burning on its own clock, with no flames drawn, no ash, no smoke and no embers (user, step 2
+// round 4 — after a restart cleared their Sandbox). Made the way a first paint makes it.
+// ⚠️ …AND ITS LIQUID FIELDS, which a first paint also makes: the fire reads `fineAmt`/`fineTotal` (oil is fuel), and without
+//    them `igniteBox` and the reaction pass return at once — the crate went in, and the Fire tool lit nothing.
+function bodyTerrainOf(room) {
+  const st = roomCells.get(room);
+  if (st && st.terrain && st.terrainHp && st.fineAmt) return st;
+  ensureTerrain(room); ensureTerrainHp(room);
+  if (!cellsOf(room).fineAmt) ensureFineArrays(room, 1);
+  return roomCells.get(room);
+}
 function bodyStamp(room, obj, x, y, a) {
-  const st = roomCells.get(room); if (!st || !st.terrain || !st.terrainHp) return false;
+  const st = bodyTerrainOf(room); if (!st || !st.terrain || !st.terrainHp) return false;
   const grid = st.terrain, hp = st.terrainHp, tot = st.fineTotal, ROWS = st.rows, COLS = st.cols, gen = !!grid.seedFn;
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
   const cells = bodyCellsOf(rec, obj);
@@ -4140,8 +4153,14 @@ function bodyTick() {
   }
   if (!full) return;
   for (const room of Object.keys(roomObjects)) {
-    const map = roomObjects[room], st = roomCells.get(room);
-    if (!map || !map.size || !st || !st.terrain) continue;
+    const map = roomObjects[room];
+    if (!map || !map.size) continue;
+    let st = roomCells.get(room);
+    if (!st || !st.terrain) {                                   // …no ground yet: made only if something here needs stamping
+      let any = false; for (const o of map.values()) if (bodySpec(o) && !bodyLoose(o)) { any = true; break; }
+      if (!any) continue;
+      st = bodyTerrainOf(room); if (!st || !st.terrain) continue;
+    }
     const m = roomBodyStamp[room], ost = roomObjSt[room];
     let changed = false, hidden;
     const hid = () => { if (hidden === undefined) { const h = objLinkHidden(room); hidden = h ? new Set(h) : null; } return hidden; };
