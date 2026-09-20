@@ -914,6 +914,10 @@ app.get('/debug/bodies', (req, res) => {
   if (req.query.split != null) bodySplitCfg.on = +req.query.split ? 1 : 0;
   for (const k of ['min', 'diag']) if (req.query['split' + k] != null) bodySplitCfg[k] = +req.query['split' + k] | 0;
   for (const k of ['min', 'max']) if (req.query[k] != null && isFinite(+req.query[k])) fallCfg[k] = Math.max(1, +req.query[k] | 0);
+  // …and the bake's dials, for an A/B: `bake=0|1` · `bakecap` (0 = never) · `bakerest` ms · `bakeper` a tick
+  if (req.query.bake != null) bakeCfg.on = +req.query.bake ? 1 : 0;
+  for (const [q, k] of [['bakecap', 'cap'], ['bakerest', 'restMs'], ['bakeper', 'perTick']])
+    if (req.query[q] != null && isFinite(+req.query[q])) bakeCfg[k] = Math.max(0, +req.query[q] | 0);
   // `?check=1`: liquid that is sitting INSIDE something solid (a body cell, ground) — a state the flow never makes itself
   const bad = {};
   if (req.query.check) for (const [room, st] of roomCells) {
@@ -925,6 +929,7 @@ app.get('/debug/bodies', (req, res) => {
   res.json({ stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
              fallCuts, fallRefused, fallPiled, fallSmall, fallBurnt, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
              splits: bodySplits, splitGone: bodySplitGone, split: bodySplitCfg,
+             bakes, bakeCells, bakeLast, bake: bakeCfg,
              drops: dropSources, gated: [...gatedRooms], rooms: bad });
 });
 app.get('/debug/cpu-profile', (req, res) => {
@@ -3998,7 +4003,10 @@ function bodyStamp(room, obj, x, y, a) {
   for (let k = 0; k < cells.length; k++) if (skip[k] && (cells[k] & 4)) { cells[k] &= 3; smothered = true; }
   if (smothered) bodyCellsSet(rec, obj, cells);
   const m = roomBodyStamp[room] || (roomBodyStamp[room] = new Map());
-  m.set(obj.id, { x, y, a, dc: D.c, dr: D.r, idx: Int32Array.from(idx), skip, g: grid, fire: litAt.size > 0 });
+  // ⭐ `restT` — WHEN ITS POSE LAST CHANGED, which is how `bakeSweep` knows a piece of debris has been left alone. It is
+  //   refreshed by every move (`bodyMoveTo`), so "settled" means "nothing has happened to it for a while" and needs no
+  //   rest report at all: a client that walks away mid-shove still ends up with a piece that settles.
+  m.set(obj.id, { x, y, a, dc: D.c, dr: D.r, idx: Int32Array.from(idx), skip, g: grid, fire: litAt.size > 0, restT: Date.now() });
   wireFanout(room, 'terrain-set', { cells: set });
   // ⭐ …AND THE CHEMISTRY LOOKS AT IT ONCE, the way it looks at a player's edit. Lava lights the fuel beside it only when
   // the reaction pass visits that lava, and a settled pool is never visited — so a crate set down on still lava sat
@@ -4309,6 +4317,7 @@ function bodyMoveTo(room, obj, x, y, a) {
   if (!set.length && !fireIn.length && !fireOut.length && !smothered) { ost.set(obj.id, rec); return 0; }
   // …and one whose only change was WHICH cells are alight still needs its pose delivered: a cell of its own, re-sent
   if (!set.length) set.push(idx[0], peek(idx[0]));
+  if (S.x !== x || S.y !== y || S.a !== a) S.restT = Date.now();   // it moved: it is not settled debris (`bakeSweep`)
   S.x = x; S.y = y; S.a = a; S.idx = Int32Array.from(idx); S.skip = skip; S.fire = S.fire || litAny;
   rec.bs = [x, y, Math.round(a * 1000)]; if (skips) rec.bs.push(skips);
   ost.set(obj.id, rec);
@@ -4418,10 +4427,28 @@ function bodyIslands(cells, D) {
 }
 // What a body cell's code is made of, once it is debris: a body is planks and charcoal, whatever it was drawn as.
 function bodySplitMat(code) { return (code & 3) === 2 ? 92 : (code & 3) === 3 ? 29 : 91; }
+// 🟥🟥 THE SPECKLED CRATES (user, 2026-09-21: *"a whole bunch of crates stacked in a pile and then burnt for a fairly
+// long time, and sometimes jostled around"*). Reproduced by `e2e_fire_live --speckle`: after five minutes one crate was
+// down to **5 cells in 3 islands**, drawn and collided as four separate flecks moving as one thing — and it was NOT
+// WRITTEN INTO THE WORLD. The split only ever ran on bodies that are (`bodyTick`'s stamped loop), and the moving-burn
+// loop never asked at all, so the crates that burn longest — the ones that sink into the ash they are making, which is
+// the whole point of a long burn in a pile — were exactly the ones nothing ever looked at. The rigs could not see it
+// because they ran for sixty seconds.
+// ⭐ SO `S` IS OPTIONAL NOW. Where a body is has nothing to do with whether it has come apart: its cells are its record,
+//   which exists either way. What the pose is needed for is PLACING things — a new piece, the ash a speck leaves — so
+//   without one the check does the half that needs no pose: it throws the specks away. A real split waits until the
+//   body is back in the world, where it can be put somewhere.
+const bodySplitAt = new Map();          // id → when it was last asked, for bodies with no stamp to hang it on
 function bodySplitCheck(room, obj, S, now, force) {
-  if (!bodySplitCfg.on || !S) return false;
-  if (!force && S.splitAt && now - S.splitAt < bodySplitCfg.everyMs) return false;
-  S.splitAt = now;
+  if (!bodySplitCfg.on) return false;
+  if (S) {
+    if (!force && S.splitAt && now - S.splitAt < bodySplitCfg.everyMs) return false;
+    S.splitAt = now;
+  } else {
+    if (!force && now - (bodySplitAt.get(obj.id) || 0) < bodySplitCfg.everyMs) return false;
+    bodySplitAt.set(obj.id, now);
+    if (bodySplitAt.size > 512) for (const [id, t] of bodySplitAt) if (now - t > 30000) bodySplitAt.delete(id);
+  }
   // ⚠️ AN EMPTY RECORD IS NORMAL, NOT A REASON TO STOP. `bodyCellsSet` DELETES the record when the cells match the
   //    body's fresh shape — and mining rewrites `fm`, so they do. Requiring one here is why a piece dug clean in two
   //    stayed one object, and the grid dump showed the hole going all the way through while the counter read zero.
@@ -4435,6 +4462,34 @@ function bodySplitCheck(room, obj, S, now, force) {
   if (isles.length < 2) return false;
   // the biggest stays; everything else leaves
   let big = 0; for (let i = 1; i < isles.length; i++) if (isles[i].length > isles[big].length) big = i;
+  // ⭐ NOT IN THE WORLD: no pose, so nothing can be placed — but a speck can still stop existing. Islands too small to
+  //   be a thing of their own go (without the ash they would leave, which needs a pose), and anything big enough to
+  //   become a piece waits for the body to be stamped again. That is the whole of the speckled-crate fault.
+  if (!S) {
+    const keep0 = bodyCellsOf(rec, obj).slice();
+    let gone = 0, left = 0;
+    for (let i = 0; i < isles.length; i++) {
+      if (i === big || isles[i].length >= bodySplitCfg.min) continue;
+      for (const k of isles[i]) keep0[k] = 0;
+      gone += isles[i].length;
+    }
+    if (!gone) return false;
+    bodySplitGone += gone;
+    for (let k = 0; k < keep0.length; k++) if (keep0[k] & 3) left++;
+    // 🟥 A FALLEN PIECE'S MATERIALS ARE THE SOURCE OF TRUTH — the same trap the stamped path records below: the moment
+    //   the codes match what `fm` implies, `bodyCellsSet` drops `bc` and the specks come back as if nothing happened.
+    if (obj.look === 'fallen' && typeof obj.fm === 'string') {
+      const fm2 = fallMats(obj).slice();
+      for (let k = 0; k < fm2.length && k < keep0.length; k++) if (!(keep0[k] & 3)) fm2[k] = 0;
+      obj.fm = Buffer.from(fm2).toString('base64');
+      delete obj._fmA; delete obj._fmS;
+      emitObjToChunks(room, obj, 'body-fm', { id: obj.id, fm: obj.fm });
+    }
+    if (!left) { bodyBurnOut(room, obj); return true; }
+    bodyCellsSet(rec, obj, keep0);
+    if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
+    return true;
+  }
   const pose = { x: S.x, y: S.y, a: S.a };
   const cells = bodyUnstamp(room, obj.id, true) || cells0;
   const st = roomCells.get(room);                         // …where the ash an island leaves behind is written
@@ -4576,13 +4631,25 @@ function bodyTick() {
       if (!bodyLoose(obj) && (S.x !== obj.x || S.y !== obj.y || S.a !== (obj.angle || 0))) { bodyUnstamp(room, id, true); changed = true; }
     }
     for (const obj of map.values()) {
-      if (bodyLoose(obj) || !bodySpec(obj)) continue;           // a loose one is stamped where a client says it came to rest
+      if (!bodySpec(obj)) continue;
       if (roomBodyStamp[room] && roomBodyStamp[room].has(obj.id)) continue;
       const rec = ost && ost.get(obj.id);
+      // 🟥 A LOOSE BODY THAT HAS BURNED BUT IS NOT IN THE WORLD IS CHECKED FOR HAVING COME APART. It is in neither of
+      //   the maps the passes above walk — the burn map holds only bodies with a cell still alight, and the stamp map
+      //   only bodies written in — so a crate that sank into its own ash and then went out was visited by NOTHING AT
+      //   ALL, for ever, and stayed a handful of disconnected flecks moving as one thing. That is the speckled crate
+      //   (see `bodySplitCheck`). Once a second, and the check throttles itself per body.
+      if (bodyLoose(obj)) {                                    // a loose one is stamped where a client says it came to rest
+        if (bodySplitCfg.on && rec && rec.bc && bodySplitCheck(room, obj, null, now, false)) changed = true;
+        continue;
+      }
       if (!bodyStill(room, obj, rec, hid())) continue;
       if (objFireAsleep(room, obj.x, obj.y)) continue;           // ground nobody is near: wait until somebody is
       if (bodyStamp(room, obj, obj.x, obj.y, obj.angle || 0)) changed = true;
     }
+    // ⭐ …and a room holding more loose debris than it may bakes the oldest settled pieces back into the ground
+    //   (`bakeSweep`). Here because this pass already walks the room's objects once a second.
+    if (bakeSweep(room, map)) changed = true;
     if (changed) broadcastObjSt(room);
   }
 }
@@ -4851,6 +4918,113 @@ function fallRestAt(room, obj, x, y, a) {
   obj.ch = dropChunkOf(room, obj); obj.chs = objChunksOf(room, obj);
   for (const ch of obj.chs) { let st = by.get(ch); if (!st) by.set(ch, st = new Set()); st.add(obj.id); }
   objsTouch(room, obj.ch);
+}
+// ══ ⭐⭐ ROUND 12 — A PIECE THAT HAS COME TO REST STOPS BEING AN OBJECT ═══════════════════════════════════════════════
+// Every round before this made loose bodies CHEAPER (fewer contacts, one manifold a pair, a hinted deepest search). This
+// one makes them stop existing. A fallen piece that has been left alone for `restMs` is written into the world as its own
+// MATERIALS — Timber, Charcoal, tree Wood, leaves — and its object is deleted. It is already stamped into the world at
+// rest (step 3), so the cells are already exactly where they are drawn: nothing changes about where it is, how it burns
+// or how it is mined. What goes is the rigid body, its collision pieces, its record on every `obj-state`, and its share
+// of the solver — the four things a pile of burning debris costs.
+// ⭐ IT ONLY HAPPENS WHEN THERE ARE TOO MANY (the user's call, 2026-09-21). Under `cap` a room's debris stays kickable,
+//   so a single plank you knocked loose is still a thing you can shove about. Past it the OLDEST-SETTLED go first, which
+//   is the ceiling that stops a forest fire ever reaching the state that was reported.
+// ⭐ THE LOOP IS CLOSED: dig the ground out from under baked cells and `fallCheck` cuts them loose again as a new piece —
+//   the same mechanism that made this one. Baking is not a one-way door.
+// ⚠️ ONLY DEBRIS, NEVER SOMETHING A PERSON PLACED. A crate, barrel, log or gate is somebody's build; baking one would
+//   silently turn their crate into a block of timber and take away their ability to move it. `look: 'fallen'` is the
+//   world's own rubble — what a fire or a dig cut loose — and nothing else qualifies.
+// ⚠️ A PIECE BEING PUSHED, CARRIED OR SHOVED IS NOT SETTLED: every pose change refreshes `restT` (`bodyMoveTo`), so the
+//   two cases §31.2 named look after themselves — a player standing on one does not move it, and the cells stay exactly
+//   where they were, so they go on standing on it; a player pushing one keeps it awake and it never qualifies.
+// ⚠️ A PIECE RESTING ON ANOTHER PIECE: bake the bottom one and the top is standing on terrain, which is right; bake both
+//   and a tower of debris becomes a solid mass, which is also right — it is what a heap of rubble is.
+// 🟥 AND "NOTHING HAS HAPPENED TO IT" IS NOT THE SAME AS "IT HAS COME TO REST" — the guard caught this, reading did not.
+// A piece nobody can see is never STEPPED (`lbFarSkip`, round 6), so no machine ever reports where it is: to this end it
+// looks exactly like a piece that settled the instant it was made. The first run of `--bake` cut thirty trees, none of
+// them on screen, and baked seventeen of them back into the ground STILL STANDING — a felled tree that never fell.
+// ⇒ a piece may only bake once somebody's machine has actually simulated it and said where it is (`rep`). Settled is a
+//   claim only a simulator can make, and the absence of a claim is not it.
+function bodyReported(room, id) {
+  const S = roomBodyStamp[room] && roomBodyStamp[room].get(id);
+  if (S) { S.rep = 1; S.restT = Date.now(); }
+}
+const bakeCfg = { on: 1, cap: 24, restMs: 5000, perTick: 8 };
+let bakes = 0, bakeCells = 0, bakeLast = null;
+// Turn one settled piece into ground. Returns whether it did.
+function bodyBake(room, obj) {
+  if (!obj || obj.look !== 'fallen') return false;                 // debris only — see the note above
+  const m = roomBodyStamp[room], S = m && m.get(obj.id);
+  if (!S) return false;                                            // not written into the world ⇒ nowhere to bake it to
+  const st = roomCells.get(room);
+  if (!st || !st.terrain || !st.terrainHp || st.terrain !== S.g) return false;
+  const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows;
+  const ost = objStOf(room), rec = ost.get(obj.id);
+  const cells = bodyCellsOf(rec, obj), D = bodyDims(obj), fm = fallMats(obj);
+  if (D.c !== S.dc || D.r !== S.dr) return false;
+  const set = [];
+  let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
+  for (let k = 0; k < cells.length; k++) {
+    const code = cells[k] & 3; if (!code) continue;
+    const q = bodyRep(obj, D, S.x, S.y, S.a, k); if (!q) continue;
+    const i = q.c * ROWS + q.r;
+    if (i < 0 || i >= grid.length) continue;
+    // ⚠️ ONLY THE CELLS THIS BODY ACTUALLY HOLDS. A cell it could not be stamped into (buried in ash, under water, inside
+    //   ground) belongs to something else, and writing Timber over it would have the piece eat what it is lying in.
+    if (!isBodyId(peekCellAt(grid, i))) continue;
+    // …as what it is MADE of, which is the same answer mining it gives: `fm` for a cell the fire has not turned, and
+    //   Charcoal for one it has. A cell with no material recorded falls back to the split's rule.
+    const mat = code === 2 ? 92 : (fm[k] || bodySplitMat(cells[k]));
+    grid.s(i, mat); hp.s(i, 0); if (st.sat) st.sat.s(i, 0);
+    set.push(i, mat);
+    if (q.c < c0) c0 = q.c; if (q.c > c1) c1 = q.c; if (q.r < r0) r0 = q.r; if (q.r > r1) r1 = q.r;
+  }
+  if (!set.length) return false;
+  wireFanout(room, 'terrain-set', { cells: set });
+  // ⭐ THE STAMP IS FORGOTTEN WITHOUT CLEARING WHAT IT WROTE. `bodyUnstamp` only erases a cell that still reads as a body
+  //   id, and every one of them is a real material now — so this drops the record, the `bs` pose and the bookkeeping and
+  //   leaves the world alone. Anything alight stays alight, in the world, where the fire already lives.
+  bodyUnstamp(room, obj.id, false);
+  if (ost) ost.delete(obj.id);
+  if (roomObjects[room] && roomObjects[room].get(obj.id) === obj) {
+    objUnindex(room, obj);
+    // ⚠️ `quiet` — NO PUFF AND NO CRACK. The ordinary removal draws a break puff and plays a hit; debris quietly becoming
+    //   ground must look like nothing happened at all, or every settling piece pops.
+    emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id, quiet: 1 });
+  }
+  // what was resting on it or flowing round it has new ground beside it
+  if (c1 >= c0) { fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 2, c1 + 1, r1 + 1); }
+  bakes++; bakeCells += set.length / 2;
+  bakeLast = { id: obj.id, cells: set.length / 2 };
+  return true;
+}
+// ⭐ THE CEILING. Counted over the room's own objects — the same pass already walks them — and only the pieces that have
+// been left alone are candidates, oldest first. Bounded per tick so a fire that frees a hundred at once cannot turn one
+// tick into a world rewrite.
+function bakeSweep(room, map) {
+  if (!bakeCfg.on || !bakeCfg.cap) return 0;
+  const m = roomBodyStamp[room]; if (!m || !m.size) return 0;
+  const now = Date.now();
+  // ⭐ THE CEILING COUNTS WHAT SOMEBODY IS ACTUALLY PAYING FOR, not every piece of rubble in the room. A piece nobody
+  //   has stepped costs nothing — it is not in anybody's solver — so counting it would make a forest fire on the far
+  //   side of the world bake the one plank you just knocked loose next to you, which is the opposite of the promise.
+  //   Being simulated at all is exactly `rep`, plus anything in motion (not written in, so somebody is moving it).
+  let n = 0; const can = [];
+  for (const o of map.values()) {
+    if (o.look !== 'fallen' || !bodyLoose(o)) continue;
+    const S = m.get(o.id);
+    if (S && !S.rep) continue;                                 // nobody has ever stepped it: it costs nothing and is not settled
+    n++;
+    if (S && S.restT && now - S.restT >= bakeCfg.restMs) can.push(o);
+  }
+  if (n <= bakeCfg.cap || !can.length) return 0;
+  can.sort((a, b) => (m.get(a.id) || {}).restT - (m.get(b.id) || {}).restT);
+  let done = 0;
+  for (const o of can) {
+    if (n - done <= bakeCfg.cap || done >= bakeCfg.perTick) break;
+    if (bodyBake(room, o)) done++;
+  }
+  return done;
 }
 function bombFuseMs(obj) { return Math.max(200, (obj.fuse == null ? (obj.boom > 0 ? obj.boom : 2.5) : obj.fuse) * 1000); }
 function armBomb(avRoom, id, sid, data) {
@@ -20818,7 +20992,9 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room) return;
     const obj = roomObjects[room] && roomObjects[room].get(id);
     if (!isFinite(x) || !isFinite(y) || !isFinite(a) || !bodyReportOk(room, obj)) return;
-    if (bodyRestAt(room, obj, +x, +y, +a)) broadcastObjSt(room);
+    const ch = bodyRestAt(room, obj, +x, +y, +a);
+    bodyReported(room, obj.id);
+    if (ch) broadcastObjSt(room);
   });
   // ⭐⭐ STEP 3 — WHERE THE MOVING BODIES I AM WORKING OUT HAVE GOT TO, ten times a second: `b` is flat
   // [id, x, y, angle×1000, …]. Each one is kept IN the world at its new pose, only the differing cells rewritten
@@ -20837,6 +21013,7 @@ io.on('connection', (socket) => {
       if (!bodyStill(room, obj, roomObjSt[room] && roomObjSt[room].get(obj.id), null)) continue;
       const P = bodyPoseClamp(room, obj, x, y, a);
       if (bodyMoveTo(room, obj, P.x, P.y, P.a) >= 2) restate = true;
+      bodyReported(room, obj.id);
     }
     if (_bodyPosAt.size > 512) for (const [id, t] of _bodyPosAt) if (now - t > 10000) _bodyPosAt.delete(id);
     if (restate) broadcastObjSt(room);
