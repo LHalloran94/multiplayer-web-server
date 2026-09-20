@@ -921,7 +921,8 @@ app.get('/debug/bodies', (req, res) => {
     if (total) bad[room] = { total, inBody, inSolid };
   }
   res.json({ stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
-             fallCuts, fallRefused, fallPiled, fallSmall, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg, rooms: bad });
+             fallCuts, fallRefused, fallPiled, fallSmall, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
+             drops: dropSources, gated: [...gatedRooms], rooms: bad });
 });
 app.get('/debug/cpu-profile', (req, res) => {
   const ip = (req.socket.remoteAddress || '').replace(/^::ffff:/, '');
@@ -4513,7 +4514,34 @@ function fallCand(v) { return v > 0 && (isPlantId(v) || v === 91 || v === 92); }
 const roomFallGone = {};
 // (`fireGone` is pointed here beside `wireFanout = interestFanout` — it is declared inside the sliced liquid block, further down,
 // and assigning a `let` before its declaration has run is a ReferenceError at startup.)
+// ⭐⭐ A WRITE WAITS BEFORE IT IS JUDGED (user, 2026-09-20: *"when I place a big tree and/or forest that I have saved
+// in the select menu, it immediately falls apart"*). 🟥 A paste arrives as SEVERAL messages and the cells are written
+// row by row, so the canopy lands BEFORE the trunk that will hold it up — and the support check ran on each message,
+// found a crown with nothing under it, and cut it loose. The tree came apart as it was being placed.
+// ⇒ an explicit cell write only queues the rectangle it touched; the check runs `FALL_SETTLE` after the LAST write
+//   near it, by which time the whole thing is there. A dig is unchanged and still decides immediately: a dig is one
+//   message and the whole point of it is what it cut.
+// ⚠️ The rectangles are UNIONED per room rather than kept as a list — a paste is contiguous, and one rectangle is
+//    what the check wants anyway. A second write extends the wait, which is what "after the last one" means.
+const roomFallWait = {};
+const FALL_SETTLE = 700;
+function fallQueueRect(room, c0, r0, c1, r1) {
+  const q = roomFallWait[room];
+  if (q) { q.c0 = Math.min(q.c0, c0); q.r0 = Math.min(q.r0, r0); q.c1 = Math.max(q.c1, c1); q.r1 = Math.max(q.r1, r1); q.at = Date.now(); }
+  else roomFallWait[room] = { c0, r0, c1, r1, at: Date.now() };
+}
+function fallWaitDrain() {
+  const now = Date.now();
+  for (const room of Object.keys(roomFallWait)) {
+    const q = roomFallWait[room];
+    if (now - q.at < FALL_SETTLE) continue;
+    delete roomFallWait[room];
+    if (!fallCfg.on) continue;
+    fallCheck(room, q.c0, q.r0, q.c1, q.r1);
+  }
+}
 function fallDrain() {
+  fallWaitDrain();
   for (const room of Object.keys(roomFallGone)) {
     const gone = roomFallGone[room]; delete roomFallGone[room];
     if (!fallCfg.on || !gone.size) continue;
@@ -4582,6 +4610,7 @@ function fallPile(room, region) {
   if (!n) return;
   wireFanout(room, 'terrain-set', { cells: set });
   if (out.length) wireFanout(room, 'fire-cells', { cells: out });
+  dropWhy = 'fallPile';
   spawnDrop(room, (sx / n + 0.5) * TERRAIN_CELL, (sy / n + 0.5) * TERRAIN_CELL, Array.from(bunch), 0);
   fallPiled++;
 }
@@ -11626,6 +11655,7 @@ function collapsePlants(room, c0, r0, c1, r1) {
       const px = ((bx / bn) + 0.5) * TERRAIN_CELL, py = ((by / bn) + 0.5) * TERRAIN_CELL;
       // A little sideways throw so the pieces spread instead of dropping in a column. Small: they should
       // land around the stump, not across the clearing.
+      dropWhy = 'collapsePlants';
       spawnDrop(room, px, py, Array.from(bunch), 0, { vx: (Math.random() - 0.5) * 0.36 });
       bunch = new Map(); bx = 0; by = 0; bn = 0;
     };
@@ -17494,7 +17524,14 @@ function dropMergeTarget(room, x, y, mats, prima) {
   }
   return null;
 }
+// ⭐ WHERE PILES COME FROM, COUNTED (`/debug/bodies`). The user still saw pickups after they were switched off for
+// sandboxes, and there are five doors that make one — a dig's pile, a felled plant's shower, a death's scatter, a
+// player putting something down, and the old fall-pile. Counting them by door turns "pickups still appear" into a
+// question with one answer instead of five theories. `dropWhy` is set by each caller.
+const dropSources = {};
+let dropWhy = '?';
 function spawnDrop(room, x, y, mats, prima, opts) {
+  dropSources[dropWhy] = (dropSources[dropWhy] | 0) + 1;
   ensureDropsLoaded(room);                // ⚠️ before the merge scan, or a restored cairn is not a merge target
   const map = roomDrops[room] || (roomDrops[room] = new Map());
   let n = 0; for (const [, k] of mats) n += k;
@@ -17576,6 +17613,7 @@ function scatterMatter(room, x, y, mats, prima, spread) {
     // A hold on this one too: a haul the next passer-by hoovers up before it has visibly landed reads as a bug
     // rather than as an event. On a death it is also what makes the scramble a scramble — the killer cannot
     // stand on the corpse and inhale it before anyone else arrives.
+    dropWhy = dropWhy === 'putDown' ? 'putDown' : 'scatter';
     out.push(spawnDrop(room, x, y, parts[i].mats, parts[i].prima, { hold: INV_DROP_HOLD_MS, vx }));
   }
   return out;
@@ -19896,15 +19934,25 @@ io.on('connection', (socket) => {
     { const _cs = cellsOf(currentAvatarRoom); if (_cs.terrain) { _cs.terrain.fill(0); if (_cs.terrainHp) _cs.terrainHp.fill(0); dropPowderSet(currentAvatarRoom); clearFineRoom(currentAvatarRoom); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); } }
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
+  // ⭐ THIS IS WHAT THE "CLEAR SANDBOX" BUTTON CALLS (user, 2026-09-20: *"it would be good if we could add a Clear
+  //    sandbox option somewhere easily accessible … just to aid in testing"*). "Remove all" next door only removes
+  //    objects that are YOURS, and a fallen piece of terrain belongs to the WORLD — so a room full of them could
+  //    not be cleared by anyone, which is how a test session became unrecoverable.
   socket.on('avatar-objects-clear-all', () => {
     if (!currentAvatarRoom) return;
     if (!canBuild()) return;                                // Phase 3: full wipe → a build op
     if (invGatedRoom(currentAvatarRoom)) { socket.emit('build-refused', { why: 'Not out here — there is no "clear everything" in a world with an economy.' }); return; }   // see remove-mine
     if (roomObjects[currentAvatarRoom]) {
       const map = roomObjects[currentAvatarRoom], ids = [...map.keys()];
+      for (const o of map.values()) bodyDrop(currentAvatarRoom, o);   // …and their cells leave the world with them
       map.clear();
       if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     }
+    // ⭐ …AND THE PILES ON THE GROUND. They are a separate list from the objects, so a wipe that left them behind
+    //    left exactly the clutter the button is being pressed to get rid of.
+    { const dm = roomDrops[currentAvatarRoom];
+      if (dm && dm.size) { const ids = [...dm.keys()]; for (const d of dm.values()) dropUnindex(currentAvatarRoom, d); dm.clear();
+        for (const id of ids) io.to(currentAvatarRoom).emit('drop-removed', { id }); } }
     { const _cs = cellsOf(currentAvatarRoom); if (_cs.terrain) { _cs.terrain.fill(0); if (_cs.terrainHp) _cs.terrainHp.fill(0); dropPowderSet(currentAvatarRoom); clearFineRoom(currentAvatarRoom); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); } }
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
@@ -19939,6 +19987,7 @@ io.on('connection', (socket) => {
       const k = Math.min(64, n); clean.push([m, k]); total += k;
     }
     if (!clean.length || total > 64) return;      // 64 = the largest brush (7×7 = 49 cells) with room to spare
+    dropWhy = 'dig';
     spawnDrop(currentAvatarRoom, cx, cy, clean);
   });
   // Collect a pile. The taker already holds its contents (from drop-add / drops-init), so the reply carries only
@@ -20400,7 +20449,9 @@ io.on('connection', (socket) => {
         const c = (i / SR) | 0, r = i - c * SR;
         if (c < bc0) bc0 = c; if (c > bc1) bc1 = c; if (r < br0) br0 = r; if (r > br1) br1 = r;
       }
-      if (bc1 >= 0) (fallCfg.on ? fallCheck : collapsePlants)(currentAvatarRoom, bc0, br0, bc1, br1);
+      // ⚠️ QUEUED, NOT DECIDED NOW — see `fallQueueRect`: a paste arrives in pieces and the canopy lands before
+      //    its trunk, so judging each message tore the tree apart as it was being placed.
+      if (bc1 >= 0) { if (fallCfg.on) fallQueueRect(currentAvatarRoom, bc0, br0, bc1, br1); else collapsePlants(currentAvatarRoom, bc0, br0, bc1, br1); }
     }
   });
   // Custom material registry: define a new custom mat (or match an identical existing one). Dedups by signature,
