@@ -912,6 +912,7 @@ app.get('/debug/voice-prox', (req, res) => {
 app.get('/debug/bodies', (req, res) => {
   for (const k of ['on', 'skipChar']) if (req.query[k] != null) bodyPosCfg[k] = +req.query[k] ? 1 : 0;   // A/B from a rig
   if (req.query.split != null) bodySplitCfg.on = +req.query.split ? 1 : 0;
+  for (const k of ['min', 'diag']) if (req.query['split' + k] != null) bodySplitCfg[k] = +req.query['split' + k] | 0;
   for (const k of ['min', 'max']) if (req.query[k] != null && isFinite(+req.query[k])) fallCfg[k] = Math.max(1, +req.query[k] | 0);
   // `?check=1`: liquid that is sitting INSIDE something solid (a body cell, ground) — a state the flow never makes itself
   const bad = {};
@@ -4385,7 +4386,7 @@ function bodySkipChar(room, obj, S, now) {
 //    be mined, drawn from its own cells, and burnt further.
 // ⚠️ Cells are cleared and rewritten through `bodyUnstamp`/`bodyStamp` rather than by hand: those two already own
 //    every rule about what a body's cells do to the world (fire, liquid, the wire), and a second copy would drift.
-const bodySplitCfg = { on: 1, min: 6, everyMs: 800 };
+const bodySplitCfg = { on: 1, min: 6, everyMs: 800, diag: 0 };   // `diag`: count a corner touch as joined (it does not)
 let bodySplits = 0, bodySplitGone = 0;
 function bodyIslands(cells, D) {
   const seen = new Uint8Array(cells.length), out = [];
@@ -4397,6 +4398,13 @@ function bodyIslands(cells, D) {
       const c = k % D.c, r = (k / D.c) | 0;
       for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) {
         if (!dc && !dr) continue;
+        // 🟥 A CORNER IS NOT A JOIN (user, 2026-09-20: *"the way that crates burn away currently leaves all these
+        //    holes and disconnected specks floating in mid-air but moving as one object, which is exactly the kind
+        //    of thing we were trying to avoid"*). Eight-neighbour was my call, on the reasoning that two cells
+        //    meeting at a corner LOOK joined — but what a burnt crate leaves is a diagonal lattice, so the whole
+        //    speckled mess counted as ONE island and the split never fired. Four-neighbour: a speck touching only
+        //    at a corner is its own island, and an island too small to be a thing turns to ash.
+        if (!bodySplitCfg.diag && dc && dr) continue;
         const nc = c + dc, nr = r + dr;
         if (nc < 0 || nr < 0 || nc >= D.c || nr >= D.r) continue;
         const kk = nr * D.c + nc;
@@ -6929,6 +6937,7 @@ const liquidCfg = {
   fireOxygen: 1,         // a cell that finishes its burn with no open face is STARVED: charcoal, out (see there)
   fireAshOrder: 0,       // 1 = a column crumbles TOP DOWN so nothing hovers
   fireAshJitter: 45,     // per-cell delay before a cell finishes burning, so a mass does not turn over all at once
+  fireLeafAsh: 6,        // one burnt FOLIAGE cell in six leaves ash; wood and charcoal always do (see `FIRE_ASH`)
   // ⭐⭐ FIRE JUMPS GAPS (2026-09-18, the user's idea). Before this fire spread ONLY to the four touching cells, so a
   // one-cell gap stopped it dead. Two channels, both switchable:
   //  · REACH — a flame lights fuel a few cells ABOVE it through clear air (heat and flame rise), and the cells beside
@@ -9254,7 +9263,17 @@ function fineReactTickRoom(room, SUB, phase) {
           // is what keeps a burnt tree's shape (charcoal burns ~10× longer than the wood did). Charcoal in turn
           // leaves Ash, which is not a fuel, so that is where the chain ends and the powder falls.
           // ⚠️ A FLASH CELL IS CONSUMED WHOLE, at either stage — that is what opens the gaps inside a burning trunk.
-          const left = flash ? 0 : FIRE_ASH[gPeek(i)];
+          // ⭐ FOLIAGE LEAVES ONLY A LITTLE ASH (user, 2026-09-21: *"the foliage being consumed is actually alright
+          //   … making it turn to ash creates way too much ash. It would be okay if it made SOME ash"*). A whole
+          //   canopy turning to ash measured 2,584 cells of it, a drift the size of the tree. One leaf cell in
+          //   `fireLeafAsh` leaves ash and the rest leave nothing, chosen by the same positional hash everything
+          //   else in the fire uses — so it is deterministic, scattered, and free.
+          // ⚠️ WOOD IS NOT IN THIS. A plank, a trunk, a crate's planks and their charcoal all leave ash cell for
+          //    cell, which is exactly what the user asked for: *"small cells of wood on a burnt through crate …
+          //    would just disappear rather than turning to ash"*.
+          let left = flash ? 0 : FIRE_ASH[gPeek(i)];
+          if (left && MAT_PLANT[gPeek(i)] === 1 && (liquidCfg.fireLeafAsh | 0) > 1
+              && (fireVar(i, salt + 71, 1e6) * (liquidCfg.fireLeafAsh | 0) | 0) !== 0) left = 0;
           // ⭐⭐ OXYGEN IS WHAT DECIDES CHARCOAL FROM ASH, and it is the difference in the real world too: wood
           // heated WITHOUT enough air pyrolyses to charcoal and stops there — the volatiles cook off and a carbon
           // skeleton is left — and charcoal only becomes ash when it actually BURNS, which needs air. That is why
