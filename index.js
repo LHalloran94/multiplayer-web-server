@@ -4429,13 +4429,29 @@ function bodySplitCheck(room, obj, S, now, force) {
   let big = 0; for (let i = 1; i < isles.length; i++) if (isles[i].length > isles[big].length) big = i;
   const pose = { x: S.x, y: S.y, a: S.a };
   const cells = bodyUnstamp(room, obj.id, true) || cells0;
+  const st = roomCells.get(room);                         // …where the ash an island leaves behind is written
   const keep = new Uint8Array(cells.length);
   for (const k of isles[big]) keep[k] = cells[k];
   const cw = (obj.w || 64) / D.c, ch = (obj.h || 64) / D.r, ca = Math.cos(pose.a), sa = Math.sin(pose.a);
   for (let i = 0; i < isles.length; i++) {
     if (i === big) continue;
     const isle = isles[i];
-    if (isle.length < bodySplitCfg.min) { bodySplitGone += isle.length; continue; }   // …too small to be a thing
+    // ⚠️ TOO SMALL TO BE A THING — but not nothing: it leaves ASH where it was, for the same reason the fire now does.
+    if (isle.length < bodySplitCfg.min) {
+      bodySplitGone += isle.length;
+      const set = [];
+      for (const k of isle) {
+        const q = bodyRep(obj, D, pose.x, pose.y, pose.a, k); if (!q) continue;
+        if (!st || !st.terrain) break;
+        const i = q.c * st.rows + q.r;
+        if (i < 0 || i >= st.terrain.length || peekCellAt(st.terrain, i) !== 0) continue;   // …only into the air it just left
+        st.terrain.s(i, FALL_ASH); if (st.terrainHp) st.terrainHp.s(i, 1);
+        set.push(i, FALL_ASH);
+      }
+      if (set.length) { wireFanout(room, 'terrain-set', { cells: set });
+        for (let z = 0; z < set.length; z += 2) powderSet(room).add(set[z]); }
+      continue;
+    }
     let c0 = D.c, r0 = D.r, c1 = -1, r1 = -1;
     for (const k of isle) { const c = k % D.c, r = (k / D.c) | 0;
       if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
@@ -8571,16 +8587,20 @@ for (const [id, rate, ash] of [
   [92, 0.05, 38],  // Charcoal — smoulders a long time, then ash
   [41, 0.15, 38],  // Coal — very slow, very long
   [20, 0.25, 38],  // Peat — smoulders
-  [29, 3, 0],      // Leaves
-  [46, 3, 0],      // Needle
-  [47, 3, 0],      // Frond
-  [48, 2.5, 0],    // Reed
-  [30, 2.5, 0],    // Scrub
-  [83, 2.5, 0],    // Vine
-  [82, 2, 0],      // Lichen
-  [32, 2, 0],      // Moss
-  [50, 1.5, 0],    // Fungus
-  [31, 0.8, 0],    // Cactus — wet flesh, catches reluctantly
+  // ⭐ FOLIAGE LEAVES ASH (user, 2026-09-20: things consumed *"would be better to turn them to ash, rather than
+  // disappearing altogether"*). It used to leave nothing, so a burning canopy simply stopped existing — and the
+  // clumps the fire cuts loose, which are set alight where they stand now instead of becoming objects, went the
+  // same way. Ash is a powder: it falls and heaps under the tree, which is what happened and the record that it did.
+  [29, 3, 38],     // Leaves
+  [46, 3, 38],      // Needle
+  [47, 3, 38],      // Frond
+  [48, 2.5, 38],    // Reed
+  [30, 2.5, 38],    // Scrub
+  [83, 2.5, 38],    // Vine
+  [82, 2, 38],      // Lichen
+  [32, 2, 38],      // Moss
+  [50, 1.5, 38],    // Fungus
+  [31, 0.8, 38],    // Cactus — wet flesh, catches reluctantly
   // ⭐⭐ CELL BODIES (step 1) — a wooden OBJECT's cells while it is written into the world (see `bodyStamp`). Its own
   // wood → its own charcoal → ordinary Ash, so a crate keeps being a crate while it chars, and only the ash it finally
   // crumbles to is left in the world as terrain. ⚠️ LITERAL IDS: `BODY_WOOD`/`BODY_CHAR` are declared outside this
@@ -8588,7 +8608,7 @@ for (const [id, rate, ash] of [
   // thin and does not smoulder for a minute the way a trunk's does.
   [250, 0.8, 251], // Body wood — ~4s alight, then its own charcoal (starves like a trunk's when buried)
   [251, 0.16, 38], // Body charcoal — ~20s, then ash (user's number; a trunk's charcoal smoulders a minute)
-  [252, 3, 0],     // Body foliage (step 3) — a fallen tree's leaves: burn as Leaves do, and leave nothing
+  [252, 3, 38],     // Body foliage (step 3) — a fallen tree's leaves: burn as Leaves do, and leave nothing
 ]) { FIRE_RATE[id] = rate; FIRE_ASH[id] = ash; }
 // 🟥 A "ONLY A SHARE OF A BODY'S CHARCOAL LEAVES ASH, THE REST AIR" TABLE WAS HERE AND IS GONE (2026-09-19, user: *"the
 // crate charcoal shouldn't be turning into air any more than normal wood does, it should be turning into ash like wood
