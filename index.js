@@ -911,6 +911,7 @@ app.get('/debug/voice-prox', (req, res) => {
 // Cell bodies — how often bodies go in, come out, and move while kept in (step 3), and what moving them displaced.
 app.get('/debug/bodies', (req, res) => {
   for (const k of ['on', 'skipChar']) if (req.query[k] != null) bodyPosCfg[k] = +req.query[k] ? 1 : 0;   // A/B from a rig
+  if (req.query.split != null) bodySplitCfg.on = +req.query.split ? 1 : 0;
   for (const k of ['min', 'max']) if (req.query[k] != null && isFinite(+req.query[k])) fallCfg[k] = Math.max(1, +req.query[k] | 0);
   // `?check=1`: liquid that is sitting INSIDE something solid (a body cell, ground) — a state the flow never makes itself
   const bad = {};
@@ -922,6 +923,7 @@ app.get('/debug/bodies', (req, res) => {
   }
   res.json({ stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
              fallCuts, fallRefused, fallPiled, fallSmall, fallBurnt, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
+             splits: bodySplits, splitGone: bodySplitGone, split: bodySplitCfg,
              drops: dropSources, gated: [...gatedRooms], rooms: bad });
 });
 app.get('/debug/cpu-profile', (req, res) => {
@@ -4369,6 +4371,111 @@ function bodySkipChar(room, obj, S, now) {
   if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
   return true;
 }
+// ⭐⭐ A BODY THAT HAS BURNED INTO SEPARATE PIECES BECOMES SEPARATE THINGS (user, 2026-09-20: *"the leftover object
+// after being burned away contains disconnected parts, but which all move together as one object"*). They were right
+// about the cause: a body is cut out of the world ONCE, and nothing ever looks at it again — so a crate burnt through
+// the middle keeps both halves on one rigid body, and the halves sail about together with a gap between them.
+// ⭐ THE SMALL ISLANDS ARE NOT SPLIT OFF, THEY ARE CONSUMED. The same reasoning as the leaves: this mechanism exists
+//   in a fire, which makes specks by the dozen, and *"such mechanics have the propensity to create many small
+//   objects"*. Only an island of `min` cells or more is worth being a thing.
+// ⚠️ EIGHT-NEIGHBOUR, so two cells meeting at a corner still count as joined — that is what they look like, and a
+//    four-neighbour rule would shatter a charred body into slivers that are visibly touching.
+// ⚠️ The largest island STAYS THE ORIGINAL OBJECT: it keeps the id, the owner, the hit points and (if it was placed
+//    and pinned) its pinning. What breaks off is debris, so it becomes a `fallen` piece — which already knows how to
+//    be mined, drawn from its own cells, and burnt further.
+// ⚠️ Cells are cleared and rewritten through `bodyUnstamp`/`bodyStamp` rather than by hand: those two already own
+//    every rule about what a body's cells do to the world (fire, liquid, the wire), and a second copy would drift.
+const bodySplitCfg = { on: 1, min: 6, everyMs: 800 };
+let bodySplits = 0, bodySplitGone = 0;
+function bodyIslands(cells, D) {
+  const seen = new Uint8Array(cells.length), out = [];
+  for (let k0 = 0; k0 < cells.length; k0++) {
+    if (seen[k0] || !(cells[k0] & 3)) continue;
+    const isle = [], stack = [k0]; seen[k0] = 1;
+    while (stack.length) {
+      const k = stack.pop(); isle.push(k);
+      const c = k % D.c, r = (k / D.c) | 0;
+      for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) {
+        if (!dc && !dr) continue;
+        const nc = c + dc, nr = r + dr;
+        if (nc < 0 || nr < 0 || nc >= D.c || nr >= D.r) continue;
+        const kk = nr * D.c + nc;
+        if (seen[kk] || !(cells[kk] & 3)) continue;
+        seen[kk] = 1; stack.push(kk);
+      }
+    }
+    out.push(isle);
+  }
+  return out;
+}
+// What a body cell's code is made of, once it is debris: a body is planks and charcoal, whatever it was drawn as.
+function bodySplitMat(code) { return (code & 3) === 2 ? 92 : (code & 3) === 3 ? 29 : 91; }
+function bodySplitCheck(room, obj, S, now, force) {
+  if (!bodySplitCfg.on || !S) return false;
+  if (!force && S.splitAt && now - S.splitAt < bodySplitCfg.everyMs) return false;
+  S.splitAt = now;
+  // ⚠️ AN EMPTY RECORD IS NORMAL, NOT A REASON TO STOP. `bodyCellsSet` DELETES the record when the cells match the
+  //    body's fresh shape — and mining rewrites `fm`, so they do. Requiring one here is why a piece dug clean in two
+  //    stayed one object, and the grid dump showed the hole going all the way through while the counter read zero.
+  const ost = objStOf(room), rec = ost.get(obj.id) || {};
+  // ⚠️ `force` IS NOT A CONVENIENCE. The cheap gate is "it has burned", which is what `bc` records — but MINING
+  //    rewrites the piece's own cells (`fm`) as well, so the record matches the fresh shape again and `bc` is
+  //    dropped. Asked without it, a piece dug clean in two answered "one island" and stayed one object.
+  if (!force && !rec.bc) return false;                    // never burned ⇒ one island by construction
+  const D = bodyDims(obj), cells0 = bodyCellsOf(rec, obj);
+  const isles = bodyIslands(cells0, D);
+  if (isles.length < 2) return false;
+  // the biggest stays; everything else leaves
+  let big = 0; for (let i = 1; i < isles.length; i++) if (isles[i].length > isles[big].length) big = i;
+  const pose = { x: S.x, y: S.y, a: S.a };
+  const cells = bodyUnstamp(room, obj.id, true) || cells0;
+  const keep = new Uint8Array(cells.length);
+  for (const k of isles[big]) keep[k] = cells[k];
+  const cw = (obj.w || 64) / D.c, ch = (obj.h || 64) / D.r, ca = Math.cos(pose.a), sa = Math.sin(pose.a);
+  for (let i = 0; i < isles.length; i++) {
+    if (i === big) continue;
+    const isle = isles[i];
+    if (isle.length < bodySplitCfg.min) { bodySplitGone += isle.length; continue; }   // …too small to be a thing
+    let c0 = D.c, r0 = D.r, c1 = -1, r1 = -1;
+    for (const k of isle) { const c = k % D.c, r = (k / D.c) | 0;
+      if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
+    const W = c1 - c0 + 1, H = r1 - r0 + 1;
+    const fm = new Uint8Array(W * H), codes = new Uint8Array(W * H);
+    for (const k of isle) {
+      const c = k % D.c, r = (k / D.c) | 0, kk = (r - r0) * W + (c - c0);
+      fm[kk] = bodySplitMat(cells[k]); codes[kk] = (cells[k] & 3) === 2 ? 2 : (cells[k] & 3) === 3 ? 3 : 1;
+      if (cells[k] & 4) codes[kk] |= 4;                   // …a piece that breaks off alight goes on burning
+    }
+    // where that patch of the body actually is, at the pose it was stamped at
+    const lx = -(obj.w || 64) / 2 + (c0 + W / 2) * cw, ly = -(obj.h || 64) / 2 + (r0 + H / 2) * ch;
+    const o2 = { id: 'fall-' + (++fallSeq) + '-' + (Date.now() % 1e8).toString(36), type: 'stamp', look: 'fallen',
+                 content: '🪵', shape: 'rect', ownerId: 'world', owner: 'world',
+                 x: pose.x + lx * ca - ly * sa, y: pose.y + lx * sa + ly * ca, w: W * cw, h: H * ch,
+                 angle: pose.a, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64') };
+    objIndex(room, o2);
+    emitObjToChunks(room, o2, 'avatar-object-add', o2);
+    { const r2 = objStOf(room).get(o2.id) || {}; bodyCellsSet(r2, o2, codes); if (Object.keys(r2).length) objStOf(room).set(o2.id, r2); }
+    bodyStamp(room, o2, o2.x, o2.y, o2.angle);
+    bodySplits++;
+  }
+  // …and the original keeps what is left, stamped back where it was
+  let any = false; for (let k = 0; k < keep.length; k++) if (keep[k] & 3) { any = true; break; }
+  if (!any) { bodyBurnOut(room, obj); return true; }
+  // 🟥 A FALLEN PIECE'S MATERIALS ARE THE SOURCE OF TRUTH, so they have to lose the cells as well. `bc` alone is
+  //    not enough: the moment the codes match what `fm` implies, `bodyCellsSet` drops `bc` — and the cells that
+  //    broke off would come back from `fm` as if nothing had happened.
+  if (obj.look === 'fallen' && typeof obj.fm === 'string') {
+    const fm2 = fallMats(obj).slice();
+    for (let k = 0; k < fm2.length && k < keep.length; k++) if (!(keep[k] & 3)) fm2[k] = 0;
+    obj.fm = Buffer.from(fm2).toString('base64');
+    delete obj._fmA; delete obj._fmS;
+    emitObjToChunks(room, obj, 'body-fm', { id: obj.id, fm: obj.fm });
+  }
+  bodyCellsSet(rec, obj, keep);
+  if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
+  bodyStamp(room, obj, pose.x, pose.y, pose.a);
+  return true;
+}
 // ⭐ ONE LOOP KEEPS THE WORLD IN STEP WITH THE OBJECTS, rather than a line in each of the dozen places an object can be
 // placed, moved, loaded, hidden or posed. Every ~1s it stamps every still, pinned body that is not stamped yet, takes
 // out any stamp whose object has gone, stopped being still, or been moved by its author, and — every 250ms in a room
@@ -4414,7 +4521,10 @@ function bodyTick() {
       if (lit) S.fire = true;
       // ⭐ …and the cells that are NOT in the world char along with the rest — see `bodySkipChar`.
       if (bodySkipChar(room, obj, S, now)) skipCh = true;
-      if (!left && S.fire) bodyBurnOut(room, obj);
+      if (!left && S.fire) { bodyBurnOut(room, obj); continue; }
+      // ⭐ …and a body burnt into separate pieces becomes separate things (`bodySplitCheck`). Only worth asking of
+      //   something that HAS burned, which is what `S.fire` says, and it throttles itself per body.
+      if (S.fire && bodySplitCheck(room, obj, S, now)) skipCh = true;
     }
     if (skipCh) broadcastObjSt(room);
   }
@@ -4697,6 +4807,10 @@ function bodyMine(room, obj, ks) {
   if (objChunked(room)) objsTouch(room, obj.ch);
   emitObjToChunks(room, obj, 'body-fm', { id: obj.id, fm: obj.fm });
   if (pose) bodyStamp(room, obj, pose.x, pose.y, pose.a);
+  // ⭐ …and mining a piece IN TWO makes two pieces (`bodySplitCheck`). Digging a channel through a fallen log is
+  //   the same event as burning through one, and it is the half a player does on purpose.
+  { const S2 = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id);
+    if (S2) bodySplitCheck(room, obj, S2, Date.now(), true); }
   broadcastObjSt(room);
   return took;
 }
