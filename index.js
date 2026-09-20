@@ -4586,33 +4586,31 @@ function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
     for (const i of mark) seen.add(i);
     if (supported || !region.length) continue;
     if (overflow) { fallRefused++; continue; }
-    // 🟥🟥 A CLUMP UNDER `min` CELLS DOES NOT BECOME AN OBJECT, and `min` 1 — every clump, which this track tried for
-    //    one round — is what the user's second lag report was: **193 bodies holding 642 cells between them**, i.e. three
-    //    cells each, 181 of them AWAKE, and 426ms of a 457ms frame spent stepping them. A burning canopy sheds a speck
-    //    every few seconds per cell, so a tree on fire mints hundreds of one-cell bodies, and a burning body's shape
-    //    keeps changing, which WAKES it (see `cbInstall`) — so they never settle and never stop costing.
-    // ⭐ AND WHAT HAPPENS TO THEM DEPENDS ON WHY THEY CAME LOOSE. Freed by FIRE, they are consumed: fire eats leaves,
-    //    and leaving them behind is what the user saw as *"sparse dots of slightly burned leaves that retain their
-    //    original shape and thus hover in the air"*. Freed by a DIG, they stay standing, exactly as before — a dig is
-    //    the player's own doing and silently deleting what they cut would be matter destroyed.
-    if (region.length < fallCfg.min) {
+    // 🟥🟥 LEAVES DO NOT FALL — THEY CATCH AND BURN AWAY WHERE THEY ARE (user, 2026-09-20: *"it would be simpler and
+    //    easier if the leaves just catch fire and then burn away completely"*). A burning crown was the whole lag: the
+    //    fire eats through faster than it spreads sideways, so it CUTS the canopy into clumps before they catch, and
+    //    every clump became a loose body. Their readout: 54 bodies, 51 awake, 417 collision pieces, 1,045 contacts a
+    //    step. The specks that survived hung in the air keeping the tree's shape, and being walk-through they fell
+    //    through everything else and *"behave in odd ways"*.
+    // ⭐ SET ALIGHT, NOT DELETED. Deleting a separated crown would make it vanish in one frame; lighting it lets the
+    //    fire finish it over the next few seconds, which is what the user described and what it already looks like.
+    // ⭐ A CLUMP UNDER `min` CELLS goes the same way — those are the specks — and so does anything cut loose by fire
+    //    that has no wood in it at all, whatever its size.
+    // ⚠️ A REGION WITH WOOD IN IT IS STILL A PIECE: a felled tree keeps its crown, because the crown is part of the
+    //    same region as the trunk. This is about foliage on its own.
+    // ⚠️ Freed by a DIG rather than by fire, a leaf-only clump stays standing exactly as it did before this track —
+    //    a dig is the player's own doing, and neither deleting nor igniting what they cut is theirs to decide.
+    let woodIn = false;
+    for (const i of region) { const v = peek(i); if (fallCand(v) && fallCode(v) !== 3) { woodIn = true; break; } }
+    if (!woodIn || region.length < fallCfg.min) {
       if (!byFire) { fallSmall++; continue; }
-      const set = [], out = [];
-      let bc0 = Infinity, br0 = Infinity, bc1 = -1, br1 = -1;
+      const lit = [], fs2 = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map());
       for (const i of region) {
-        if (!fallCand(peek(i))) continue;
-        grid.s(i, 0); if (st.terrainHp) st.terrainHp.s(i, 0); if (st.sat) st.sat.s(i, 0);
-        set.push(i, 0); fallBurnt++;
-        const ic = (i / ROWS) | 0, ir = i - ic * ROWS;
-        if (ic < bc0) bc0 = ic; if (ic > bc1) bc1 = ic; if (ir < br0) br0 = ir; if (ir > br1) br1 = ir;
-        // …and the flame goes with the cell, rather than being left burning where nothing is (`lift`, as `bodyUnstamp`)
-        if (st.fineFire && st.fineFire.delete(i)) { out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); }
+        if (!fallCand(peek(i)) || fs2.has(i)) continue;
+        fs2.add(i); ages.set(i, 0);
+        lit.push(i, 1); fallBurnt++;
       }
-      if (set.length) {
-        wireFanout(room, 'terrain-set', { cells: set });
-        if (out.length) wireFanout(room, 'fire-cells', { cells: out, lift: 1 });
-        fineWakeRect(room, bc0 - 1, br0 - 1, bc1 + 1, br1 + 1); activatePowderRect(room, grid, bc0 - 1, br0 - 1, bc1 + 1, br1 + 1);
-      }
+      if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
       continue;
     }
     if (fallCut(room, region)) cut++;
@@ -20426,7 +20424,12 @@ io.on('connection', (socket) => {
   // Undo for placed terrain: restore an explicit list of cells to prior values. Flat [index, value, ...].
   // Owner-agnostic (terrain isn't owner-tracked), but bounded and rebroadcast so all clients stay in sync.
   socket.on('terrain-set', ({ cells }) => {
-    if (!currentAvatarRoom || !Array.isArray(cells) || cells.length > 16384) return;
+    if (!currentAvatarRoom || !Array.isArray(cells)) return;
+    // 🟥 NEVER SILENTLY, and that is the whole of a real bug: an over-long write was dropped without a word, so an
+    //    UNDO of a pasted template (which sent the lot in one message) looked like it had worked on the client and
+    //    left every cell standing on the server — invisible until the user set the scene alight and the "deleted"
+    //    content caught fire. The client chunks its writes now; this says so when something has not.
+    if (cells.length > 16384) { socket.emit('build-refused', { why: 'That write was too big to send in one piece (' + (cells.length >> 1) + ' cells). Nothing was changed.' }); return; }
     if (!canBuild()) return;                                // Phase 3: L2 build permission
     const grid = ensureTerrain(currentAvatarRoom), hp = ensureTerrainHp(currentAvatarRoom), mats = roomMats[currentAvatarRoom] || {};
     // ⚠️ The spawn keep-clear box no longer applies to TERRAIN. Keeping the ground empty was the wrong half of
