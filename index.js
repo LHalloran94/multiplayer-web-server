@@ -921,7 +921,7 @@ app.get('/debug/bodies', (req, res) => {
     if (total) bad[room] = { total, inBody, inSolid };
   }
   res.json({ stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
-             fallCuts, fallRefused, fallPiled, fallSmall, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
+             fallCuts, fallRefused, fallPiled, fallSmall, fallBurnt, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
              drops: dropSources, gated: [...gatedRooms], rooms: bad });
 });
 app.get('/debug/cpu-profile', (req, res) => {
@@ -4506,8 +4506,8 @@ function bodyIgnite(room, obj, x, y, r, px, py, pa) {
 // ⚠ `max` 2,000 → 12,000 with the same reasoning as FALL_DIM: the limit, not the mechanism, was stopping big trees.
 // `min` 6 → 1 now that a hundred pieces cost 0.5ms a frame instead of 256 (the reason it was 6 is gone — see the note
 // on the clause that uses it). Every clump the fire frees is a piece you can mine, and nothing drops pickups any more.
-const fallCfg = { on: 1, max: 12000, min: 1 };
-let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallSmall = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
+const fallCfg = { on: 1, max: 12000, min: 6 };
+let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallSmall = 0, fallBurnt = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
 const FALL_ASH = 38;
 function fallCand(v) { return v > 0 && (isPlantId(v) || v === 91 || v === 92); }
 // the cells the fire has finished since the last look, per room (`fireGone` → here; `bodyTick` drains it)
@@ -4548,11 +4548,11 @@ function fallDrain() {
     const st = roomCells.get(room); if (!st || !st.terrain) continue;
     const ROWS = st.rows;
     const seen = new Set();
-    for (const i of gone) { const c = (i / ROWS) | 0, r = i - c * ROWS; fallCheck(room, c, r, c, r, seen); }
+    for (const i of gone) { const c = (i / ROWS) | 0, r = i - c * ROWS; fallCheck(room, c, r, c, r, seen, true); }   // …freed by FIRE — see `fallCfg.min`
   }
 }
 // Look for unsupported falling-capable regions touching a rectangle of cells (a dig, or a cell the fire finished).
-function fallCheck(room, c0, r0, c1, r1, seenIn) {
+function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
   const st = cellsOf(room), grid = st.terrain; if (!grid) return 0;
   const COLS = grid.geom.cols, ROWS = grid.geom.rows, nn = grid.length;
   c0 = Math.max(0, c0 - 1); r0 = Math.max(0, r0 - 1); c1 = Math.min(COLS - 1, c1 + 1); r1 = Math.min(ROWS - 1, r1 + 1);
@@ -4586,11 +4586,35 @@ function fallCheck(room, c0, r0, c1, r1, seenIn) {
     for (const i of mark) seen.add(i);
     if (supported || !region.length) continue;
     if (overflow) { fallRefused++; continue; }
-    // ⭐ EVERY CLUMP IS A PIECE NOW (`min` 1). It was 6 because a burning crown sheds one- and two-cell specks and many
-    //    small bodies were the lag the user was seeing — which was measured and fixed: the solver's cost with a hundred
-    //    pieces went from 256ms a frame to 0.5. The user asked for these to fall *"once performance allows"*, and it does.
-    //    `fallPile` is kept, unused, for the `fallCfg.on = 0` era's behaviour; nothing drops pickups in a sandbox.
-    if (region.length < fallCfg.min) { fallSmall++; continue; }
+    // 🟥🟥 A CLUMP UNDER `min` CELLS DOES NOT BECOME AN OBJECT, and `min` 1 — every clump, which this track tried for
+    //    one round — is what the user's second lag report was: **193 bodies holding 642 cells between them**, i.e. three
+    //    cells each, 181 of them AWAKE, and 426ms of a 457ms frame spent stepping them. A burning canopy sheds a speck
+    //    every few seconds per cell, so a tree on fire mints hundreds of one-cell bodies, and a burning body's shape
+    //    keeps changing, which WAKES it (see `cbInstall`) — so they never settle and never stop costing.
+    // ⭐ AND WHAT HAPPENS TO THEM DEPENDS ON WHY THEY CAME LOOSE. Freed by FIRE, they are consumed: fire eats leaves,
+    //    and leaving them behind is what the user saw as *"sparse dots of slightly burned leaves that retain their
+    //    original shape and thus hover in the air"*. Freed by a DIG, they stay standing, exactly as before — a dig is
+    //    the player's own doing and silently deleting what they cut would be matter destroyed.
+    if (region.length < fallCfg.min) {
+      if (!byFire) { fallSmall++; continue; }
+      const set = [], out = [];
+      let bc0 = Infinity, br0 = Infinity, bc1 = -1, br1 = -1;
+      for (const i of region) {
+        if (!fallCand(peek(i))) continue;
+        grid.s(i, 0); if (st.terrainHp) st.terrainHp.s(i, 0); if (st.sat) st.sat.s(i, 0);
+        set.push(i, 0); fallBurnt++;
+        const ic = (i / ROWS) | 0, ir = i - ic * ROWS;
+        if (ic < bc0) bc0 = ic; if (ic > bc1) bc1 = ic; if (ir < br0) br0 = ir; if (ir > br1) br1 = ir;
+        // …and the flame goes with the cell, rather than being left burning where nothing is (`lift`, as `bodyUnstamp`)
+        if (st.fineFire && st.fineFire.delete(i)) { out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); }
+      }
+      if (set.length) {
+        wireFanout(room, 'terrain-set', { cells: set });
+        if (out.length) wireFanout(room, 'fire-cells', { cells: out, lift: 1 });
+        fineWakeRect(room, bc0 - 1, br0 - 1, bc1 + 1, br1 + 1); activatePowderRect(room, grid, bc0 - 1, br0 - 1, bc1 + 1, br1 + 1);
+      }
+      continue;
+    }
     if (fallCut(room, region)) cut++;
   }
   return cut;
