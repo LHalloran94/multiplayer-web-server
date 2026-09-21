@@ -166,7 +166,7 @@
     // exactly the moment the thing holding it up went away.
     // ⚠️ SAME COLOUR AND SAME YIELD as Charcoal — the user's objection to reusing Ash was that a burnt thing should
     // not go grey and should not stop being worth mining. What differs is that it falls.
-    ['Cinder', '#16120f', 'powder', 1, 'dusty'], // 93 cinder — charcoal with nothing holding it up; falls and piles
+    ['Cinder', '#16120f', 'solid', 1, 'dusty'], // 93 cinder — charcoal with nothing holding it up; falls and piles
   ];
 
   const GEN_MAT_MIN = 18;
@@ -238,6 +238,15 @@
     Uranium: 70,      // 74 — a sickly green glow. Radiation damage is still unbuilt; this is only light.
   };
   Object.keys(EMIT).forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].emit = EMIT[n]; });
+
+  // ---- CHARRED — drawn as burnt matter rather than as flat dark rock ---------------------------------------
+  // The user, 2026-09-22, on charcoal made by a crate crumbling: *"it should look like the burnt remains of crates
+  // do, with the grey veins running through it … this also helps keep continuity when the object crumbles, since
+  // otherwise it changes how it looks quite a bit quite suddenly."* The renderer reads the flag; nothing else does.
+  // ⚠️ CINDER IS DECLARED `solid`, NOT `powder`, and that is deliberate (same round): ash is background you walk
+  // through, and a heap of crumbled charcoal should be something you can stand on. It still FALLS — the server puts
+  // it in the powder set by hand — but it blocks, so it comes to rest ON TOP of the ash rather than in it.
+  ['Charcoal', 'Cinder'].forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].charred = 1; });
 
   // ---- PRIMA WORTH — what a cell of this refines into ------------------------------------------------------
   // ⭐ MEASURED, NOT CHOSEN. Every number below is the output of `scratchpad/probe_material_abundance.js`,

@@ -4395,7 +4395,7 @@ function bodyMoveTo(room, obj, x, y, a) {
   if (S.x !== x || S.y !== y || S.a !== a) S.restT = Date.now();   // it moved: it is not settled debris (`bakeSweep`)
   // ⭐ SOMETHING IS SHOVING IT, so the charred parts fall off (user's own reasoning: a heap is only expensive while
   //   things are disturbing each other, and one crate on its own being left alone costs nothing).
-  const moved = S.x !== x || S.y !== y || S.a !== a;
+  const moved = S.x !== x || S.y !== y || S.a !== a, S0x = S.x, S0y = S.y;
   S.x = x; S.y = y; S.a = a; S.idx = Int32Array.from(idx); S.kOf = Int32Array.from(kOf); S.skip = skip; S.fire = S.fire || litAny;
   rec.bs = [x, y, Math.round(a * 1000)]; if (skips) rec.bs.push(skips);
   ost.set(obj.id, rec);
@@ -4407,7 +4407,10 @@ function bodyMoveTo(room, obj, x, y, a) {
   if (c1 >= c0) { fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 2, c1 + 1, r1 + 1); }
   for (const i of fresh) seedFineReactAround(room, i);
   // …and if something is shoving a burnt thing about, its charred parts fall off it (`crumbleCfg.trigger`)
-  if (moved && crumbleCfg.on && crumbleCfg.trigger === 'disturb' && S.fire && !S.lit) bodyCrumble(room, obj, S, crumbleCfg.perPass);
+  if (moved && crumbleCfg.on && crumbleCfg.trigger === 'disturb' && !S.lit && crumbleChar(room, obj)) {
+    const mx = x - S0x, my = y - S0y, ml = Math.hypot(mx, my) || 1;
+    bodyCrumble(room, obj, S, mx / ml, my / ml);                 // …the way it was shoved is where the chain starts
+  }
   return 1;
 }
 // ⭐⭐ THE CELLS THAT ARE NOT IN THE WORLD CHAR TOO (user, step 3 round 5: *"the cells pushed over ash turn orange"*).
@@ -4687,7 +4690,7 @@ function bodyTick() {
       if (lit) S.fire = true;
       // when it was last alight, which is what the timed trigger counts from (`crumbleDue`)
       S.lit = lit; if (lit) S.outT = now; else if (!S.outT) S.outT = now;
-      if (crumbleDue(room, obj, S, now)) bodyCrumble(room, obj, S, crumbleCfg.perPass);
+      if (crumbleDue(room, obj, S, now)) bodyCrumble(room, obj, S, 0, 1);
       // ⭐ …and the cells that are NOT in the world char along with the rest — see `bodySkipChar`.
       if (bodySkipChar(room, obj, S, now)) skipCh = true;
       if (!left && S.fire) { bodyBurnOut(room, obj); continue; }
@@ -5055,7 +5058,7 @@ const bakeCfg = { on: 1, cap: 24, restMs: 5000, perTick: 8, burntFrac: 0.8 };
 // `trigger` 'disturb' it falls apart when something moves it — a heap is only expensive when things are shoving
 //           'time'    it falls apart `afterMs` after its flames go out, whether or not anything touches it
 // ⚠️ NOTHING ALIGHT EVER CRUMBLES: a cell still burning is still the thing burning.
-const crumbleCfg = { on: 1, mode: 'edge', trigger: 'disturb', afterMs: 4000, perPass: 6 };
+const crumbleCfg = { on: 1, mode: 'cascade', trigger: 'disturb', afterMs: 4000, perPass: 6, cascadeMax: 512 };
 let crumbles = 0, crumbleCells = 0;
 let bakes = 0, bakeCells = 0, bakeLast = null;
 // Turn one settled piece into ground. Returns whether it did.
@@ -5142,8 +5145,8 @@ function bodyBake(room, obj, force) {
 // ⭐ THE CEILING. Counted over the room's own objects — the same pass already walks them — and only the pieces that have
 // been left alone are candidates, oldest first. Bounded per tick so a fire that frees a hundred at once cannot turn one
 // tick into a world rewrite.
-// ⭐ WHICH OF A BODY'S CELLS ARE READY TO FALL OFF IT: charred (code 2), not alight, and — in `edge` mode — with at
-// least one open face in the body's own grid, which is what makes it crumble from the outside in rather than hollow
+// ⭐ WHICH OF A BODY'S CELLS ARE READY TO FALL OFF IT: charred (code 2) and not alight. In `edge` mode it must also
+// have an open face in the body's own grid, which is what makes it crumble from the outside in rather than hollow
 // itself out. The grid's border counts as open: that is the outside.
 function crumbleReady(cells, D, k, edgeOnly) {
   if ((cells[k] & 3) !== 2 || (cells[k] & 4)) return false;
@@ -5152,26 +5155,66 @@ function crumbleReady(cells, D, k, edgeOnly) {
   const solid = (cc, rr) => cc >= 0 && rr >= 0 && cc < D.c && rr < D.r && (cells[rr * D.c + cc] & 3) !== 0;
   return !solid(c - 1, r) || !solid(c + 1, r) || !solid(c, r - 1) || !solid(c, r + 1);
 }
-// Let go of up to `perPass` charred cells: each becomes Cinder where it stands and leaves the body's grid. Returns how
+// ⭐⭐ WHICH CELLS GO THIS TIME. The user's own description of what it should feel like (2026-09-22): *"a chain event,
+// where there is some trigger like being shoved, and then that cascades through from the point of impact and triggers
+// any other cells which are ready to crumble"*.
+//   'cascade'  from the side it was shoved from, through every charred cell CONNECTED to that one — so the charred
+//              part of a thing comes away in one piece and sound wood stops the chain dead
+//   'edge'     a few outermost charred cells each time, so it wears away slowly
+//   'all'      every charred cell at once, connected or not
+function crumblePick(cells, D, mode, dx, dy) {
+  const out = [];
+  if (mode === 'all') { for (let k = 0; k < cells.length; k++) if (crumbleReady(cells, D, k, false)) out.push(k); return out; }
+  if (mode !== 'cascade') {
+    for (let k = 0; k < cells.length && out.length < crumbleCfg.perPass; k++) if (crumbleReady(cells, D, k, true)) out.push(k);
+    return out;
+  }
+  // …the seed is the open charred cell furthest along the way it was shoved, which is the side of it that was hit
+  let seed = -1, best = -Infinity;
+  for (let k = 0; k < cells.length; k++) {
+    if (!crumbleReady(cells, D, k, true)) continue;
+    const c = k % D.c, r = (k / D.c) | 0;
+    const sc = (c - (D.c - 1) / 2) * dx + (r - (D.r - 1) / 2) * dy;
+    if (sc > best) { best = sc; seed = k; }
+  }
+  if (seed < 0) return out;
+  const seen = new Uint8Array(cells.length), q = [seed];
+  seen[seed] = 1;
+  while (q.length && out.length < crumbleCfg.cascadeMax) {
+    const k = q.shift();
+    if (!crumbleReady(cells, D, k, false)) continue;             // sound wood, or something still alight: the chain stops
+    out.push(k);
+    const c = k % D.c, r = (k / D.c) | 0;
+    for (const nb of [[c - 1, r], [c + 1, r], [c, r - 1], [c, r + 1]]) {
+      const cc = nb[0], rr = nb[1];
+      if (cc < 0 || rr < 0 || cc >= D.c || rr >= D.r) continue;
+      const kk = rr * D.c + cc; if (seen[kk]) continue;
+      seen[kk] = 1; q.push(kk);
+    }
+  }
+  return out;
+}
+// Let go of the cells `crumblePick` chose: each becomes Cinder where it stands and leaves the body's grid. Returns how
 // many went. ⚠️ ONLY CELLS THIS BODY OWNS — the same rule as every other read-back (round 19); a cell it could not be
 // stamped into belongs to whatever it is buried in.
-function bodyCrumble(room, obj, S, perPass) {
+function bodyCrumble(room, obj, S, dx, dy) {
   const st = roomCells.get(room);
   if (!st || !st.terrain || !st.terrainHp || st.terrain !== S.g) return 0;
   const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows;
   const ost = objStOf(room), rec = ost.get(obj.id); if (!rec) return 0;
   const cells = bodyCellsOf(rec, obj), D = bodyDims(obj);
   if (D.c !== S.dc || D.r !== S.dr) return 0;
-  const edgeOnly = crumbleCfg.mode !== 'all';
+  const ks = crumblePick(cells, D, crumbleCfg.mode, dx || 0, dy || 0);
+  if (!ks.length) return 0;
   const set = [];
   let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity, went = 0;
-  for (let k = 0; k < cells.length && went < perPass; k++) {
-    if (S.skip[k] || !crumbleReady(cells, D, k, edgeOnly)) continue;
+  for (const k of ks) {
+    if (S.skip[k]) continue;
     const q = bodyRep(obj, D, S.x, S.y, S.a, k); if (!q) continue;
     const i = q.c * ROWS + q.r;
     if (i < 0 || i >= grid.length) continue;
     if (!isBodyId(peekCellAt(grid, i)) || !bodyOwns(room, i, obj.id)) continue;
-    grid.s(i, MAT_CINDER); hp.s(i, 0); if (st.sat) st.sat.s(i, 0);
+    grid.s(i, MAT_CINDER); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
     bodyOwnDrop(room, i, obj.id);
     set.push(i, MAT_CINDER);
     cells[k] = 0; went++;
@@ -5187,19 +5230,26 @@ function bodyCrumble(room, obj, S, perPass) {
   io.to(room).emit('obj-cells', { id: obj.id, bc: rec.bc || null });
   if (c1 >= c0) { activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1); fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); }
   if (!bodyAny(cells)) { bodyBurnOut(room, obj); return went; }
-  // 'all' / 'edgeall': once nothing but char is left, the rest goes in one piece rather than cell by cell
-  if (crumbleCfg.mode !== 'edge') {
-    let sound = 0; for (let k = 0; k < cells.length; k++) if ((cells[k] & 3) === 1 || (cells[k] & 3) === 3) sound++;
-    if (!sound) bodyBake(room, obj, true);
-  }
+  // 🟥 AND WHAT IS LEFT MAY BE IN TWO PIECES NOW. Crumbling takes cells out of the middle of a thing as readily as off
+  //    its edge, so the split has to be re-asked at once (`force`) — otherwise the remains stay one object with a gap
+  //    through them until the split's own timer next comes round.
+  bodySplitCheck(room, obj, S, Date.now(), true);
   return went;
 }
-// Has this body anything to crumble, and has whatever sets it off happened? `lastLit` is kept by the stamped sweep.
+// Has this body anything to crumble, and has whatever sets it off happened?
+// 🟥 THE TEST IS "IT HAS CHARRED CELLS", NOT "THIS STAMP HAS SEEN FIRE" (user, 2026-09-22: *"it splits into different
+//    objects and stops crumbling"*). A piece that breaks off a burnt thing is STAMPED FRESH, so its stamp has no fire
+//    history at all — and the old gate therefore made every piece of a crate that split permanently uncrumbleable,
+//    which is exactly what they saw. Charcoal is only ever made by fire, so the cells are the honest question.
+function crumbleChar(room, obj) {
+  const rec = roomObjSt[room] && roomObjSt[room].get(obj.id);
+  return !!(rec && rec.bc && typeof rec.bc.s === 'string' && /[26]/.test(rec.bc.s));
+}
 function crumbleDue(room, obj, S, now) {
-  if (!crumbleCfg.on || !S || !S.fire || !bodyLoose(obj)) return false;
-  if (S.lit) return false;                                        // still burning: it is still the thing burning
+  if (!crumbleCfg.on || !S || !bodyLoose(obj) || S.lit) return false;   // still burning: it is still the thing burning
+  if (!crumbleChar(room, obj)) return false;
   if (crumbleCfg.trigger === 'time') return !S.outT || now - S.outT >= crumbleCfg.afterMs;
-  return false;                                                   // 'disturb': set off by a move, not by this
+  return false;                                                 // 'disturb': set off by a move, not by this
 }
 function bakeSweep(room, map) {
   if (!bakeCfg.on || !bakeCfg.cap) return 0;
@@ -12125,6 +12175,10 @@ const CUSTOM_MAT_MIN = MATGEN.GEN_MAT_MAX + 1, CUSTOM_MAT_CAP = 160;   // custom
 // died. That is the ninth time this exact boundary has bitten on this track. Anything referencing a required
 // module belongs below EVERY block-end marker, not below the nearest one.
 for (const id of MATGEN.POWDER_IDS) { POWDER_MOVE[id] = 1; POWDER_SEED[id] = 1; }
+// ⭐ CINDER FALLS THOUGH IT IS DECLARED SOLID (2026-09-22). It is crumbled charcoal: it has to pile up like a
+// powder, and it has to BLOCK like ground, because ash — which it lands on — is walk-through background. Powders
+// only ever move into empty or liquid cells, so being solid is what keeps it resting on top of the ash.
+POWDER_MOVE[MATGEN.NAMES.Cinder] = 1; POWDER_SEED[MATGEN.NAMES.Cinder] = 1;
 // 🟥🟥 PLANTS ARE NOT POWDER ANY MORE (#108, 2026-09-05). They were, and it produced the reported
 // *"when you break a tree it sort of disappears outward or upwards from the point that you broke it"*:
 // `activatePowderRect` woke the cell above the cut, it fell, `wakeAround` woke the one above THAT, and the
@@ -18412,7 +18466,7 @@ io.on('connection', (socket) => {
     for (const k of ['densitySort', 'sortBeforeLevel', 'lateralLevel', 'perLiquidLevel', 'viscosity', 'reactions', 'symLevel', 'levelMix', 'perfLog', 'fluxLevel', 'paused', 'fineQuiesce', 'storedWakeAll', 'fineAdaptiveK', 'fineConstFall', 'fineSortDiagGate', 'finePerLiquidSortGate', 'fineSortOnePerPass', 'wakeDensityFace', 'sortColRun', 'storedWakeAudit', 'scanVerify', 'scanFast', 'sinks']) if (k in patch) liquidCfg[k] = !!patch[k];
     // …burnt things crumbling: on/off, what sets it off, how it goes, and how long after the flames
     if ('crumble' in patch) crumbleCfg.on = patch.crumble ? 1 : 0;
-    if ('crumbleMode' in patch && ['edge', 'all', 'edgeall'].indexOf(patch.crumbleMode) >= 0) crumbleCfg.mode = patch.crumbleMode;
+    if ('crumbleMode' in patch && ['edge', 'all', 'cascade'].indexOf(patch.crumbleMode) >= 0) crumbleCfg.mode = patch.crumbleMode;
     if ('crumbleTrigger' in patch && ['disturb', 'time'].indexOf(patch.crumbleTrigger) >= 0) crumbleCfg.trigger = patch.crumbleTrigger;
     if ('crumbleMs' in patch) crumbleCfg.afterMs = Math.max(0, Math.min(60000, patch.crumbleMs | 0));
     if ('crumblePer' in patch) crumbleCfg.perPass = Math.max(1, Math.min(64, patch.crumblePer | 0));
