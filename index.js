@@ -3971,6 +3971,20 @@ const roomBodyStamp = {};
 // the world (being pushed, dragged on a rope). User, on step 1: *"when you move crates they stop burning until they sit
 // still"* — so the grid burns on its own clock between stamps, with the terrain fire's own numbers (`bodyBurnMoving`).
 const roomBodyBurn = {};
+// ⭐⭐ WHICH BODY OWNS WHICH WORLD CELL (round 19). All bodies are written into the world as the SAME three
+// materials, so "is there a body material here" cannot answer "is this cell MINE" — and that is the whole of the
+// flicker: a burnt crate's cell goes to ash, a neighbour in the heap moves a cell of its own into that hole, and
+// the first crate reads the neighbour's charcoal as its own cell come back from the dead. It then rebuilds its
+// collision shape, wakes itself and everything touching it, and the neighbour's jitter keeps the loop going.
+// ⇒ every write records the owner; every read-back asks. Cleared when a body lets a cell go (`bodyOwnDrop`).
+// ⚠️ An entry may outlive the material — fire turns a cell to ash without telling this map — so the tests are
+// always "holds a body material AND is owned by me", never the map alone.
+const roomBodyOwn = {};
+function bodyOwnMap(room) { return roomBodyOwn[room] || (roomBodyOwn[room] = new Map()); }
+function bodyOwnSet(room, i, id) { bodyOwnMap(room).set(i, id); }
+function bodyOwnDrop(room, i, id) { const m = roomBodyOwn[room]; if (m && (!id || m.get(i) === id)) m.delete(i); }
+function bodyOwns(room, i, id) { const m = roomBodyOwn[room]; return !m || !m.has(i) || m.get(i) === id; }
+
 let bodyStamps = 0, bodyUnstamps = 0, bodyBurnt = 0;   // mechanism counters — see `mwObjFire` / the rigs
 // Is this thing sitting still where the server can say where it is? A route, a spin, a swing, an open door, a pose a
 // rule put it in, something a plate shut away — any of those and it is not stamped (it simply does not burn there).
@@ -4008,7 +4022,7 @@ function bodyStamp(room, obj, x, y, a) {
   let unmade = false;
   if (gen) bodyRaster(obj, D, x, y, a, (c, r) => { if (!unmade && c >= 0 && r >= 0 && c < COLS && r < ROWS && peekCellAt(grid, c * ROWS + r) < 0) unmade = true; });
   if (unmade) return false;
-  const idx = [], set = [], litAt = new Map();                  // world cell → body cell, for the alight ones
+  const idx = [], kOf = [], set = [], litAt = new Map();        // world cell → body cell, for the alight ones
   bodyRaster(obj, D, x, y, a, (c, r, k) => {
     if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return;
     const code = cells[k]; if (!(code & 3)) return;
@@ -4017,7 +4031,7 @@ function bodyStamp(room, obj, x, y, a) {
     if (tot && peekCellAt(tot, i) > 0) return;                 // …or water
     const m = bodyCodeMat(code);
     grid.s(i, m); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
-    idx.push(i); set.push(i, m);
+    idx.push(i); kOf.push(k); set.push(i, m); bodyOwnSet(room, i, obj.id);
     if (code & 4) litAt.set(i, k);
   });
   if (!idx.length) return false;
@@ -4039,7 +4053,7 @@ function bodyStamp(room, obj, x, y, a) {
   // ⭐ `restT` — WHEN ITS POSE LAST CHANGED, which is how `bakeSweep` knows a piece of debris has been left alone. It is
   //   refreshed by every move (`bodyMoveTo`), so "settled" means "nothing has happened to it for a while" and needs no
   //   rest report at all: a client that walks away mid-shove still ends up with a piece that settles.
-  m.set(obj.id, { x, y, a, dc: D.c, dr: D.r, idx: Int32Array.from(idx), skip, g: grid, fire: litAt.size > 0, restT: Date.now() });
+  m.set(obj.id, { x, y, a, dc: D.c, dr: D.r, idx: Int32Array.from(idx), kOf: Int32Array.from(kOf), skip, g: grid, fire: litAt.size > 0, restT: Date.now() });
   wireFanout(room, 'terrain-set', { cells: set });
   // ⭐ …AND THE CHEMISTRY LOOKS AT IT ONCE, the way it looks at a player's edit. Lava lights the fuel beside it only when
   // the reaction pass visits that lava, and a settled pool is never visited — so a crate set down on still lava sat
@@ -4094,7 +4108,7 @@ function bodyUnstamp(room, id, readBack) {
       if (!q) { nw[k] = old[k]; continue; }
       const i = q.c * ROWS + q.r;
       // ⚠️ A REAL READ, NOT A PEEK: a chunk put away since is faulted back in — rare, a client near the body moved it.
-      const v = grid.g(i), code = bodyMatCode(v), lit = !!(code && fs && fs.has(i));
+      const v = grid.g(i), own = bodyOwns(room, i, id), code = own ? bodyMatCode(v) : 0, lit = !!(code && fs && fs.has(i));
       nw[k] = code ? (code | (lit ? 4 : 0)) : 0;
       if (lit) age[k] = ((ages && ages.get(i)) || 0) * tk;
     }
@@ -4104,7 +4118,9 @@ function bodyUnstamp(room, id, readBack) {
   for (let q = 0; q < S.idx.length; q++) {
     const i = S.idx[q];
     const v = grid.g(i), alight = !!(fs && fs.has(i));
-    if (!isBodyId(v)) continue;                               // ash, air, whatever the fire left: that stays
+    if (!isBodyId(v)) { bodyOwnDrop(room, i, id); continue; }  // ash, air, whatever the fire left: that stays
+    if (!bodyOwns(room, i, id)) continue;                      // …and a cell somebody ELSE now owns is not ours to clear
+    bodyOwnDrop(room, i, id);
     grid.s(i, 0); hp.s(i, 0); set.push(i, 0); if (st.sat) st.sat.s(i, 0);
     if (alight) { fs.delete(i); out.push(i, 0); }
     if (ages) ages.delete(i);
@@ -4126,6 +4142,32 @@ function bodyUnstamp(room, id, readBack) {
   let lit = false; for (let k = 0; k < nw.length; k++) if (nw[k] & 4) { lit = true; break; }
   if (lit) (roomBodyBurn[room] || (roomBodyBurn[room] = new Map())).set(id, { age, last: Date.now() });
   return nw;
+}
+// ⭐ MARK BODY CELLS GONE IN THE RECORD, and tell everyone — one small message for one body, not the room's whole
+// object state (every burnt body's grid rides one of those, which is why it is not used for something this frequent).
+// Returns whether anything changed. ⚠️ Gone is one-way here as it is everywhere else: this never brings a cell back.
+function bodyNoteGone(room, obj, S, ks) {
+  const st = roomCells.get(room); if (!st || st.terrain !== S.g) return false;
+  const ost = objStOf(room), rec = ost.get(obj.id) || {};
+  const cells = bodyCellsOf(rec, obj), D = bodyDims(obj), ROWS = st.rows;
+  if (D.c !== S.dc || D.r !== S.dr) return false;
+  let any = false;
+  // 🟥 ASKED THE WAY THE READ-BACK ASKS IT, cell by cell — the cell a body cell READS from (`bodyRep`, the nearest
+  //    covered one) is not always the cell the write loop handed it, and marking the wrong one gone is precisely
+  //    what made whole crates disappear when the browser was left to guess at this (round 19b). A cell the stamp
+  //    could not write keeps its own state, here as everywhere.
+  for (const k of ks) {
+    if (k < 0 || k >= cells.length || !(cells[k] & 3) || S.skip[k]) continue;
+    const q = bodyRep(obj, D, S.x, S.y, S.a, k); if (!q) continue;
+    const i = q.c * ROWS + q.r;
+    if (isBodyId(peekCellAt(st.terrain, i)) && bodyOwns(room, i, obj.id)) continue;   // still ours: not gone
+    cells[k] = 0; any = true;
+  }
+  if (!any) return false;
+  bodyCellsSet(rec, obj, cells);
+  if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
+  io.to(room).emit('obj-cells', { id: obj.id, bc: rec.bc || null });
+  return false;                                                 // the message above is the update; no room-wide re-send
 }
 // ⭐⭐ A BODY BURNING WHILE IT IS NOT IN THE WORLD — its own grid, on the terrain fire's own numbers: a cell catches from an
 // alight neighbour after `fireSolidCatch / rate` passes (half that for the one above), burns for `fireSolidBurn / rate`,
@@ -4246,7 +4288,7 @@ const bodyPosCfg = { on: 1, hz: 10, skipChar: 1 };   // `skipChar`: buried cells
 let bodyMoves = 0, bodyMoveCells = 0;   // mechanism counters (`mwObjFire`)
 // Each body cell's state as the world has it at stamp `S` — `bodyUnstamp`'s readback, without clearing anything.
 // Returns { cells, age (ms alight per body cell), changed }. ⚠️ Only fire changes a body's cells (see `bodyUnstamp`).
-function bodyReadCells(st, obj, D, S, rec) {
+function bodyReadCells(room, st, obj, D, S, rec) {
   const old = bodyCellsOf(rec, obj), age = new Float32Array(old.length);
   if (!S.fire) return { cells: old, age, changed: false };
   const grid = st.terrain, fs = st.fineFire, ages = st.fireAge, ROWS = st.rows, tk = liquidCfg.tickMs || 40;
@@ -4258,7 +4300,7 @@ function bodyReadCells(st, obj, D, S, rec) {
     const q = bodyRep(obj, D, S.x, S.y, S.a, k);
     if (!q) { nw[k] = old[k]; continue; }
     const i = q.c * ROWS + q.r;
-    const v = grid.g(i), code = bodyMatCode(v), lit = !!(code && fs && fs.has(i));
+    const v = grid.g(i), own = bodyOwns(room, i, obj.id), code = own ? bodyMatCode(v) : 0, lit = !!(code && fs && fs.has(i));
     nw[k] = code ? (code | (lit ? 4 : 0)) : 0;
     if (lit) age[k] = ((ages && ages.get(i)) || 0) * tk;
     if (nw[k] !== old[k]) changed = true;
@@ -4281,13 +4323,13 @@ function bodyMoveTo(room, obj, x, y, a) {
   if (grid.seedFn) bodyRaster(obj, D, x, y, a, (c, r) => { if (!unmade && c >= 0 && r >= 0 && c < COLS && r < ROWS && peekCellAt(grid, c * ROWS + r) < 0) unmade = true; });
   if (unmade) { bodyUnstamp(room, obj.id, true); return 3; }
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
-  const R = bodyReadCells(st, obj, D, S, rec), cells = R.cells;
+  const R = bodyReadCells(room, st, obj, D, S, rec), cells = R.cells;
   const tk = liquidCfg.tickMs || 40, fireOk = !!liquidCfg.fireSolids;
   const fs = st.fineFire, ages = st.fireAge || (st.fireAge = new Map());
   const tot = st.fineTotal, src = st.src;
   // where it was: the cells still holding one of its materials are its own (ash the fire left there stays)
   const was = new Set();
-  for (let q = 0; q < S.idx.length; q++) { const i = S.idx[q]; if (isBodyId(peek(i))) was.add(i); }
+  for (let q = 0; q < S.idx.length; q++) { const i = S.idx[q]; if (isBodyId(peek(i)) && bodyOwns(room, i, obj.id)) was.add(i); }
   // where it is going: world cell → body cell
   const want = new Map();
   bodyRaster(obj, D, x, y, a, (c, r, k) => { if (c >= 0 && r >= 0 && c < COLS && r < ROWS && (cells[k] & 3)) want.set(c * ROWS + r, k); });
@@ -4297,16 +4339,16 @@ function bodyMoveTo(room, obj, x, y, a) {
   const fireOff = (i) => { if (fs && fs.delete(i)) fireOut.push(i, 0); ages.delete(i); };
   // 1 · leave the cells it no longer covers
   for (const i of was) if (!want.has(i)) {
-    grid.s(i, 0); hp.s(i, 0); if (st.sat) st.sat.s(i, 0); set.push(i, 0); fireOff(i); box(i);
+    grid.s(i, 0); hp.s(i, 0); if (st.sat) st.sat.s(i, 0); set.push(i, 0); fireOff(i); box(i); bodyOwnDrop(room, i, obj.id);
   }
   // 2 · take the cells it now covers
-  const idx = [];
+  const idx = [], kOf = [];
   let litAny = false;
   for (const [i, k] of want) {
     const code = cells[k], mat = bodyCodeMat(code), lit = fireOk && !!(code & 4);
     if (lit) litAny = true;
     if (was.has(i)) {                                           // already one of its cells: only its state can differ
-      idx.push(i);
+      idx.push(i); kOf.push(k);
       if (peek(i) !== mat) { grid.s(i, mat); set.push(i, mat); box(i); }
       const on = !!(fs && fs.has(i));
       if (lit) { ages.set(i, Math.round(R.age[k] / tk)); if (!on) { fineFireSet(room).add(i); fireIn.push(i, 1); box(i); } }
@@ -4317,8 +4359,8 @@ function bodyMoveTo(room, obj, x, y, a) {
     if (v < 0 || (src && src.has(i))) continue;
     if (isFluidId(v) || (tot && tot.g(i) > 0)) continue;       // water: not taken — see the note above `bodyPosCfg`
     if (v > 0) continue;                                         // ground, powder, another body: not ours to overwrite
-    grid.s(i, mat); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
-    set.push(i, mat); idx.push(i); fresh.push(i); box(i);
+    grid.s(i, mat); hp.s(i, 1); if (st.sat) st.sat.s(i, 0); bodyOwnSet(room, i, obj.id);
+    set.push(i, mat); idx.push(i); kOf.push(k); fresh.push(i); box(i);
     if (lit) { fineFireSet(room).add(i); ages.set(i, Math.round(R.age[k] / tk)); fireIn.push(i, 1); }
   }
   // which body cells' READ cell was not written — they keep their own state (and are smothered: see `bodyStamp`)
@@ -4351,7 +4393,7 @@ function bodyMoveTo(room, obj, x, y, a) {
   // …and one whose only change was WHICH cells are alight still needs its pose delivered: a cell of its own, re-sent
   if (!set.length) set.push(idx[0], peek(idx[0]));
   if (S.x !== x || S.y !== y || S.a !== a) S.restT = Date.now();   // it moved: it is not settled debris (`bakeSweep`)
-  S.x = x; S.y = y; S.a = a; S.idx = Int32Array.from(idx); S.skip = skip; S.fire = S.fire || litAny;
+  S.x = x; S.y = y; S.a = a; S.idx = Int32Array.from(idx); S.kOf = Int32Array.from(kOf); S.skip = skip; S.fire = S.fire || litAny;
   rec.bs = [x, y, Math.round(a * 1000)]; if (skips) rec.bs.push(skips);
   ost.set(obj.id, rec);
   bodyMoves++; bodyMoveCells += set.length / 2;
@@ -4381,7 +4423,7 @@ function bodySkipChar(room, obj, S, now) {
   if (!bodyPosCfg.skipChar || !S || !S.skip || !liquidCfg.fireSolids) return false;
   const st = roomCells.get(room); if (!st || st.terrain !== S.g) return false;
   const ost = objStOf(room), rec = ost.get(obj.id); if (!rec) return false;
-  const D = bodyDims(obj), R = bodyReadCells(st, obj, D, S, rec), cells = R.cells;
+  const D = bodyDims(obj), R = bodyReadCells(room, st, obj, D, S, rec), cells = R.cells;
   const n = cells.length;
   let any = false;
   for (let k = 0; k < n; k++) if (S.skip[k] && (cells[k] & 3) !== 0 && (cells[k] & 3) !== 2) { any = true; break; }
@@ -4622,14 +4664,21 @@ function bodyTick() {
       if (!fire && !S.fire) continue;
       const obj = map && map.get(id); if (!obj) continue;       // the reconcile below clears it
       if (!st.terrain || st.terrain !== S.g) continue;
-      let left = 0, lit = false, unmade = false;
+      let left = 0, lit = false, unmade = false, burnt = null;
       for (let q = 0; q < S.idx.length; q++) {
         const i = S.idx[q], v = peekCellAt(st.terrain, i);
         if (v < 0) { unmade = true; break; }                    // put away while nobody looks — frozen with its chunk
-        if (isBodyId(v)) left++;
+        // ⭐⭐ A CELL THAT HAS GONE IS WRITTEN INTO THE RECORD HERE (round 19), instead of being noticed the next time
+        //   the body happens to move. It matters because the record is what every CLIENT reads a gone cell from: while
+        //   it says a burnt cell is still there, the browser falls back to looking at the world, where a neighbour in
+        //   a heap may have moved a cell of its own into the hole — and that is the flicker. This loop already walks
+        //   every stamped cell, so the only new work is on the cells that actually went.
+        if (isBodyId(v) && bodyOwns(room, i, id)) left++;
+        else { bodyOwnDrop(room, i, id); if (S.kOf && S.kOf[q] >= 0) (burnt || (burnt = [])).push(S.kOf[q]); }
         if (!lit && fire && fs.has(i)) lit = true;
       }
       if (unmade) continue;
+      if (burnt) { S.fire = true; bodyNoteGone(room, obj, S, burnt); }
       if (lit) S.fire = true;
       // ⭐ …and the cells that are NOT in the world char along with the rest — see `bodySkipChar`.
       if (bodySkipChar(room, obj, S, now)) skipCh = true;
