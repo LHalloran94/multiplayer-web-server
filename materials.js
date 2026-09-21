@@ -155,6 +155,18 @@
     // its own colour. The heat is drawn separately and fades over half a minute (`fireCoolMs`); this is what is
     // left underneath when it has gone cold.
     ['Charcoal', '#16120f', 'solid', 1, 'dusty'], // 92 charcoal — burnt wood; smoulders a long time, then ash
+    // ⭐⭐ CINDER — CHARCOAL THAT HAS STOPPED BEING HELD UP BY ANYTHING (user, 2026-09-21). When a burnt loose thing
+    // is baked back into the world (`bodyBake`) it stops being a rigid body, and a rigid body is the only reason its
+    // pose was ever legal: a crate balanced on one corner is a crate balanced on one corner, but a heap of charred
+    // remains cannot balance on anything. So the CHARRED part of what is baked becomes this and falls, while the
+    // sound wood keeps its shape — a half-burnt plank crumbles off the burnt end and settles on the sound middle,
+    // which is what actually happened to it.
+    // ⚠️ IT IS A SEPARATE MATERIAL FROM CHARCOAL ON PURPOSE. Charcoal standing where the wood stood is the whole
+    // point of Charcoal (see above), and a burnt tree must not slump. This is only ever made by the bake, which is
+    // exactly the moment the thing holding it up went away.
+    // ⚠️ SAME COLOUR AND SAME YIELD as Charcoal — the user's objection to reusing Ash was that a burnt thing should
+    // not go grey and should not stop being worth mining. What differs is that it falls.
+    ['Cinder', '#16120f', 'powder', 1, 'dusty'], // 93 cinder — charcoal with nothing holding it up; falls and piles
   ];
 
   const GEN_MAT_MIN = 18;
@@ -359,6 +371,8 @@
   // matter is collected as what it is. Only wood becomes something else, because a felled tree is timber.
   const DIG_YIELD = {};
   DIG_YIELD[NAMES.Wood] = NAMES.Timber;
+  // ⭐ Cinder is charcoal that fell; what you dig out of it is charcoal.
+  DIG_YIELD[NAMES.Cinder] = NAMES.Charcoal;
   const yieldOf = (id) => DIG_YIELD[id] || id;
 
   return {

@@ -4699,8 +4699,9 @@ function bodyIgnite(room, obj, x, y, r, px, py, pa) {
 // materials (`body-dig`). This replaces #108's "a cut tree comes down as a shower of pickups" (`collapsePlants`, kept
 // behind `fallCfg.on = 0`).
 // ⭐ SUPPORT is #108's rule, widened: walking through falling-capable cells (8-neighbour), can you reach something solid that
-//    is not itself falling-capable? The ground, rock, a placed block. Three things are NOT support: a body (it moves), ASH
-//    (a burnt trunk's base crumbles to it, and a trunk does not stand on its own ash), and liquid. An unbuilt neighbour IS
+//    is not itself falling-capable? The ground, rock, a placed block. Four things are NOT support: a body (it moves), ASH
+//    (a burnt trunk's base crumbles to it, and a trunk does not stand on its own ash), CINDER (the same, for the same
+//    reason — it is charcoal that has already lost whatever held it up), and liquid. An unbuilt neighbour IS
 //    (never fell into ground nobody has made — a read must not build world), and so is the level's floor.
 // ⚠️ LIMITS: up to `fallCfg.max` cells and `FALL_DIM` a side; anything bigger stays standing. The user set 2,000
 //    originally and raised it after big trees would not come down at all (round 5 item 3).
@@ -4712,6 +4713,7 @@ function bodyIgnite(room, obj, x, y, r, px, py, pa) {
 const fallCfg = { on: 1, max: 12000, min: 6 };
 let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallSmall = 0, fallBurnt = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
 const FALL_ASH = 38;
+const MAT_CINDER = 93;   // charcoal with nothing holding it up — see `materials.js` and `bodyBake`
 function fallCand(v) { return v > 0 && (isPlantId(v) || v === 91 || v === 92); }
 // the cells the fire has finished since the last look, per room (`fireGone` → here; `bodyTick` drains it)
 const roomFallGone = {};
@@ -4783,7 +4785,7 @@ function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
         const v = peek(j);
         if (v < 0) { supported = true; fallLast = { why: 'unbuilt', nc, nr, region: region.length }; break; }                  // unbuilt — never fall into the unknown
         if (fallCand(v)) { if (!mark.has(j)) { mark.add(j); stack.push(j); } continue; }
-        if (isSolidCell(v) && !isBodyId(v) && v !== FALL_ASH) { supported = true; fallLast = { why: 'solid', v, nc, nr, region: region.length }; break; }
+        if (isSolidCell(v) && !isBodyId(v) && v !== FALL_ASH && v !== MAT_CINDER) { supported = true; fallLast = { why: 'solid', v, nc, nr, region: region.length }; break; }
       }
     }
     for (const i of mark) seen.add(i);
@@ -4997,7 +4999,13 @@ function bodyBake(room, obj) {
     if (!isBodyId(peekCellAt(grid, i))) continue;
     // …as what it is MADE of, which is the same answer mining it gives: `fm` for a cell the fire has not turned, and
     //   Charcoal for one it has. A cell with no material recorded falls back to the split's rule.
-    const mat = code === 2 ? 92 : (fm[k] || bodySplitMat(cells[k]));
+    // ⭐⭐ THE CHARRED PART FALLS, THE SOUND PART KEEPS ITS SHAPE (user, 2026-09-21: baked debris *"ends up
+    //   hovering in mid-air"*). A rigid body is the only reason this pose was ever legal — a crate can balance on
+    //   one corner, a heap of charred remains cannot — so the cells that are CHARRED bake as Cinder, a powder,
+    //   and slump to wherever they would settle. Sound wood and timber stay solid and lie where they lie, because a
+    //   fallen log should be a fallen log. A half-burnt plank therefore crumbles off the burnt end and settles on
+    //   the sound middle, which is what actually happened to it.
+    const mat = code === 2 ? MAT_CINDER : (fm[k] || bodySplitMat(cells[k]));
     grid.s(i, mat); hp.s(i, 0); if (st.sat) st.sat.s(i, 0);
     set.push(i, mat);
     if (q.c < c0) c0 = q.c; if (q.c > c1) c1 = q.c; if (q.r < r0) r0 = q.r; if (q.r > r1) r1 = q.r;
@@ -5016,7 +5024,15 @@ function bodyBake(room, obj) {
     emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id, quiet: 1 });
   }
   // what was resting on it or flowing round it has new ground beside it
-  if (c1 >= c0) { fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 2, c1 + 1, r1 + 1); }
+  if (c1 >= c0) {
+    fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 2, c1 + 1, r1 + 1);
+    // 🟥 AND ASK WHETHER ANY OF IT IS HELD UP BY ANYTHING. Shipping this without the support check was the other
+    //   half of the hovering: the rule already says a BODY is not support, so a piece resting on another piece
+    //   became terrain with literally nothing under it — and nothing ever asked again, because only a dig or a
+    //   fire triggers the check. Now the bake asks, and unsupported ground is cut loose and falls, exactly as it
+    //   would if you had dug the floor out from under it. That is the loop this was always supposed to close.
+    fallCheck(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
+  }
   bakes++; bakeCells += set.length / 2;
   bakeLast = { id: obj.id, cells: set.length / 2 };
   return true;
@@ -8794,6 +8810,8 @@ for (const [id, rate, ash] of [
   // ⭐ Charcoal is what the three above leave, and it is a fuel itself: at 0.05 it smoulders for 1,600 passes
   // (about a minute) before crumbling to Ash, which is the window a player has to come and dig it out.
   [92, 0.05, 38],  // Charcoal — smoulders a long time, then ash
+  // ⭐ Cinder burns exactly as Charcoal does — it IS charcoal, with nothing holding it up (see `materials.js`).
+  [93, 0.05, 38],  // Cinder — fallen charcoal; same smoulder, same ash
   [41, 0.15, 38],  // Coal — very slow, very long
   [20, 0.25, 38],  // Peat — smoulders
   // ⭐ FOLIAGE LEAVES ASH (user, 2026-09-20: things consumed *"would be better to turn them to ash, rather than
