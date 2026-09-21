@@ -928,7 +928,38 @@ app.get('/debug/bodies', (req, res) => {
     st.fineTotal.scan((i, o, a) => { const t = a[o]; if (!t) return; total += t; const v = st.terrain.g(i); if (isBodyId(v)) inBody++; else if (v && !isFluidId(v)) inSolid++; });
     if (total) bad[room] = { total, inBody, inSolid };
   }
-  res.json({ stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
+  // `?shared=1`: DIAG — world cells that two stamped bodies both list as their own
+  const shared = {};
+  if (req.query.shared) for (const room in roomBodyStamp) {
+    const own = new Map(); let n = 0, cells = 0;
+    for (const [id, S] of roomBodyStamp[room]) for (const i of S.idx) { cells++; if (own.has(i) && own.get(i) !== id) n++; else own.set(i, id); }
+    // …listed cells NOT holding a body material (split by whether that body has had fire), and body material nobody lists
+    const st = roomCells.get(room); let lost = 0, lostNoFire = 0, ghost = 0;
+    if (st && st.terrain && !st.terrain.seedFn) {
+      for (const [id, S] of roomBodyStamp[room]) for (const i of S.idx) if (!isBodyId(st.terrain.g(i))) { lost++; if (!S.fire) lostNoFire++; }
+      // …THE CLIENT'S READ-BACK, done here on the server's own state: record-alive, not skipped, read cell not a body
+      let unread = 0, unreadAir = 0, unreadBodies = 0;
+      const ost = objStOf(room), objs = roomObjects[room];
+      for (const [id, S] of roomBodyStamp[room]) {
+        const obj = objs && objs.get(id); if (!obj) continue;
+        const D = bodyDims(obj); if (D.c !== S.dc || D.r !== S.dr) continue;
+        const cells = bodyCellsOf(ost.get(id) || {}, obj); let bad = 0;
+        for (let k = 0; k < cells.length; k++) {
+          if (!(cells[k] & 3) || S.skip[k]) continue;
+          const q = bodyRep(obj, D, S.x, S.y, S.a, k); if (!q) continue;
+          const v = st.terrain.g(q.c * st.rows + q.r);
+          if (!isBodyId(v)) { unread++; bad++; if (!v) unreadAir++; }
+        }
+        if (bad) unreadBodies++;
+      }
+      shared[room + ':read'] = { unread, unreadAir, unreadBodies };
+      const poses = {}; for (const [id, S] of roomBodyStamp[room]) poses[id] = [S.x, S.y, Math.round(S.a * 1000)];
+      shared[room + ':poses'] = poses;
+      st.terrain.scan && st.terrain.scan((i, o, a) => { if (isBodyId(a[o]) && !own.has(i)) ghost++; });
+    }
+    shared[room] = { bodies: roomBodyStamp[room].size, cells, shared: n, lost, lostNoFire, ghost };
+  }
+  res.json({ shared, stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
              fallCuts, fallRefused, fallPiled, fallSmall, fallBurnt, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
              splits: bodySplits, splitGone: bodySplitGone, split: bodySplitCfg,
              bakes, bakeCells, bakeLast, bake: bakeCfg,
