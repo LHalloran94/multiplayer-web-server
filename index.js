@@ -918,6 +918,8 @@ app.get('/debug/bodies', (req, res) => {
   if (req.query.bake != null) bakeCfg.on = +req.query.bake ? 1 : 0;
   for (const [q, k] of [['bakecap', 'cap'], ['bakerest', 'restMs'], ['bakeper', 'perTick']])
     if (req.query[q] != null && isFinite(+req.query[q])) bakeCfg[k] = Math.max(0, +req.query[q] | 0);
+  // …and how burnt a PLACED crate must be before it counts as debris (0 = never)
+  if (req.query.bakeburnt != null && isFinite(+req.query.bakeburnt)) bakeCfg.burntFrac = Math.max(0, Math.min(1, +req.query.bakeburnt));
   // `?check=1`: liquid that is sitting INSIDE something solid (a body cell, ground) — a state the flow never makes itself
   const bad = {};
   if (req.query.check) for (const [room, st] of roomCells) {
@@ -4949,11 +4951,32 @@ function bodyReported(room, id) {
   const S = roomBodyStamp[room] && roomBodyStamp[room].get(id);
   if (S) { S.rep = 1; S.restT = Date.now(); }
 }
-const bakeCfg = { on: 1, cap: 24, restMs: 5000, perTick: 8 };
+// `burntFrac`: how much of a PLACED crate has to be gone before it counts as debris (0 = never, a crate is for ever).
+const bakeCfg = { on: 1, cap: 24, restMs: 5000, perTick: 8, burntFrac: 0.8 };
 let bakes = 0, bakeCells = 0, bakeLast = null;
 // Turn one settled piece into ground. Returns whether it did.
+// ⭐⭐ …AND A CRATE THAT HAS BURNT DOWN TO ALMOST NOTHING IS DEBRIS TOO (user, 2026-09-21). The ceiling above only
+// ever covered rubble the WORLD made, which is the forest-fire case — but the scene they actually reported is forty
+// crates THEY placed, burnt for minutes, and those are never rubble however little is left of them. So a loose
+// placed body that has lost `burntFrac` of the cells it was made with counts as debris as well: a full crate stays a
+// crate for ever, a charred stub becomes the little heap of charcoal it looks like.
+// ⚠️ LOOSE ONLY. A PINNED crate is part of something somebody built — a wall, a platform — and it is not in anybody's
+//    solver either, so there is nothing to win by dissolving it and an author's build to lose.
+// ⚠️ It has no `fm`, so its cells bake as what the split already calls them: charred ⇒ Charcoal, the rest Timber.
+function bakeBurntEnough(room, obj) {
+  const rec = roomObjSt[room] && roomObjSt[room].get(obj.id);
+  if (!rec || !rec.bc) return false;                               // never burned ⇒ still the whole crate
+  const D = bodyDims(obj), cells = bodyCellsOf(rec, obj), fresh = bodyFresh(D, bodySpec(obj), obj);
+  let whole = 0, left = 0;
+  for (let k = 0; k < fresh.length; k++) { if (fresh[k]) whole++; if (cells[k] & 3) left++; }
+  return whole > 0 && left <= whole * (1 - bakeCfg.burntFrac);
+}
+function bakeEligible(room, obj) {
+  if (!obj || !bodyLoose(obj) || !bodySpec(obj)) return false;
+  return obj.look === 'fallen' ? true : (bakeCfg.burntFrac > 0 && bakeBurntEnough(room, obj));
+}
 function bodyBake(room, obj) {
-  if (!obj || obj.look !== 'fallen') return false;                 // debris only — see the note above
+  if (!bakeEligible(room, obj)) return false;
   const m = roomBodyStamp[room], S = m && m.get(obj.id);
   if (!S) return false;                                            // not written into the world ⇒ nowhere to bake it to
   const st = roomCells.get(room);
@@ -5011,11 +5034,14 @@ function bakeSweep(room, map) {
   //   Being simulated at all is exactly `rep`, plus anything in motion (not written in, so somebody is moving it).
   let n = 0; const can = [];
   for (const o of map.values()) {
-    if (o.look !== 'fallen' || !bodyLoose(o)) continue;
+    // ⚠️ THE COUNT IS EVERY LOOSE BODY, the candidates are only the ones eligible to go. A wall of fifty crates
+    //    nobody has lit is over the ceiling and nothing happens to it, which is right — there is nothing there that
+    //    may be dissolved. What the count decides is whether the room is under pressure at all.
+    if (!bodyLoose(o) || !bodySpec(o)) continue;
     const S = m.get(o.id);
     if (S && !S.rep) continue;                                 // nobody has ever stepped it: it costs nothing and is not settled
     n++;
-    if (S && S.restT && now - S.restT >= bakeCfg.restMs) can.push(o);
+    if (S && S.restT && now - S.restT >= bakeCfg.restMs && bakeEligible(room, o)) can.push(o);
   }
   if (n <= bakeCfg.cap || !can.length) return 0;
   can.sort((a, b) => (m.get(a.id) || {}).restT - (m.get(b.id) || {}).restT);
