@@ -959,7 +959,7 @@ app.get('/debug/bodies', (req, res) => {
     }
     shared[room] = { bodies: roomBodyStamp[room].size, cells, shared: n, lost, lostNoFire, ghost };
   }
-  res.json({ shared, crumbles, crumbleCells, crumble: crumbleCfg, stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
+  res.json({ shared, crumbles, crumbleCells, crumbleWhy, crumble: crumbleCfg, stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
              fallCuts, fallRefused, fallPiled, fallSmall, fallBurnt, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
              splits: bodySplits, splitGone: bodySplitGone, split: bodySplitCfg,
              bakes, bakeCells, bakeLast, bake: bakeCfg,
@@ -4321,7 +4321,7 @@ function bodyReadCells(room, st, obj, D, S, rec) {
 // 2 newly in the world · 3 taken out (the room's object state must be re-sent for 2 and 3).
 function bodyMoveTo(room, obj, x, y, a) {
   const m = roomBodyStamp[room], S = m && m.get(obj.id);
-  if (!S) return bodyStamp(room, obj, x, y, a) ? 2 : 0;
+  if (!S) { cWhy('move:unstamped'); return bodyStamp(room, obj, x, y, a) ? 2 : 0; }
   const st = roomCells.get(room), D = bodyDims(obj);
   if (!bodyPosCfg.on || !st || st.terrain !== S.g || D.c !== S.dc || D.r !== S.dr) {
     bodyUnstamp(room, obj.id, true);
@@ -4387,6 +4387,7 @@ function bodyMoveTo(room, obj, x, y, a) {
   const skips = bodySkipStr(skip, cells);
   if (R.changed || smothered) bodyCellsSet(rec, obj, cells);
   if (!idx.length) {                                            // nowhere left to be: out, as step 1 would have it
+    cWhy('move:nowhere');
     m.delete(obj.id); if (!m.size) delete roomBodyStamp[room];
     delete rec.bs; if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
     if (set.length) wireFanout(room, 'terrain-set', { cells: set });
@@ -4399,13 +4400,24 @@ function bodyMoveTo(room, obj, x, y, a) {
   //    carries cells for it — with no cells there is no message — and a server pose the client never heard of maps its body
   //    cells onto the wrong world cells: the crate that settled a few pixels under water was drawn cut to its bottom rows.
   //    The old pose describes the world exactly as well, since the world did not change.
-  if (!set.length && !fireIn.length && !fireOut.length && !smothered) { ost.set(obj.id, rec); return 0; }
+  // 🟥 A SHOVE TOO SMALL TO MOVE IT OFF ITS CELLS IS STILL A SHOVE (2026-09-22). This return used to skip the crumble
+  //    check below entirely, and a wreck wedged among its neighbours only ever moves a few pixels when you push it —
+  //    it took this path every time, and "no amount of shoving would make them disintegrate". Its cells have not
+  //    moved in the world, so the crumble reads them at the pose they are already at.
+  if (!set.length && !fireIn.length && !fireOut.length && !smothered) {
+    ost.set(obj.id, rec);
+    if (crumbleShove(S, x, y, a) && crumbleCfg.on && crumbleCfg.trigger === 'disturb' && crumbleChar(room, obj)) {
+      const mx = x - S.x, my = y - S.y, ml = Math.hypot(mx, my) || 1;
+      bodyCrumble(room, obj, S, mx / ml, my / ml);
+    }
+    return 0;
+  }
   // …and one whose only change was WHICH cells are alight still needs its pose delivered: a cell of its own, re-sent
   if (!set.length) set.push(idx[0], peek(idx[0]));
   if (S.x !== x || S.y !== y || S.a !== a) S.restT = Date.now();   // it moved: it is not settled debris (`bakeSweep`)
   // ⭐ SOMETHING IS SHOVING IT, so the charred parts fall off (user's own reasoning: a heap is only expensive while
   //   things are disturbing each other, and one crate on its own being left alone costs nothing).
-  const moved = S.x !== x || S.y !== y || S.a !== a, S0x = S.x, S0y = S.y;
+  const moved = crumbleShove(S, x, y, a), S0x = S.x, S0y = S.y;
   S.x = x; S.y = y; S.a = a; S.idx = Int32Array.from(idx); S.kOf = Int32Array.from(kOf); S.skip = skip; S.fire = S.fire || litAny;
   rec.bs = [x, y, Math.round(a * 1000)]; if (skips) rec.bs.push(skips);
   ost.set(obj.id, rec);
@@ -5124,8 +5136,10 @@ const bakeCfg = { on: 1, cap: 24, restMs: 5000, perTick: 8, burntFrac: 0.8 };
 // `trigger` 'disturb' it falls apart when something moves it — a heap is only expensive when things are shoving
 //           'time'    it falls apart `afterMs` after its flames go out, whether or not anything touches it
 // ⚠️ NOTHING ALIGHT EVER CRUMBLES: a cell still burning is still the thing burning.
-const crumbleCfg = { on: 1, mode: 'cascade', trigger: 'disturb', afterMs: 4000, perPass: 6, cascadeMax: 512, frontPer: 0, looseMs: 8000 };   // `frontPer` 0: the whole connected part at once (user: the stagger *"causes it to look staggered"*)
+const crumbleCfg = { on: 1, mode: 'cascade', trigger: 'disturb', afterMs: 4000, perPass: 6, cascadeMax: 512, frontPer: 0, looseMs: 8000, shovePx: 5, shoveRad: 0.08 };   // `frontPer` 0: the whole connected part at once (user: the stagger *"causes it to look staggered"*)
 let crumbles = 0, crumbleCells = 0;
+const crumbleWhy = {};                                          // DIAG: why a crumble attempt did nothing — /debug/bodies
+const cWhy = (k) => { crumbleWhy[k] = (crumbleWhy[k] || 0) + 1; };
 let bakes = 0, bakeCells = 0, bakeLast = null;
 // Turn one settled piece into ground. Returns whether it did.
 // ⭐⭐ …AND A CRATE THAT HAS BURNT DOWN TO ALMOST NOTHING IS DEBRIS TOO (user, 2026-09-21). The ceiling above only
@@ -5267,12 +5281,13 @@ function crumblePick(cells, D, mode, dx, dy) {
 // many went. ⚠️ ONLY CELLS THIS BODY OWNS — the same rule as every other read-back (round 19); a cell it could not be
 // stamped into belongs to whatever it is buried in.
 function bodyCrumble(room, obj, S, dx, dy) {
+  cWhy('try');
   const st = roomCells.get(room);
-  if (!st || !st.terrain || !st.terrainHp || st.terrain !== S.g) return 0;
+  if (!st || !st.terrain || !st.terrainHp || st.terrain !== S.g) { cWhy('noGrid'); return 0; }
   const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows;
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
   const cells = bodyCellsOf(rec, obj), D = bodyDims(obj);
-  if (D.c !== S.dc || D.r !== S.dr) return 0;
+  if (D.c !== S.dc || D.r !== S.dr) { cWhy('dims'); return 0; }
   // ⭐⭐ NOTHING SOUND LEFT ⇒ IT ALL GOES (user, 2026-09-22, of the fragments left lying about: *"they seemed fairly
   //   burnt but no amount of shoving would make them disintegrate … we really want to do away with these"*). A thin,
   //   ragged fragment is all open faces, so any cell of it that FINISHED burning became ash — what is left is charcoal
@@ -5283,7 +5298,8 @@ function bodyCrumble(room, obj, S, dx, dy) {
   const whole = bodyAllChar(cells);
   let ks = whole ? [] : crumblePick(cells, D, crumbleCfg.mode, dx || 0, dy || 0);
   if (whole) for (let k = 0; k < cells.length; k++) if (cells[k] & 3) ks.push(k);
-  if (!ks.length) return 0;
+  cWhy(whole ? 'whole' : 'cascade');
+  if (!ks.length) { cWhy('noCells'); return 0; }
   // ⭐ …AND IT ARRIVES OVER A FEW TICKS RATHER THAN ALL IN ONE (user: *"the crumbling may travel too quickly, as it
   //   is basically instantaneous, though it should still be quick"*). `crumblePick` returns the cells in the order
   //   the break reaches them, so the front is simply the first `frontPer` of them; the rest are kept and taken on
@@ -5324,7 +5340,7 @@ function bodyCrumble(room, obj, S, dx, dy) {
     cells[k] = 0; went++;
     if (q.c < c0) c0 = q.c; if (q.c > c1) c1 = q.c; if (q.r < r0) r0 = q.r; if (q.r > r1) r1 = q.r;
   }
-  if (!went) return 0;
+  if (!went) { cWhy('wentNone'); return 0; }
   crumbles++; crumbleCells += went;
   // …the stamp forgets those cells: they are real ground now, and `bodyUnstamp` must not erase them later
   S.idx = Int32Array.from([...S.idx].filter((i) => isBodyId(peekCellAt(grid, i))));
@@ -5373,6 +5389,14 @@ function crumbleSoon(room, obj, S, now) {
   if (!S.outT || now - S.outT < crumbleCfg.looseMs) return false;
   const rec = roomObjSt[room] && roomObjSt[room].get(obj.id) || {};
   return bodyAllChar(bodyCellsOf(rec, obj));
+}
+// ⭐ WAS THAT A SHOVE, or just the thing settling as it burns? A burning body shifts by a pixel or two on its own as
+//   cells leave it (its centre of mass moves), and counting that as a shove hollowed crates out while they were still
+//   alight — measured, 24 crates down to 1 by 40s once small moves counted. A real push, a knock or a fall moves it
+//   further than that between two reports.
+function crumbleShove(S, x, y, a) {
+  let da = a - S.a; while (da > Math.PI) da -= 2 * Math.PI; while (da < -Math.PI) da += 2 * Math.PI;
+  return Math.hypot(x - S.x, y - S.y) >= crumbleCfg.shovePx || Math.abs(da) >= crumbleCfg.shoveRad;
 }
 function crumbleDue(room, obj, S, now) {
   if (!crumbleCfg.on || !S || !bodyLoose(obj) || S.lit) return false;   // still burning: it is still the thing burning
@@ -18636,6 +18660,7 @@ io.on('connection', (socket) => {
     if ('crumblePer' in patch) crumbleCfg.perPass = Math.max(1, Math.min(64, patch.crumblePer | 0));
     if ('crumbleFront' in patch) crumbleCfg.frontPer = Math.max(0, Math.min(512, patch.crumbleFront | 0));
     if ('crumbleLooseMs' in patch) crumbleCfg.looseMs = Math.max(0, Math.min(120000, patch.crumbleLooseMs | 0));
+    if ('crumbleShovePx' in patch) crumbleCfg.shovePx = Math.max(0, Math.min(200, +patch.crumbleShovePx || 0));
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
     if ('sortRate' in patch) liquidCfg.sortRate = Math.max(1, Math.min(32, patch.sortRate | 0));
     if ('fineLevelSteps' in patch) liquidCfg.fineLevelSteps = Math.max(1, Math.min(16, patch.fineLevelSteps | 0));
@@ -21440,10 +21465,11 @@ io.on('connection', (socket) => {
     let restate = false;
     for (let q = 0; q + 3 < b.length && q < 4 * 48; q += 4) {
       const obj = map.get(b[q]), x = +b[q + 1], y = +b[q + 2], a = +b[q + 3] / 1000;
-      if (!isFinite(x) || !isFinite(y) || !isFinite(a) || !bodyReportOk(room, obj)) continue;
-      if (now - (_bodyPosAt.get(obj.id) || 0) < gap) continue;
+      if (!isFinite(x) || !isFinite(y) || !isFinite(a) || !bodyReportOk(room, obj)) { cWhy('pos:notDriver'); continue; }
+      if (now - (_bodyPosAt.get(obj.id) || 0) < gap) { cWhy('pos:tooSoon'); continue; }
       _bodyPosAt.set(obj.id, now);
-      if (!bodyStill(room, obj, roomObjSt[room] && roomObjSt[room].get(obj.id), null)) continue;
+      if (!bodyStill(room, obj, roomObjSt[room] && roomObjSt[room].get(obj.id), null)) { cWhy('pos:notStill'); continue; }
+      cWhy('pos:ok');
       const P = bodyPoseClamp(room, obj, x, y, a);
       if (bodyMoveTo(room, obj, P.x, P.y, P.a) >= 2) restate = true;
       bodyReported(room, obj.id);
