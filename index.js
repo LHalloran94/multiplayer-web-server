@@ -5051,7 +5051,22 @@ function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
       continue;
     }
     if (!sound) { fallCharCrumble(room, region, peek); continue; }
-    if (region.length < fallCfg.min) { fallPile(room, region); continue; }
+    // 🟥🟥 A SCRAP OF SOUND WOOD IS SET ALIGHT, NOT TURNED INTO A PICKUP (2026-09-23). Sending it to `fallPile` — which
+    //    had been DEAD CODE, and drops the material as collectable matter — carpeted the user's burning wood in wood
+    //    pickups, in a Sandbox where pickups should not exist at all, and deleted the cells to make them ("burnt
+    //    through without leaving charcoal or anything at all"). Every twig a fire cuts loose took that path.
+    //    A burning scrap burns away in a few seconds; what it chars into is then handled by the rule above, because
+    //    losing a neighbour asks the question again.
+    if (region.length < fallCfg.min) {
+      if (!byFire) { fallSmall++; continue; }                   // a player's dig: their doing, leave it standing
+      const lit = [], fs2 = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map());
+      for (const i of region) {
+        if (!fallCand(peek(i)) || fs2.has(i)) continue;
+        fs2.add(i); ages.set(i, 0); lit.push(i, 1); fallBurnt++;
+      }
+      if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
+      continue;
+    }
     if (fallCut(room, region)) cut++;
   }
   return cut;
