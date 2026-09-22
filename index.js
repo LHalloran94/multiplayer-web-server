@@ -4205,15 +4205,18 @@ function bodyBurnMoving(room, obj, B, now) {
     for (const [nc, nr, up] of [[c - 1, r, 0], [c + 1, r, 0], [c, r - 1, 1], [c, r + 1, 0]]) {
       if (!has(nc, nr)) continue;
       const kk = nr * D.c + nc; if ((next[kk] & 4) || !(next[kk] & 3)) continue;   // ⚠️ `next`: it may have crumbled this pass
-      if (oxy && (next[kk] & 3) === 2 && !open(kk)) continue;          // charcoal needs air to catch
+      if (oxy && (next[kk] & 8) && !open(kk)) continue;                // burnt-through needs an open face to catch (charcoal no longer does — see the world's rule)
       if (B.age[k] >= liquidCfg.fireSolidCatch / rateOf(next[kk]) / (up ? 2 : 1) * tk) { next[kk] |= 4; B.age[kk] = 0; changed = true; }
     }
     const burn = liquidCfg.fireSolidBurn / rateOf(cells[k]) * tk * (0.8 + 0.4 * fireVar(k, hs, 2));
     if (B.age[k] < burn) continue;
     const ex = !oxy || open(k);
-    if ((cells[k] & 3) === 1) next[k] = ex ? (2 | 4) : 2;            // wood → charcoal, alight if it has air, else out
+    // ⚠️ THE WORLD'S RULES, kept in step (2026-09-22): wood never starves, buried charcoal ends burnt through, and a
+    //    burnt-through cell that finishes is gone (a moving thing has nowhere to put ash).
+    if ((cells[k] & 3) === 1) next[k] = 2 | 4;                        // wood → charcoal, still alight
     else if ((cells[k] & 3) === 3) next[k] = 0;                       // foliage → gone, as leaves leave nothing
-    else next[k] = ex ? 0 : 2;                                        // charcoal → gone, or starved and out
+    else if (cells[k] & 8) next[k] = 0;                               // burnt-through → gone
+    else next[k] = ex ? 0 : (2 | 8);                                  // charcoal → gone, or burnt through and out
     B.age[k] = 0; changed = true;
   }
   if (!changed) return false;
@@ -4585,11 +4588,60 @@ function bodySplitCheck(room, obj, S, now, force) {
   const st = roomCells.get(room);                         // …where the ash an island leaves behind is written
   const keep = new Uint8Array(cells.length);
   for (const k of isles[big]) keep[k] = cells[k];
+  // 🟥🟥 THE PARENT SHRINKS FIRST, AND SAYS SO, *THEN* THE PIECES APPEAR (2026-09-22). It was the other way round:
+  //    each piece was added to every client inside the loop below and the parent's own record was updated after it,
+  //    with nothing sent at all until the room's next object-state. So for a moment every client held the new piece
+  //    INSIDE the parent's old shape, and the solver blasted the two apart — measured, on a pile nobody touched,
+  //    at 16 px a step with crumbling on and 0.3 with it off. Crumbling made it common by asking for a split on
+  //    every crumble. Now the parent's new cells go out first (`obj-cells`) and the pieces follow.
+  // …and the original keeps what is left, stamped back where it was
+  let any = false; for (let k = 0; k < keep.length; k++) if (keep[k] & 3) { any = true; break; }
+  const burntOut = !any;
+  // 🟥 A FALLEN PIECE'S MATERIALS ARE THE SOURCE OF TRUTH, so they have to lose the cells as well. `bc` alone is
+  //    not enough: the moment the codes match what `fm` implies, `bodyCellsSet` drops `bc` — and the cells that
+  //    broke off would come back from `fm` as if nothing had happened.
+  if (!burntOut && obj.look === 'fallen' && typeof obj.fm === 'string') {
+    const fm2 = fallMats(obj).slice();
+    for (let k = 0; k < fm2.length && k < keep.length; k++) if (!(keep[k] & 3)) fm2[k] = 0;
+    obj.fm = Buffer.from(fm2).toString('base64');
+    delete obj._fmA; delete obj._fmS;
+    emitObjToChunks(room, obj, 'body-fm', { id: obj.id, fm: obj.fm });
+  }
+  if (!burntOut) { bodyCellsSet(rec, obj, keep); if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id); }
+  if (!burntOut) {
+    bodyStamp(room, obj, pose.x, pose.y, pose.a);
+    io.to(room).emit('obj-cells', { id: obj.id, bc: rec.bc || null });
+  }
   const cw = (obj.w || 64) / D.c, ch = (obj.h || 64) / D.r, ca = Math.cos(pose.a), sa = Math.sin(pose.a);
   for (let i = 0; i < isles.length; i++) {
     if (i === big) continue;
     const isle = isles[i];
     // ⚠️ TOO SMALL TO BE A THING — but not nothing: it leaves ASH where it was, for the same reason the fire now does.
+    // ⭐⭐ A PIECE WITH NO SOUND WOOD LEFT IN IT CRUMBLES WHERE IT STANDS, instead of becoming an object (user,
+    //    2026-09-22: *"the crumbling would supersede the splitting of burnt objects into multiple pieces"*). Measured
+    //    once crates were let burn through: a pile of 24 crates became 57 objects, every one awake, 72ms of stepping —
+    //    the fire was carving each crate into charred lumps, which is precisely the expensive, oddly shaped debris
+    //    crumbling exists to get rid of. A lump that is all char has nothing holding it together, so it goes to
+    //    CINDER cell for cell (still alight where it was alight); a piece with wood in it stays a thing, and crumbles
+    //    later by the ordinary rules.
+    if (crumbleCfg.on && st && st.terrain) {
+      let sound = 0; for (const k of isle) if ((cells[k] & 3) === 1 || (cells[k] & 3) === 3) { sound++; break; }
+      if (!sound) {
+        const set = [], lit = [], fs = st.fineFire, ages = st.fireAge || (st.fireAge = new Map());
+        for (const k of isle) {
+          const q = bodyRep(obj, D, pose.x, pose.y, pose.a, k); if (!q) continue;
+          const wi = q.c * st.rows + q.r;
+          if (wi < 0 || wi >= st.terrain.length || peekCellAt(st.terrain, wi) !== 0) continue;   // …only into the air it just left
+          st.terrain.s(wi, MAT_CINDER); if (st.terrainHp) st.terrainHp.s(wi, 1);
+          set.push(wi, MAT_CINDER);
+          if ((cells[k] & 4) && liquidCfg.fireSolids) { fineFireSet(room).add(wi); ages.set(wi, 0); lit.push(wi, 1); }
+        }
+        if (set.length) { wireFanout(room, 'terrain-set', { cells: set }); for (let z = 0; z < set.length; z += 2) powderSet(room).add(set[z]); }
+        if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
+        crumbles++; crumbleCells += set.length / 2;
+        continue;
+      }
+    }
     if (isle.length < bodySplitCfg.min) {
       bodySplitGone += isle.length;
       const set = [];
@@ -4629,22 +4681,7 @@ function bodySplitCheck(room, obj, S, now, force) {
     bodyStamp(room, o2, o2.x, o2.y, o2.angle);
     bodySplits++;
   }
-  // …and the original keeps what is left, stamped back where it was
-  let any = false; for (let k = 0; k < keep.length; k++) if (keep[k] & 3) { any = true; break; }
-  if (!any) { bodyBurnOut(room, obj); return true; }
-  // 🟥 A FALLEN PIECE'S MATERIALS ARE THE SOURCE OF TRUTH, so they have to lose the cells as well. `bc` alone is
-  //    not enough: the moment the codes match what `fm` implies, `bodyCellsSet` drops `bc` — and the cells that
-  //    broke off would come back from `fm` as if nothing had happened.
-  if (obj.look === 'fallen' && typeof obj.fm === 'string') {
-    const fm2 = fallMats(obj).slice();
-    for (let k = 0; k < fm2.length && k < keep.length; k++) if (!(keep[k] & 3)) fm2[k] = 0;
-    obj.fm = Buffer.from(fm2).toString('base64');
-    delete obj._fmA; delete obj._fmS;
-    emitObjToChunks(room, obj, 'body-fm', { id: obj.id, fm: obj.fm });
-  }
-  bodyCellsSet(rec, obj, keep);
-  if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
-  bodyStamp(room, obj, pose.x, pose.y, pose.a);
+  if (burntOut) bodyBurnOut(room, obj);
   return true;
 }
 // ⭐ ONE LOOP KEEPS THE WORLD IN STEP WITH THE OBJECTS, rather than a line in each of the dozen places an object can be
@@ -5069,7 +5106,7 @@ const bakeCfg = { on: 1, cap: 24, restMs: 5000, perTick: 8, burntFrac: 0.8 };
 // `trigger` 'disturb' it falls apart when something moves it — a heap is only expensive when things are shoving
 //           'time'    it falls apart `afterMs` after its flames go out, whether or not anything touches it
 // ⚠️ NOTHING ALIGHT EVER CRUMBLES: a cell still burning is still the thing burning.
-const crumbleCfg = { on: 1, mode: 'cascade', trigger: 'disturb', afterMs: 4000, perPass: 6, cascadeMax: 512, frontPer: 10 };
+const crumbleCfg = { on: 1, mode: 'cascade', trigger: 'disturb', afterMs: 4000, perPass: 6, cascadeMax: 512, frontPer: 0 };   // `frontPer` 0: the whole connected part at once (user: the stagger *"causes it to look staggered"*)
 let crumbles = 0, crumbleCells = 0;
 let bakes = 0, bakeCells = 0, bakeLast = null;
 // Turn one settled piece into ground. Returns whether it did.
@@ -9075,6 +9112,13 @@ for (const [id, rate, ash] of [
   // thin and does not smoulder for a minute the way a trunk's does.
   [250, 0.8, 251], // Body wood — ~4s alight, then its own charcoal (starves like a trunk's when buried)
   [251, 0.16, 38], // Body charcoal — ~20s, then ash (user's number; a trunk's charcoal smoulders a minute)
+  // ⭐⭐ BURNT-THROUGH CHARCOAL SMOULDERS AWAY FROM THE OUTSIDE IN (user, 2026-09-22): *"allow cells which are burned
+  // through but which are blocked by ash to keep burning and become ash themselves, so that cells on the interior
+  // still couldn't burn through completely, but cells on the edge covered by ash still could, so that it would turn
+  // to ash from the outside in and sort of burn itself out."* Slow on purpose — a wreck should stand for a minute or
+  // two, which is the window in which a shove crumbles it. It catches only beside air or ash (`ashAround`), so the
+  // front walks inward one layer at a time, and ash is not a fuel, so nothing ever relights.
+  [253, 0.05, 38], // Body charcoal, burnt through — ~a minute a cell, and only from an open or ash-covered face
   [252, 3, 38],     // Body foliage (step 3) — a fallen tree's leaves: burn as Leaves do, and leave nothing
 ]) { FIRE_RATE[id] = rate; FIRE_ASH[id] = ash; }
 // 🟥 A "ONLY A SHARE OF A BODY'S CHARCOAL LEAVES ASH, THE REST AIR" TABLE WAS HERE AND IS GONE (2026-09-19, user: *"the
@@ -9571,6 +9615,11 @@ function fineReactTickRoom(room, SUB, phase) {
     // bottom of non-moving crates"* — found with `e2e_fire_live --objash`: 0/0/0 under a crate resting on the floor).
     const airCell = (j) => j >= 0 && j < N && (j % ROWS) < FLOOR_ROW && gPeek(j) === 0 && tot.g(j) <= 0;
     const airAround = (j) => { const rj = j % ROWS; return airCell(j - ROWS) || airCell(j + ROWS) || (rj > 0 && airCell(j - 1)) || (rj < ROWS - 1 && airCell(j + 1)); };
+    // …ash on a face, which is how a burnt-through wreck is let smoulder in from its outside (see [253] above)
+    // ⚠️ LITERALS (38 ash, 253 burnt-through): this block is sliced out and run alone by the rigs.
+    const ashCell = (q) => q >= 0 && q < N && gPeek(q) === 38;
+    const ashAround = (j) => { const rj = j % ROWS; return ashCell(j - ROWS) || ashCell(j + ROWS) || (rj > 0 && ashCell(j - 1)) || (rj < ROWS - 1 && ashCell(j + 1)); };
+    const burntCanCatch = (j) => gPeek(j) !== 253 || airAround(j) || ashAround(j);
     const spread = (j0, rj, age) => {
       for (const j of [rj < ROWS - 1 ? j0 + 1 : -1, rj > 0 ? j0 - 1 : -1, j0 - ROWS, j0 + ROWS]) {
         if (j < 0 || j >= N || burningAny(fire, j)) continue;   // ⚠️ the ROOM's set — see `burningAny`
@@ -9584,6 +9633,7 @@ function fineReactTickRoom(room, SUB, phase) {
         // open face has no surface to oxidise. It is also what keeps the fire finite: without it a starved cell
         // is re-lit by its neighbour for ever.
         if (liquidCfg.fireOxygen && FIRE_AIR[gPeek(j)] && !airAround(j)) continue;
+        if (!burntCanCatch(j)) continue;
         if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1) * catchMul(j)))) { lightCell(fire, j); ages.set(j, 0); }
       }
     };
@@ -9605,6 +9655,7 @@ function fineReactTickRoom(room, SUB, phase) {
       if (oilAt(j) > 0) { if (age < Math.round(2 * d)) return false; lightCell(fire, j); return true; }
       const sr = solidRate(j); if (sr <= 0) return false;
       if (liquidCfg.fireOxygen && FIRE_AIR[gPeek(j)] && !airAround(j)) return false;
+      if (!burntCanCatch(j)) return false;
       const thr = liquidCfg.fireSolidCatch / sr / 2 * catchMul(j) * (1 + Math.max(0, +liquidCfg.fireReachSlow || 0) * (d - 1));
       if (age < Math.max(1, Math.round(thr))) return false;
       lightCell(fire, j); ages.set(j, 0); return true;
@@ -9755,7 +9806,15 @@ function fineReactTickRoom(room, SUB, phase) {
           // is only the RESULT that changes. Gating the catch as well would leave a log with a charred skin and
           // an untouched core, which is a different and much smaller fire than anyone asked for.
           // ⚠️ A cell with liquid in it counts as buried — that is the same rule as `fireBlocked` on the client.
-          const exposed = !liquidCfg.fireOxygen || airAround(i);
+          // ⭐⭐ TWO BODY RULES (2026-09-22). BODY WOOD NEVER STARVES: it becomes charcoal and goes on smouldering,
+          //   where it used to become charcoal and GO OUT — which is why crates went out before they burnt through
+          //   (user: *"crates … go out too quickly, so they don't burn through. We were limiting it before but now
+          //   that we have a way of dealing with it, the crates should burn through a bit more."*). The limit that
+          //   used to justify it — a buried middle relighting itself for ever — is gone: buried charcoal now ends as
+          //   burnt-through, which is not fuel. And a BURNT-THROUGH cell counts ash on a face as open, which is
+          //   what lets a wreck smoulder in from its outside.
+          const _g0 = gPeek(i);
+          const exposed = !liquidCfg.fireOxygen || airAround(i) || _g0 === 250 || (_g0 === 253 && ashAround(i));
           const relit = left > 0 && FIRE_RATE[left] > 0 && exposed;
           // ⭐ STARVED: the chain stops here. Wood becomes charcoal and goes out; charcoal stays charcoal and goes
           // out. Either way the cell keeps its shape and can be dug for what it is, which is how charcoal is made.
