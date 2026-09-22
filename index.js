@@ -4216,10 +4216,15 @@ function bodyBurnMoving(room, obj, B, now) {
     const ex = !oxy || open(k);
     // ⚠️ THE WORLD'S RULES, kept in step (2026-09-22): wood never starves, buried charcoal ends burnt through, and a
     //    burnt-through cell that finishes is gone (a moving thing has nowhere to put ash).
+    // 🟥🟥 A MOVING THING'S CELLS NO LONGER VANISH (user, 2026-09-23: *"most of the tree cells just burn away without
+    //    leaving anything"*). This path used to DELETE a charcoal or burnt-through cell that finished, on the reasoning
+    //    that a thing in mid-air has nowhere to put ash — so the same cell left ash if it burnt where it stood and
+    //    nothing at all if it happened to be falling, and a burning canopy sheds branches the whole time. Now it stops
+    //    at burnt-through and holds there: matter is never destroyed by which path a cell happened to be on, and once
+    //    the piece comes to rest it is back in the world, where the ordinary rules finish it.
     if ((cells[k] & 3) === 1) next[k] = 2 | 4;                        // wood → charcoal, still alight
-    else if ((cells[k] & 3) === 3) next[k] = 0;                       // foliage → gone, as leaves leave nothing
-    else if (cells[k] & 8) next[k] = 0;                               // burnt-through → gone
-    else next[k] = ex ? 0 : (2 | 8);                                  // charcoal → gone, or burnt through and out
+    else if ((cells[k] & 3) === 3) next[k] = 0;                       // foliage → nothing, as leaves do everywhere
+    else next[k] = 2 | 8;                                             // charcoal, or already burnt through → burnt through, out
     B.age[k] = 0; changed = true;
   }
   if (!changed) return false;
@@ -8434,6 +8439,12 @@ function powderTickRoom(room) {
       const sr = src % ROWS; for (const j of [sr > 0 ? src - 1 : -1, sr < ROWS - 1 ? src + 1 : -1, src - ROWS, src + ROWS]) if (j >= 0 && j < nn && ftot.g(j) > 0) fineSet(room).add(j);
     }
     changedSet.add(src); changedSet.add(dst); active.add(dst); wakeAround(src);
+    // 🟥 A GRAIN MOVING AWAY IS HOW SUPPORT USUALLY DISAPPEARS, and nothing asked about it (user, 2026-09-23: *"cells
+    //    still end up floating in mid-air"*). The fall check is asked when the FIRE consumes a cell — but the common
+    //    case in a burnt wood is the ash under a charred branch flowing out from under it, which is no fire event at
+    //    all. ⚠️ Only when the cell above could actually fall: in a flowing heap the cell above a grain is almost
+    //    always more powder, so this adds an index to the queue rarely rather than once per grain moved.
+    if (fireGone) { const sr2 = src % ROWS; if (sr2 > 0) { const av = peekG(src - 1); if (av === 28 || av === 91 || av === 40 || av === 92 || av === 254 || MAT_PLANT[av] === 1) fireGone(room, src - 1); } }
     if (liquidCfg.reactions) { seedFineReactAround(room, src); seedFineReactAround(room, dst); }   // a grain landing in a pool is a new contact (snow dropped into water → ice)
   };
   for (const i of list) {
