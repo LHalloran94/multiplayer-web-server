@@ -221,6 +221,30 @@
     if (behavior === 'plant') PLANT_IDS.push(id);
   });
 
+  // ---- SPENT CHARCOAL — the stage between "charred but sturdy" and "ash", for TERRAIN (2026-09-23) -----------
+  // ⭐⭐ A crate's cells have had this stage since 2026-09-22 (charred → burnt through → ash), and the user asked for
+  // trees to have the same stages: *"Unburnt → charred but still sturdy → burnt enough to be able to crumble → ash if
+  // it keeps burning long enough and is spent. Also the charcoal should look the same."* So this is Charcoal in every
+  // visible respect — same colour, same charred look, digs into Charcoal — and differs only in what the fire and the
+  // falling rules may do to it: it is what crumbles, and Charcoal proper never does.
+  // ⚠️ A FIXED ID, NOT APPENDED TO `ROWS`. Appending moves GEN_MAT_MAX and therefore CUSTOM_MAT_MIN, which is the id
+  // every player-made block is STORED under — a world saved before the change would read its custom blocks as the
+  // wrong material. 250..254 are spare above the custom range (the server's CUSTOM_MAT_HI is 249) and below the
+  // client's TW_UNKNOWN (255), which is exactly what that space is reserved for.
+  // ⚠️ `EXTRA_IDS` is installed by the client AFTER it counts the palette (16a), like the body ids beside it: the
+  // count is the build menu's length, and 254 would stretch it to 254 empty swatches.
+  const EXTRA_IDS = [254];
+  {
+    const fill = DEFS[NAMES.Charcoal].fill;
+    DEFS[254] = {
+      name: 'Spent charcoal', behavior: 'solid', fill, cap: lighten(fill, 0.24), capShade: darken(fill, 0.20),
+      debris: hueSat(fill), strength: 1, gen: 1, dusty: 1,
+      hint: 'Charcoal that has burnt through — it holds its shape until something takes its support away.',
+    };
+    NAMES['Spent charcoal'] = 254;
+    STRENGTH[254] = 1;
+  }
+
   // ---- EMISSION — which materials give off light of their own ----------------------------------------------
   // ⭐ A PROPERTY OF THE MATERIAL, NOT A LIST IN THE RENDERER. `drawLight` builds a 256-entry table off
   // `TERRAIN_MATS[v].emit` once a frame and never asks what a material IS — so adding a glowing rock is a number
@@ -247,7 +271,7 @@
   // powder blocks the PLAYER and is invisible to loose bodies (`terrainSoftens` / `lbSolidCell` in the client). A
   // first attempt made cinder `solid` instead, and that gave a pile you could stand on in some places and not in
   // others — the user's report — because the ash around it stayed walk-through.
-  ['Charcoal', 'Cinder'].forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].charred = 1; });
+  ['Charcoal', 'Cinder', 'Spent charcoal'].forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].charred = 1; });
 
   // ---- PRIMA WORTH — what a cell of this refines into ------------------------------------------------------
   // ⭐ MEASURED, NOT CHOSEN. Every number below is the output of `scratchpad/probe_material_abundance.js`,
@@ -383,12 +407,14 @@
   DIG_YIELD[NAMES.Wood] = NAMES.Timber;
   // ⭐ Cinder is charcoal that fell; what you dig out of it is charcoal.
   DIG_YIELD[NAMES.Cinder] = NAMES.Charcoal;
+  // …and so is charcoal that has burnt through: it is still charcoal to anyone who digs it out.
+  DIG_YIELD[NAMES['Spent charcoal']] = NAMES.Charcoal;
   const yieldOf = (id) => DIG_YIELD[id] || id;
 
   return {
     ROWS, DEFS, NAMES, NAME_TO_ID, idOf, STRENGTH, EMIT, DIG_YIELD, yieldOf,
     WORTH, PRIMA_WORTH, PRIMA_REFINE_MIN, primaWorthOf, primaRefinable,
-    GEN_MAT_MIN, GEN_MAT_MAX,
+    GEN_MAT_MIN, GEN_MAT_MAX, EXTRA_IDS,
     POWDER_IDS, PLANT_IDS, HANGS_IDS,
     COUNT: ROWS.length,
   };

@@ -960,7 +960,7 @@ app.get('/debug/bodies', (req, res) => {
     shared[room] = { bodies: roomBodyStamp[room].size, cells, shared: n, lost, lostNoFire, ghost };
   }
   res.json({ shared, crumbles, crumbleCells, crumbleWhy, crumble: crumbleCfg, stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
-             fallCuts, fallRefused, fallPiled, fallSmall, fallBurnt, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
+             fallCuts, fallRefused, fallPiled, fallSmall, fallBurnt, fallCrumbled, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
              splits: bodySplits, splitGone: bodySplitGone, split: bodySplitCfg,
              bakes, bakeCells, bakeLast, bake: bakeCfg,
              drops: dropSources, gated: [...gatedRooms], rooms: bad });
@@ -3868,7 +3868,7 @@ function fallMats(obj) {
   return a;
 }
 // what a material is as a body: charcoal chars, woody things are wood, every other plant is foliage (burns fast, leaves nothing)
-function fallCode(m) { return !m ? 0 : m === 92 ? 2 : (m === 28 || m === 91 || m === 40) ? 1 : 3; }
+function fallCode(m) { return !m ? 0 : (m === 92 || m === 254) ? 2 : (m === 28 || m === 91 || m === 40) ? 1 : 3; }
 // A whole one. Codes: 0 gone · 1 wood · 2 charcoal, +4 alight. A round thing (barrel, log) has its four corner cells
 // missing — its outline at cell resolution. ⚠️ Mirrored on the client (`bodyFresh`).
 function bodyFresh(D, kind, obj) {
@@ -4241,13 +4241,22 @@ function bodyDrop(room, o) {
 // and nothing is left behind here — the ash is already on the ground, cell by cell, where each part burned.
 function bodyBurnOut(room, obj) {
   bodyBurnt++;
+  // ⭐ WAS IT STILL HOT? (user, 2026-09-22, of a cold test crate crumbling away: it *"would play a sort of flame
+  //   animation"*). The farewell is dark flakes AND ORANGE SPARKS, written for a thing that burns away while alight —
+  //   and a crate that has gone cold and then crumbles gets the same sparks. The flakes always; the sparks only here.
+  const S0 = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id);
+  let hot = !!(S0 && S0.lit);
+  if (!hot && S0 && S0.outAt) {                                 // …or a cell of it went out recently enough to still glow
+    const now = Date.now();
+    for (let k = 0; k < S0.outAt.length; k++) if (S0.outAt[k] > 0 && now - S0.outAt[k] < crumbleCfg.coolMs) { hot = true; break; }
+  }
   bodyUnstamp(room, obj.id, false);
   bodyOutKeep.delete(obj.id);
   const ost = roomObjSt[room]; if (ost) ost.delete(obj.id);
   if (roomObjects[room] && roomObjects[room].get(obj.id) === obj) {
     objUnindex(room, obj);
     if (obj.cost > 0 && invGatedRoom(room)) scatterMatter(room, obj.x, obj.y - 12, [], obj.cost | 0, 1);
-    emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id, burnt: 1 });
+    emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id, burnt: 1, hot: hot ? 1 : 0 });
   }
 }
 // Somebody's machine says this loose body came to rest here (`obj-rest`), or started moving (`obj-move`). ⚠️ CLAMPED to
@@ -4931,10 +4940,10 @@ function bodyIgnite(room, obj, x, y, r, px, py, pa) {
 // `min` 6 → 1 now that a hundred pieces cost 0.5ms a frame instead of 256 (the reason it was 6 is gone — see the note
 // on the clause that uses it). Every clump the fire frees is a piece you can mine, and nothing drops pickups any more.
 const fallCfg = { on: 1, max: 12000, min: 6 };
-let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallSmall = 0, fallBurnt = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
+let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallSmall = 0, fallBurnt = 0, fallCrumbled = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
 const FALL_ASH = 38;
 const MAT_CINDER = 93;   // charcoal with nothing holding it up — see `materials.js` and `bodyBake`
-function fallCand(v) { return v > 0 && (isPlantId(v) || v === 91 || v === 92); }
+function fallCand(v) { return v > 0 && (isPlantId(v) || v === 91 || v === 92 || v === 254); }   // …254: charcoal burnt through (2026-09-23)
 // the cells the fire has finished since the last look, per room (`fireGone` → here; `bodyTick` drains it)
 const roomFallGone = {};
 // (`fireGone` is pointed here beside `wireFanout = interestFanout` — it is declared inside the sliced liquid block, further down,
@@ -5025,22 +5034,76 @@ function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
     //    same region as the trunk. This is about foliage on its own.
     // ⚠️ Freed by a DIG rather than by fire, a leaf-only clump stays standing exactly as it did before this track —
     //    a dig is the player's own doing, and neither deleting nor igniting what they cut is theirs to decide.
-    let woodIn = false;
-    for (const i of region) { const v = peek(i); if (fallCand(v) && fallCode(v) !== 3) { woodIn = true; break; } }
-    if (!woodIn || region.length < fallCfg.min) {
+    // ⭐⭐ WHAT A CUT-LOOSE PIECE BECOMES, BY WHAT IT IS MADE OF (2026-09-23, the user on burnt trees: *"we don't really
+    //   want branch objects lying about, we would want them to disintegrate, but we also wouldn't want unburnt parts to
+    //   crumble"*). The same rule a burnt crate's pieces already follow:
+    //     · nothing but foliage  → it burns away where it is (a clump of leaves is not a thing)
+    //     · no sound wood left   → it collapses into fallen charcoal and drops: no object, nothing to tidy up
+    //     · sound wood in it     → a real branch falls, as before; a scrap too small to be an object is a pickup
+    // 🟥 THE OLD RULE SET SMALL CLUMPS ALIGHT INSTEAD, and that is the user's floating cells: charcoal smoulders for
+    //    about a minute, so specks hung in the air burning the whole time and only then turned to ash.
+    let sound = false, charred = false;
+    for (const i of region) { const c = fallCode(peek(i)); if (c === 1) sound = true; else if (c === 2) charred = true; }
+    if (!sound && !charred) {
+      // ⚠️ Only what the FIRE freed: a leaf clump a player cut loose with a dig is their own doing and stays put.
       if (!byFire) { fallSmall++; continue; }
-      const lit = [], fs2 = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map());
-      for (const i of region) {
-        if (!fallCand(peek(i)) || fs2.has(i)) continue;
-        fs2.add(i); ages.set(i, 0);
-        lit.push(i, 1); fallBurnt++;
-      }
-      if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
+      fallLeavesGo(room, region, peek);
       continue;
     }
+    if (!sound) { fallCharCrumble(room, region, peek); continue; }
+    if (region.length < fallCfg.min) { fallPile(room, region); continue; }
     if (fallCut(room, region)) cut++;
   }
   return cut;
+}
+// ⭐⭐ A CUT-LOOSE PIECE WITH NO SOUND WOOD LEFT COLLAPSES INTO FALLEN CHARCOAL (2026-09-23) — the terrain half of the
+// rule a burnt crate's pieces already follow. It does not become an object: every charred cell turns into the powder
+// charcoal a crumbling crate makes, which falls and heaps up, and anything alight goes on burning as it drops.
+// ⚠️ ONLY THE CHARRED CELLS. A region reaches here with no wood in it, but it can still hold leaves (a charred branch
+//    with a few green ones on it) — those burn away as they do anywhere else.
+function fallCharCrumble(room, region, peek) {
+  const st = roomCells.get(room); if (!st || !st.terrain) return;
+  const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows, set = [];
+  let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
+  for (const i of region) {
+    const v = peek ? peek(i) : grid.g(i), code = fallCode(v);
+    if (code !== 2) continue;
+    grid.s(i, MAT_CINDER); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
+    set.push(i, MAT_CINDER); powderSet(room).add(i);
+    const c = (i / ROWS) | 0, r = i - c * ROWS;
+    if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r;
+  }
+  if (!set.length) return;
+  fallCrumbled += set.length / 2;
+  wireFanout(room, 'terrain-set', { cells: set });
+  activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
+  fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
+}
+// ⭐ A CLUMP OF NOTHING BUT LEAVES THE FIRE HAS CUT LOOSE BURNS AWAY WHERE IT IS. It used to be set alight and left
+// hanging, which is what a speck of foliage smouldering in mid-air looked like. One cell in `fireLeafAsh` leaves ash,
+// the same share as foliage burning anywhere else, chosen by position so it is scattered rather than clumped.
+function fallLeavesGo(room, region, peek) {
+  const st = roomCells.get(room); if (!st || !st.terrain) return;
+  const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows, fs = st.fineFire, set = [], out = [];
+  let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
+  const share = Math.max(1, liquidCfg.fireLeafAsh | 0);
+  for (const i of region) {
+    const v = peek ? peek(i) : grid.g(i);
+    if (!fallCand(v) || fallCode(v) !== 3) continue;
+    let h = (i * 2654435761) >>> 0; h = (h ^ (h >>> 13)) >>> 0;
+    const leaves = (h % share) === 0 ? FALL_ASH : 0;
+    grid.s(i, leaves); hp.s(i, leaves ? 1 : 0); if (st.sat) st.sat.s(i, 0);
+    set.push(i, leaves); if (leaves) powderSet(room).add(i);
+    if (fs && fs.delete(i)) { out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); }
+    const c = (i / ROWS) | 0, r = i - c * ROWS;
+    if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r;
+    fallBurnt++;
+  }
+  if (!set.length) return;
+  wireFanout(room, 'terrain-set', { cells: set });
+  if (out.length) wireFanout(room, 'fire-cells', { cells: out });
+  activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
+  fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
 }
 // A clump too small to be worth an object: its material as a pickup where it was (what #108 did with every cut tree).
 function fallPile(room, region) {
@@ -7726,7 +7789,13 @@ const liquidCfg = {
   //   *"burnt through to the level of being able to crumble too quickly"*). × its ordinary burn; open-faced charcoal
   //   going to ash is untouched. 1 = the old timing (~20s).
   fireBodyThrough: 3,
-  fireLeafAsh: 6,       // one burnt FOLIAGE cell in six leaves ash; wood and charcoal always do (see `FIRE_ASH`)
+  // …and whether a cell with AIR on it also passes through the burnt-through stage, or goes straight to ash (see the
+  // switch's own note in the burn). Trees on, objects off: the user's two answers may differ, so they are two dials.
+  fireTreeStages: 1,
+  fireBodyStages: 0,
+  // ⭐ ONE BURNT FOLIAGE CELL IN TWELVE LEAVES ASH — was one in six until 2026-09-23 (user: *"foliage produces too much
+  //   ash as it burns"*). A canopy is thousands of cells, so this is the number that decides how grey a burnt wood looks.
+  fireLeafAsh: 12,      // one burnt FOLIAGE cell in six leaves ash; wood and charcoal always do (see `FIRE_ASH`)
   // ⭐⭐ FIRE JUMPS GAPS (2026-09-18, the user's idea). Before this fire spread ONLY to the four touching cells, so a
   // one-cell gap stopped it dead. Two channels, both switchable:
   //  · REACH — a flame lights fuel a few cells ABOVE it through clear air (heat and flame rise), and the cells beside
@@ -9383,6 +9452,11 @@ for (const [id, rate, ash] of [
   // ⭐ Charcoal is what the three above leave, and it is a fuel itself: at 0.05 it smoulders for 1,600 passes
   // (about a minute) before crumbling to Ash, which is the window a player has to come and dig it out.
   [92, 0.05, 38],  // Charcoal — smoulders a long time, then ash
+  // ⭐⭐ SPENT CHARCOAL (254) — the stage between charred and ash, for TERRAIN, the mirror of a crate's 253 (2026-09-23,
+  // the user asked for trees to have a crate's stages). Slow on purpose, and it catches only beside air or ash
+  // (`burntCanCatch`), so a burnt trunk goes out from the outside in instead of all at once.
+  // ⚠️ LITERAL: this block is sliced out and run alone by the rigs — see the note on 253.
+  [254, 0.05, 38], // Spent charcoal — burnt through; crumbles away, and ashes only from an open or ash-covered face
   // ⭐ Cinder burns exactly as Charcoal does — it IS charcoal, with nothing holding it up (see `materials.js`).
   [93, 0.05, 38],  // Cinder — fallen charcoal; same smoulder, same ash
   [41, 0.15, 38],  // Coal — very slow, very long
@@ -9915,7 +9989,10 @@ function fineReactTickRoom(room, SUB, phase) {
     // ⚠️ LITERALS (38 ash, 253 burnt-through): this block is sliced out and run alone by the rigs.
     const ashCell = (q) => q >= 0 && q < N && gPeek(q) === 38;
     const ashAround = (j) => { const rj = j % ROWS; return ashCell(j - ROWS) || ashCell(j + ROWS) || (rj > 0 && ashCell(j - 1)) || (rj < ROWS - 1 && ashCell(j + 1)); };
-    const burntCanCatch = (j) => gPeek(j) !== 253 || airAround(j) || ashAround(j);
+    // ⚠️ 254 IS THE SAME RULE FOR TERRAIN (2026-09-23): charcoal burnt through, in a tree or a build, only catches
+    //    where there is air or ash on a face — that is what makes a burnt trunk ash away from the outside in.
+    const burntThrough = (v) => v === 253 || v === 254;
+    const burntCanCatch = (j) => !burntThrough(gPeek(j)) || airAround(j) || ashAround(j);
     const spread = (j0, rj, age) => {
       for (const j of [rj < ROWS - 1 ? j0 + 1 : -1, rj > 0 ? j0 - 1 : -1, j0 - ROWS, j0 + ROWS]) {
         if (j < 0 || j >= N || burningAny(fire, j)) continue;   // ⚠️ the ROOM's set — see `burningAny`
@@ -10089,7 +10166,12 @@ function fineReactTickRoom(room, SUB, phase) {
           //    cell, which is exactly what the user asked for: *"small cells of wood on a burnt through crate …
           //    would just disappear rather than turning to ash"*.
           let left = flash ? 0 : FIRE_ASH[gPeek(i)];
-          if (left && MAT_PLANT[gPeek(i)] === 1 && (liquidCfg.fireLeafAsh | 0) > 1
+          // 🟥 …AND FOLIAGE IN A FALLEN PIECE COUNTS AS FOLIAGE (252, 2026-09-23). The share was asked of `MAT_PLANT`,
+          //    which a body's own cells are not, so every leaf cell in a broken-off branch left ash where one in twelve
+          //    of the same leaves on the tree did. Measured on the user's report that *"foliage produces too much ash"*:
+          //    leaves alone left 122 ash of 1,596 (1 in 13, right), while a burning wood left ~300 more than its leaves
+          //    and wood could account for. The row's own comment said "leave nothing" and the table said ash.
+          if (left && (MAT_PLANT[gPeek(i)] === 1 || gPeek(i) === 252) && (liquidCfg.fireLeafAsh | 0) > 1
               && (fireVar(i, salt + 71, 1e6) * (liquidCfg.fireLeafAsh | 0) | 0) !== 0) left = 0;
           // ⭐⭐ OXYGEN IS WHAT DECIDES CHARCOAL FROM ASH, and it is the difference in the real world too: wood
           // heated WITHOUT enough air pyrolyses to charcoal and stops there — the volatiles cook off and a carbon
@@ -10111,19 +10193,31 @@ function fineReactTickRoom(room, SUB, phase) {
           //   burnt-through, which is not fuel. And a BURNT-THROUGH cell counts ash on a face as open, which is
           //   what lets a wreck smoulder in from its outside.
           const _g0 = gPeek(i);
-          const exposed = !liquidCfg.fireOxygen || airAround(i) || _g0 === 250 || (_g0 === 253 && ashAround(i));
+          // ⭐⭐ ALL FOUR STAGES, OR AIR SHORT-CIRCUITS TO ASH (2026-09-23, the user asked to try it both ways). With the
+          //   switch ON, a charcoal cell that finishes ALWAYS becomes charcoal-burnt-through and goes on from there,
+          //   so the chain is always unburnt → charred → burnt through → ash. With it OFF, a cell with air on it goes
+          //   straight to ash and only a buried one reaches the burnt-through stage (how crates have worked since
+          //   round 20 — without it a crate went to ash in one pass with nothing left to crumble).
+          //   Separate switches for trees (terrain) and objects, because they may want different answers.
+          if (_g0 === 92 && liquidCfg.fireTreeStages) left = 254;
+          if (_g0 === 251 && liquidCfg.fireBodyStages) left = 253;
+          const exposed = !liquidCfg.fireOxygen || airAround(i) || _g0 === 250 || (burntThrough(_g0) && ashAround(i));
           const relit = left > 0 && FIRE_RATE[left] > 0 && exposed;
           // ⭐ STARVED: the chain stops here. Wood becomes charcoal and goes out; charcoal stays charcoal and goes
           // out. Either way the cell keeps its shape and can be dug for what it is, which is how charcoal is made.
           if (!flash && !exposed && left > 0) {
-            // …a crate's buried charcoal smoulders on for longer before it is burnt through (`fireBodyThrough`)
-            if (_g0 === 251 && age < need * Math.max(1, liquidCfg.fireBodyThrough || 1)) continue;
+            // …buried charcoal smoulders on for longer before it is burnt through (`fireBodyThrough`) — a tree's too,
+            //   which is most of what makes a half-burnt trunk survive: it is already 3× slower per pass than a crate's.
+            if ((_g0 === 251 || _g0 === 92) && age < need * Math.max(1, liquidCfg.fireBodyThrough || 1)) continue;
             fire.delete(i); ages.delete(i); fireOut.push(i);
             // ⭐⭐ A BODY'S BURIED CHARCOAL ENDS AS BURNT-THROUGH (2026-09-22), not as charcoal that can be lit again.
             //   That is the stage the user asked for between "charred" and "ash": no ash forms inside a crate, the
             //   cell still looks and digs like charcoal, it is no longer fuel — and it is the only state crumbling
             //   will take, which is what stops a shove taking a whole barely-burnt crate at once.
             if (gPeek(i) === 251) setSolid(i, 253);            // ⚠️ LITERALS: this block is sliced out and run alone by the rigs (BODY_CHAR / BODY_FRIABLE)
+            // ⭐ …and a TREE's buried charcoal ends the same way: burnt through, out, and crumbly (2026-09-23). It used
+            //   to stay plain charcoal for ever, which is why a burnt forest could never come apart the way a crate can.
+            else if (gPeek(i) === 92) setSolid(i, 254);
             else if (FIRE_RATE[left] > 0) setSolid(i, left);   // wood → charcoal; charcoal → left alone, it IS charcoal
             continue;
           }
@@ -18940,6 +19034,8 @@ io.on('connection', (socket) => {
     if ('fireAshOrder' in patch) liquidCfg.fireAshOrder = patch.fireAshOrder ? 1 : 0;
     if ('fireAshJitter' in patch) liquidCfg.fireAshJitter = Math.max(0, Math.min(400, patch.fireAshJitter | 0));
     if ('fireBodyThrough' in patch) liquidCfg.fireBodyThrough = Math.max(1, Math.min(20, +patch.fireBodyThrough || 1));
+    if ('fireTreeStages' in patch) liquidCfg.fireTreeStages = patch.fireTreeStages ? 1 : 0;
+    if ('fireBodyStages' in patch) liquidCfg.fireBodyStages = patch.fireBodyStages ? 1 : 0;
     if ('fireReach' in patch) liquidCfg.fireReach = Math.max(0, Math.min(16, patch.fireReach | 0));
     if ('fireReachMin' in patch) liquidCfg.fireReachMin = Math.max(0, Math.min(16, patch.fireReachMin | 0));
     if ('fireReachSlow' in patch) liquidCfg.fireReachSlow = Math.max(0, Math.min(4, +patch.fireReachSlow || 0));
