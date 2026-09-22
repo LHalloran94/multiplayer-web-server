@@ -166,7 +166,7 @@
     // exactly the moment the thing holding it up went away.
     // ⚠️ SAME COLOUR AND SAME YIELD as Charcoal — the user's objection to reusing Ash was that a burnt thing should
     // not go grey and should not stop being worth mining. What differs is that it falls.
-    ['Cinder', '#16120f', 'solid', 1, 'dusty'], // 93 cinder — charcoal with nothing holding it up; falls and piles
+    ['Cinder', '#16120f', 'powder', 1, 'dusty'], // 93 cinder — charcoal with nothing holding it up; falls and piles
   ];
 
   const GEN_MAT_MIN = 18;
@@ -243,9 +243,10 @@
   // The user, 2026-09-22, on charcoal made by a crate crumbling: *"it should look like the burnt remains of crates
   // do, with the grey veins running through it … this also helps keep continuity when the object crumbles, since
   // otherwise it changes how it looks quite a bit quite suddenly."* The renderer reads the flag; nothing else does.
-  // ⚠️ CINDER IS DECLARED `solid`, NOT `powder`, and that is deliberate (same round): ash is background you walk
-  // through, and a heap of crumbled charcoal should be something you can stand on. It still FALLS — the server puts
-  // it in the powder set by hand — but it blocks, so it comes to rest ON TOP of the ash rather than in it.
+  // ⚠️ CINDER IS A POWDER LIKE ASH, and the question of standing on a heap is answered elsewhere (2026-09-22):
+  // powder blocks the PLAYER and is invisible to loose bodies (`terrainSoftens` / `lbSolidCell` in the client). A
+  // first attempt made cinder `solid` instead, and that gave a pile you could stand on in some places and not in
+  // others — the user's report — because the ash around it stayed walk-through.
   ['Charcoal', 'Cinder'].forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].charred = 1; });
 
   // ---- PRIMA WORTH — what a cell of this refines into ------------------------------------------------------
