@@ -5052,15 +5052,28 @@ function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
     if (!sound && !charred) {
       // ⚠️ Only what the FIRE freed: a leaf clump a player cut loose with a dig is their own doing and stays put.
       if (!byFire) { fallSmall++; continue; }
-      // 🟥 SET ALIGHT, NOT DELETED (2026-09-23, the user: leaves *"seem to disappear all at once after a certain amount
-      //    of them have burned away"*). Converting the whole cut-loose clump in one pass took a canopy out the instant
-      //    the branch under it burnt through. Lighting it lets the fire eat through it over a second or two — leaves
-      //    burn fast, so they are gone quickly either way, but it LOOKS like burning instead of a deletion.
+      // 🟥🟥 LIT WHERE THE FIRE REACHES IT, NOT ALL OVER (2026-09-23). Two rounds of the same fault: first the whole
+      //    cut-loose clump was CONVERTED in one pass (the canopy vanished the instant the branch under it burnt
+      //    through), then it was SET ALIGHT in one pass — and the user saw the second at once: *"the whole connected
+      //    patch of leaves will ignite at once"* after the flames had been travelling through it normally. A clump
+      //    coming loose is not a clump catching fire. Only the cells of it already touching flame are lit, and the
+      //    fire then spreads through the rest by the ordinary rules, which is the cascade they remember.
+      // ⚠️ If the fire has moved on and nothing of it touches flame any more, the LOWEST few are lit instead, so a
+      //    clump the fire freed and then left behind still burns away rather than hanging there unlit for ever.
       const lit = [], fs2 = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map());
+      const ROWS2 = st.rows, touching = [];
       for (const i of region) {
         if (!fallCand(peek(i)) || fs2.has(i)) continue;
-        fs2.add(i); ages.set(i, 0); lit.push(i, 1); fallBurnt++;
+        const rr = i % ROWS2;
+        if (fs2.has(i - ROWS2) || fs2.has(i + ROWS2) || (rr > 0 && fs2.has(i - 1)) || (rr < ROWS2 - 1 && fs2.has(i + 1))) touching.push(i);
       }
+      let seeds = touching;
+      if (!seeds.length) {
+        const cand = region.filter((i) => fallCand(peek(i)) && !fs2.has(i));
+        cand.sort((a, b) => (b % ROWS2) - (a % ROWS2));            // …the lowest rows first
+        seeds = cand.slice(0, 3);
+      }
+      for (const i of seeds) { fs2.add(i); ages.set(i, 0); lit.push(i, 1); fallBurnt++; }
       if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
       continue;
     }
