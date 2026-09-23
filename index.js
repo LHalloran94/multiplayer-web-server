@@ -5052,7 +5052,16 @@ function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
     if (!sound && !charred) {
       // ⚠️ Only what the FIRE freed: a leaf clump a player cut loose with a dig is their own doing and stays put.
       if (!byFire) { fallSmall++; continue; }
-      fallLeavesGo(room, region, peek);
+      // 🟥 SET ALIGHT, NOT DELETED (2026-09-23, the user: leaves *"seem to disappear all at once after a certain amount
+      //    of them have burned away"*). Converting the whole cut-loose clump in one pass took a canopy out the instant
+      //    the branch under it burnt through. Lighting it lets the fire eat through it over a second or two — leaves
+      //    burn fast, so they are gone quickly either way, but it LOOKS like burning instead of a deletion.
+      const lit = [], fs2 = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map());
+      for (const i of region) {
+        if (!fallCand(peek(i)) || fs2.has(i)) continue;
+        fs2.add(i); ages.set(i, 0); lit.push(i, 1); fallBurnt++;
+      }
+      if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
       continue;
     }
     if (!sound) { fallCharCrumble(room, region, peek); continue; }
@@ -5096,32 +5105,6 @@ function fallCharCrumble(room, region, peek) {
   if (!set.length) return;
   fallCrumbled += set.length / 2;
   wireFanout(room, 'terrain-set', { cells: set });
-  activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
-  fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
-}
-// ⭐ A CLUMP OF NOTHING BUT LEAVES THE FIRE HAS CUT LOOSE BURNS AWAY WHERE IT IS. It used to be set alight and left
-// hanging, which is what a speck of foliage smouldering in mid-air looked like. One cell in `fireLeafAsh` leaves ash,
-// the same share as foliage burning anywhere else, chosen by position so it is scattered rather than clumped.
-function fallLeavesGo(room, region, peek) {
-  const st = roomCells.get(room); if (!st || !st.terrain) return;
-  const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows, fs = st.fineFire, set = [], out = [];
-  let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
-  const share = Math.max(1, liquidCfg.fireLeafAsh | 0);
-  for (const i of region) {
-    const v = peek ? peek(i) : grid.g(i);
-    if (!fallCand(v) || fallCode(v) !== 3) continue;
-    let h = (i * 2654435761) >>> 0; h = (h ^ (h >>> 13)) >>> 0;
-    const leaves = (h % share) === 0 ? FALL_ASH : 0;
-    grid.s(i, leaves); hp.s(i, leaves ? 1 : 0); if (st.sat) st.sat.s(i, 0);
-    set.push(i, leaves); if (leaves) powderSet(room).add(i);
-    if (fs && fs.delete(i)) { out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); }
-    const c = (i / ROWS) | 0, r = i - c * ROWS;
-    if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r;
-    fallBurnt++;
-  }
-  if (!set.length) return;
-  wireFanout(room, 'terrain-set', { cells: set });
-  if (out.length) wireFanout(room, 'fire-cells', { cells: out });
   activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
   fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
 }
