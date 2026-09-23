@@ -273,6 +273,17 @@
   // others — the user's report — because the ash around it stayed walk-through.
   ['Charcoal', 'Cinder', 'Spent charcoal'].forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].charred = 1; });
 
+  // ---- WOODY — plant matter that leaves charcoal, as against foliage that burns to nothing ------------------
+  // 🟥🟥 A TREE'S WOOD IS `behavior: 'plant'` — it is the living wood of a trunk, not sawn Timber — and the fire's
+  // "one burnt FOLIAGE cell in N leaves ash, the rest leave nothing" rule tested exactly that behaviour. So a burning
+  // trunk threw its charcoal away eleven times in twelve and the cells simply vanished, which is what the user
+  // reported from play (2026-09-23): *"the cells on the trunk are burning away without leaving anything, they are not
+  // becoming charcoal, they are just disappearing"*. Measured in a strip of wood that could neither starve nor be cut
+  // loose: 7 of 176 burnt cells left anything at all. The comment beside that rule asserted the opposite ("A plank, a
+  // trunk … leave ash cell for cell"), which is why it stood.
+  // ⇒ The question the fire wants is "is this FOLIAGE", and behaviour cannot answer it. This flag can.
+  ['Wood'].forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].woody = 1; });
+
   // ---- PRIMA WORTH — what a cell of this refines into ------------------------------------------------------
   // ⭐ MEASURED, NOT CHOSEN. Every number below is the output of `scratchpad/probe_material_abundance.js`,
   // which samples the shipping generator and counts cells per material. Re-derive with:

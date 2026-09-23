@@ -10197,7 +10197,9 @@ function fineReactTickRoom(room, SUB, phase) {
           //    of the same leaves on the tree did. Measured on the user's report that *"foliage produces too much ash"*:
           //    leaves alone left 122 ash of 1,596 (1 in 13, right), while a burning wood left ~300 more than its leaves
           //    and wood could account for. The row's own comment said "leave nothing" and the table said ash.
-          if (left && (MAT_PLANT[gPeek(i)] === 1 || gPeek(i) === 252) && (liquidCfg.fireLeafAsh | 0) > 1
+          // ⚠️ FOLIAGE, NOT "PLANT BEHAVIOUR": a trunk is plant matter too, and this rule was throwing its charcoal
+          //    away (see `MAT_WOODY` and the note in materials.js). 252 is a fallen piece's leaves.
+          if (left && ((MAT_PLANT[gPeek(i)] === 1 && !MAT_WOODY[gPeek(i)]) || gPeek(i) === 252) && (liquidCfg.fireLeafAsh | 0) > 1
               && (fireVar(i, salt + 71, 1e6) * (liquidCfg.fireLeafAsh | 0) | 0) !== 0) left = 0;
           // ⭐⭐ OXYGEN IS WHAT DECIDES CHARCOAL FROM ASH, and it is the difference in the real world too: wood
           // heated WITHOUT enough air pyrolyses to charcoal and stops there — the volatiles cook off and a carbon
@@ -12710,6 +12712,9 @@ for (const id of MATGEN.POWDER_IDS) { POWDER_MOVE[id] = 1; POWDER_SEED[id] = 1; 
 // ⚠️ `MAT_PLANT` replaces the POWDER_MOVE entry — the sim still has to be able to ASK what a plant is.
 const MAT_PLANT = new Uint8Array(256);
 for (const id of MATGEN.PLANT_IDS) MAT_PLANT[id] = 1;
+// …and which of those are WOODY (a trunk), which leave charcoal where foliage leaves nothing — see `materials.js`.
+const MAT_WOODY = new Uint8Array(256);
+for (const id of MATGEN.PLANT_IDS) if (MATGEN.DEFS[id] && MATGEN.DEFS[id].woody) MAT_WOODY[id] = 1;
 const isPlantId = (v) => MAT_PLANT[v] === 1;
 for (const id of MATGEN.HANGS_IDS) MAT_HANGS[id] = 1;
 SALT_ID = MATGEN.NAMES['Salt'];   // the salt + water → brine reaction's reagent, same seam and the same reason
