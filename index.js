@@ -7792,8 +7792,11 @@ const liquidCfg = {
   fireQuench: 1,         // a NEGATIVE-rate liquid (water, brine) puts fire out. 0 = water does nothing to fire
   fireVary: 0.7,         // how different one cell of a material is from the next (see `fireVar`). 0 = identical
   fireVaryLeaf: 0,       // …and FOLIAGE's own, separately: 0 = a canopy is consumed as the flame passes, not raggedly
-  fireLeafFlash: 0.08,   // …foliage's share of cells that go in a fifth of the time (the trunk's is `fireFlash`)
-  fireLeafAshJitter: 6,  // …and foliage's own changeover jitter, in passes (the trunk's is `fireAshJitter`)
+  // ⭐ BOTH CHOSEN BY EYE (user, 2026-09-24): the early-goers OFF, the timing jitter at 3. A leaf's burn is
+  // `fireSolidBurn / 3` ≈ 27 passes, so 3 is about ±5% — half what 6 was, and small enough that leaves stop
+  // outliving their neighbours by a visible margin.
+  fireLeafFlash: 0,      // …foliage's share of cells that go in a fifth of the time (the trunk's is `fireFlash`)
+  fireLeafAshJitter: 3,  // …and foliage's own changeover jitter, in passes (the trunk's is `fireAshJitter`)
   // ⚠️ OFF BY DEFAULT — the user tried it in play and did not want it (*"the fast-burning cells aren't really any
   // good"*). It was asked for to open gaps for flames to show through, and the flames are not to depend on gaps.
   // The mechanism is three lines and a dial, kept so it can be tried again; 0 is exactly the behaviour without it.
