@@ -7792,6 +7792,8 @@ const liquidCfg = {
   fireQuench: 1,         // a NEGATIVE-rate liquid (water, brine) puts fire out. 0 = water does nothing to fire
   fireVary: 0.7,         // how different one cell of a material is from the next (see `fireVar`). 0 = identical
   fireVaryLeaf: 0,       // …and FOLIAGE's own, separately: 0 = a canopy is consumed as the flame passes, not raggedly
+  fireLeafFlash: 0.08,   // …foliage's share of cells that go in a fifth of the time (the trunk's is `fireFlash`)
+  fireLeafAshJitter: 6,  // …and foliage's own changeover jitter, in passes (the trunk's is `fireAshJitter`)
   // ⚠️ OFF BY DEFAULT — the user tried it in play and did not want it (*"the fast-burning cells aren't really any
   // good"*). It was asked for to open gaps for flames to show through, and the flames are not to depend on gaps.
   // The mechanism is three lines and a dial, kept so it can be tried again; 0 is exactly the behaviour without it.
@@ -9999,7 +10001,16 @@ function fineReactTickRoom(room, SUB, phase) {
     // point of it is stated where it is declared: to open gaps inside a burning TRUNK so flames can appear in
     // the middle of it. Foliage leaves nothing to begin with, so on a canopy it buys no gap — all it does is
     // make a fifth of the leaves vanish early, which is the ragged dissolve the user reported.
-    const isFlash = (j) => flashFrac > 0 && fireVar(j, salt, 3) < flashFrac && !isFol(j);
+    // 🟥 …AND WHETHER FOLIAGE IS IN IT IS A SWITCH, BECAUSE TAKING IT AWAY WENT TOO FAR. Removing this AND the
+    // changeover jitter from foliage in one go made a canopy read *"too mathematical"* — a flame front sweeping
+    // a perfectly even band. Both are back, each on its own dial, so which of them (or how much of each) a
+    // canopy actually wants is something that can be SEEN rather than argued about.
+    // ⚠️ What a flash cell does on a TRUNK is open a gap, because everything else a burning solid leaves still
+    // fills its cell. On foliage there is no gap to open — it leaves nothing either way — so all it varies is
+    // WHEN a leaf goes. That is a smaller effect than it is on wood, which is why it gets its own fraction
+    // rather than sharing `fireFlash`.
+    const leafFlash = Math.max(0, Math.min(0.5, +liquidCfg.fireLeafFlash));
+    const isFlash = (j) => { const f = isFol(j) ? leafFlash : flashFrac; return f > 0 && fireVar(j, salt, 3) < f; };
     const FLASH_MUL = 0.2;
     const solidsOn = !!liquidCfg.fireSolids;
     const oilAt = (j) => amt.rp(j)[amt.o(j) + 5];
@@ -10198,7 +10209,13 @@ function fineReactTickRoom(room, SUB, phase) {
         // and the changeover reads as a switch rather than as something travelling through the wood. A canopy
         // has no changeover worth staggering — the leaves simply go — so all it does there is leave a scatter
         // of cells behind the flame front.
-        const ashJit = (j) => isFol(j) ? 0 : Math.round(fireVar(j, salt, 4) * Math.max(0, liquidCfg.fireAshJitter | 0));
+        // …and foliage's own share of it, for the same reason. On a trunk this staggers the CHANGEOVER to
+        // charcoal, which is a visible event; on a canopy there is no changeover, so all it staggers is when
+        // each leaf disappears — which is the ragged edge, and is either what makes it look alive or what makes
+        // it look like it is dissolving, depending on how much of it there is.
+        const leafJit = Math.max(0, liquidCfg.fireLeafAshJitter | 0);
+        const ashJit = (j) => { const n = isFol(j) ? leafJit : Math.max(0, liquidCfg.fireAshJitter | 0);
+          return n ? Math.round(fireVar(j, salt, 4) * n) : 0; };
         const need = Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i) * (flash ? FLASH_MUL : 1))) + (flash ? 0 : ashJit(i));
         if (age >= need) {
           // ⭐⭐ WHAT A BURNT SOLID LEAVES, AND WHETHER IT IS STILL ALIGHT. Wood leaves CHARCOAL, which is itself a
@@ -19112,6 +19129,8 @@ io.on('connection', (socket) => {
     if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
     if ('fireVary' in patch) liquidCfg.fireVary = Math.max(0, Math.min(1, +patch.fireVary || 0));
     if ('fireVaryLeaf' in patch) liquidCfg.fireVaryLeaf = Math.max(0, Math.min(1, +patch.fireVaryLeaf || 0));
+    if ('fireLeafFlash' in patch) liquidCfg.fireLeafFlash = Math.max(0, Math.min(0.5, +patch.fireLeafFlash || 0));
+    if ('fireLeafAshJitter' in patch) liquidCfg.fireLeafAshJitter = Math.max(0, Math.min(200, patch.fireLeafAshJitter | 0));
     if ('fireFlash' in patch) liquidCfg.fireFlash = Math.max(0, Math.min(0.5, +patch.fireFlash || 0));
     if ('fireOxygen' in patch) liquidCfg.fireOxygen = patch.fireOxygen ? 1 : 0;
     if ('fireAshOrder' in patch) liquidCfg.fireAshOrder = patch.fireAshOrder ? 1 : 0;
