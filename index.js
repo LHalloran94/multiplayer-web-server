@@ -7791,6 +7791,7 @@ const liquidCfg = {
   fireSolidCatch: 10,    // passes a cell must have burned before a rate-1 solid NEIGHBOUR catches (wood: 20 ≈ 0.8s)
   fireQuench: 1,         // a NEGATIVE-rate liquid (water, brine) puts fire out. 0 = water does nothing to fire
   fireVary: 0.7,         // how different one cell of a material is from the next (see `fireVar`). 0 = identical
+  fireVaryLeaf: 0,       // …and FOLIAGE's own, separately: 0 = a canopy is consumed as the flame passes, not raggedly
   // ⚠️ OFF BY DEFAULT — the user tried it in play and did not want it (*"the fast-burning cells aren't really any
   // good"*). It was asked for to open gaps for flames to show through, and the flames are not to depend on gaps.
   // The mechanism is three lines and a dial, kept so it can be tried again; 0 is exactly the behaviour without it.
@@ -9971,9 +9972,17 @@ function fineReactTickRoom(room, SUB, phase) {
     // ⚠️ `gPeek`, not `grid.g`: a neighbour one cell past produced world must not build it (see the note on gPeek).
     const ages = st.fireAge || (st.fireAge = new Map());
     const salt = fireSaltOf(st), vary = Math.max(0, Math.min(1, +liquidCfg.fireVary || 0));
+    // ⭐ FOLIAGE HAS ITS OWN, AND IT IS 0 — uniform (user, 2026-09-24: *"maybe it looks better when they just burn
+    // uniformly as the flame passes over them and burns them out"*). The variance is what makes a TRUNK read as
+    // a real thing: the front goes ragged, some cells hold out, holes open. A leaf has no such story — it is
+    // gone in a second or two either way — so all the spread does there is make the edge of a canopy dissolve
+    // raggedly instead of being consumed as the flame passes. Foliage only; a trunk's own leaves are foliage and
+    // its wood is not.
+    const leafVary = Math.max(0, Math.min(1, +liquidCfg.fireVaryLeaf));
+    const varyAt = (j) => { const g = gPeek(j); return (MAT_PLANT[g] === 1 && !MAT_WOODY[g]) ? leafVary : vary; };
     // susceptibility: how soon this cell catches (×), and how long it burns (×). Centred on 1 so the dials keep meaning.
-    const catchMul = (j) => vary ? Math.max(0.25, 1 + vary * 0.9 * (2 * fireVar(j, salt, 1) - 1)) : 1;
-    const burnMul = (j) => vary ? 1 + vary * 0.5 * (2 * fireVar(j, salt, 2) - 1) : 1;
+    const catchMul = (j) => { const v = varyAt(j); return v ? Math.max(0.25, 1 + v * 0.9 * (2 * fireVar(j, salt, 1) - 1)) : 1; };
+    const burnMul = (j) => { const v = varyAt(j); return v ? 1 + v * 0.5 * (2 * fireVar(j, salt, 2) - 1) : 1; };
     // ⭐⭐ A FEW CELLS BURN RIGHT AWAY TO NOTHING — the user, once wood stopped leaving a hole at all: *"it would be
     // good to have a small amount of cells that burn away much faster than the others so that this produces gaps as
     // it burns through the interior of the tree and thus leaves spaces for the flames to appear."* Everything else
@@ -19088,6 +19097,7 @@ io.on('connection', (socket) => {
     if ('fireSolidCatch' in patch) liquidCfg.fireSolidCatch = Math.max(1, Math.min(1000, patch.fireSolidCatch | 0));
     if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
     if ('fireVary' in patch) liquidCfg.fireVary = Math.max(0, Math.min(1, +patch.fireVary || 0));
+    if ('fireVaryLeaf' in patch) liquidCfg.fireVaryLeaf = Math.max(0, Math.min(1, +patch.fireVaryLeaf || 0));
     if ('fireFlash' in patch) liquidCfg.fireFlash = Math.max(0, Math.min(0.5, +patch.fireFlash || 0));
     if ('fireOxygen' in patch) liquidCfg.fireOxygen = patch.fireOxygen ? 1 : 0;
     if ('fireAshOrder' in patch) liquidCfg.fireAshOrder = patch.fireAshOrder ? 1 : 0;
