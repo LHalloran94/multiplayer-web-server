@@ -9979,7 +9979,10 @@ function fineReactTickRoom(room, SUB, phase) {
     // raggedly instead of being consumed as the flame passes. Foliage only; a trunk's own leaves are foliage and
     // its wood is not.
     const leafVary = Math.max(0, Math.min(1, +liquidCfg.fireVaryLeaf));
-    const varyAt = (j) => { const g = gPeek(j); return (MAT_PLANT[g] === 1 && !MAT_WOODY[g]) ? leafVary : vary; };
+    // ⭐ ONE TEST FOR "IS THIS FOLIAGE", because THREE separate rules have to agree about it and they were
+    // written at different times. A trunk is plant matter too — `woody` is what separates them.
+    const isFol = (j) => { const g = gPeek(j); return MAT_PLANT[g] === 1 && !MAT_WOODY[g]; };
+    const varyAt = (j) => (isFol(j) ? leafVary : vary);
     // susceptibility: how soon this cell catches (×), and how long it burns (×). Centred on 1 so the dials keep meaning.
     const catchMul = (j) => { const v = varyAt(j); return v ? Math.max(0.25, 1 + v * 0.9 * (2 * fireVar(j, salt, 1) - 1)) : 1; };
     const burnMul = (j) => { const v = varyAt(j); return v ? 1 + v * 0.5 * (2 * fireVar(j, salt, 2) - 1) : 1; };
@@ -9992,7 +9995,11 @@ function fineReactTickRoom(room, SUB, phase) {
     // ⚠️ Hashed per cell like the rest of the susceptibility, off the same per-fire salt, so a tree burns its own
     // pattern of holes each time it is lit — and it is a FIXED property of the cell, not a per-pass dice roll.
     const flashFrac = Math.max(0, Math.min(0.5, +liquidCfg.fireFlash || 0));
-    const isFlash = (j) => flashFrac > 0 && fireVar(j, salt, 3) < flashFrac;
+    // 🟥 …AND NOT FOR FOLIAGE. A flash cell burns in a fifth of the time AND LEAVES NOTHING, and the whole
+    // point of it is stated where it is declared: to open gaps inside a burning TRUNK so flames can appear in
+    // the middle of it. Foliage leaves nothing to begin with, so on a canopy it buys no gap — all it does is
+    // make a fifth of the leaves vanish early, which is the ragged dissolve the user reported.
+    const isFlash = (j) => flashFrac > 0 && fireVar(j, salt, 3) < flashFrac && !isFol(j);
     const FLASH_MUL = 0.2;
     const solidsOn = !!liquidCfg.fireSolids;
     const oilAt = (j) => amt.rp(j)[amt.o(j) + 5];
@@ -10184,7 +10191,14 @@ function fineReactTickRoom(room, SUB, phase) {
         // That is every cell turning to charcoal at once — they all caught within a few seconds of each other and
         // they all burn for the same time — and charcoal looks quite different from burning wood. A per-cell
         // delay staggers the changeover so it travels through the mass instead of happening to all of it.
-        const ashJit = (j) => Math.round(fireVar(j, salt, 4) * Math.max(0, liquidCfg.fireAshJitter | 0));
+        // 🟥 THE THIRD SOURCE OF FOLIAGE RAGGEDNESS, and the user guessed it exactly: *"there might also be some
+        // variance in how long each cell takes to burn through, and this might be causing the ragged
+        // dissolving."* It is this — a per-cell delay of up to `fireAshJitter` passes on the changeover.
+        // It earns its place on a TRUNK: without it a whole connected mass turns to charcoal on the same pass
+        // and the changeover reads as a switch rather than as something travelling through the wood. A canopy
+        // has no changeover worth staggering — the leaves simply go — so all it does there is leave a scatter
+        // of cells behind the flame front.
+        const ashJit = (j) => isFol(j) ? 0 : Math.round(fireVar(j, salt, 4) * Math.max(0, liquidCfg.fireAshJitter | 0));
         const need = Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i) * (flash ? FLASH_MUL : 1))) + (flash ? 0 : ashJit(i));
         if (age >= need) {
           // ⭐⭐ WHAT A BURNT SOLID LEAVES, AND WHETHER IT IS STILL ALIGHT. Wood leaves CHARCOAL, which is itself a
