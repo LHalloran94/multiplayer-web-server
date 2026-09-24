@@ -7380,6 +7380,20 @@ function carveCellSrv(grid, hp, mats, i, hard) {
 // `cap` limits how many cells a PAINT may change; the loop stops there. That is what makes "you place what you
 // can afford" a property of the raster rather than a pre-flight dry run over the same cells, which would double
 // the cost of the hottest edit path in the server. ⚠️ It does NOT limit carving: digging is free and always was.
+// ⭐ CELLS A PAINT MUST LEAVE ALONE because a player's body is in them (user, 2026-09-25: nothing may be placed where a
+// player is standing — it makes them clip). The painting client knows where every body is and sends their boxes with
+// the stroke as `skip`; `terrain-edit` sets this for the duration of its raster and clears it after. It is the
+// client's `rasterSkipHit` (16a) character for character, so both ends leave exactly the same cells alone.
+// ⚠️ A SELF-RESTRICTION, so trusting the client costs nothing: a forged `skip` can only make a paint do LESS.
+let _rasterSkip = null;
+function rasterSkipHit(ccx, ccy) {
+  const S = _rasterSkip, h = TERRAIN_CELL / 2;
+  for (let k = 0; k < S.length; k++) {
+    const b = S[k];
+    if (ccx + h > b[0] + 1 && ccx - h < b[2] - 1 && ccy + h > b[1] + 1 && ccy - h < b[3] - 1) return true;
+  }
+  return false;
+}
 function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard, cap) {
   const COLS = grid.geom.cols, ROWS = grid.geom.rows;                 // Phase 6: the grid carries its own shape
   const c0 = Math.max(0, Math.floor((wx - r) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((wx + r) / TERRAIN_CELL));
@@ -7392,6 +7406,7 @@ function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard, cap) {
     if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) > r2) continue;
     const i = cx * ROWS + ry;
     if (val) { const was = grid.g(i); if (was >= 250 && was <= 252) continue;   // a cell body: not paintable over (see carveCellSrv)
+      if (_rasterSkip && rasterSkipHit(ccx, ccy)) continue;                      // …nor into a player's body (see `_rasterSkip`)
       if (was !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
   }
@@ -7410,6 +7425,7 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard, cap) {
     if (Math.abs(ccx - wx) > r || Math.abs(ccy - wy) > r) continue;
     const i = cx * ROWS + ry;
     if (val) { const was = grid.g(i); if (was >= 250 && was <= 252) continue;   // a cell body: not paintable over (see carveCellSrv)
+      if (_rasterSkip && rasterSkipHit(ccx, ccy)) continue;                      // …nor into a player's body (see `_rasterSkip`)
       if (was !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
   }
@@ -21439,7 +21455,7 @@ io.on('connection', (socket) => {
     emitToChunk(currentAvatarRoom, d.ch, 'drop-removed', { id, by: socket.id });
     socket.emit('drop-removed', { id, by: socket.id });
   });
-  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor }) => {
+  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
     // arrived" from "a guard rejected it", and those need completely different fixes — which cost a whole round
     // of wrong theories on 2026-08-27.
@@ -21547,6 +21563,14 @@ io.on('connection', (socket) => {
     // nothing owned — see `sendPaintTruth`.
     if (_payMat && _budget <= 0) { sendPaintTruth(socket, currentAvatarRoom, cx, cy, rr); return; }
     let _did = 0, _conjured = 0;
+    // ⭐ the player boxes this paint must leave alone (see `_rasterSkip`). Validated hard — a few finite, body-sized
+    //   boxes — because this is the only place a client's numbers steer the raster. Fluids are exempt, as on the client.
+    let _skipList = (op === 'paint' && Array.isArray(skip) && !isFluidId(m))
+      ? skip.slice(0, 16).filter(b => Array.isArray(b) && b.length === 4 && b.every(Number.isFinite) && b[2] - b[0] <= 1024 && b[3] - b[1] <= 1024)
+      : null;
+    if (_skipList && !_skipList.length) _skipList = null;
+    _rasterSkip = _skipList;
+    try {
     for (let _h = 0; _h < nHits; _h++) {
       const _n = (sq ? rasterTerrainSquare : rasterTerrainCircle)(grid, hp, mats, cx, cy, rr, m, hd, _budget);
       _did += _n;
@@ -21564,6 +21588,7 @@ io.on('connection', (socket) => {
         if (_budget <= 0) { sendPaintTruth(socket, currentAvatarRoom, cx, cy, rr); break; }
       }
     }
+    } finally { _rasterSkip = null; }        // …never left set: the next raster, of any kind, must not inherit it
     // ── THE EDIT TRACE, the PAINT half. The carve half above has existed since the chunk-deletion track; a paint
     // had none, and "the server placed nothing and said nothing about it" is exactly the state that takes a
     // whole session to diagnose from the outside. One line, behind the same flag.
@@ -21616,7 +21641,9 @@ io.on('connection', (socket) => {
       if (op === 'carve') (fallCfg.on ? fallCheck : collapsePlants)(currentAvatarRoom, Math.floor((cx - rr) / TERRAIN_CELL), Math.floor((cy - rr) / TERRAIN_CELL), Math.floor((cx + rr) / TERRAIN_CELL), Math.floor((cy + rr) / TERRAIN_CELL));
       // `hits`/`keepLiq` ride the rebroadcast too, or every OTHER client lands a different number of chips
       // than the sender did and their hp drifts apart — the same desync, one step removed.
-      socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd, hits: nHits, keepLiq: keepLiq ? 1 : undefined });
+      // 🟥 …WITH THE SKIP LIST. Peers redraw the SHAPE themselves rather than receiving cells, so without it every
+      //    other player would paint the full square — including into the body the server just left alone.
+      socket.to(currentAvatarRoom).emit('terrain-edited', { op, x: cx, y: cy, r: rr, mat: m, shape: sq ? 'square' : undefined, hard: hd, hits: nHits, keepLiq: keepLiq ? 1 : undefined, skip: _skipList || undefined });
       // A CARVE removes any source in the dug-out area. Digging the cell out is the obvious way to get rid of a
       // source, and without this it kept refilling the hole you had just made with no way to stop it -- a source is
       // invisible in the terrain data, so there was nothing left to delete.
