@@ -7805,6 +7805,10 @@ const liquidCfg = {
   //   *"burnt through to the level of being able to crumble too quickly"*). × its ordinary burn; open-faced charcoal
   //   going to ash is untouched. 1 = the old timing (~20s).
   fireBodyThrough: 3,
+  // ⭐ A buried cell that finishes and leaves a FUEL stays alight as that fuel instead of going out the instant it
+  // converts — so "the fire passed over it" and "I lit it by hand" produce the same charcoal with the same life.
+  // See the long note at the starved branch. 0 = the old behaviour, where the two differed by 120s against 312s.
+  fireBuriedSmoulder: 1,
   // …and whether a cell with AIR on it also passes through the burnt-through stage, or goes straight to ash (see the
   // switch's own note in the burn). Trees on, objects off: the user's two answers may differ, so they are two dials.
   fireTreeStages: 1,
@@ -10233,6 +10237,33 @@ function fineReactTickRoom(room, SUB, phase) {
             // …buried charcoal smoulders on for longer before it is burnt through (`fireBodyThrough`) — a tree's too,
             //   which is most of what makes a half-burnt trunk survive: it is already 3× slower per pass than a crate's.
             if ((_g0 === 251 || _g0 === 92) && age < need * Math.max(1, liquidCfg.fireBodyThrough || 1)) continue;
+            // ⭐⭐ A BURIED CELL THAT LEAVES A FUEL KEEPS SMOULDERING AS IT, rather than going out the instant it
+            //   converts. Reported from play (2026-09-24): *"relit internal charcoal of a burnt tree stays glowing
+            //   for much longer than the charcoal stays glowing for after the flames pass over them initially …
+            //   It's literally the same material, we don't want it to act differently when in both cases it is
+            //   being burned."* — and the user's own guess at the cause was right.
+            // 🟥 THE TWO PATHS WERE WILDLY DIFFERENT AND NEITHER WAS OBVIOUS FROM THE OUTSIDE:
+            //   · fire passes over a buried WOOD cell → it finishes, lands HERE, becomes charcoal and is pushed to
+            //     `fireOut` in the same breath. It is never alight as charcoal for a single pass. The client's
+            //     two-minute cooling glow is the whole of its afterlife.
+            //   · the same cell lit BY HAND is already charcoal, so it takes the `continue` above and smoulders for
+            //     `need × fireBodyThrough` = 1,600 × 3 passes ≈ **3.2 minutes**, which is exactly the "2 to 4
+            //     minutes from memory" in the report, and only then goes out and starts its two minutes of cooling.
+            //   ⇒ 120s against 312s for the same material in the same place, decided by how it got there.
+            // ⭐ The fix is to stop treating "it converted here" as different from "it was lit here": it becomes the
+            //   new material with a fresh clock and stays alight, which is precisely what the EXPOSED path already
+            //   does (`relit`, below). Both routes then run wood → charcoal(age 0) → burnt through → out → cool,
+            //   and the interior of a burnt trunk smoulders instead of switching off behind the flame front.
+            // ⚠️ IT COSTS ALIGHT CELLS. The inside of every burning mass stays in `fire` for a charcoal lifetime
+            //   instead of leaving it at once, so the sim carries more and the client walks more. Measured before
+            //   this change the server had enormous headroom (1.8ms of a 40ms budget on the user's own capture) —
+            //   but that is the number to watch, and it is why this is a switch.
+            // ⚠️ IT DOES NOT CHANGE WHAT IS LEFT BEHIND in substance: a buried cell still ends as burnt-through
+            //   charcoal (254 / 253), which still looks and digs like charcoal. What changes is that it takes a
+            //   charcoal lifetime to get there instead of arriving instantly.
+            if (liquidCfg.fireBuriedSmoulder && FIRE_RATE[left] > 0 && _g0 !== 92 && _g0 !== 251 && _g0 !== 254 && _g0 !== 253) {
+              setSolid(i, left); ages.set(i, 0); fireRelit.push(i); continue;
+            }
             fire.delete(i); ages.delete(i); fireOut.push(i);
             // ⭐⭐ A BODY'S BURIED CHARCOAL ENDS AS BURNT-THROUGH (2026-09-22), not as charcoal that can be lit again.
             //   That is the stage the user asked for between "charred" and "ash": no ash forms inside a crate, the
@@ -19053,6 +19084,7 @@ io.on('connection', (socket) => {
     if ('fireBurnShare' in patch) liquidCfg.fireBurnShare = Math.max(0, Math.min(1, +patch.fireBurnShare || 0));
     if ('fireSolids' in patch) liquidCfg.fireSolids = patch.fireSolids ? 1 : 0;
     if ('fireSolidBurn' in patch) liquidCfg.fireSolidBurn = Math.max(1, Math.min(4000, patch.fireSolidBurn | 0));
+    if ('fireBuriedSmoulder' in patch) liquidCfg.fireBuriedSmoulder = patch.fireBuriedSmoulder ? 1 : 0;
     if ('fireSolidCatch' in patch) liquidCfg.fireSolidCatch = Math.max(1, Math.min(1000, patch.fireSolidCatch | 0));
     if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
     if ('fireVary' in patch) liquidCfg.fireVary = Math.max(0, Math.min(1, +patch.fireVary || 0));
