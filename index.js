@@ -4516,7 +4516,12 @@ function bodySkipChar(room, obj, S, now) {
     if (!has(c, r)) return false;
     const kk = r * D.c + c;
     if (cells[kk] & 4) return true;
-    return !S.skip[kk] && !!outAt && outAt[kk] > 0 && now - outAt[kk] < heatMs;
+    // ⭐ WHOLE OBJECTS (`liquidCfg.bodyWhole`, 2026-09-26): a buried cell that has JUST charred heats its buried neighbours
+    //   too, for the same `heatMs`. Otherwise the charring stopped one row into the buried part of a crate sunk in powder,
+    //   and — since a whole object crumbles only once EVERY cell is charcoal — that crate could never crumble at all
+    //   (measured: 4 of 60 crates, all of their leftover wood buried). Bounded exactly as the rule above wants: each cell
+    //   is hot for `heatMs` after it chars and never again, so the front walks through once and stops.
+    return (!S.skip[kk] || liquidCfg.bodyWhole) && !!outAt && outAt[kk] > 0 && now - outAt[kk] < heatMs;
   };
   let changed = false;
   for (let k = 0; k < n; k++) {
@@ -5454,10 +5459,15 @@ function bodyCrumble(room, obj, S, dx, dy) {
   const whole = bodyAllChar(cells);
   // (…a break already travelling through it is not started again: its cells are spoken for)
   const busy = crumbleQ[room] && crumbleQ[room].get(obj.id);
+  // ⭐ WHOLE OBJECTS (`liquidCfg.bodyWhole`, 2026-09-26): nothing until every cell is charcoal, then EVERY cell — burning
+  //   ones too, which `crumbleTake` writes as burning cinder, so a crate shoved while it smoulders leaves a smouldering
+  //   heap that burns down to ash by the ground's rules. This deliberately REVERSES the rule below for this mode (user's
+  //   fallback: *"if it was still smouldering the powder would keep smouldering and then eventually burn to ash"*).
+  if (liquidCfg.bodyWhole && !whole) { cWhy('notWhole'); return 0; }
   let ks = whole ? [] : crumblePick(cells, D, crumbleCfg.mode, dx || 0, dy || 0, S, now);
   // ⚠️ WHOLE STILL WAITS FOR THE HEAT: a lump with no wood left goes cell by cell as each has cooled, not all at once
-  //    while half of it is glowing (user: nothing crumbles *"until they are out"*).
-  if (whole) for (let k = 0; k < cells.length; k++) if ((cells[k] & 3) && !(cells[k] & 4) && crumbleCold(S, k, now)) ks.push(k);
+  //    while half of it is glowing (user: nothing crumbles *"until they are out"*). (Not in `bodyWhole` mode — above.)
+  if (whole) for (let k = 0; k < cells.length; k++) if ((cells[k] & 3) && (liquidCfg.bodyWhole || (!(cells[k] & 4) && crumbleCold(S, k, now)))) ks.push(k);
   if (busy) ks = ks.filter((k) => !busy.has(k));
   cWhy(whole ? 'whole' : 'cascade');
   if (!ks.length) { cWhy('noCells'); return 0; }
@@ -5612,6 +5622,7 @@ function crumbleChar(room, obj) {
   const rec = roomObjSt[room] && roomObjSt[room].get(obj.id) || {};
   const cells = bodyCellsOf(rec, obj);
   if (bodyAllChar(cells)) return true;
+  if (liquidCfg.bodyWhole) return false;                           // …whole objects crumble all at once or not at all (`bodyWholeApply`)
   for (let k = 0; k < cells.length; k++) if ((cells[k] & 3) === 2 && (cells[k] & 8)) return true;
   return false;
 }
@@ -5626,6 +5637,7 @@ function crumbleChar(room, obj) {
 //   it that are ready and have COOLED go (for a body with sound wood, only the burnt-through ones — `crumbleReady`).
 function crumbleSoon(room, obj, S, now) {
   if (!crumbleCfg.on || !crumbleCfg.looseMs || !S || !bodyLoose(obj)) return false;
+  if (liquidCfg.bodyWhole) return false;                           // …a whole object never crumbles on its own (user, 2026-09-26)
   if (now - (S.restT || 0) < crumbleCfg.looseMs) return false;   // (`restT`: last moved, or written into the world)
   const rec = roomObjSt[room] && roomObjSt[room].get(obj.id) || {};
   const cells = bodyCellsOf(rec, obj), all = bodyAllChar(cells);
@@ -5654,6 +5666,7 @@ function crumbleShove(S, x, y, a) {
 const bodyBuried = new Map();                                   // room + '|' + id → { room, id, t: when, x, y }
 function crumbleAdrift(now) {
   if (!crumbleCfg.on || !crumbleCfg.looseMs) return;
+  if (liquidCfg.bodyWhole) return;                                  // …nor one buried in a heap
   for (const [key, B] of bodyBuried) {
     const room = B.room, id = B.id, map = roomObjects[room], obj = map && map.get(id);
     const sm = roomBodyStamp[room], bm = roomBodyBurn[room];
@@ -7821,6 +7834,7 @@ const liquidCfg = {
   // turned off."* Pieces of charcoal can be left hovering over the mound their base flowed out of; the ordering
   // that prevented it is what made the ash predictable, and predictable was the worse of the two.
   fireOxygen: 1,         // a cell that finishes its burn with no open face is STARVED: charcoal, out (see there)
+  bodyWhole: 1,          // a burning object stays WHOLE — no holes, no pieces — and crumbles only once it is all charcoal (`bodyWholeApply`)
   fireAshOrder: 0,       // 1 = a column crumbles TOP DOWN so nothing hovers
   fireAshJitter: 45,     // per-cell delay before a cell finishes burning, so a mass does not turn over all at once
   // ⭐ HOW MUCH LONGER A CRATE'S BURIED CHARCOAL SMOULDERS BEFORE IT IS BURNT THROUGH (user, 2026-09-22: crates
@@ -9600,6 +9614,21 @@ function fireVar(i, salt, k) {
 function fireSaltOf(st) { if (!st.fireSalt) st.fireSalt = ((Math.random() * 0x7ffffffe) | 0) + 1; return st.fireSalt; }
 // ranks: lava0 quicksand1 brine2 acid3 water4 oil5. Brine and water put fire out; oil burns.
 const FIRE_RATE_RANK = [0, 0, -1, 0, -1, 1];
+// ⭐⭐ A BURNING OBJECT STAYS WHOLE (`liquidCfg.bodyWhole`, the user's fallback, 2026-09-26). Breaking burnt objects into
+//   pieces made a burning pile the dearest thing on the client — hundreds of collision pieces, and every lost cell waking
+//   the crate and its neighbours. In this mode a crate never loses a cell to fire: its charcoal finishes as BURNT THROUGH
+//   (253) wherever it is, exposed or not, where it used to go to ash when exposed (the holes, and the pieces that came of
+//   them); and burnt-through charcoal is no longer fuel, so it does not ash away from the outside either. So it keeps its
+//   full shape and collides as the box it always was, and it only ever goes by CRUMBLING — which, in this mode, happens
+//   only once EVERY cell is charcoal (a half-burnt crate would otherwise crumble its unburnt-looking part into charcoal),
+//   only when shoved (never on its own), and takes burning cells with it as burning cinder (`bodyCrumble`).
+// ⚠️ DONE THROUGH THE TABLES, NOT IN THE FIRE LOOP: the loop is sliced out and run alone by the rigs, and a name it
+//    cannot see breaks them (this project has hit that four times). These two entries are what the loop already reads.
+function bodyWholeApply() {
+  FIRE_ASH[251] = liquidCfg.bodyWhole ? 253 : 38;          // body charcoal finishing: burnt through, or ash
+  FIRE_RATE[253] = liquidCfg.bodyWhole ? 0 : 0.05;         // burnt through: inert, or smoulders away from the outside
+}
+bodyWholeApply();
 let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCand (⇒ it is biting; see the Perf tab)
 // ⚠️ A COUNT, NOT A CLOCK. `probe_react_budget` D2 first asserted "the flow moved liquid on most ticks", which
 // gave 18/30 and then 6/30 for identical code — the budget scheduler is `performance.now()`-driven, so any
@@ -19144,6 +19173,7 @@ io.on('connection', (socket) => {
     if ('fireSolids' in patch) liquidCfg.fireSolids = patch.fireSolids ? 1 : 0;
     if ('fireSolidBurn' in patch) liquidCfg.fireSolidBurn = Math.max(1, Math.min(4000, patch.fireSolidBurn | 0));
     if ('fireBuriedSmoulder' in patch) liquidCfg.fireBuriedSmoulder = patch.fireBuriedSmoulder ? 1 : 0;
+    if ('bodyWhole' in patch) { liquidCfg.bodyWhole = patch.bodyWhole ? 1 : 0; bodyWholeApply(); }
     if ('fireSolidCatch' in patch) liquidCfg.fireSolidCatch = Math.max(1, Math.min(1000, patch.fireSolidCatch | 0));
     if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
     if ('fireVary' in patch) liquidCfg.fireVary = Math.max(0, Math.min(1, +patch.fireVary || 0));
