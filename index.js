@@ -965,7 +965,13 @@ app.get('/debug/bodies', (req, res) => {
   const lefts = {}; for (const r in roomBodyStamp) { const objs = roomObjects[r], ost = roomObjSt[r]; lefts[r] = [...roomBodyStamp[r]].map(([id, S]) => {
     const o = objs && objs.get(id); if (!o) return [String(id).slice(-8), 'noObj'];
     const cs = bodyCellsOf((ost && ost.get(id)) || {}, o); let n = 0, th = 0, lt = 0; for (const v of cs) if (v & 3) { n++; if (v & 8) th++; if (v & 4) lt++; }
-    return [String(id).slice(-8), bodyAllChar(cs), n ? +(th / n).toFixed(2) : 0, lt, !!S.fire]; }); }
+    // `?cells=1`: …and the RECORD and the WORLD's cells for it side by side, one character per cell ('0' + code), with its
+    //   stamp pose — for catching the record going stale, and cells going backwards (charcoal → wood) in either
+    const extra = req.query.cells ? (() => { const st = roomCells.get(r), D = bodyDims(o);
+      if (!st || !st.terrain || st.terrain !== S.g || D.c !== S.dc || D.r !== S.dr) return { rec: [...cs].map(v => String.fromCharCode(48 + v)).join(''), world: null };
+      const w = bodyWorldCells(r, st, o, D, S, (ost && ost.get(id)) || {});
+      return { rec: [...cs].map(v => String.fromCharCode(48 + v)).join(''), world: [...w].map(v => String.fromCharCode(48 + v)).join(''), pose: [S.x, S.y, Math.round(S.a * 1000)], cols: D.c }; })() : null;
+    return [String(id), bodyAllChar(cs), n ? +(th / n).toFixed(2) : 0, lt, !!S.fire, extra]; }); }
   res.json({ lefts, cq, shared, crumbles, crumbleCells, crumbleWhy, crumble: crumbleCfg, stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
              fallCuts, fallRefused, fallPiled, fallSmall, fallBurnt, fallCrumbled, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
              splits: bodySplits, splitGone: bodySplitGone, split: bodySplitCfg,
@@ -5303,7 +5309,7 @@ const crumbleCfg = { on: 1, mode: 'cascade', trigger: 'disturb', afterMs: 4000, 
   // ⭐⭐ THE BREAK TRAVELS (user, 2026-09-22: *"not instantaneous … similar to the speed at which fire spreads"*). Each cell
   //   goes `cellMs` × its distance from where the break started, give or take a per-cell random share — a front, where
   //   the old `frontPer` was fixed batches on a 250ms clock and read as a stagger. 0 = all at once.
-  cellMs: 40,                  // (was 90 — user, 2026-09-26: the crumble was "too slow and too stilted")
+  cellMs: 0,                   // (90 → 40 → 0: user, 2026-09-27 — try a crate crumbling ALL AT ONCE; the dial is still there)
   // ⭐⭐ NOTHING CRUMBLES WHILE IT IS STILL HOT (user, same day: cells *"go from glowing hot to being completely dead in
   //   an instant … they shouldn't crumble until they are out"*). A cell must have been out of the fire this long.
   coolMs: 20000,
@@ -7953,7 +7959,7 @@ const liquidCfg = {
   fireOxygen: 1,         // a cell that finishes its burn with no open face is STARVED: charcoal, out (see there)
   ashAir: 1,             // ash lets air through to charcoal/cinder under it, so a heap burns down past its top layer
   bodyCharRate: 0.1,     // a WHOLE object's charcoal: burn rate. 0.1 = ~32s on its outside, ~96s inside (inside takes `fireBodyThrough` = 3x); 0.16 was the old value
-  bodyAshDepth: 2,       // a whole object's burnt-through cells this close to its top/sides are ASH (`bodyAshAt`)
+  bodyAshDepth: 0,       // …ash on a whole object's outside: OFF (user, 2026-09-27: "looks kind of blurry … should just be reverted")
   bodyWhole: 1,          // a burning object stays WHOLE — no holes, no pieces — and crumbles only once it is all charcoal (`bodyWholeApply`)
   fireAshOrder: 0,       // 1 = a column crumbles TOP DOWN so nothing hovers
   fireAshJitter: 45,     // per-cell delay before a cell finishes burning, so a mass does not turn over all at once
