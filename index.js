@@ -4665,6 +4665,33 @@ function bodySkipChar(room, obj, S, now) {
 // ⚠️ The world fire pass leaves body wood/charcoal ALONE in this mode (the `bodyOwn` test in its loop): it still spreads
 //   from them and to them, but never ages them into the next material — that is this function's job.
 function bodyOwnOn() { return !!(liquidCfg.bodyWhole && liquidCfg.bodyOwn && liquidCfg.fireSolids); }
+// ⭐⭐ STAGGERED (2026-09-27, the user: crates charred "in a stilted fashion, where all of a sudden parts … would go from not
+//   burnt to burnt in large sections"). Run from `bodyTick` it advanced EVERY crate on the same 250ms beat, so a pile's
+//   changes arrived in one lump four times a second — and every crate's picture came due in the same frame on the client.
+//   Now a 50ms clock takes a fifth of the crates each time (by a hash of the id), so each still advances every 250ms but the
+//   pile's changes arrive in five smaller, even lumps.
+let _bodyOwnN = 0;
+function bodyOwnTick() {
+  if (!bodyOwnOn()) return;
+  const ph = (_bodyOwnN++) % 5, now = Date.now();
+  for (const room of Object.keys(roomBodyStamp)) {
+    const m = roomBodyStamp[room], st = roomCells.get(room), map = roomObjects[room];
+    if (!st || !st.terrain || !map) continue;
+    const fs = st.fineFire, fire = !!(fs && fs.size), bm = roomBodyBurn[room];
+    if (!fire && !(bm && bm.size)) continue;
+    let skipCh = false;
+    for (const [id, S] of m) {
+      if (st.terrain !== S.g) continue;
+      const obj = map.get(id); if (!obj) continue;
+      if (((bodyHashOf(obj) >>> 0) % 5) !== ph) continue;
+      let go = !!(bm && bm.has(id));
+      if (!go && fire) for (let q = 0; q < S.idx.length; q++) if (fs.has(S.idx[q])) { go = true; break; }
+      if (go && bodyOwnBurn(room, obj, S, st, now)) skipCh = true;
+    }
+    if (skipCh) broadcastObjSt(room);
+  }
+}
+setInterval(bodyOwnTick, 50);
 function bodyOwnBurn(room, obj, S, st, now) {
   if (!S.kOf || S.kOf.length !== S.idx.length) return false;
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
@@ -5024,11 +5051,8 @@ function bodyTick() {
       }
       if (unmade) continue;
       if (burnt) { S.fire = true; bodyNoteGone(room, obj, S, burnt); }
-      // ⭐ its own burn (`bodyOwnBurn`) — when anything of it is alight in the world, or alight in its record (a buried cell)
-      if (bodyOwnOn() && (lit || (roomBodyBurn[room] && roomBodyBurn[room].has(id)))) {
-        if (bodyOwnBurn(room, obj, S, st, now)) skipCh = true;
-        const bo = roomBodyBurn[room] && roomBodyBurn[room].get(id); if (bo) lit = true;
-      }
+      // ⭐ its own burn (`bodyOwnBurn`) runs on its own staggered clock (`bodyOwnTick`); here it only counts as alight
+      if (bodyOwnOn() && roomBodyBurn[room] && roomBodyBurn[room].has(id)) lit = true;
       if (lit) S.fire = true;
       // when it was last alight, which is what the timed trigger counts from (`crumbleDue`)
       S.lit = lit; if (lit) S.outT = now; else if (!S.outT) S.outT = now;
@@ -5474,7 +5498,8 @@ const crumbleCfg = { on: 1, mode: 'cascade', trigger: 'disturb', afterMs: 4000, 
   // ⭐⭐ THE BREAK TRAVELS (user, 2026-09-22: *"not instantaneous … similar to the speed at which fire spreads"*). Each cell
   //   goes `cellMs` × its distance from where the break started, give or take a per-cell random share — a front, where
   //   the old `frontPer` was fixed batches on a 250ms clock and read as a stagger. 0 = all at once.
-  cellMs: 40,                  // (90 → 40 → 0 → 40: user, 2026-09-27 — all at once was jarring; the gradual crumble is back)
+  cellMs: 22,                  // (90 → 40 → 0 → 40 → 22: user, 2026-09-27 — all at once was jarring; 40 too slow)
+  rough: 0.9,                  // how irregularly the crumble travels (0 = rings; see `crumbleEnqueue`)
   // ⭐⭐ NOTHING CRUMBLES WHILE IT IS STILL HOT (user, same day: cells *"go from glowing hot to being completely dead in
   //   an instant … they shouldn't crumble until they are out"*). A cell must have been out of the fire this long.
   coolMs: 20000,
@@ -5685,27 +5710,43 @@ function bodyCrumble(room, obj, S, dx, dy) {
 }
 // ⭐ THE FRONT: distance from the start, walked through the cells that are going (four-connected). Cells in a part not
 //   joined to the start begin a front of their own, from the end of that part nearest the way it was pushed.
+// ⭐⭐ …AND IT TRAVELS IRREGULARLY (2026-09-27, the user: *"it travels too mathematically and predictably"*). It was a
+//   breadth-first distance — perfect rings — with a ±0.4-step jitter per cell, which only roughens the edge of a ring.
+//   Now each cell takes its own time to cross (`crumbleCfg.rough`: 0 = all the same, 1 = from almost nothing to twice a
+//   step), mixed from a per-cell hash and a coarser patch hash so whole patches go early or late, and the arrival time is
+//   the SHORTEST PATH through those times (Dijkstra). The front runs ahead down quick lanes and lags round slow patches.
 function crumbleEnqueue(room, obj, D, ks, dx, dy, now) {
-  const inSet = new Map(); for (const k of ks) inSet.set(k, -1);
+  const n = D.c * D.r, arr = new Float64Array(n).fill(Infinity), want = new Uint8Array(n);
+  for (const k of ks) want[k] = 1;
+  let hs = 0; const sid = String(obj.id); for (let q = 0; q < sid.length; q++) hs = (Math.imul(hs, 31) + sid.charCodeAt(q)) | 0;
+  const rough = Math.max(0, Math.min(1, +crumbleCfg.rough || 0));
+  const cost = (k) => {
+    const c = k % D.c, r = (k / D.c) | 0;
+    const fine = fireVar(k, hs, 31), patch = fireVar(((c >> 2) * 131 + (r >> 2)) | 0, hs, 32);
+    return Math.max(0.05, 1 + rough * (0.55 * (2 * fine - 1) + 0.45 * (2 * patch - 1)));
+  };
+  // a tiny binary heap of [time, cell]
+  const H = []; const push = (t, k) => { H.push([t, k]); let i = H.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (H[p][0] <= H[i][0]) break; [H[p], H[i]] = [H[i], H[p]]; i = p; } };
+  const pop = () => { const top = H[0], last = H.pop(); if (H.length) { H[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = l + 1; let m = i; if (l < H.length && H[l][0] < H[m][0]) m = l; if (r < H.length && H[r][0] < H[m][0]) m = r; if (m === i) break; [H[m], H[i]] = [H[i], H[m]]; i = m; } } return top; };
+  // it starts on the side it was pushed from — and in any part not joined to that, at that part's end nearest the push
   const score = (k) => ((k % D.c) - (D.c - 1) / 2) * dx + (((k / D.c) | 0) - (D.r - 1) / 2) * dy;
   const byScore = ks.slice().sort((a, b) => score(b) - score(a));
   for (const s0 of byScore) {
-    if (inSet.get(s0) >= 0) continue;
-    inSet.set(s0, 0); const q = [s0];
-    for (let h = 0; h < q.length; h++) {
-      const k = q[h], c = k % D.c, r = (k / D.c) | 0, d = inSet.get(k) + 1;
+    if (arr[s0] !== Infinity) continue;
+    arr[s0] = 0; push(0, s0);
+    while (H.length) {
+      const [t, k] = pop(); if (t > arr[k]) continue;
+      const c = k % D.c, r = (k / D.c) | 0;
       for (const kk of [c > 0 ? k - 1 : -1, c < D.c - 1 ? k + 1 : -1, r > 0 ? k - D.c : -1, r < D.r - 1 ? k + D.c : -1]) {
-        if (kk < 0 || inSet.get(kk) !== -1) continue;
-        inSet.set(kk, d); q.push(kk);
+        if (kk < 0 || !want[kk]) continue;
+        const tt = t + cost(kk); if (tt < arr[kk]) { arr[kk] = tt; push(tt, kk); }
       }
     }
   }
   const m = crumbleQ[room] || (crumbleQ[room] = new Map());
   const Q = m.get(obj.id) || new Map();
-  for (const [k, d] of inSet) {
-    // a fixed per-cell share (the same cell always gets the same one), 0.6–1.4 of a step
-    const h = ((k * 2654435761 + obj.id.length * 97) >>> 0) / 4294967296;
-    const due = now + crumbleCfg.cellMs * (d + (d ? h * 0.8 - 0.4 : 0));
+  for (const k of ks) {
+    const due = now + crumbleCfg.cellMs * arr[k];
     if (!Q.has(k) || Q.get(k) > due) Q.set(k, due);
   }
   m.set(obj.id, Q);
@@ -5842,9 +5883,8 @@ function crumbleTake(room, obj, S, ks, more) {
   //   the ground's flare, flame die-back and glow are all timed from that moment; (2) a buried heap cell went out at the
   //   EXPOSED time where the crate's buried charcoal smoulders `fireBodyThrough`× longer (now the same rule — the fire
   //   pass's buried-charcoal test includes cinder); and (3) the handover started each cell part-way through a new burn.
-  // ⇒ NOW EACH CELL CONTINUES EXACTLY: alight stays alight with the SAME time left (the heap age is set so that
-  //   `fireSolidBurn / rate[cinder] − age` passes remain, negative if the crate had more left than a fresh cinder cell —
-  //   a buried heap cell then gets its ×3 on top, never less); its browser clock is set back by how long it has been
+  // ⇒ NOW EACH CELL CONTINUES EXACTLY: alight stays alight at the SAME SHARE of its burn (see `age` below — a buried heap
+  //   cell ages a third as fast, so a share carries over where "passes left" would not); its browser clock is set back by how long it has been
   //   charcoal (`lt`), so no flare, the same flame die-back and the same glow; one that had gone out stays out. (A cooling
   //   glow for those was tried and taken out: the crate draws its gone-out cells with none, so the heap must not either.)
   let H = null;
@@ -5866,13 +5906,21 @@ function crumbleTake(room, obj, S, ks, more) {
         //    crate, and in the heap — open to the air — the same moment turns it to grey ASH: at 50% burnt through that was
         //    a spray of grey specks the instant a crate crumbled (look/perf/cont/tl_072.png). A floor spreads the ash out
         //    over the heap's own burn-down instead.
-        const rem = Math.max(Math.max(0, +crumbleCfg.minLeftMs || 0), bodyBurnNeedMs(obj, Bb, k, cells[k]) - Bb.age[k]) / tk;
-        return Math.round(n93 - rem);
+        // ⭐ AS A SHARE OF THE BURN (2026-09-27): a buried heap cell now AGES a third as fast (`_inc` in the fire pass), so
+        //   "passes left" means different time buried and exposed. The share done carries over instead: a crate cell half
+        //   through its burn is half through the heap's, whichever way it lands — and the floor above still holds.
+        const need = bodyBurnNeedMs(obj, Bb, k, cells[k]);
+        // 🟥 …AND THE FLOOR VARIES PER CELL (0.4–1.6×). A fixed one gave every capped cell EXACTLY the same time left, and a
+        //    crate far through its burn is mostly capped: 4,000 of a heap's 7,000 burning cells went out within 8s of each
+        //    other, 40s after the crumble (rig, `timeline_cont4`) — the user's "a bunch of connected cells … at the same time".
+        const floorMs = Math.max(0, +crumbleCfg.minLeftMs || 0) * (i >= 0 ? 0.4 + 1.2 * fireVar(i, fireSaltOf(st), 13) : 1);
+        const pMax = Math.max(0, 1 - floorMs / (n93 * tk));
+        const p = need > 0 ? Math.min(pMax, Math.max(0, Bb.age[k] / need)) : 0;
+        return Math.round(p * n93);
       },
       ago: (k) => (Bb && Bb.age && Bb.age.length === cells.length) ? Math.round(Bb.age[k]) : 0,
     };
   }
-  const cinderAge = (frac) => Math.round(frac * liquidCfg.fireSolidBurn / (FIRE_RATE[MAT_CINDER] || 0.05));
   for (const k of ks) {
     if (!(cells[k] & 3)) continue;                              // (…gone already: a travelling break can outlive a cell)
     const q = bodyRep(obj, D, S.x, S.y, S.a, k);
@@ -10674,7 +10722,17 @@ function fineReactTickRoom(room, SUB, phase) {
     }
     for (const i of list) {
       if (!fuelHere(i)) { if (fire.delete(i)) fireOut.push(i); ages.delete(i); continue; }   // burnt out (or the oil moved on)
-      const age = (ages.get(i) || 0) + 1; ages.set(i, age);
+      // ⭐⭐ BURIED CINDER AGES SLOWER, it is not allowed to be OLDER (`cinderThrough`, 2026-09-27 — the user: in a smouldering
+      //   heap *"a bunch of connected cells would turn to ash at the same time … it would start and sort of spread from a
+      //   point"*). The first version let a buried cell run to `fireBodyThrough`× its life before it finished. Then a
+      //   neighbour turned to ash — which counts as AIR (`ashAir`) — so the cell was exposed, already past its exposed
+      //   life, and finished on the SAME pass: ash, exposing the next. A chain. Burning at a third of the rate while buried
+      //   gives the same ×3 life, and uncovering a cell only speeds it up from where it is.
+      // ⚠️ LITERAL 93: this block is sliced.
+      let _inc = 1;
+      if (liquidCfg.cinderThrough && liquidCfg.fireOxygen && gPeek(i) === 93 && !(airAround(i) || (liquidCfg.ashAir && ashAround(i))))
+        _inc = 1 / Math.max(1, liquidCfg.fireBodyThrough || 1);
+      const age = (ages.get(i) || 0) + _inc; ages.set(i, age);
       const rI = i % ROWS;
       if (liquidCfg.fireQuench && quenched(i, rI)) { fire.delete(i); ages.delete(i); fireOut.push(i); addFx(i, 1); continue; }   // put out: a puff of steam
       // ── A BURNING SOLID: it has no stack to spend, so its fuel is its AGE against `fireSolidBurn / rate`.
@@ -10779,7 +10837,9 @@ function fineReactTickRoom(room, SUB, phase) {
             // ⭐ …and CINDER (93) too (2026-09-27, user: *"crates smoulder far longer than the crumbled charcoal … they should
             //   obviously be the same, since they are the same material just in different forms"*). A heap's buried cinder
             //   went out at the EXPOSED time. `cinderThrough` 0 = the old rule. ⚠️ LITERAL 93: this block is sliced.
-            if ((_g0 === 251 || _g0 === 92 || (_g0 === 93 && liquidCfg.cinderThrough)) && age < need * Math.max(1, liquidCfg.fireBodyThrough || 1)) continue;
+            //   (…REPLACED the same day by a slower AGE while buried — see `_inc` at the top of the loop: waiting here made a
+            //   chain of ash when a cell was uncovered past its exposed life.)
+            if ((_g0 === 251 || _g0 === 92) && age < need * Math.max(1, liquidCfg.fireBodyThrough || 1)) continue;
             // ⭐⭐ A BURIED CELL THAT LEAVES A FUEL KEEPS SMOULDERING AS IT, rather than going out the instant it
             //   converts. Reported from play (2026-09-24): *"relit internal charcoal of a burnt tree stays glowing
             //   for much longer than the charcoal stays glowing for after the flames pass over them initially …
@@ -13128,7 +13188,7 @@ function cfgWire() {
     dayCycleMin: Math.round(worldClock.cycleMs / 60000), dayOffsetMin: Math.round(worldClock.offsetMs / 60000),
     crumble: !!crumbleCfg.on, crumbleMode: crumbleCfg.mode, crumbleTrigger: crumbleCfg.trigger,
     crumbleMs: crumbleCfg.afterMs, crumblePer: crumbleCfg.perPass, crumbleFront: crumbleCfg.frontPer, crumbleLooseMs: crumbleCfg.looseMs, crumbles, crumbleCells,
-    crumbleCellMs: crumbleCfg.cellMs, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, crumbleAvoid: !!crumbleCfg.avoid, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, crumbleHandover: !!crumbleCfg.handover,
+    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, crumbleAvoid: !!crumbleCfg.avoid, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, crumbleHandover: !!crumbleCfg.handover,
     worldGen2: !!worldCfg.gen2,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
@@ -19569,6 +19629,7 @@ io.on('connection', (socket) => {
     if ('crumbleLooseMs' in patch) crumbleCfg.looseMs = Math.max(0, Math.min(120000, patch.crumbleLooseMs | 0));
     if ('crumbleShovePx' in patch) crumbleCfg.shovePx = Math.max(0, Math.min(200, +patch.crumbleShovePx || 0));
     if ('crumbleCellMs' in patch) crumbleCfg.cellMs = Math.max(0, Math.min(2000, patch.crumbleCellMs | 0));
+    if ('crumbleRough' in patch) crumbleCfg.rough = Math.max(0, Math.min(1, +patch.crumbleRough || 0));
     if ('crumbleCoolMs' in patch) crumbleCfg.coolMs = Math.max(0, Math.min(120000, patch.crumbleCoolMs | 0));
     if ('crumbleHeatMs' in patch) crumbleCfg.heatMs = Math.max(0, Math.min(120000, patch.crumbleHeatMs | 0));
     if ('levelGate' in patch) liquidCfg.levelGate = Math.max(0, Math.min(2, patch.levelGate | 0));
