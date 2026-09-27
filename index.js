@@ -4306,9 +4306,73 @@ function bodyBurnMoving(room, obj, B, now) {
   if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
   return true;
 }
+// ⭐⭐ LOOSE THINGS THAT ARE NOT IN THE WORLD STILL KEEP POWDER OUT (`powderCoverCfg`, 2026-09-28 — the user: *"if I drop
+// ash on a crate, then it treats the crate as solid and pools around it, whereas if I drop it on a ball it buries the
+// ball"*). A wooden thing is written INTO the grid as its own cells (250–253), which powder cannot enter; anything else loose
+// — a ball, a stone block — is not in the grid at all, so powder fell straight through it and filled its outline, and a
+// ball then had powder inside it to be held by (or not). Now every loose thing that is not a cell body has a COVER: the
+// world cells whose centres its outline holds, at the pose its driver last reported (`obj-cover`) or, before any report,
+// where it was placed. Powder may not move into a covered cell — it lands on the thing and runs off it — and when the thing
+// moves off cells the powder above them is woken, so a pile falls into the space a ball rolls out of.
+// ⚠️ A covered cell that ALREADY holds powder keeps it: this decides only where powder may go, never erases it.
+// ⚠️ The ground's own cells are not touched, so nothing here can show up in a saved world.
+const powderCoverCfg = { on: 1 };
+const roomLoosePose = {};                               // room → Map<objId, {x, y, a}> — the last reported pose
+const roomCover = {};                                   // room → { byId: Map<objId, {k, cells}>, n: Map<cell, count> }
+function coverCellsOf(o, x, y, a, COLS, ROWS) {
+  const w = Math.min(1024, o.w || 64), h = Math.min(1024, o.h || 64), T = TERRAIN_CELL, round = o.shape === 'ellipse';
+  const ca = Math.cos(a), sa = Math.sin(a), ex = Math.abs(w / 2 * ca) + Math.abs(h / 2 * sa), ey = Math.abs(w / 2 * sa) + Math.abs(h / 2 * ca);
+  const out = [];
+  for (let c = Math.max(0, Math.floor((x - ex) / T)), c1 = Math.min(COLS - 1, Math.floor((x + ex) / T)); c <= c1; c++)
+    for (let r = Math.max(0, Math.floor((y - ey) / T)), r1 = Math.min(ROWS - 1, Math.floor((y + ey) / T)); r <= r1; r++) {
+      const px = (c + 0.5) * T - x, py = (r + 0.5) * T - y, u = px * ca + py * sa, v = -px * sa + py * ca;
+      if (round ? (u * u) / (w * w / 4) + (v * v) / (h * h / 4) < 1 : Math.abs(u) < w / 2 && Math.abs(v) < h / 2) out.push(c * ROWS + r);
+    }
+  return out;
+}
+function coverTakes(o) { return !!(o && bodyLoose(o) && !bodySpec(o)); }
+// …this one object's cover, brought up to date with where it is; returns the cells it LEFT (for waking the powder above)
+function coverUpdate(room, o) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid || !powderCoverCfg.on) return;
+  const C = roomCover[room] || (roomCover[room] = { byId: new Map(), n: new Map() });
+  const P = roomLoosePose[room], pp = P && P.get(o.id);
+  const x = pp ? pp.x : o.x, y = pp ? pp.y : o.y, a = pp ? pp.a : (o.angle || 0);
+  const k = x.toFixed(1) + ',' + y.toFixed(1) + ',' + a.toFixed(3) + ',' + o.w + ',' + o.h + ',' + o.shape;
+  const e = C.byId.get(o.id);
+  if (e && e.k === k) return;
+  const cells = coverCellsOf(o, x, y, a, st.cols, st.rows), now = new Set(cells);
+  for (const i of cells) C.n.set(i, (C.n.get(i) || 0) + 1);
+  if (e) coverRelease(room, C, e.cells, now);
+  C.byId.set(o.id, { k, cells });
+}
+function coverRelease(room, C, cells, keep) {
+  const ROWS = cellsOf(room).rows, left = [];
+  for (const i of cells) { const q = (C.n.get(i) || 0) - 1; if (q > 0) C.n.set(i, q); else C.n.delete(i); if (!keep || !keep.has(i)) left.push(i); }
+  if (!left.length) return;
+  // …the powder resting on what just moved away falls into the space
+  let c0 = Infinity, c1 = -Infinity, r0 = Infinity, r1 = -Infinity;
+  for (const i of left) { const c = (i / ROWS) | 0, r = i - c * ROWS; if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
+  const grid = cellsOf(room).terrain; if (grid) activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1);
+}
+function coverDrop(room, id) {
+  const C = roomCover[room], e = C && C.byId.get(id);
+  if (roomLoosePose[room]) { roomLoosePose[room].delete(id); if (!roomLoosePose[room].size) delete roomLoosePose[room]; }
+  if (!e) return;
+  C.byId.delete(id); coverRelease(room, C, e.cells, null);
+  if (!C.byId.size) delete roomCover[room];
+}
+// …every loose thing in the room, once per powder pass (a string compare each while nothing moves): picks up things
+//   placed since, and things whose report arrived while no powder was moving
+function coverSync(room) {
+  const map = roomObjects[room]; if (!map || !powderCoverCfg.on) return null;
+  for (const o of map.values()) if (coverTakes(o)) coverUpdate(room, o);
+  const C = roomCover[room];
+  if (C) for (const id of [...C.byId.keys()]) { const o = map.get(id); if (!coverTakes(o)) coverDrop(room, id); }
+  return roomCover[room] ? roomCover[room].n : null;
+}
 // The removal seam (`objUnindex` → `objLinkDrop`): an object that is erased, smashed or burnt takes its cells with it.
 function bodyDrop(room, o) {
-  if (o) bodyLastPose.delete(room + '|' + o.id);
+  if (o) { bodyLastPose.delete(room + '|' + o.id); coverDrop(room, o.id); }
   if (o && roomBodyBurn[room]) { roomBodyBurn[room].delete(o.id); if (!roomBodyBurn[room].size) delete roomBodyBurn[room]; }
   if (!o || !roomBodyStamp[room] || !roomBodyStamp[room].has(o.id)) return false;
   bodyUnstamp(room, o.id, false);
@@ -8916,9 +8980,13 @@ function powderTickRoom(room) {
   // falling through open sky keeps falling.
   const genRoom = !!grid.seedFn;
   const peekG = genRoom ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
-  const canDisplace = (j) => { const v = peekG(j); return v === 0 || isFluidId(v); };   // -1 (unbuilt) is neither
+  // …and a cell a loose thing covers is not somewhere a grain can go (`powderCoverCfg`): it lands on the thing instead
+  const cov = typeof coverSync === 'function' ? coverSync(room) : null;   // (typeof: the rigs slice this tick without it)
+  const canDisplace = cov && cov.size
+    ? (j) => { if (cov.has(j)) return false; const v = peekG(j); return v === 0 || isFluidId(v); }
+    : (j) => { const v = peekG(j); return v === 0 || isFluidId(v); };   // -1 (unbuilt) is neither
   // …and the same question asked on behalf of a RIGID block, which floats: air yes, fluid no. See MAT_RIGID.
-  const canEnter = (gv, j) => (MAT_RIGID[gv] ? peekG(j) === 0 : canDisplace(j));
+  const canEnter = (gv, j) => (MAT_RIGID[gv] ? peekG(j) === 0 && !(cov && cov.has(j)) : canDisplace(j));
   const list = Array.from(active); active.clear();
   list.sort((a, b) => (b % ROWS) - (a % ROWS));   // bottom-up so a falling column cascades in a single pass
   const changedSet = new Set(), fineChanged = new Set();
@@ -22497,6 +22565,23 @@ io.on('connection', (socket) => {
     }
     if (_bodyPosAt.size > 512) for (const [id, t] of _bodyPosAt) if (now - t > 10000) _bodyPosAt.delete(id);
     if (restate) broadcastObjSt(room);
+  });
+  // ⭐⭐ …AND WHERE EVERY OTHER LOOSE THING IS (`obj-cover`, 2026-09-28): the same flat [id, x, y, angle×1000, …], for loose
+  // things that are NOT cell bodies — a ball, a stone block — so powder can be kept out of them (`coverUpdate`). Nothing is
+  // written into the world; the server only remembers the pose. Same driver rule as `obj-pos`, without making anyone driver.
+  let _coverAt = 0;
+  socket.on('obj-cover', ({ b } = {}) => {
+    const room = currentAvatarRoom; if (!room || !Array.isArray(b) || !powderCoverCfg.on) return;
+    const map = roomObjects[room]; if (!map) return;
+    const now = Date.now(); if (now - _coverAt < 40) return; _coverAt = now;
+    const P = roomLoosePose[room] || (roomLoosePose[room] = new Map()), drv = roomObjDrv[room];
+    for (let q = 0; q + 3 < b.length && q < 4 * 64; q += 4) {
+      const obj = map.get(b[q]), x = +b[q + 1], y = +b[q + 2], a = +b[q + 3] / 1000;
+      if (!coverTakes(obj) || !isFinite(x) || !isFinite(y) || !isFinite(a)) continue;
+      const d = drv && drv.get(obj.id); if (d && d !== socket.id) continue;
+      P.set(obj.id, { x, y, a });
+      coverUpdate(room, obj);
+    }
   });
   // ⭐ STEP 3 — MINE CELLS OUT OF A FALLEN PIECE. Same gate as digging the ground (build rights), a bounded list.
   socket.on('body-dig', ({ id, ks } = {}) => {
