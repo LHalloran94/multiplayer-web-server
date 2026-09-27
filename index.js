@@ -4261,7 +4261,24 @@ function bodyBurnMoving(room, obj, B, now) {
     }
     // (…a WHOLE object's buried charcoal smoulders `fireBodyThrough` times longer before it is burnt through, as in the world)
     const burn = bodyBurnNeedMs(obj, B, k, cells[k], liquidCfg.bodyWhole ? true : open(k));   // (whole: the slowness is in the RATE above)
-    if (B.age[k] < burn) continue;
+    if (B.age[k] < burn) {
+      // ⭐⭐ THE ASH SKIN, ON THE CELLS THAT WILL BECOME ASH (`bodyAshSkin`, 2026-09-28 — the user: a crate's cells "do not
+      //   transition into ash cells with the speckling that other cells do"). Bits 32|64 hold a level 1–3 of the grey
+      //   flecks the ground's charcoal grows (16d `drawCharOver`). Only a cell that this very rule (below) will finish as ASH
+      //   gets it — the same hash, the same open/buried share — and from its own point in its own burn, so the flecks come
+      //   up scattered cell by cell and each one ends as the ash it was becoming. (Skinning every exposed cell, the ground's
+      //   rule, outlined every crate: its exposed cells ARE its outline and burn on one schedule — look/perf/skin/tl_060.png.)
+      if (liquidCfg.bodyWhole && liquidCfg.bodyAsh && liquidCfg.bodyAshSkin && (cells[k] & 3) === 2 && !(cells[k] & 24)) {
+        let L = 0;
+        if (fireVar(k, hs, 41) < (open(k) ? +liquidCfg.bodyAshOpen || 0 : +liquidCfg.bodyAshBuried || 0)) {
+          const fk = Math.max(0.05, Math.min(0.9, (+liquidCfg.bodyAshSkinFrom || 0) + 0.3 * (fireVar(k, hs, 43) - 0.5))), p = B.age[k] / burn;
+          if (p > fk) L = Math.min(3, Math.ceil(3 * (p - fk) / (1 - fk)));
+        }
+        const nv = (next[k] & ~96) | (L << 5);
+        if (nv !== next[k]) { next[k] = nv; changed = true; }
+      }
+      continue;
+    }
     const ex = !oxy || open(k);
     // ⚠️ THE WORLD'S RULES, kept in step (2026-09-22): wood never starves, buried charcoal ends burnt through, and a
     //    burnt-through cell that finishes is gone (a moving thing has nowhere to put ash).
@@ -4755,7 +4772,8 @@ function bodyOwnBurn(room, obj, S, st, now) {
   }
   if (changed) bodyCellsSet(rec, obj, cells);
   // 2 · ITS OWN BURN — every cell, whether or not it has a world cell
-  let ash0 = 0; for (let k = 0; k < n; k++) if (cells[k] & 16) ash0++;
+  // (…and the ash SKIN's levels, bits 32|64 — also only in the record, so a change to either is what the browsers are told)
+  let ash0 = 0; for (let k = 0; k < n; k++) ash0 += (cells[k] & 16) ? 1 : (cells[k] & 96) * 1024;
   if (anyLit) {
     if (!B) { B = { age: new Float32Array(n), last: now }; bm.set(obj.id, B); }
     // ⭐ WHICH OF ITS CELLS ARE OPEN TO THE AIR, asked of the WORLD — the same test the world fire uses (air, or ash with
@@ -4776,7 +4794,7 @@ function bodyOwnBurn(room, obj, S, st, now) {
     cells = bodyCellsOf(rec, obj);
     // ⭐ ASH THAT FORMED ON IT IS NOT IN THE WORLD — its world cell stays the object's burnt-through charcoal — so the
     //   browsers are told through the object's record (`obj-cells`), the same message a crumble sends (`bodyAsh`)
-    let ash1 = 0; for (let k = 0; k < n; k++) if (cells[k] & 16) ash1++;
+    let ash1 = 0; for (let k = 0; k < n; k++) ash1 += (cells[k] & 16) ? 1 : (cells[k] & 96) * 1024;
     if (ash1 !== ash0) io.to(room).emit('obj-cells', { id: obj.id, bc: rec.bc || null });
   } else if (B) B.last = now;
   let still = false; for (let k = 0; k < n; k++) if (cells[k] & 4) { still = true; break; }
@@ -8285,7 +8303,7 @@ const liquidCfg = {
   // (else charcoal, out), a buried one in `cinderAshBuried` of them
   cinderHeat: 1, cinderHeatDecay: 0.6, cinderHeatMin: 0.3,   // (the heat limit, its own switch 2026-09-27)
   cinderMix: 1, cinderAshExposed: 0.4, cinderAshBuried: 0.08, cinderClump: 0,   // 2026-09-27: the OBJECTS' rule (`bodyAsh` shares, each cell alone) — the same material ends the same way; the clumped version is `cinderClump` 0.7
-  bodyAsh: 1, bodyAshOpen: 0.4, bodyAshBuried: 0.08,   // a whole object's charcoal may finish as ASH still on it (`bodyBurnMoving`); open / buried share
+  bodyAsh: 1, bodyAshOpen: 0.4, bodyAshBuried: 0.08, bodyAshSkin: 1, bodyAshSkinFrom: 0.45,   // a whole object's charcoal may finish as ASH still on it (`bodyBurnMoving`); open / buried share
   fireAshOrder: 0,       // 1 = a column crumbles TOP DOWN so nothing hovers
   fireAshJitter: 45,     // per-cell delay before a cell finishes burning, so a mass does not turn over all at once
   // ⭐ HOW MUCH LONGER A CRATE'S BURIED CHARCOAL SMOULDERS BEFORE IT IS BURNT THROUGH (user, 2026-09-22: crates
@@ -13191,7 +13209,7 @@ function cfgWire() {
     dayCycleMin: Math.round(worldClock.cycleMs / 60000), dayOffsetMin: Math.round(worldClock.offsetMs / 60000),
     crumble: !!crumbleCfg.on, crumbleMode: crumbleCfg.mode, crumbleTrigger: crumbleCfg.trigger,
     crumbleMs: crumbleCfg.afterMs, crumblePer: crumbleCfg.perPass, crumbleFront: crumbleCfg.frontPer, crumbleLooseMs: crumbleCfg.looseMs, crumbles, crumbleCells,
-    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, cinderMix: !!liquidCfg.cinderMix, cinderHeat: !!liquidCfg.cinderHeat, bodyAsh: !!liquidCfg.bodyAsh, bodyAshOpen: liquidCfg.bodyAshOpen, bodyAshBuried: liquidCfg.bodyAshBuried, cinderHeatDecay: liquidCfg.cinderHeatDecay, cinderHeatMin: liquidCfg.cinderHeatMin, cinderAshExposed: liquidCfg.cinderAshExposed, cinderAshBuried: liquidCfg.cinderAshBuried, cinderClump: liquidCfg.cinderClump, crumbleHandover: !!crumbleCfg.handover,
+    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, cinderMix: !!liquidCfg.cinderMix, cinderHeat: !!liquidCfg.cinderHeat, bodyAsh: !!liquidCfg.bodyAsh, bodyAshOpen: liquidCfg.bodyAshOpen, bodyAshBuried: liquidCfg.bodyAshBuried, bodyAshSkin: !!liquidCfg.bodyAshSkin, bodyAshSkinFrom: liquidCfg.bodyAshSkinFrom, cinderHeatDecay: liquidCfg.cinderHeatDecay, cinderHeatMin: liquidCfg.cinderHeatMin, cinderAshExposed: liquidCfg.cinderAshExposed, cinderAshBuried: liquidCfg.cinderAshBuried, cinderClump: liquidCfg.cinderClump, crumbleHandover: !!crumbleCfg.handover,
     worldGen2: !!worldCfg.gen2,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
@@ -19696,8 +19714,8 @@ io.on('connection', (socket) => {
     if ('bodyOwn' in patch) liquidCfg.bodyOwn = patch.bodyOwn ? 1 : 0;
     if ('cinderThrough' in patch) liquidCfg.cinderThrough = patch.cinderThrough ? 1 : 0;
     if ('cinderMix' in patch) liquidCfg.cinderMix = patch.cinderMix ? 1 : 0;
-    if ('cinderHeat' in patch) liquidCfg.cinderHeat = patch.cinderHeat ? 1 : 0; if ('bodyAsh' in patch) liquidCfg.bodyAsh = patch.bodyAsh ? 1 : 0;
-    for (const k of ['bodyAshOpen', 'bodyAshBuried']) if (k in patch) liquidCfg[k] = Math.max(0, Math.min(1, +patch[k] || 0));
+    if ('cinderHeat' in patch) liquidCfg.cinderHeat = patch.cinderHeat ? 1 : 0; if ('bodyAsh' in patch) liquidCfg.bodyAsh = patch.bodyAsh ? 1 : 0; if ('bodyAshSkin' in patch) liquidCfg.bodyAshSkin = patch.bodyAshSkin ? 1 : 0;
+    for (const k of ['bodyAshOpen', 'bodyAshBuried', 'bodyAshSkinFrom']) if (k in patch) liquidCfg[k] = Math.max(0, Math.min(1, +patch[k] || 0));
     for (const k of ['cinderHeatDecay', 'cinderHeatMin', 'cinderAshExposed', 'cinderAshBuried', 'cinderClump']) if (k in patch) liquidCfg[k] = Math.max(0, Math.min(1, +patch[k] || 0));
     if ('crumbleHandover' in patch) crumbleCfg.handover = patch.crumbleHandover ? 1 : 0;
     if ('bodyCharRate' in patch) { liquidCfg.bodyCharRate = Math.max(0.005, Math.min(1, +patch.bodyCharRate || 0.1)); bodyWholeApply(); }
