@@ -4692,6 +4692,12 @@ function bodyOwnOn() { return !!(liquidCfg.bodyWhole && liquidCfg.bodyOwn && liq
 //   Now a 50ms clock takes a fifth of the crates each time (by a hash of the id), so each still advances every 250ms but the
 //   pile's changes arrive in five smaller, even lumps.
 let _bodyOwnN = 0;
+// Is any of this stamped body's ground a quiet (or evicted) chunk? First and last cell cover a body that spans two.
+function bodyOnQuietGround(room, S) {
+  const geom = worldGeom(room), ch = chunksOf(room);
+  for (const i of [S.idx[0], S.idx[S.idx.length - 1]]) { const p = geomPage(geom, i); if (ch.evicted[p] || ch.peek(p).quiet) return true; }
+  return false;
+}
 function bodyOwnTick() {
   if (!bodyOwnOn()) return;
   const ph = (_bodyOwnN++) % 5, now = Date.now();
@@ -4705,6 +4711,12 @@ function bodyOwnTick() {
       if (st.terrain !== S.g) continue;
       const obj = map.get(id); if (!obj) continue;
       if (((bodyHashOf(obj) >>> 0) % 5) !== ph) continue;
+      // 🟥 NOT WHILE ITS GROUND IS ASLEEP (2026-09-27, the user: crates burning OFF SCREEN "don't burn all the way through
+      //    and burn in a blotchy fashion"). A chunk nobody is watching PARKS its fire (`pruneChunkWork`) — out of the fire
+      //    set, frozen, not out. Its crates then read their world cells as unlit, took that as "the world put you out"
+      //    (step 1 of `bodyOwnBurn`), and went out cell by cell. A crate on quiet ground now waits, as the ground does,
+      //    and carries on from where it was when somebody looks (its clock steps at most a second at a time).
+      if (S.idx.length && bodyOnQuietGround(room, S)) continue;
       let go = !!(bm && bm.has(id));
       if (!go && fire) for (let q = 0; q < S.idx.length; q++) if (fs.has(S.idx[q])) { go = true; break; }
       if (go && bodyOwnBurn(room, obj, S, st, now)) skipCh = true;
