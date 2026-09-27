@@ -5357,7 +5357,8 @@ const crumbleCfg = { on: 1, mode: 'cascade', trigger: 'disturb', afterMs: 4000, 
   // ⭐ a WHOLE object crumbles on its own once this share of its cells has BURNT THROUGH (0 = never) — `crumbleSoon`
   wholeAuto: 0.8,
   // ⭐ no powder inside another object: such a cell goes to the nearest free cell within `avoidRad` (`crumbleBoxes`)
-  avoid: 1, avoidRad: 3 };
+  // ⏹️ OFF 2026-09-27 (user: the fling fixes do not work; the approach is being rethought). Switch kept for comparison.
+  avoid: 0, avoidRad: 3 };
 const crumbleQ = {};                                            // room → Map(id → Map(cell → when it goes)) — the travelling break
 let crumbles = 0, crumbleCells = 0;
 const crumbleWhy = {};                                          // DIAG: why a crumble attempt did nothing — /debug/bodies
