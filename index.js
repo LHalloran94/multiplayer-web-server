@@ -5508,9 +5508,6 @@ const crumbleCfg = { on: 1, mode: 'cascade', trigger: 'disturb', afterMs: 4000, 
   heatMs: 15000,
   // ⭐ a WHOLE object crumbles on its own once this share of its cells has BURNT THROUGH (0 = never) — `crumbleSoon`
   wholeAuto: 0.5,        // (0.8 → 0.5, user 2026-09-27: crates should crumble on their own sooner)
-  // ⭐ no powder inside another object: such a cell goes to the nearest free cell within `avoidRad` (`crumbleBoxes`)
-  // ⏹️ OFF 2026-09-27 (user: the fling fixes do not work; the approach is being rethought). Switch kept for comparison.
-  avoid: 0, avoidRad: 3,
   // ⭐ a WHOLE object's cells carry on exactly into its heap: the same state, time left and clock (`crumbleTake`, 2026-09-27)
   handover: 1, minLeftMs: 15000 };
 const crumbleQ = {};                                            // room → Map(id → Map(cell → when it goes)) — the travelling break
@@ -5774,77 +5771,11 @@ function crumbleQTick() {
 setInterval(crumbleQTick, 40);
 // Let go of the cells `crumblePick` chose: each becomes Cinder where it stands and leaves the body's grid. Returns how
 // many went. `more` = more of this break is still to come, so the split check waits until it has finished.
-// ⭐⭐ WHAT A CRUMBLED CELL BECOMES, AND WHERE IT GOES (2026-09-26).
-// ASH ON THE OUTSIDE (user: *"ash can form on the outer edges of the crates as they burn, but it just doesn't fall off …
-//   so it will crumble with the rest of the charcoal into the heap"*). There is no free material id for an "object ash"
-//   (250–254 are all taken, 255 is the client's unknown, below 250 is players' own blocks), so it is decided by PLACE:
-//   a whole object's cell that has BURNT THROUGH (finished its charcoal burn) and lies within `bodyAshDepth` of its top or
-//   sides — not its bottom, which rests on something — is ash. The client draws the same rule from the same record
-//   (16b `bodyAshOf`), so the two cannot disagree; it crumbles as ASH and everything else as CINDER, which makes the
-//   mixed heap.
-// 🟥 SCATTERED, NOT A BAND. A solid one-cell shell crumbled into a straight grey OUTLINE of every crate — a packed pile
-//   became a grid of crate-shaped blocks ruled with ash lines (look/perf/timeline_end.png). Now each cell within
-//   `bodyAshDepth` is ash BY CHANCE, likelier the nearer the outside (60% on it, 25% one in, 10% beyond), from a hash of
-//   the cell and the object's id — so every crate's pattern differs and the client, hashing the same, draws the same.
-const MAT_ASH = 38;
-function bodyAshHash(id) { let h = 0; const s = String(id); for (let q = 0; q < s.length; q++) h = (Math.imul(h, 31) + s.charCodeAt(q)) | 0; return h; }
-function bodyAshAt(cells, D, k, id) {
-  if (!liquidCfg.bodyWhole || (cells[k] & 3) !== 2 || !(cells[k] & 8)) return false;
-  const c = k % D.c, r = (k / D.c) | 0, d = Math.max(0, liquidCfg.bodyAshDepth | 0);
-  const depth = Math.min(c, D.c - 1 - c, r);                    // …cells in from the top or the nearer side
-  if (depth >= d) return false;
-  let h = Math.imul(k ^ bodyAshHash(id), 2654435761) >>> 0; h = (h ^ (h >>> 15)) >>> 0;
-  return h / 4294967296 < (depth === 0 ? 0.6 : depth === 1 ? 0.25 : 0.1);
-}
-function crumbleMatOf(cells, D, k, id) { return bodyAshAt(cells, D, k, id) ? MAT_ASH : MAT_CINDER; }
+// (Ash on a whole object's outside, and crumbled cells steered away from other objects — both tried 2026-09-26/27 and
+//  removed 2026-09-27: the ash looked blurry, and the steering never cured the fling; powder that never pushes did.)
 // …and a cell with nowhere of its own to go (its world cell already holds powder) takes the nearest EMPTY cell above it,
 //   climbing through powder only — a heap is climbed, solid ground is never tunnelled. -1 = nowhere (it is lost, as before).
-// ⭐⭐ OPTION 2 OF THE USER'S TWO (`crumbleCfg.avoid`, 2026-09-27): NO POWDER WHERE ANOTHER OBJECT IS. A crate's cells in
-//   the world are NOT solid to other objects (they collide with its smooth shape), but the powder it crumbles into is —
-//   and a rotated crate's cells stick out up to half a cell past its outline, so a crate leaning on it was suddenly inside
-//   solid ground and got flung. A crumbled cell that would land inside another object's box goes into the NEAREST free
-//   cell instead (by distance, so nothing jumps to the top of a heap); none within `avoidRad` cells ⇒ it is not placed.
-// ⚠️ Boxes from the stamp pose where there is one (where the server last wrote it), else the object's own record.
-function crumbleBoxes(room, exceptId) {
-  const out = [], map = roomObjects[room], sm = roomBodyStamp[room];
-  if (!map) return out;
-  for (const [id, o] of map) {
-    if (id === exceptId || !(o.type === 'stamp' || o.type === 'platform') || !(o.w > 0) || !(o.h > 0)) continue;
-    const S = sm && sm.get(id), x = S ? S.x : o.x, y = S ? S.y : o.y, a = S ? S.a : (o.angle || 0);
-    out.push({ x, y, ca: Math.cos(a), sa: Math.sin(a), hw: o.w / 2, hh: o.h / 2 });
-  }
-  return out;
-}
-function crumbleInBox(B, c, r) {
-  // …a cell counts as inside if it overlaps the box by more than a pixel (so one resting exactly ON a box does not)
-  const px = (c + 0.5) * TERRAIN_CELL, py = (r + 0.5) * TERRAIN_CELL, m = TERRAIN_CELL / 2 - 1;
-  for (const b of B) { const dx = px - b.x, dy = py - b.y, u = dx * b.ca + dy * b.sa, v = -dx * b.sa + dy * b.ca; if (Math.abs(u) < b.hw + m && Math.abs(v) < b.hh + m) return true; }
-  return false;
-}
-function crumbleNearestFree(st, B, c, r) {
-  const grid = st.terrain, ROWS = st.rows, R = Math.max(1, crumbleCfg.avoidRad | 0);
-  let best = -1, bd = Infinity;
-  for (let dc = -R; dc <= R; dc++) for (let dr = -R; dr <= R; dr++) {
-    const d = dc * dc + dr * dr; if (d >= bd || d > R * R) continue;
-    const cc = c + dc, rr = r + dr; if (cc < 0 || rr < 0 || rr >= ROWS) continue;
-    const j = cc * ROWS + rr; if (j >= grid.length) continue;
-    if (peekCellAt(grid, j) !== 0 || (st.fineTotal && peekCellAt(st.fineTotal, j) > 0)) continue;
-    if (B && crumbleInBox(B, cc, rr)) continue;
-    best = j; bd = d;
-  }
-  return best;
-}
-// …writes a crumbled cell into world cell `j` (air), alight if it was, carrying `frac` of the way through its burn
-function crumbleWrite(st, j, mat, lit, frac, set, litArr) {
-  st.terrain.s(j, mat); st.terrainHp.s(j, 1); if (st.sat) st.sat.s(j, 0); set.push(j, mat);
-  if (lit && mat === MAT_CINDER && st.fineFire && liquidCfg.fireSolids) {
-    if (!st.fineFire.has(j)) { st.fineFire.add(j); litArr.push(j, 1); }
-    (st.fireAge || (st.fireAge = new Map())).set(j, Math.round((frac || 0) * liquidCfg.fireSolidBurn / (FIRE_RATE[MAT_CINDER] || 0.05)));
-  }
-}
-function crumblePlace(st, c, r, mat, lit, set, litArr, B) {
-  // (…with `avoid` on, the nearest free cell by DISTANCE — the straight-up climb below read as a teleport, user 2026-09-27)
-  if (crumbleCfg.avoid) { const j = crumbleNearestFree(st, B || null, c, r) >= 0 ? crumbleNearestFree(st, B || null, c, r) : crumbleNearestFree(st, null, c, r); if (j >= 0) crumbleWrite(st, j, mat, lit, 0, set, litArr); else cWhy('avoid:lost'); return j; }
+function crumblePlace(st, c, r, mat, lit, set, litArr) {
   const grid = st.terrain, ROWS = st.rows, hp = st.terrainHp;
   for (let rr = r; rr >= Math.max(0, r - 24); rr--) {
     const j = c * ROWS + rr; if (j < 0 || j >= grid.length) return -1;
@@ -5868,7 +5799,6 @@ function crumbleTake(room, obj, S, ks, more) {
   const set = [];
   let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity, went = 0;
   const fs = st.fineFire, ages = st.fireAge || (st.fireAge = new Map()), lit = [];
-  const B = crumbleCfg.avoid ? crumbleBoxes(room, obj.id) : null;   // …other objects' boxes (option 2 — `crumbleBoxes`)
   // ⭐⭐ THE GLOW IS HANDED OVER AS A WHOLE (`crumbleCfg.handover`, 2026-09-27 — the user: crates "go from smouldering to
   //   basically completely out" when they crumble, and the heap shows hard-edged ash squares). A crate burns from the
   //   outside in, so when it crumbles its OUTLINE is burnt through and out and its MIDDLE still smoulders; handed over cell
@@ -5937,7 +5867,7 @@ function crumbleTake(room, obj, S, ks, more) {
       // ⭐ …AND IT ALWAYS LANDS SOMEWHERE (2026-09-26, user: objects crumbling INTO NOTHING where powder already was). It
       //   used to go in only if its own cell was empty and otherwise simply vanished. Now it takes the nearest empty cell
       //   ABOVE, so a crate sunk in a heap adds its buried half to the top of the heap.
-      if (q) { const j = crumblePlace(st, q.c, Math.min(q.r, Math.floor(roomFloorTop(room) / TERRAIN_CELL) - 1), crumbleMatOf(cells, D, k, obj.id), H ? H.lit(k) : (cells[k] & 4) !== 0, set, lit, B);
+      if (q) { const j = crumblePlace(st, q.c, Math.min(q.r, Math.floor(roomFloorTop(room) / TERRAIN_CELL) - 1), MAT_CINDER, H ? H.lit(k) : (cells[k] & 4) !== 0, set, lit);
         if (j >= 0 && H && H.lit(k) && st.fireAge && st.fineFire && st.fineFire.has(j)) { st.fireAge.set(j, H.age(k, j)); lt.push(j, H.ago(k)); }
         if (j >= 0) { const cc = (j / ROWS) | 0, rr = j % ROWS; if (cc < c0) c0 = cc; if (cc > c1) c1 = cc; if (rr < r0) r0 = rr; if (rr > r1) r1 = rr; } }
       cells[k] = 0; went++;
@@ -5950,26 +5880,7 @@ function crumbleTake(room, obj, S, ks, more) {
       if (liquidCfg.bodyWhole) { cells[k] = 0; went++; cWhy('take:gap'); }
       continue;
     }
-    const _cm = crumbleMatOf(cells, D, k, obj.id);                        // …cinder, or ASH for a burnt-through shell cell
-    // ⭐ OPTION 2 (`crumbleCfg.avoid`): this cell would put powder inside another object — clear it, and put its powder in
-    //   the nearest free cell instead, carrying its fire and how far through its burn it was
-    if (B && crumbleInBox(B, q.c, q.r)) {
-      const need251 = liquidCfg.fireSolidBurn / (FIRE_RATE[251] || 0.1) * Math.max(1, liquidCfg.fireBodyThrough || 1);
-      const wasLit = H ? H.lit(k) : !!(cells[k] & 4), frac = H ? 0 : fs && fs.has(i) ? Math.min(0.85, (ages.get(i) || 0) / need251) : 0;
-      // 🟥 …AND WITH NOWHERE FREE IT STAYS WHERE IT WAS (the overlap is then the gentle push-out's to settle —
-      //    `lbPushCfg.gentle` on the client). Dropping it lost 89 cells in one packed pile: "crumbling into nothing" again.
-      const j = crumbleNearestFree(st, B, q.c, q.r);
-      if (j >= 0) {
-        grid.s(i, 0); hp.s(i, 0); if (st.sat) st.sat.s(i, 0); bodyOwnDrop(room, i, obj.id); set.push(i, 0);
-        if (fs && fs.delete(i)) { ages.delete(i); lit.push(i, 0); }
-        crumbleWrite(st, j, _cm, wasLit, frac, set, lit); cWhy('avoid:moved');
-        if (H && wasLit && st.fireAge && st.fineFire && st.fineFire.has(j)) { st.fireAge.set(j, H.age(k, j)); lt.push(j, H.ago(k)); }
-        cells[k] = 0; went++;
-        if (q.c < c0) c0 = q.c; if (q.c > c1) c1 = q.c; if (q.r < r0) r0 = q.r; if (q.r > r1) r1 = q.r;
-        continue;
-      }
-      cWhy('avoid:stayed');
-    }
+    const _cm = MAT_CINDER;
     grid.s(i, _cm); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
     bodyOwnDrop(room, i, obj.id);
     set.push(i, _cm);
@@ -5983,7 +5894,7 @@ function crumbleTake(room, obj, S, ks, more) {
       const on = !!(fs && fs.has(i)), want = _cm === MAT_CINDER && H.lit(k) && !!liquidCfg.fireSolids;
       // ⚠️ ALWAYS RE-SENT when alight, even if the world cell already was: the browser filed it as an OBJECT's burning cell
       //    and would go on doing so — the ground's fire never drew it (16b `fire-cells` moves it across on this message)
-      if (want) { const f = fineFireSet(room); f.add(i); lit.push(i, 1); ages.set(i, H.age(k, i)); lt.push(i, H.ago(k)); }
+      if (want) { const f = fineFireSet(room); f.add(i); lit.push(i, 1); ages.set(i, H.age(k, i)); lt.push(i, H.ago(k)); if (st.fireHeat) st.fireHeat.delete(i); }
       else if (on) { fs.delete(i); ages.delete(i); lit.push(i, 0); }
     } else if (_cm === MAT_CINDER && (cells[k] & 4) && fs && liquidCfg.fireSolids) {
       const need251 = liquidCfg.fireSolidBurn / (FIRE_RATE[251] || 0.1) * Math.max(1, liquidCfg.fireBodyThrough || 1);
@@ -6025,11 +5936,11 @@ function crumbleUnstamped(room, obj, ks) {
   const cells = bodyCellsOf(rec, obj);
   // ⭐ NOT INTO NOTHING (2026-09-26): a body with no stamp — sunk whole in a heap — used to just lose these cells. They go
   //   into the world at its last known pose now, each in the nearest empty cell above where it was (`crumblePlace`).
-  const st = roomCells.get(room), D = bodyDims(obj), set = [], lit = [], B = crumbleCfg.avoid ? crumbleBoxes(room, obj.id) : null;
+  const st = roomCells.get(room), D = bodyDims(obj), set = [], lit = [];
   const bs = Array.isArray(rec.bs) ? rec.bs : null, px = bs ? bs[0] : obj.x, py = bs ? bs[1] : obj.y, pa = bs ? bs[2] / 1000 : (obj.angle || 0);
   let went = 0;
   for (const k of ks) if (cells[k] & 3) {
-    if (st && st.terrain && liquidCfg.bodyWhole) { const q = bodyRep(obj, D, px, py, pa, k); if (q) crumblePlace(st, q.c, Math.min(q.r, Math.floor(roomFloorTop(room) / TERRAIN_CELL) - 1), crumbleMatOf(cells, D, k, obj.id), (cells[k] & 4) !== 0, set, lit, B); }
+    if (st && st.terrain && liquidCfg.bodyWhole) { const q = bodyRep(obj, D, px, py, pa, k); if (q) crumblePlace(st, q.c, Math.min(q.r, Math.floor(roomFloorTop(room) / TERRAIN_CELL) - 1), MAT_CINDER, (cells[k] & 4) !== 0, set, lit); }
     cells[k] = 0; went++;
   }
   if (!went) return 0;
@@ -8321,10 +8232,13 @@ const liquidCfg = {
   fireOxygen: 1,         // a cell that finishes its burn with no open face is STARVED: charcoal, out (see there)
   ashAir: 1,             // ash lets air through to charcoal/cinder under it, so a heap burns down past its top layer
   bodyCharRate: 0.1,     // a WHOLE object's charcoal: burn rate. 0.1 = ~32s on its outside, ~96s inside (inside takes `fireBodyThrough` = 3x); 0.16 was the old value
-  bodyAshDepth: 0,       // …ash on a whole object's outside: OFF (user, 2026-09-27: "looks kind of blurry … should just be reverted")
   bodyWhole: 1,          // a burning object stays WHOLE — no holes, no pieces — and crumbles only once it is all charcoal (`bodyWholeApply`)
   bodyOwn: 1,            // …and burns on its OWN grid, never read back from the world (`bodyOwnBurn`, 2026-09-27)
   cinderThrough: 1,      // buried CINDER smoulders `fireBodyThrough`× longer, like buried charcoal (the same material)
+  // a smouldering PILE (cinder) is finite and ends MIXED (2026-09-27, see the fire pass): heat falls ×`cinderHeatDecay` each
+  // time cinder lights cinder and it stops below `cinderHeatMin`; an exposed cell ends as ash in `cinderAshExposed` of cells
+  // (else charcoal, out), a buried one in `cinderAshBuried` of them
+  cinderMix: 1, cinderHeatDecay: 0.6, cinderHeatMin: 0.3, cinderAshExposed: 0.55, cinderAshBuried: 0.3,
   fireAshOrder: 0,       // 1 = a column crumbles TOP DOWN so nothing hovers
   fireAshJitter: 45,     // per-cell delay before a cell finishes burning, so a mass does not turn over all at once
   // ⭐ HOW MUCH LONGER A CRATE'S BURIED CHARCOAL SMOULDERS BEFORE IT IS BURNT THROUGH (user, 2026-09-22: crates
@@ -10587,6 +10501,7 @@ function fineReactTickRoom(room, SUB, phase) {
     //    where there is air or ash on a face — that is what makes a burnt trunk ash away from the outside in.
     const burntThrough = (v) => v === 253 || v === 254;
     const burntCanCatch = (j) => !burntThrough(gPeek(j)) || airAround(j) || ashAround(j);
+    const heat = st.fireHeat || (st.fireHeat = new Map());   // cinder cell → the heat it was lit with, below 1 only (`cinderMix`)
     const spread = (j0, rj, age) => {
       for (const j of [rj < ROWS - 1 ? j0 + 1 : -1, rj > 0 ? j0 - 1 : -1, j0 - ROWS, j0 + ROWS]) {
         if (j < 0 || j >= N || burningAny(fire, j)) continue;   // ⚠️ the ROOM's set — see `burningAny`
@@ -10601,7 +10516,23 @@ function fineReactTickRoom(room, SUB, phase) {
         // is re-lit by its neighbour for ever.
         if (liquidCfg.fireOxygen && FIRE_AIR[gPeek(j)] && !(airAround(j) || (liquidCfg.ashAir && ashAround(j)))) continue;
         if (!burntCanCatch(j)) continue;
-        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1) * catchMul(j)))) { lightCell(fire, j); ages.set(j, 0); }
+        // ⭐⭐ A PILE'S FIRE RUNS OUT OF HEAT (`cinderMix`, 2026-09-27 — the user: surface cells of a smouldering heap *"burn
+        //   until they become ash and then the cells below them become exposed and burn also. But there should be some
+        //   limitation on this … a smouldering tree or charcoal doesn't just burn forever"*). Every cinder cell is fuel, so
+        //   fire walked cinder to cinder until the whole heap was ash. Now each cinder cell lit FROM cinder carries less
+        //   heat than the cell that lit it (× `cinderHeatDecay`), and catches only if that heat, scaled by its own hashed
+        //   resistance (0.5–1), clears `cinderHeatMin` — so a burning patch lights a ragged ring or two and stops. Any
+        //   other source (a crumble, wood, a torch, lava) lights at full heat. ⚠️ LITERAL 93 — this block is sliced.
+        let _hN = 1;
+        if (liquidCfg.cinderMix && gPeek(j) === 93 && gPeek(j0) === 93) {
+          const h0 = heat.has(j0) ? heat.get(j0) : 1;
+          if (h0 * (0.5 + 0.5 * fireVar(j, salt, 21)) < (+liquidCfg.cinderHeatMin || 0)) continue;
+          _hN = h0 * (+liquidCfg.cinderHeatDecay || 1);
+        }
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1) * catchMul(j)))) {
+          lightCell(fire, j); ages.set(j, 0);
+          if (_hN < 1) heat.set(j, _hN); else heat.delete(j);
+        }
       }
     };
     // ── FIRE JUMPS GAPS (see `fireReach` / `fireEmbers` in liquidCfg for the design).
@@ -10719,6 +10650,7 @@ function fineReactTickRoom(room, SUB, phase) {
     if ((tick % FIRE_AUDIT_TICKS) === 0) {
       for (const i of fire)
         if (!fuelHere(i)) { fire.delete(i); ages.delete(i); fireOut.push(i); liqFireStale++; }
+      if (heat.size) for (const j of heat.keys()) if (!fire.has(j)) heat.delete(j);   // …a cell no longer alight has no heat to pass on
     }
     for (const i of list) {
       if (!fuelHere(i)) { if (fire.delete(i)) fireOut.push(i); ages.delete(i); continue; }   // burnt out (or the oil moved on)
@@ -10829,6 +10761,28 @@ function fineReactTickRoom(room, SUB, phase) {
           //   exposed top layer"*). Finite: a cell that finishes this way becomes ash, which is not fuel.
           const exposed = !liquidCfg.fireOxygen || airAround(i) || _g0 === 250 || (burntThrough(_g0) && ashAround(i)) || (liquidCfg.ashAir && FIRE_AIR[_g0] && ashAround(i));
           const relit = left > 0 && FIRE_RATE[left] > 0 && exposed;
+          // ⭐⭐ A PILE ENDS AS A MIX OF ASH AND CHARCOAL (`cinderMix`, 2026-09-27 — the user: *"we kind of want the pile to be
+          //   made of both ash and charcoal, … spread in a non-predictable, non-'mathematical' looking way, without defined
+          //   edges"*). A cinder cell open to the air always became ash and a buried one never did, so ash formed as a clean
+          //   layer over a charcoal core with a hard edge between. Now an exposed one goes out as charcoal instead in
+          //   (1 − `cinderAshExposed`) of cells, and a buried one becomes ash in `cinderAshBuried` of them, each by the cell's
+          //   own hash. ⚠️ LITERALS (93 cinder, 38 ash) — this block is sliced.
+          if (liquidCfg.cinderMix && _g0 === 93 && !flash && left > 0) {
+            // 🟥 IN CLUMPS, NOT SPECKS: decided by a cell's own hash alone, the finished pile was salt-and-pepper STATIC
+            //    (look/perf/pile/tl_330.png). Mostly a smooth field ~5 cells across, a little of the cell's own hash on top.
+            const _cc = (i / ROWS) | 0, _rr = i % ROWS, _gx = _cc / 5, _gy = _rr / 5, _x0 = Math.floor(_gx), _y0 = Math.floor(_gy);
+            const _tx = _gx - _x0, _ty = _gy - _y0, _sx = _tx * _tx * (3 - 2 * _tx), _sy = _ty * _ty * (3 - 2 * _ty);
+            const _lat = (x, y) => fireVar((x * 7919 + y * 104729) | 0, salt, 23);
+            const _vn = (_lat(_x0, _y0) * (1 - _sx) + _lat(_x0 + 1, _y0) * _sx) * (1 - _sy) + (_lat(_x0, _y0 + 1) * (1 - _sx) + _lat(_x0 + 1, _y0 + 1) * _sx) * _sy;
+            const _hc = 0.7 * _vn + 0.3 * fireVar(i, salt, 22);
+            if (exposed && _hc >= (+liquidCfg.cinderAshExposed || 0)) { fire.delete(i); ages.delete(i); heat.delete(i); fireOut.push(i); continue; }
+            if (!exposed && _hc < (+liquidCfg.cinderAshBuried || 0)) {
+              fire.delete(i); ages.delete(i); heat.delete(i); fireOut.push(i);
+              setSolid(i, 38); powderSet(room).add(i);
+              if (fireGone) fireGone(room, i);
+              continue;
+            }
+          }
           // ⭐ STARVED: the chain stops here. Wood becomes charcoal and goes out; charcoal stays charcoal and goes
           // out. Either way the cell keeps its shape and can be dug for what it is, which is how charcoal is made.
           if (!flash && !exposed && left > 0) {
@@ -13188,7 +13142,7 @@ function cfgWire() {
     dayCycleMin: Math.round(worldClock.cycleMs / 60000), dayOffsetMin: Math.round(worldClock.offsetMs / 60000),
     crumble: !!crumbleCfg.on, crumbleMode: crumbleCfg.mode, crumbleTrigger: crumbleCfg.trigger,
     crumbleMs: crumbleCfg.afterMs, crumblePer: crumbleCfg.perPass, crumbleFront: crumbleCfg.frontPer, crumbleLooseMs: crumbleCfg.looseMs, crumbles, crumbleCells,
-    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, crumbleAvoid: !!crumbleCfg.avoid, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, crumbleHandover: !!crumbleCfg.handover,
+    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, cinderMix: !!liquidCfg.cinderMix, cinderHeatDecay: liquidCfg.cinderHeatDecay, cinderHeatMin: liquidCfg.cinderHeatMin, cinderAshExposed: liquidCfg.cinderAshExposed, cinderAshBuried: liquidCfg.cinderAshBuried, crumbleHandover: !!crumbleCfg.handover,
     worldGen2: !!worldCfg.gen2,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
@@ -19692,11 +19646,12 @@ io.on('connection', (socket) => {
     if ('bodyWhole' in patch) { liquidCfg.bodyWhole = patch.bodyWhole ? 1 : 0; bodyWholeApply(); }
     if ('bodyOwn' in patch) liquidCfg.bodyOwn = patch.bodyOwn ? 1 : 0;
     if ('cinderThrough' in patch) liquidCfg.cinderThrough = patch.cinderThrough ? 1 : 0;
+    if ('cinderMix' in patch) liquidCfg.cinderMix = patch.cinderMix ? 1 : 0;
+    for (const k of ['cinderHeatDecay', 'cinderHeatMin', 'cinderAshExposed', 'cinderAshBuried']) if (k in patch) liquidCfg[k] = Math.max(0, Math.min(1, +patch[k] || 0));
     if ('crumbleHandover' in patch) crumbleCfg.handover = patch.crumbleHandover ? 1 : 0;
     if ('bodyCharRate' in patch) { liquidCfg.bodyCharRate = Math.max(0.005, Math.min(1, +patch.bodyCharRate || 0.1)); bodyWholeApply(); }
     if ('ashAir' in patch) liquidCfg.ashAir = patch.ashAir ? 1 : 0;
-    if ('bodyAshDepth' in patch) liquidCfg.bodyAshDepth = Math.max(0, Math.min(8, patch.bodyAshDepth | 0));
-    if ('bodyAutoShare' in patch) crumbleCfg.wholeAuto = Math.max(0, Math.min(1, +patch.bodyAutoShare || 0)); if ('crumbleAvoid' in patch) crumbleCfg.avoid = patch.crumbleAvoid ? 1 : 0; if ('bodyExactRead' in patch) bodyPosCfg.exact = patch.bodyExactRead ? 1 : 0;
+    if ('bodyAutoShare' in patch) crumbleCfg.wholeAuto = Math.max(0, Math.min(1, +patch.bodyAutoShare || 0)); if ('bodyExactRead' in patch) bodyPosCfg.exact = patch.bodyExactRead ? 1 : 0;
     if ('fireSolidCatch' in patch) liquidCfg.fireSolidCatch = Math.max(1, Math.min(1000, patch.fireSolidCatch | 0));
     if ('fireQuench' in patch) liquidCfg.fireQuench = patch.fireQuench ? 1 : 0;
     if ('fireVary' in patch) liquidCfg.fireVary = Math.max(0, Math.min(1, +patch.fireVary || 0));
