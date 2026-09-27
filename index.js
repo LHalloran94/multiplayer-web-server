@@ -4032,7 +4032,10 @@ function bodyTerrainOf(room) {
   if (!cellsOf(room).fineAmt) ensureFineArrays(room, 1);
   return roomCells.get(room);
 }
+// the latest pose each body was stamped or moved at — `crumbleUnstamped` places a crumble that outlived its stamp there
+const bodyLastPose = new Map();                                 // room|id → { x, y, a }
 function bodyStamp(room, obj, x, y, a) {
+  bodyLastPose.set(room + '|' + obj.id, { x, y, a });
   const st = bodyTerrainOf(room); if (!st || !st.terrain || !st.terrainHp) { cWhy("stamp:noGround"); return false; }
   const grid = st.terrain, hp = st.terrainHp, tot = st.fineTotal, ROWS = st.rows, COLS = st.cols, gen = !!grid.seedFn;
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
@@ -4227,9 +4230,13 @@ function bodyBurnMoving(room, obj, B, now) {
   // ⚠️ ITS BOTTOM EDGE IS NOT OPEN: a thing being pushed or dragged is nearly always sitting on something, and counting
   // that face as air let a moving crate burn away from underneath as readily as from its sides (user, 2026-09-19: *"they
   // burn just as well on the bottom as on the exposed sides"*). A cell gone from INSIDE the grid still opens it.
+  // ⭐ …AND ASH ON A FACE LETS AIR THROUGH (`bodyAsh`, 2026-09-27), as it does in the world (`ashAir`): a cell beside one of
+  //   the object's own ash cells is open, so ash eats inward from wherever it formed, irregularly.
+  const ashAt = (c, r) => c >= 0 && r >= 0 && c < D.c && r < D.r && (cells[r * D.c + c] & 16) !== 0;
+  const ashBy = (k) => { if (!liquidCfg.bodyAsh) return false; const c = k % D.c, r = (k / D.c) | 0; return ashAt(c - 1, r) || ashAt(c + 1, r) || ashAt(c, r - 1) || ashAt(c, r + 1); };
   const open = (B.open && B.open.length === n && bodyOwnOn())
-    ? (k) => B.open[k] === 1                                           // …in the world: what the world says (`bodyOwnBurn`)
-    : (k) => { const c = k % D.c, r = (k / D.c) | 0; return !has(c - 1, r) || !has(c + 1, r) || !has(c, r - 1) || (r + 1 < D.r && !has(c, r + 1)); };
+    ? (k) => B.open[k] === 1 || ashBy(k)                               // …in the world: what the world says (`bodyOwnBurn`)
+    : (k) => { const c = k % D.c, r = (k / D.c) | 0; return !has(c - 1, r) || !has(c + 1, r) || !has(c, r - 1) || (r + 1 < D.r && !has(c, r + 1)) || ashBy(k); };
   const rateOf = (code) => FIRE_RATE[bodyCodeMat(code)] || 0.1;
   const vary = Math.max(0, Math.min(1, +liquidCfg.fireVary || 0));
   let hs = 0; const sid = String(obj.id); for (let q = 0; q < sid.length; q++) hs = (Math.imul(hs, 31) + sid.charCodeAt(q)) | 0;
@@ -4237,7 +4244,11 @@ function bodyBurnMoving(room, obj, B, now) {
   let changed = false;
   for (let k = 0; k < n; k++) {
     if (!(cells[k] & 4) || !(cells[k] & 3)) continue;
-    B.age[k] += dt;
+    // ⭐ A WHOLE OBJECT'S BURIED CHARCOAL BURNS SLOWER rather than being allowed to get OLDER (2026-09-27): it used to wait
+    //   `fireBodyThrough`× its life, so a cell uncovered late (ash forming beside it) was already past its open life and
+    //   finished at once — a chain, the same fault the heap had. At 1/`fireBodyThrough` the rate, uncovering only speeds it up.
+    const _slow = liquidCfg.bodyWhole && (cells[k] & 3) === 2 && !open(k);
+    B.age[k] += _slow ? dt / Math.max(1, liquidCfg.fireBodyThrough || 1) : dt;
     const c = k % D.c, r = (k / D.c) | 0;
     for (const [nc, nr, up] of [[c - 1, r, 0], [c + 1, r, 0], [c, r - 1, 1], [c, r + 1, 0]]) {
       if (!has(nc, nr)) continue;
@@ -4249,7 +4260,7 @@ function bodyBurnMoving(room, obj, B, now) {
       if (B.age[k] >= liquidCfg.fireSolidCatch / rateOf(next[kk]) / (up ? 2 : 1) * tk * cm) { next[kk] |= 4; B.age[kk] = 0; changed = true; }
     }
     // (…a WHOLE object's buried charcoal smoulders `fireBodyThrough` times longer before it is burnt through, as in the world)
-    const burn = bodyBurnNeedMs(obj, B, k, cells[k], open(k));
+    const burn = bodyBurnNeedMs(obj, B, k, cells[k], liquidCfg.bodyWhole ? true : open(k));   // (whole: the slowness is in the RATE above)
     if (B.age[k] < burn) continue;
     const ex = !oxy || open(k);
     // ⚠️ THE WORLD'S RULES, kept in step (2026-09-22): wood never starves, buried charcoal ends burnt through, and a
@@ -4262,7 +4273,15 @@ function bodyBurnMoving(room, obj, B, now) {
     //    the piece comes to rest it is back in the world, where the ordinary rules finish it.
     if ((cells[k] & 3) === 1) next[k] = 2 | 4;                        // wood → charcoal, still alight
     else if ((cells[k] & 3) === 3) next[k] = 0;                       // foliage → nothing, as leaves do everywhere
-    else next[k] = 2 | 8;                                             // charcoal, or already burnt through → burnt through, out
+    else {
+      next[k] = 2 | 8;                                                // charcoal, or already burnt through → burnt through, out
+      // ⭐⭐ …OR ASH, STILL PART OF THE OBJECT (`bodyAsh`, 2026-09-27 — the user: ash should form on the crates as they burn and
+      //   smoulder, and mix into the heap when they crumble; the first try formed a one-cell RING round the edge and looked
+      //   blurry). Each cell decides by its own hash: open to the air `bodyAshOpen` of them, buried `bodyAshBuried` — no
+      //   depth rule, so no ring. Out, not fuel; it crumbles as Ash (`crumbleTake`).
+      if (liquidCfg.bodyWhole && liquidCfg.bodyAsh && (cells[k] & 3) === 2 && !(cells[k] & 8)
+          && fireVar(k, hs, 41) < (open(k) ? +liquidCfg.bodyAshOpen || 0 : +liquidCfg.bodyAshBuried || 0)) next[k] = 2 | 8 | 16;
+    }
     B.age[k] = 0; changed = true;
   }
   if (!changed) return false;
@@ -4272,6 +4291,7 @@ function bodyBurnMoving(room, obj, B, now) {
 }
 // The removal seam (`objUnindex` → `objLinkDrop`): an object that is erased, smashed or burnt takes its cells with it.
 function bodyDrop(room, o) {
+  if (o) bodyLastPose.delete(room + '|' + o.id);
   if (o && roomBodyBurn[room]) { roomBodyBurn[room].delete(o.id); if (!roomBodyBurn[room].size) delete roomBodyBurn[room]; }
   if (!o || !roomBodyStamp[room] || !roomBodyStamp[room].has(o.id)) return false;
   bodyUnstamp(room, o.id, false);
@@ -4447,6 +4467,7 @@ function bodyReadCells(room, st, obj, D, S, rec) {
 // Move a stamped body to a new pose, touching only the world cells that differ. Returns 0 nothing changed · 1 moved ·
 // 2 newly in the world · 3 taken out (the room's object state must be re-sent for 2 and 3).
 function bodyMoveTo(room, obj, x, y, a) {
+  bodyLastPose.set(room + '|' + obj.id, { x, y, a });
   const m = roomBodyStamp[room], S = m && m.get(obj.id);
   if (!S) {
     cWhy('move:unstamped');
@@ -4722,6 +4743,7 @@ function bodyOwnBurn(room, obj, S, st, now) {
   }
   if (changed) bodyCellsSet(rec, obj, cells);
   // 2 · ITS OWN BURN — every cell, whether or not it has a world cell
+  let ash0 = 0; for (let k = 0; k < n; k++) if (cells[k] & 16) ash0++;
   if (anyLit) {
     if (!B) { B = { age: new Float32Array(n), last: now }; bm.set(obj.id, B); }
     // ⭐ WHICH OF ITS CELLS ARE OPEN TO THE AIR, asked of the WORLD — the same test the world fire uses (air, or ash with
@@ -4740,6 +4762,10 @@ function bodyOwnBurn(room, obj, S, st, now) {
     }
     if (bodyBurnMoving(room, obj, B, now)) changed = true;
     cells = bodyCellsOf(rec, obj);
+    // ⭐ ASH THAT FORMED ON IT IS NOT IN THE WORLD — its world cell stays the object's burnt-through charcoal — so the
+    //   browsers are told through the object's record (`obj-cells`), the same message a crumble sends (`bodyAsh`)
+    let ash1 = 0; for (let k = 0; k < n; k++) if (cells[k] & 16) ash1++;
+    if (ash1 !== ash0) io.to(room).emit('obj-cells', { id: obj.id, bc: rec.bc || null });
   } else if (B) B.last = now;
   let still = false; for (let k = 0; k < n; k++) if (cells[k] & 4) { still = true; break; }
   if (!still && B) { bm.delete(obj.id); if (!bm.size) delete roomBodyBurn[room]; B = null; }
@@ -5818,7 +5844,7 @@ function crumbleTake(room, obj, S, ks, more) {
   //   charcoal (`lt`), so no flare, the same flame die-back and the same glow; one that had gone out stays out. (A cooling
   //   glow for those was tried and taken out: the crate draws its gone-out cells with none, so the heap must not either.)
   let H = null;
-  const lt = [];
+  const lt = [], lp = [];                                    // …clock (ms as charcoal) and progress (‰ of its burn) per carried cell
   if (liquidCfg.bodyWhole && crumbleCfg.handover) {
     const Bb = roomBodyBurn[room] && roomBodyBurn[room].get(obj.id), tk = liquidCfg.tickMs || 40;
     H = {
@@ -5828,6 +5854,7 @@ function crumbleTake(room, obj, S, ks, more) {
       //    shipped `fireVary`), so measured against the average the short-lived ones were already past their end and turned
       //    to ASH the instant they landed — grey specks all over a heap that had just crumbled. Same seed, same formula.
       age: (k, i) => {
+        H._p = 0;
         const vary = Math.max(0, Math.min(1, +liquidCfg.fireVary || 0));
         const bm = vary && i >= 0 ? 1 + vary * 0.5 * (2 * fireVar(i, fireSaltOf(st), 2) - 1) : 1;
         const n93 = liquidCfg.fireSolidBurn / (FIRE_RATE[MAT_CINDER] || 0.05) * bm;
@@ -5839,13 +5866,14 @@ function crumbleTake(room, obj, S, ks, more) {
         // ⭐ AS A SHARE OF THE BURN (2026-09-27): a buried heap cell now AGES a third as fast (`_inc` in the fire pass), so
         //   "passes left" means different time buried and exposed. The share done carries over instead: a crate cell half
         //   through its burn is half through the heap's, whichever way it lands — and the floor above still holds.
-        const need = bodyBurnNeedMs(obj, Bb, k, cells[k]);
+        const need = bodyBurnNeedMs(obj, Bb, k, cells[k], true);   // (open: a buried cell burns SLOWER, not longer)
         // 🟥 …AND THE FLOOR VARIES PER CELL (0.4–1.6×). A fixed one gave every capped cell EXACTLY the same time left, and a
         //    crate far through its burn is mostly capped: 4,000 of a heap's 7,000 burning cells went out within 8s of each
         //    other, 40s after the crumble (rig, `timeline_cont4`) — the user's "a bunch of connected cells … at the same time".
         const floorMs = Math.max(0, +crumbleCfg.minLeftMs || 0) * (i >= 0 ? 0.4 + 1.2 * fireVar(i, fireSaltOf(st), 13) : 1);
         const pMax = Math.max(0, 1 - floorMs / (n93 * tk));
         const p = need > 0 ? Math.min(pMax, Math.max(0, Bb.age[k] / need)) : 0;
+        H._p = p;                                               // …kept for the browser's ash skin (`lp`)
         return Math.round(p * n93);
       },
       ago: (k) => (Bb && Bb.age && Bb.age.length === cells.length) ? Math.round(Bb.age[k]) : 0,
@@ -5867,8 +5895,8 @@ function crumbleTake(room, obj, S, ks, more) {
       // ⭐ …AND IT ALWAYS LANDS SOMEWHERE (2026-09-26, user: objects crumbling INTO NOTHING where powder already was). It
       //   used to go in only if its own cell was empty and otherwise simply vanished. Now it takes the nearest empty cell
       //   ABOVE, so a crate sunk in a heap adds its buried half to the top of the heap.
-      if (q) { const j = crumblePlace(st, q.c, Math.min(q.r, Math.floor(roomFloorTop(room) / TERRAIN_CELL) - 1), MAT_CINDER, H ? H.lit(k) : (cells[k] & 4) !== 0, set, lit);
-        if (j >= 0 && H && H.lit(k) && st.fireAge && st.fineFire && st.fineFire.has(j)) { st.fireAge.set(j, H.age(k, j)); lt.push(j, H.ago(k)); }
+      if (q) { const j = crumblePlace(st, q.c, Math.min(q.r, Math.floor(roomFloorTop(room) / TERRAIN_CELL) - 1), (cells[k] & 16) ? 38 : MAT_CINDER, H ? H.lit(k) : (cells[k] & 4) !== 0, set, lit);
+        if (j >= 0 && H && H.lit(k) && st.fireAge && st.fineFire && st.fineFire.has(j)) { st.fireAge.set(j, H.age(k, j)); lt.push(j, H.ago(k)); lp.push(j, Math.round((H._p || 0) * 1000)); }
         if (j >= 0) { const cc = (j / ROWS) | 0, rr = j % ROWS; if (cc < c0) c0 = cc; if (cc > c1) c1 = cc; if (rr < r0) r0 = rr; if (rr > r1) r1 = rr; } }
       cells[k] = 0; went++;
       continue;
@@ -5880,7 +5908,7 @@ function crumbleTake(room, obj, S, ks, more) {
       if (liquidCfg.bodyWhole) { cells[k] = 0; went++; cWhy('take:gap'); }
       continue;
     }
-    const _cm = MAT_CINDER;
+    const _cm = (cells[k] & 16) ? 38 : MAT_CINDER;                      // …ash that formed on the object crumbles as Ash (`bodyAsh`)
     grid.s(i, _cm); hp.s(i, 1); if (st.sat) st.sat.s(i, 0);
     bodyOwnDrop(room, i, obj.id);
     set.push(i, _cm);
@@ -5894,7 +5922,7 @@ function crumbleTake(room, obj, S, ks, more) {
       const on = !!(fs && fs.has(i)), want = _cm === MAT_CINDER && H.lit(k) && !!liquidCfg.fireSolids;
       // ⚠️ ALWAYS RE-SENT when alight, even if the world cell already was: the browser filed it as an OBJECT's burning cell
       //    and would go on doing so — the ground's fire never drew it (16b `fire-cells` moves it across on this message)
-      if (want) { const f = fineFireSet(room); f.add(i); lit.push(i, 1); ages.set(i, H.age(k, i)); lt.push(i, H.ago(k)); if (st.fireHeat) st.fireHeat.delete(i); }
+      if (want) { const f = fineFireSet(room); f.add(i); lit.push(i, 1); ages.set(i, H.age(k, i)); lt.push(i, H.ago(k)); lp.push(i, Math.round((H._p || 0) * 1000)); if (st.fireHeat) st.fireHeat.delete(i); }
       else if (on) { fs.delete(i); ages.delete(i); lit.push(i, 0); }
     } else if (_cm === MAT_CINDER && (cells[k] & 4) && fs && liquidCfg.fireSolids) {
       const need251 = liquidCfg.fireSolidBurn / (FIRE_RATE[251] || 0.1) * Math.max(1, liquidCfg.fireBodyThrough || 1);
@@ -5917,7 +5945,7 @@ function crumbleTake(room, obj, S, ks, more) {
   if (Object.keys(rec).length) ost.set(obj.id, rec); else ost.delete(obj.id);
   if (set.length) wireFanout(room, 'terrain-set', { cells: set });
   // …with each carried-on cell's clock (`lt`: how long it has been charcoal)
-  if (lit.length) wireFanout(room, 'fire-cells', { cells: lit, lt: lt.length ? lt : undefined });
+  if (lit.length) wireFanout(room, 'fire-cells', { cells: lit, lt: lt.length ? lt : undefined, lp: lp.length ? lp : undefined });
   io.to(room).emit('obj-cells', { id: obj.id, bc: rec.bc || null });
   if (c1 >= c0) { activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1); fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); }
   if (!bodyAny(cells)) { bodyBurnOut(room, obj); return went; }
@@ -5937,10 +5965,15 @@ function crumbleUnstamped(room, obj, ks) {
   // ⭐ NOT INTO NOTHING (2026-09-26): a body with no stamp — sunk whole in a heap — used to just lose these cells. They go
   //   into the world at its last known pose now, each in the nearest empty cell above where it was (`crumblePlace`).
   const st = roomCells.get(room), D = bodyDims(obj), set = [], lit = [];
-  const bs = Array.isArray(rec.bs) ? rec.bs : null, px = bs ? bs[0] : obj.x, py = bs ? bs[1] : obj.y, pa = bs ? bs[2] / 1000 : (obj.angle || 0);
+  // 🟥 …AT ITS LATEST POSE, NOT WHERE IT WAS FIRST PUT (2026-09-27, the user: crumbled powder appearing *"much higher above
+  //    the pile … maybe even off-screen"*). `rec.bs` is deleted when a body is taken out of the world, so a travelling
+  //    crumble that outlived its stamp (a ball knocked the crate mid-crumble) fell back to `obj.x/y` — the PLACEMENT pose,
+  //    which for a crate dropped from above is high in the air. `bodyLastPose` is written on every stamp and every move.
+  const LP = bodyLastPose.get(room + '|' + obj.id), bs = Array.isArray(rec.bs) ? rec.bs : null;
+  const px = LP ? LP.x : bs ? bs[0] : obj.x, py = LP ? LP.y : bs ? bs[1] : obj.y, pa = LP ? LP.a : bs ? bs[2] / 1000 : (obj.angle || 0);
   let went = 0;
   for (const k of ks) if (cells[k] & 3) {
-    if (st && st.terrain && liquidCfg.bodyWhole) { const q = bodyRep(obj, D, px, py, pa, k); if (q) crumblePlace(st, q.c, Math.min(q.r, Math.floor(roomFloorTop(room) / TERRAIN_CELL) - 1), MAT_CINDER, (cells[k] & 4) !== 0, set, lit); }
+    if (st && st.terrain && liquidCfg.bodyWhole) { const q = bodyRep(obj, D, px, py, pa, k); if (q) crumblePlace(st, q.c, Math.min(q.r, Math.floor(roomFloorTop(room) / TERRAIN_CELL) - 1), (cells[k] & 16) ? 38 : MAT_CINDER, (cells[k] & 4) !== 0, set, lit); }
     cells[k] = 0; went++;
   }
   if (!went) return 0;
@@ -8238,7 +8271,9 @@ const liquidCfg = {
   // a smouldering PILE (cinder) is finite and ends MIXED (2026-09-27, see the fire pass): heat falls ×`cinderHeatDecay` each
   // time cinder lights cinder and it stops below `cinderHeatMin`; an exposed cell ends as ash in `cinderAshExposed` of cells
   // (else charcoal, out), a buried one in `cinderAshBuried` of them
-  cinderMix: 1, cinderHeatDecay: 0.6, cinderHeatMin: 0.3, cinderAshExposed: 0.55, cinderAshBuried: 0.3,
+  cinderHeat: 1, cinderHeatDecay: 0.6, cinderHeatMin: 0.3,   // (the heat limit, its own switch 2026-09-27)
+  cinderMix: 1, cinderAshExposed: 0.4, cinderAshBuried: 0.08, cinderClump: 0,   // 2026-09-27: the OBJECTS' rule (`bodyAsh` shares, each cell alone) — the same material ends the same way; the clumped version is `cinderClump` 0.7
+  bodyAsh: 1, bodyAshOpen: 0.4, bodyAshBuried: 0.08,   // a whole object's charcoal may finish as ASH still on it (`bodyBurnMoving`); open / buried share
   fireAshOrder: 0,       // 1 = a column crumbles TOP DOWN so nothing hovers
   fireAshJitter: 45,     // per-cell delay before a cell finishes burning, so a mass does not turn over all at once
   // ⭐ HOW MUCH LONGER A CRATE'S BURIED CHARCOAL SMOULDERS BEFORE IT IS BURNT THROUGH (user, 2026-09-22: crates
@@ -10524,7 +10559,7 @@ function fineReactTickRoom(room, SUB, phase) {
         //   resistance (0.5–1), clears `cinderHeatMin` — so a burning patch lights a ragged ring or two and stops. Any
         //   other source (a crumble, wood, a torch, lava) lights at full heat. ⚠️ LITERAL 93 — this block is sliced.
         let _hN = 1;
-        if (liquidCfg.cinderMix && gPeek(j) === 93 && gPeek(j0) === 93) {
+        if (liquidCfg.cinderHeat && gPeek(j) === 93 && gPeek(j0) === 93) {
           const h0 = heat.has(j0) ? heat.get(j0) : 1;
           if (h0 * (0.5 + 0.5 * fireVar(j, salt, 21)) < (+liquidCfg.cinderHeatMin || 0)) continue;
           _hN = h0 * (+liquidCfg.cinderHeatDecay || 1);
@@ -10774,7 +10809,9 @@ function fineReactTickRoom(room, SUB, phase) {
             const _tx = _gx - _x0, _ty = _gy - _y0, _sx = _tx * _tx * (3 - 2 * _tx), _sy = _ty * _ty * (3 - 2 * _ty);
             const _lat = (x, y) => fireVar((x * 7919 + y * 104729) | 0, salt, 23);
             const _vn = (_lat(_x0, _y0) * (1 - _sx) + _lat(_x0 + 1, _y0) * _sx) * (1 - _sy) + (_lat(_x0, _y0 + 1) * (1 - _sx) + _lat(_x0 + 1, _y0 + 1) * _sx) * _sy;
-            const _hc = 0.7 * _vn + 0.3 * fireVar(i, salt, 22);
+            // (`cinderClump`: how much of the decision is the smooth field — 0 = each cell alone, the objects' own rule)
+            const _cw = Math.max(0, Math.min(1, +liquidCfg.cinderClump || 0));
+            const _hc = _cw * _vn + (1 - _cw) * fireVar(i, salt, 22);
             if (exposed && _hc >= (+liquidCfg.cinderAshExposed || 0)) { fire.delete(i); ages.delete(i); heat.delete(i); fireOut.push(i); continue; }
             if (!exposed && _hc < (+liquidCfg.cinderAshBuried || 0)) {
               fire.delete(i); ages.delete(i); heat.delete(i); fireOut.push(i);
@@ -13142,7 +13179,7 @@ function cfgWire() {
     dayCycleMin: Math.round(worldClock.cycleMs / 60000), dayOffsetMin: Math.round(worldClock.offsetMs / 60000),
     crumble: !!crumbleCfg.on, crumbleMode: crumbleCfg.mode, crumbleTrigger: crumbleCfg.trigger,
     crumbleMs: crumbleCfg.afterMs, crumblePer: crumbleCfg.perPass, crumbleFront: crumbleCfg.frontPer, crumbleLooseMs: crumbleCfg.looseMs, crumbles, crumbleCells,
-    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, cinderMix: !!liquidCfg.cinderMix, cinderHeatDecay: liquidCfg.cinderHeatDecay, cinderHeatMin: liquidCfg.cinderHeatMin, cinderAshExposed: liquidCfg.cinderAshExposed, cinderAshBuried: liquidCfg.cinderAshBuried, crumbleHandover: !!crumbleCfg.handover,
+    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, cinderMix: !!liquidCfg.cinderMix, cinderHeat: !!liquidCfg.cinderHeat, bodyAsh: !!liquidCfg.bodyAsh, bodyAshOpen: liquidCfg.bodyAshOpen, bodyAshBuried: liquidCfg.bodyAshBuried, cinderHeatDecay: liquidCfg.cinderHeatDecay, cinderHeatMin: liquidCfg.cinderHeatMin, cinderAshExposed: liquidCfg.cinderAshExposed, cinderAshBuried: liquidCfg.cinderAshBuried, cinderClump: liquidCfg.cinderClump, crumbleHandover: !!crumbleCfg.handover,
     worldGen2: !!worldCfg.gen2,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
@@ -19647,7 +19684,9 @@ io.on('connection', (socket) => {
     if ('bodyOwn' in patch) liquidCfg.bodyOwn = patch.bodyOwn ? 1 : 0;
     if ('cinderThrough' in patch) liquidCfg.cinderThrough = patch.cinderThrough ? 1 : 0;
     if ('cinderMix' in patch) liquidCfg.cinderMix = patch.cinderMix ? 1 : 0;
-    for (const k of ['cinderHeatDecay', 'cinderHeatMin', 'cinderAshExposed', 'cinderAshBuried']) if (k in patch) liquidCfg[k] = Math.max(0, Math.min(1, +patch[k] || 0));
+    if ('cinderHeat' in patch) liquidCfg.cinderHeat = patch.cinderHeat ? 1 : 0; if ('bodyAsh' in patch) liquidCfg.bodyAsh = patch.bodyAsh ? 1 : 0;
+    for (const k of ['bodyAshOpen', 'bodyAshBuried']) if (k in patch) liquidCfg[k] = Math.max(0, Math.min(1, +patch[k] || 0));
+    for (const k of ['cinderHeatDecay', 'cinderHeatMin', 'cinderAshExposed', 'cinderAshBuried', 'cinderClump']) if (k in patch) liquidCfg[k] = Math.max(0, Math.min(1, +patch[k] || 0));
     if ('crumbleHandover' in patch) crumbleCfg.handover = patch.crumbleHandover ? 1 : 0;
     if ('bodyCharRate' in patch) { liquidCfg.bodyCharRate = Math.max(0.005, Math.min(1, +patch.bodyCharRate || 0.1)); bodyWholeApply(); }
     if ('ashAir' in patch) liquidCfg.ashAir = patch.ashAir ? 1 : 0;
