@@ -4370,6 +4370,126 @@ function coverSync(room) {
   if (C) for (const id of [...C.byId.keys()]) { const o = map.get(id); if (!coverTakes(o)) coverDrop(room, id); }
   return roomCover[room] ? roomCover[room].n : null;
 }
+// ⭐⭐ OBJECTS PUSHING POWDER, AND THROWING IT UP WHEN THEY LAND (2026-09-28 — the user asked for both: *"if I stand at the
+// edge of a pile and push a crate into it…"*, and a splash). The physics runs in the browser that drives a thing; it says
+// what the thing did (`powder-push`, `powder-splash`, 16b `lbPowderFx`) and this end decides what powder moves.
+//   PUSH — a pressed cell moves out of the way (ahead-and-up, up, or ahead: the first that is open air) only if the push
+//     beats its LOAD — `k` per cell of powder stacked on it, plus one for the cell itself. So a thing ploughs the loose top
+//     of a pile and is stopped by its base, and the bottom of a big heap is never shoved out the far side (the user's point).
+//   SPLASH — surface grains round the impact are lifted out and FLOWN (a ballistic arc worked out whole at launch, as an
+//     ember's is), drawn by every browser from the launch (`powder-fly`), and set down as the same powder where they land.
+// ⚠️ Nothing here trusts the numbers beyond sanity: a strength is capped, a cell must be powder and on the room's grid, a
+//    splash throws at most `max` grains, and each socket is rate-limited. The worst a lying client can do is move loose
+//    powder about, which anybody with build rights can do anyway.
+const powderPushCfg = { on: 1, k: 2, loadMax: 24 };
+const powderSplashCfg = { on: 1, per: 0.8, max: 24, up: 0.32, out: 0.22, g: 70, drag: 0.6 };
+const POWDER_FLY_DT = 1 / 60;
+function powderMoveCell(room, st, i, dest, out) {
+  const grid = st.terrain, hp = st.terrainHp, v = grid.g(i);
+  grid.s(dest, v); if (hp) { hp.s(dest, hp.g(i)); hp.s(i, 0); } grid.s(i, 0);
+  out.push(i, 0, dest, v);
+  // …a burning grain keeps burning where it went (cinder in a smouldering heap is the common case)
+  const fs = st.fineFire;
+  if (fs && fs.has(i)) { fs.delete(i); fs.add(dest); const ag = st.fireAge; if (ag) { ag.set(dest, ag.get(i) || 0); ag.delete(i); } out.fire = (out.fire || []); out.fire.push(i, 0, dest, 1); }
+}
+function powderPushApply(room, list) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid || !powderPushCfg.on) return;
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, cov = roomCover[room] && roomCover[room].n;
+  const floorRow = Math.floor(roomFloorTop(room) / TERRAIN_CELL);
+  const air = (j) => j >= 0 && j < N && peekCellAt(grid, j) === 0 && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  const out = [];
+  let c0 = Infinity, c1 = -Infinity, r0 = Infinity, r1 = -Infinity;
+  for (let q = 0; q + 3 < list.length && q < 4 * 48; q += 4) {
+    const c = list[q] | 0, r = list[q + 1] | 0, dir = list[q + 2] > 0 ? 1 : -1, S = Math.min(2000, Math.max(0, +list[q + 3] / 10 || 0));
+    if (c < 0 || c >= COLS || r < 1 || r >= ROWS) continue;
+    const i = c * ROWS + r, v = peekCellAt(grid, i);
+    if (!isPowderId(v) || MAT_RIGID[v]) continue;
+    let load = 0; while (load < powderPushCfg.loadMax && r - load - 1 >= 0 && isPowderId(peekCellAt(grid, i - load - 1))) load++;
+    if (S < powderPushCfg.k * (1 + load)) { cWhy('push:load'); continue; }
+    const ahead = i + dir * ROWS, cc = c + dir;
+    const dest = (cc >= 0 && cc < COLS && air(ahead - 1)) ? ahead - 1 : air(i - 1) ? i - 1 : (cc >= 0 && cc < COLS && air(ahead)) ? ahead : -1;
+    if (dest < 0) { cWhy('push:boxed'); continue; }
+    powderMoveCell(room, st, i, dest, out); cWhy('push:moved');
+    if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r;
+  }
+  if (!out.length) return;
+  activatePowderRect(room, grid, c0 - 2, r0 - 2, c1 + 2, r1 + 1);
+  const tc = []; for (let q = 0; q < out.length; q += 4) tc.push(out[q], out[q + 1], out[q + 2], out[q + 3]);
+  wireFanout(room, 'terrain-set', { cells: tc });
+  if (out.fire) { const fo = [], fi = []; for (let q = 0; q < out.fire.length; q += 4) { fo.push(out.fire[q], 0); fi.push(out.fire[q + 2], 1); } wireFanout(room, 'fire-cells', { cells: fo }); wireFanout(room, 'fire-cells', { cells: fi }); }
+}
+// …a splash: grains lifted from the surface round (x, y) and flown. `sp` px/step, `vx` the thing's own sideways speed.
+const roomPowderFly = {};                             // room → [{ at, land, v, hp }] grains in the air
+function powderSplashApply(room, x, y, sp, vx, hw) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid || !powderSplashCfg.on) return;
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n;
+  const floorRow = Math.floor(roomFloorTop(room) / T);
+  const air = (j) => j >= 0 && j < N && peekCellAt(grid, j) === 0 && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  const ic = Math.floor(x / T), ir = Math.floor(y / T), R = Math.max(2, Math.min(10, Math.round(hw / T + sp / 5)));
+  const want = Math.max(1, Math.min(powderSplashCfg.max, Math.round(sp * powderSplashCfg.per)));
+  // the surface cells near the impact: powder with open air straight above, nearest first
+  const cand = [];
+  for (let c = Math.max(0, ic - R); c <= Math.min(COLS - 1, ic + R); c++) for (let r = Math.max(1, ir - 3); r <= Math.min(ROWS - 2, ir + 4); r++) {
+    const i = c * ROWS + r, v = peekCellAt(grid, i);
+    if (!isPowderId(v) || MAT_RIGID[v] || !air(i - 1)) continue;
+    cand.push([Math.abs(c - ic) + Math.abs(r - ir) * 0.5, i, c, r, v]);
+  }
+  if (!cand.length) return;
+  cand.sort((a, b) => a[0] - b[0]);
+  const fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], gone = [], now = Date.now();
+  const salt = (now & 0xffff) ^ (ic * 131 + ir * 7);
+  for (let n = 0; n < Math.min(want, cand.length); n++) {
+    const [, i, c, r, v] = cand[n];
+    if (fly.length > 600) break;
+    const h1 = fireVar(i, salt, 71), h2 = fireVar(i, salt, 72);
+    const side = c === ic ? (h1 < 0.5 ? -1 : 1) : Math.sign(c - ic);
+    // cells/s: outward from the impact, up by how hard it landed, plus some of the thing's own sideways speed
+    const s = sp * 60 / T;
+    const vx0 = side * s * powderSplashCfg.out * (0.4 + 0.9 * h1) + vx * 60 / T * 0.3, vy0 = -s * powderSplashCfg.up * (0.55 + 0.6 * h2);
+    let fx = c + 0.5, fy = r + 0.5, fvx = vx0, fvy = vy0, steps = 0, last = i, land = -1;
+    const own = i;
+    const hpv = st.terrainHp ? st.terrainHp.g(i) : 0;
+    grid.s(i, 0); if (st.terrainHp) st.terrainHp.s(i, 0); gone.push(i, 0);
+    while (steps < 240) {
+      steps++;
+      fvy += powderSplashCfg.g * POWDER_FLY_DT; fvx -= fvx * powderSplashCfg.drag * POWDER_FLY_DT;
+      fx += fvx * POWDER_FLY_DT; fy += fvy * POWDER_FLY_DT;
+      const cc = Math.floor(fx), rr = Math.floor(fy);
+      if (cc < 0 || cc >= COLS || rr < 0 || rr >= ROWS) break;
+      const j = cc * ROWS + rr;
+      if (j === last) continue;
+      if (!air(j) && j !== own) { land = last; break; }
+      last = j;
+    }
+    if (land < 0) land = last;
+    fly.push({ at: now + steps * POWDER_FLY_DT * 1000, land, v, hp: hpv });
+    wire.push(i, v, Math.round(vx0 * 100), Math.round(vy0 * 100), steps);
+  }
+  if (gone.length) { wireFanout(room, 'terrain-set', { cells: gone }); activatePowderRect(room, grid, ic - R - 1, ir - 4, ic + R + 1, ir + 4); }
+  if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: powderSplashCfg.g, d: powderSplashCfg.drag });
+}
+// …and the grains that have come down: set back as powder where they landed (or the nearest open cell above it)
+function powderFlyLand() {
+  const now = Date.now();
+  for (const room in roomPowderFly) {
+    const fly = roomPowderFly[room], st = cellsOf(room), grid = st.terrain;
+    if (!grid) { delete roomPowderFly[room]; continue; }
+    const ROWS = st.rows, cov = roomCover[room] && roomCover[room].n, set = [];
+    let keep = 0;
+    for (const F of fly) {
+      if (F.at > now) { fly[keep++] = F; continue; }
+      let j = F.land;
+      for (let k = 0; k < 6 && j >= 0; k++, j--) if (peekCellAt(grid, j) === 0 && !(cov && cov.has(j))) break;
+      if (j < 0 || peekCellAt(grid, j) !== 0) continue;
+      grid.s(j, F.v); if (st.terrainHp) st.terrainHp.s(j, F.hp || 0); set.push(j, F.v);
+      powderSet(room).add(j);
+    }
+    fly.length = keep;
+    if (set.length) wireFanout(room, 'terrain-set', { cells: set });
+    if (!keep) delete roomPowderFly[room];
+  }
+}
+setInterval(powderFlyLand, 50);
 // The removal seam (`objUnindex` → `objLinkDrop`): an object that is erased, smashed or burnt takes its cells with it.
 function bodyDrop(room, o) {
   if (o) { bodyLastPose.delete(room + '|' + o.id); coverDrop(room, o.id); }
@@ -13277,7 +13397,7 @@ function cfgWire() {
     dayCycleMin: Math.round(worldClock.cycleMs / 60000), dayOffsetMin: Math.round(worldClock.offsetMs / 60000),
     crumble: !!crumbleCfg.on, crumbleMode: crumbleCfg.mode, crumbleTrigger: crumbleCfg.trigger,
     crumbleMs: crumbleCfg.afterMs, crumblePer: crumbleCfg.perPass, crumbleFront: crumbleCfg.frontPer, crumbleLooseMs: crumbleCfg.looseMs, crumbles, crumbleCells,
-    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, cinderMix: !!liquidCfg.cinderMix, cinderHeat: !!liquidCfg.cinderHeat, bodyAsh: !!liquidCfg.bodyAsh, bodyAshOpen: liquidCfg.bodyAshOpen, bodyAshBuried: liquidCfg.bodyAshBuried, bodyAshSkin: !!liquidCfg.bodyAshSkin, bodyAshSkinFrom: liquidCfg.bodyAshSkinFrom, cinderHeatDecay: liquidCfg.cinderHeatDecay, cinderHeatMin: liquidCfg.cinderHeatMin, cinderAshExposed: liquidCfg.cinderAshExposed, cinderAshBuried: liquidCfg.cinderAshBuried, cinderClump: liquidCfg.cinderClump, crumbleHandover: !!crumbleCfg.handover,
+    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, cinderMix: !!liquidCfg.cinderMix, cinderHeat: !!liquidCfg.cinderHeat, bodyAsh: !!liquidCfg.bodyAsh, bodyAshOpen: liquidCfg.bodyAshOpen, bodyAshBuried: liquidCfg.bodyAshBuried, bodyAshSkin: !!liquidCfg.bodyAshSkin, bodyAshSkinFrom: liquidCfg.bodyAshSkinFrom, powderPush: !!powderPushCfg.on, powderPushK: powderPushCfg.k, powderSplash: !!powderSplashCfg.on, powderSplashPer: powderSplashCfg.per, powderSplashUp: powderSplashCfg.up, powderCover: !!powderCoverCfg.on, cinderHeatDecay: liquidCfg.cinderHeatDecay, cinderHeatMin: liquidCfg.cinderHeatMin, cinderAshExposed: liquidCfg.cinderAshExposed, cinderAshBuried: liquidCfg.cinderAshBuried, cinderClump: liquidCfg.cinderClump, crumbleHandover: !!crumbleCfg.handover,
     worldGen2: !!worldCfg.gen2,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
@@ -19718,6 +19838,12 @@ io.on('connection', (socket) => {
     if ('crumbleLooseMs' in patch) crumbleCfg.looseMs = Math.max(0, Math.min(120000, patch.crumbleLooseMs | 0));
     if ('crumbleShovePx' in patch) crumbleCfg.shovePx = Math.max(0, Math.min(200, +patch.crumbleShovePx || 0));
     if ('crumbleCellMs' in patch) crumbleCfg.cellMs = Math.max(0, Math.min(2000, patch.crumbleCellMs | 0));
+    // …objects and powder (`powderPushApply` / `powderSplashApply` / `coverUpdate`)
+    if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
+    if ('powderCover' in patch) { powderCoverCfg.on = patch.powderCover ? 1 : 0; if (!powderCoverCfg.on) for (const r in roomCover) delete roomCover[r]; }
+    if ('powderPushK' in patch) powderPushCfg.k = Math.max(0.1, Math.min(100, +patch.powderPushK || 2));
+    if ('powderSplashPer' in patch) powderSplashCfg.per = Math.max(0, Math.min(4, +patch.powderSplashPer || 0));
+    if ('powderSplashUp' in patch) powderSplashCfg.up = Math.max(0, Math.min(1.5, +patch.powderSplashUp || 0));
     if ('crumbleRough' in patch) crumbleCfg.rough = Math.max(0, Math.min(1, +patch.crumbleRough || 0));
     if ('crumbleCoolMs' in patch) crumbleCfg.coolMs = Math.max(0, Math.min(120000, patch.crumbleCoolMs | 0));
     if ('crumbleHeatMs' in patch) crumbleCfg.heatMs = Math.max(0, Math.min(120000, patch.crumbleHeatMs | 0));
@@ -22581,6 +22707,22 @@ io.on('connection', (socket) => {
       const d = drv && drv.get(obj.id); if (d && d !== socket.id) continue;
       P.set(obj.id, { x, y, a });
       coverUpdate(room, obj);
+    }
+  });
+  // ⭐⭐ …WHAT THE THINGS I DRIVE DID TO POWDER (`powder-push` [col, row, dir, strength×10, …], `powder-splash` [x, y,
+  // speed×10, vx×10, half-width, …]) — see `powderPushApply` / `powderSplashApply`. Rate-limited per socket.
+  let _pushAt = 0, _splashAt = 0;
+  socket.on('powder-push', ({ p } = {}) => {
+    const room = currentAvatarRoom; if (!room || !Array.isArray(p)) return;
+    const now = Date.now(); if (now - _pushAt < 25) return; _pushAt = now;
+    powderPushApply(room, p);
+  });
+  socket.on('powder-splash', ({ s } = {}) => {
+    const room = currentAvatarRoom; if (!room || !Array.isArray(s)) return;
+    const now = Date.now(); if (now - _splashAt < 60) return; _splashAt = now;
+    for (let q = 0; q + 4 < s.length && q < 5 * 8; q += 5) {
+      const x = +s[q], y = +s[q + 1], sp = Math.min(40, Math.max(0, +s[q + 2] / 10 || 0)), vx = Math.max(-40, Math.min(40, +s[q + 3] / 10 || 0)), hw = Math.max(4, Math.min(256, +s[q + 4] || 16));
+      if (isFinite(x) && isFinite(y)) powderSplashApply(room, x, y, sp, vx, hw);
     }
   });
   // ⭐ STEP 3 — MINE CELLS OUT OF A FALLEN PIECE. Same gate as digging the ground (build rights), a bounded list.
