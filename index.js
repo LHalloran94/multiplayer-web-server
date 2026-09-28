@@ -909,6 +909,32 @@ app.get('/debug/voice-prox', (req, res) => {
   res.json(out);
 });
 // Cell bodies — how often bodies go in, come out, and move while kept in (step 3), and what moving them displaced.
+// ⭐ WHAT IS ALIGHT, PER ROOM — the size of the burning set is the one fire number no readout carried, and the
+//   per-turn cap (`fireMaxCells`) works against it. Per strip as well, because a sectored room caps each strip's
+//   turn separately. Materials by `peekCellAt`, so asking never builds a chunk. Read-only.
+app.get('/debug/fire', (req, res) => {
+  const out = {}, W = Math.max(1, liquidCfg.secW | 0);
+  for (const [room, st] of roomCells) {
+    const fs = st.fineFire; if (!fs || !fs.size) continue;
+    const FROWS = st.rows * (st.fineSub || 1), strips = {}, mats = {}, ageB = {};
+    for (const i of fs) {
+      const k = (((i / FROWS) | 0) / W) | 0; strips[k] = (strips[k] || 0) + 1;
+      const v = st.terrain ? peekCellAt(st.terrain, i) : -1; mats[v] = (mats[v] || 0) + 1;
+      const a = st.fireAge ? (st.fireAge.get(i) || 0) : 0, b = a < 10 ? '<10' : a < 50 ? '<50' : a < 200 ? '<200' : a < 1000 ? '<1000' : '1000+';
+      ageB[b] = (ageB[b] || 0) + 1;
+    }
+    const cursors = {}; for (const k in fireCursor) if (k === room || k.startsWith(room + ':')) cursors[k.slice(room.length + 1) || 'room'] = fireCursor[k];
+    out[room] = { alight: fs.size, strips, mats, ages: ageB, cursors };
+    // `?count=28,92`: how many cells of those materials the whole room holds — "has the wood been used up", which
+    // the burning set alone cannot say. Page rooms only (a generated room would be a scan of the world).
+    if (req.query.count && st.terrain && !st.terrain.seedFn) {
+      const want = new Set(String(req.query.count).split(',').map(Number)), cnt = {}, N = st.cols * st.rows;
+      for (let i = 0; i < N; i++) { const v = peekCellAt(st.terrain, i); if (want.has(v)) cnt[v] = (cnt[v] || 0) + 1; }
+      out[room].count = cnt;
+    }
+  }
+  res.json({ cap: liquidCfg.fireMaxCells, secW: liquidCfg.secW, fireOnce: liquidCfg.fireOnce, solidCatch: liquidCfg.fireSolidCatch, solidBurn: liquidCfg.fireSolidBurn, rooms: out });
+});
 app.get('/debug/bodies', (req, res) => {
   for (const k of ['on', 'skipChar']) if (req.query[k] != null) bodyPosCfg[k] = +req.query[k] ? 1 : 0;   // A/B from a rig
   if (req.query.split != null) bodySplitCfg.on = +req.query.split ? 1 : 0;
@@ -8469,6 +8495,7 @@ const liquidCfg = {
   // (`probe_fire_budget.js`). 6,000 is roughly a fifth of the budget at the measured rate.
   fireOnce: 1,           // 0 = the old behaviour, fire on both reaction passes at half the spend
   fireMaxCells: 6000,    // 0 = unlimited. Per room per turn, from a rotating cursor. A DELAY, never a skip.
+  fireCapAge: 1,         // a capped cell ages by the turns it missed, so the cap does not slow the burn (0 = old: slower)
   // ⭐⭐ HOW LONG ONE CELL STAYS ALIGHT, and it is the lever for *"the flames appear and disappear so rapidly
   // that it makes it look like it's sped up"*. THE BAND OF FIRE IS AS WIDE AS THE FLAME IS LONG: the front
   // crosses a cell a tick and a cell burns for `24 / units` ticks, so at the old spend — 5 units of a
@@ -10707,16 +10734,32 @@ function fineReactTickRoom(room, SUB, phase) {
     // turn, from a ROTATING cursor so nothing is starved, and the rest simply burn on the next tick.
     // ⚠️ A DELAY, NEVER A SKIP — the same contract `reactMaxCand` has, and for the same reason: a cell left out
     // of this turn keeps its fuel and its place in the set, so a capped fire burns SLOWER, it does not go out.
+    // 🟥🟥 THE CURSOR IS PER STRIP, NOT PER ROOM (2026-09-28). A sectored room runs this once per STRIP, each on its
+    //   own slice of the set, and they all shared `fireCursor[room]` — so a strip UNDER the cap took the `else`
+    //   below and reset it to 0 on every tick, and the big strip beside it burnt the same first `cap` cells of its
+    //   set for ever: its OLDEST, the smouldering charcoal interior. The front, at the end of the list, never aged
+    //   again — it neither caught its neighbours nor burnt through. The user's report exactly: a wood fire that
+    //   spread fine, then STALLED the moment it grew into a second strip (`diag_fire_lines --scene=woodspread`:
+    //   13,051 alight → 13,056 over the next 90s, from the tick the neighbouring strip held 6 cells).
+    const ck = st.fireSec === undefined ? room : room + ':' + st.fireSec;
     const all = Array.from(fire);
     const cap = liquidCfg.fireMaxCells | 0;
     let list = all;
     if (cap > 0 && all.length > cap) {
-      const cur = (fireCursor[room] || 0) % all.length;
+      const cur = (fireCursor[ck] || 0) % all.length;
       list = all.slice(cur, cur + cap);
       if (list.length < cap) list = list.concat(all.slice(0, cap - list.length));
-      fireCursor[room] = (cur + cap) % all.length;
+      fireCursor[ck] = (cur + cap) % all.length;
       liqFireThrottles++;
-    } else if (fireCursor[room]) fireCursor[room] = 0;
+    } else if (fireCursor[ck]) fireCursor[ck] = 0;
+    // ⭐⭐ …AND A CAPPED CELL AGES BY THE TURNS IT MISSED, so the cap costs TIME RESOLUTION and not SPEED. The rotating
+    //   cursor visits each cell once every `all.length / cap` turns, and age is what both catching and burning through
+    //   are measured against — so aging by 1 per visit slowed the whole fire by that ratio. A burnt interior stays
+    //   in the set as smouldering charcoal (it burns ~10× longer than the wood did), so the ratio GREW as the fire did
+    //   and the front slowed with every cell it burnt: measured on a 3200×1200 wood slab at 150s, 30,089 alight with
+    //   the cap against 50,304 without it. (The user: a fresh ignition beside a burnt patch spread *"much much slower
+    //   than it would if nothing had been already burning"*.) Same cap, same CPU per turn; `fireCapAge` 0 = old way.
+    const capK = (list !== all && liquidCfg.fireCapAge) ? all.length / cap : 1;
     // ⭐⭐ AND EVERY SO OFTEN, CHECK THE WHOLE SET RATHER THAN THE SLICE. The loop below already drops a cell whose
     // oil has gone — but only for the cells it looks at, and under the cap it looks at `fireMaxCells` of them,
     // and only when this strip gets a turn. Anything that leaves a cell in the set without fuel (oil that flowed
@@ -10967,7 +11010,7 @@ function fineReactTickRoom(room, SUB, phase) {
       let _inc = 1;
       if (liquidCfg.cinderThrough && liquidCfg.fireOxygen && gPeek(i) === 93 && !(airAround(i) || (liquidCfg.ashAir && ashAround(i))))
         _inc = 1 / Math.max(1, liquidCfg.fireBodyThrough || 1);
-      const age = (ages.get(i) || 0) + _inc; ages.set(i, age);
+      const age = (ages.get(i) || 0) + _inc * capK; ages.set(i, age);
       const rI = i % ROWS;
       if (liquidCfg.fireQuench && quenched(i, rI)) { fire.delete(i); ages.delete(i); fireOut.push(i); addFx(i, 1); continue; }   // put out: a puff of steam
       // ── A BURNING SOLID: it has no stack to spend, so its fuel is its AGE against `fireSolidBurn / rate`.
@@ -11688,6 +11731,7 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
   };
   for (let _sn = 0; _sn < _nSec; _sn++) {
     const s = order[(_secStart + _sn) % _nSec];
+    st.fireSec = s;                                           // whose turn it is, for the fire's per-strip cursor
     if (budgetMs && performance.now() - tickT0 > budgetMs) {   // out of time: this strip waits for a later tick
       _starve(s, 1);
       liqSecDeferred++;
@@ -11782,7 +11826,7 @@ function liqTickSectors(room, plan, kFull, budgetMs, tickT0, doReact, doSoil) {
     const s = st[d.f];
     if (s && s.size) cellRooms[d.reg].add(room); else if (s) d.drop(room);
   }
-  st.fireRoom = null;
+  st.fireRoom = null; st.fireSec = undefined;
   // …and the fire's salt is reset HERE, once the whole room is out — not by a strip that merely ran dry.
   if (!st.fineFire || !st.fineFire.size) st.fireSalt = 0;
   st.src = savedSrc;
@@ -19947,6 +19991,7 @@ io.on('connection', (socket) => {
     if ('reactMaxCand' in patch) liquidCfg.reactMaxCand = Math.max(0, Math.min(2000000, patch.reactMaxCand | 0));
     if ('fireOnce' in patch) liquidCfg.fireOnce = patch.fireOnce ? 1 : 0;
     if ('fireMaxCells' in patch) liquidCfg.fireMaxCells = Math.max(0, Math.min(2000000, patch.fireMaxCells | 0));
+    if ('fireCapAge' in patch) liquidCfg.fireCapAge = patch.fireCapAge ? 1 : 0;
     // ⚠️ A FRACTION, so it is clamped as one and never put through `| 0` the way every integer dial on this
     // wire is — that would floor it to 0 and stop oil burning at all.
     if ('fireBurn' in patch) liquidCfg.fireBurn = Math.max(0.002, Math.min(1, +patch.fireBurn || 0.021));
