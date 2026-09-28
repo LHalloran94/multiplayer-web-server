@@ -4387,7 +4387,12 @@ function bodyYieldCell(room, i, buried) {
   const k = S.kOf[q], idx = Array.from(S.idx), kOf = Array.from(S.kOf);
   idx.splice(q, 1); kOf.splice(q, 1);
   S.idx = Int32Array.from(idx); S.kOf = Int32Array.from(kOf);
-  if (S.skip && kOf.indexOf(k) < 0) S.skip[k] = 1;
+  // 🟥 BURIED AS SOON AS ANY OF ITS SQUARES GOES, not only its last (2026-09-28 — the user: holes in crates in a scene with no
+  //    fire at all, gone again when shoved). A tilted crate's cell covers several world squares, and a browser reads it
+  //    from ONE of them (`bodyRep`); when that one went to powder while another still held the crate, the cell was not
+  //    marked buried, the browser read powder or air there, and drew the cell burnt away. Its state is on the record, so
+  //    reading it from there is always right.
+  if (S.skip) S.skip[k] = 1;
   bodyOwnDrop(room, i, id);
   const st = cellsOf(room);
   if (st.fineFire && st.fineFire.delete(i)) { if (st.fireAge) st.fireAge.delete(i); (buried.fireOut || (buried.fireOut = [])).push(i, 0); }
