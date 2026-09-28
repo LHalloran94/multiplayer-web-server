@@ -4370,6 +4370,42 @@ function coverSync(room) {
   if (C) for (const id of [...C.byId.keys()]) { const o = map.get(id); if (!coverTakes(o)) coverDrop(room, id); }
   return roomCover[room] ? roomCover[room].n : null;
 }
+// ⭐⭐ OBJECTS BURIED BY FALLING POWDER (`powderBuryCfg`, 2026-09-28 — the user: *"try having it so that objects (crates and
+// balls and so on) get buried when powder falls on top of them, but put it behind a switch"*). On: powder falls through a
+// loose thing's outline instead of landing on it (the cover is ignored), and into a WOODEN thing's own world cells — each is
+// handed over by `bodyYieldCell`: it leaves the thing's stamp and becomes one of its BURIED cells (`skip`), whose state lives
+// on its record, exactly as when a crate is set down in ash that is already there. So the thing still draws whole (from the
+// record), still burns (buried cells smoulder slowly — they have no air), and the powder fills it from the bottom up.
+// ⚠️ A yielded cell stays buried until the thing moves (`bodyMoveTo` re-stamps it wherever it goes).
+const powderBuryCfg = { on: 1 };
+function powderBuryOn() { return !!powderBuryCfg.on; }
+function bodyYieldCell(room, i, buried) {
+  const om = roomBodyOwn[room], id = om && om.get(i); if (id == null) return false;
+  const m = roomBodyStamp[room], S = m && m.get(id); if (!S) return false;
+  let q = -1; for (let t = 0; t < S.idx.length; t++) if (S.idx[t] === i) { q = t; break; }
+  if (q < 0) return false;
+  const k = S.kOf[q], idx = Array.from(S.idx), kOf = Array.from(S.kOf);
+  idx.splice(q, 1); kOf.splice(q, 1);
+  S.idx = Int32Array.from(idx); S.kOf = Int32Array.from(kOf);
+  if (S.skip && kOf.indexOf(k) < 0) S.skip[k] = 1;
+  bodyOwnDrop(room, i, id);
+  const st = cellsOf(room);
+  if (st.fineFire && st.fineFire.delete(i)) { if (st.fireAge) st.fireAge.delete(i); (buried.fireOut || (buried.fireOut = [])).push(i, 0); }
+  buried.set(id, i);
+  return true;
+}
+// …then, once per powder pass, each thing that gave cells up tells the browsers which of its cells are now buried (`bp`)
+function bodyYieldFlush(room, buried) {
+  const m = roomBodyStamp[room], ost = objStOf(room), map = roomObjects[room], grid = cellsOf(room).terrain;
+  for (const [id, i] of buried) {
+    const S = m && m.get(id), obj = map && map.get(id); if (!S || !obj) continue;
+    const rec = ost.get(id) || {}, skips = bodySkipStr(S.skip, bodyCellsOf(rec, obj));
+    rec.bs = [S.x, S.y, Math.round(S.a * 1000)]; if (skips) rec.bs.push(skips);
+    ost.set(id, rec);
+    wireFanout(room, 'terrain-set', { cells: [i, grid.g(i)], bp: [id, S.x, S.y, Math.round(S.a * 1000), skips || 0] });
+  }
+  if (buried.fireOut) wireFanout(room, 'fire-cells', { cells: buried.fireOut, lift: 1 });
+}
 // ⭐⭐ OBJECTS PUSHING POWDER, AND THROWING IT UP WHEN THEY LAND (2026-09-28 — the user asked for both: *"if I stand at the
 // edge of a pile and push a crate into it…"*, and a splash). The physics runs in the browser that drives a thing; it says
 // what the thing did (`powder-push`, `powder-splash`, 16b `lbPowderFx`) and this end decides what powder moves.
@@ -9101,10 +9137,17 @@ function powderTickRoom(room) {
   const genRoom = !!grid.seedFn;
   const peekG = genRoom ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
   // …and a cell a loose thing covers is not somewhere a grain can go (`powderCoverCfg`): it lands on the thing instead
-  const cov = typeof coverSync === 'function' ? coverSync(room) : null;   // (typeof: the rigs slice this tick without it)
+  // ⭐ …UNLESS OBJECTS ARE BURIED BY POWDER (`powderBuryCfg`): then a grain falls INTO a loose thing's outline (no cover), and
+  //   into a wooden thing's own cells too — each such cell is handed over (`bodyYieldCell`) and kept on the thing's record
+  //   as a buried cell, so the thing still draws and burns whole while the powder fills it. ⚠️ Literal ids 250–253: sliced.
+  const buryFn = (typeof powderBuryOn === 'function' && powderBuryOn()) ? bodyYieldCell : null, buried = buryFn ? new Map() : null;
+  const cov = buryFn ? null : (typeof coverSync === 'function' ? coverSync(room) : null);   // (typeof: the rigs slice this tick without it)
   const canDisplace = cov && cov.size
     ? (j) => { if (cov.has(j)) return false; const v = peekG(j); return v === 0 || isFluidId(v); }
+    : buryFn ? (j) => { const v = peekG(j); return v === 0 || isFluidId(v) || (v >= 250 && v <= 253); }
     : (j) => { const v = peekG(j); return v === 0 || isFluidId(v); };   // -1 (unbuilt) is neither
+  // …a move into a wooden thing's cell has to be allowed by the thing first (it can refuse: not one of its stamped cells)
+  const enter = (src, dst) => { const v = peekG(dst); if (v >= 250 && v <= 253 && !(buryFn && buryFn(room, dst, buried))) return false; swapMove(src, dst); return true; };
   // …and the same question asked on behalf of a RIGID block, which floats: air yes, fluid no. See MAT_RIGID.
   const canEnter = (gv, j) => (MAT_RIGID[gv] ? peekG(j) === 0 && !(cov && cov.has(j)) : canDisplace(j));
   const list = Array.from(active); active.clear();
@@ -9150,7 +9193,7 @@ function powderTickRoom(room) {
     // test (nothing there runs a sim) — this is the sim reading it.
     if (MAT_HANGS[gv] && r > 0 && !canDisplace(i - 1)) continue;   // still hanging from something solid
     const below = i + 1;
-    if (canEnter(gv, below)) { swapMove(i, below); continue; }
+    if (canEnter(gv, below) && enter(i, below)) continue;
     if (MAT_RIGID[gv]) continue;                              // a slab falls straight down or not at all — it does not trickle into a pile
     // DIAGONAL SLIDE — the grain must be able to pass THROUGH the side cell, not just land in the target. Checking only
     // the destination let a grain squeeze between two solids that touch only at their corners: it tunnelled through a
@@ -9158,10 +9201,12 @@ function powderTickRoom(room) {
     for (const dc of (((c + tick) & 1) ? [-1, 1] : [1, -1])) {   // parity per COLUMN — see increment 5's note in the fine tick
       const cc = c + dc; if (cc < 0 || cc >= COLS) continue;
       if (!canDisplace(i + dc * ROWS)) continue;               // side blocked → no corner-cutting
-      const j = below + dc * ROWS; if (canDisplace(j)) { swapMove(i, j); break; }
+      const j = below + dc * ROWS; if (canDisplace(j) && enter(i, j)) break;
     }
     // couldn't fall or slide → rests (not re-added to active)
   }
+  // (…the things that gave cells up say so FIRST, so no browser draws a buried cell as a hole for a frame)
+  if (buried && buried.size && typeof bodyYieldFlush === 'function') bodyYieldFlush(room, buried);
   {   // grain movement is a TERRAIN change; any pool it displaced rides the fine-liquid wire
     if (changedSet.size && !liquidQuiet) { const tc = []; for (const j of changedSet) tc.push(j, grid.g(j)); wireFanout(room, 'terrain-set', { cells: tc }); }
     if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
@@ -13397,7 +13442,7 @@ function cfgWire() {
     dayCycleMin: Math.round(worldClock.cycleMs / 60000), dayOffsetMin: Math.round(worldClock.offsetMs / 60000),
     crumble: !!crumbleCfg.on, crumbleMode: crumbleCfg.mode, crumbleTrigger: crumbleCfg.trigger,
     crumbleMs: crumbleCfg.afterMs, crumblePer: crumbleCfg.perPass, crumbleFront: crumbleCfg.frontPer, crumbleLooseMs: crumbleCfg.looseMs, crumbles, crumbleCells,
-    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, cinderMix: !!liquidCfg.cinderMix, cinderHeat: !!liquidCfg.cinderHeat, bodyAsh: !!liquidCfg.bodyAsh, bodyAshOpen: liquidCfg.bodyAshOpen, bodyAshBuried: liquidCfg.bodyAshBuried, bodyAshSkin: !!liquidCfg.bodyAshSkin, bodyAshSkinFrom: liquidCfg.bodyAshSkinFrom, powderPush: !!powderPushCfg.on, powderPushK: powderPushCfg.k, powderSplash: !!powderSplashCfg.on, powderSplashPer: powderSplashCfg.per, powderSplashUp: powderSplashCfg.up, powderCover: !!powderCoverCfg.on, cinderHeatDecay: liquidCfg.cinderHeatDecay, cinderHeatMin: liquidCfg.cinderHeatMin, cinderAshExposed: liquidCfg.cinderAshExposed, cinderAshBuried: liquidCfg.cinderAshBuried, cinderClump: liquidCfg.cinderClump, crumbleHandover: !!crumbleCfg.handover,
+    crumbleCellMs: crumbleCfg.cellMs, crumbleRough: crumbleCfg.rough, crumbleCoolMs: crumbleCfg.coolMs, crumbleHeatMs: crumbleCfg.heatMs, bodyAutoShare: crumbleCfg.wholeAuto, bodyExactRead: !!bodyPosCfg.exact, bodyOwn: !!liquidCfg.bodyOwn, cinderThrough: !!liquidCfg.cinderThrough, cinderMix: !!liquidCfg.cinderMix, cinderHeat: !!liquidCfg.cinderHeat, bodyAsh: !!liquidCfg.bodyAsh, bodyAshOpen: liquidCfg.bodyAshOpen, bodyAshBuried: liquidCfg.bodyAshBuried, bodyAshSkin: !!liquidCfg.bodyAshSkin, bodyAshSkinFrom: liquidCfg.bodyAshSkinFrom, powderPush: !!powderPushCfg.on, powderPushK: powderPushCfg.k, powderSplash: !!powderSplashCfg.on, powderSplashPer: powderSplashCfg.per, powderSplashUp: powderSplashCfg.up, powderCover: !!powderCoverCfg.on, powderBury: !!powderBuryCfg.on, cinderHeatDecay: liquidCfg.cinderHeatDecay, cinderHeatMin: liquidCfg.cinderHeatMin, cinderAshExposed: liquidCfg.cinderAshExposed, cinderAshBuried: liquidCfg.cinderAshBuried, cinderClump: liquidCfg.cinderClump, crumbleHandover: !!crumbleCfg.handover,
     worldGen2: !!worldCfg.gen2,
     worldDropPristine: !!worldCfg.dropPristine,
     // Read-only mechanism counters, carried on the same wire so a test (or the Perf tab) can assert that the
@@ -19839,6 +19884,7 @@ io.on('connection', (socket) => {
     if ('crumbleShovePx' in patch) crumbleCfg.shovePx = Math.max(0, Math.min(200, +patch.crumbleShovePx || 0));
     if ('crumbleCellMs' in patch) crumbleCfg.cellMs = Math.max(0, Math.min(2000, patch.crumbleCellMs | 0));
     // …objects and powder (`powderPushApply` / `powderSplashApply` / `coverUpdate`)
+    if ('powderBury' in patch) powderBuryCfg.on = patch.powderBury ? 1 : 0;
     if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
     if ('powderCover' in patch) { powderCoverCfg.on = patch.powderCover ? 1 : 0; if (!powderCoverCfg.on) for (const r in roomCover) delete roomCover[r]; }
     if ('powderPushK' in patch) powderPushCfg.k = Math.max(0.1, Math.min(100, +patch.powderPushK || 2));
