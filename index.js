@@ -938,6 +938,7 @@ app.get('/debug/fire', (req, res) => {
 app.get('/debug/bodies', (req, res) => {
   for (const k of ['on', 'skipChar']) if (req.query[k] != null) bodyPosCfg[k] = +req.query[k] ? 1 : 0;   // A/B from a rig
   if (req.query.split != null) bodySplitCfg.on = +req.query.split ? 1 : 0;
+  if (req.query.powderfire != null) powderFireCfg.carry = +req.query.powderfire ? 1 : 0;   // a falling grain takes its fire (A/B)
   for (const k of ['min', 'diag']) if (req.query['split' + k] != null) bodySplitCfg[k] = +req.query['split' + k] | 0;
   for (const k of ['min', 'max']) if (req.query[k] != null && isFinite(+req.query[k])) fallCfg[k] = Math.max(1, +req.query[k] | 0);
   // …and the bake's dials, for an A/B: `bake=0|1` · `bakecap` (0 = never) · `bakerest` ms · `bakeper` a tick
@@ -998,7 +999,9 @@ app.get('/debug/bodies', (req, res) => {
       const w = bodyWorldCells(r, st, o, D, S, (ost && ost.get(id)) || {});
       return { rec: [...cs].map(v => String.fromCharCode(48 + v)).join(''), world: [...w].map(v => String.fromCharCode(48 + v)).join(''), pose: [S.x, S.y, Math.round(S.a * 1000)], cols: D.c }; })() : null;
     return [String(id), bodyAllChar(cs), n ? +(th / n).toFixed(2) : 0, lt, !!S.fire, extra]; }); }
-  res.json({ lefts, cq, shared, crumbles, crumbleCells, crumbleWhy, crumble: crumbleCfg, stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
+  // (`stampedIds`: which bodies are written into the world right now, per room — is a crate there for powder to land on?)
+  const stampedIds = {}; for (const r in roomBodyStamp) stampedIds[r] = [...roomBodyStamp[r].keys()];
+  res.json({ stampedIds, lefts, cq, shared, crumbles, crumbleCells, crumbleWhy, crumble: crumbleCfg, stamps: bodyStamps, unstamps: bodyUnstamps, burnt: bodyBurnt, moves: bodyMoves, moveCells: bodyMoveCells,
              fallCuts, fallRefused, fallPiled, fallSmall, fallBurnt, fallCrumbled, fallMined, fallLast, fall: fallCfg, cfg: bodyPosCfg,
              splits: bodySplits, splitGone: bodySplitGone, split: bodySplitCfg,
              bakes, bakeCells, bakeLast, bake: bakeCfg,
@@ -4404,6 +4407,7 @@ function coverSync(room) {
 // record), still burns (buried cells smoulder slowly — they have no air), and the powder fills it from the bottom up.
 // ⚠️ A yielded cell stays buried until the thing moves (`bodyMoveTo` re-stamps it wherever it goes).
 const powderBuryCfg = { on: 1 };
+const powderFireCfg = { carry: 1 };                     // a falling grain takes its fire with it — see `powderTickRoom`'s `swapFire`
 function powderBuryOn() { return !!powderBuryCfg.on; }
 function bodyYieldCell(room, i, buried) {
   const om = roomBodyOwn[room], id = om && om.get(i); if (id == null) return false;
@@ -9193,8 +9197,29 @@ function powderTickRoom(room) {
     if (r <= 0) return;
     for (const j of [i - 1, i - ROWS - 1, i + ROWS - 1]) if (j >= 0 && j < nn && isPowderId(peekG(j))) active.add(j);
   };
+  // ⭐⭐ A BURNING GRAIN TAKES ITS FIRE WITH IT (2026-09-29 — the user: a crumbling crate's heap *"goes cold"*). A crate crumbles
+  //   while it still burns and hands each burning cell over to its heap exactly (`crumbleTake`) — and then the heap FALLS, and
+  //   this move carried the grain, its strength and any pool it displaced but NOT its fire: the fire stayed behind in the air
+  //   it left and went out, and the grain arrived cold. Measured: 481 burning cells in six crates the second before they
+  //   crumbled, 0–55 burning in the heap after. A push (`powderMoveCell`) always carried it. Now the two cells SWAP their
+  //   fire state — alight, age, heat — so a burning grain lands burning and a burning pool pushed up by it stays burning,
+  //   and the moves go out as `mv` pairs so a browser moves the cell's own clock with it: no puff where it left, no flare
+  //   where it lands. (`powderFireCfg.carry` 0 = the old way.)
+  const fireMv = [];
+  const swapFire = (a, b) => {
+    const fs = st.fineFire; if (!fs || (typeof powderFireCfg !== 'undefined' && !powderFireCfg.carry)) return;   // (typeof: rigs slice this tick)
+    const fa = fs.has(a), fb = fs.has(b); if (!fa && !fb) return;
+    const ag = st.fireAge, ht = st.fireHeat;
+    const aa = ag ? ag.get(a) : undefined, ab = ag ? ag.get(b) : undefined, ha = ht ? ht.get(a) : undefined, hb = ht ? ht.get(b) : undefined;
+    if (fa) fs.delete(a); if (fb) fs.delete(b);
+    if (fa) fs.add(b); if (fb) fs.add(a);
+    if (ag) { ag.delete(a); ag.delete(b); if (fa && aa !== undefined) ag.set(b, aa); if (fb && ab !== undefined) ag.set(a, ab); }
+    if (ht) { ht.delete(a); ht.delete(b); if (ha !== undefined) ht.set(b, ha); if (hb !== undefined) ht.set(a, hb); }
+    fireMv.push(a, b);
+  };
   const swapMove = (src, dst) => {
     const P = grid.g(src), hpP = hp.g(src);
+    swapFire(src, dst);
     {
       const ps = famt.wp(src), bs = famt.o(src), pd = famt.wp(dst), bd = famt.o(dst);   // src is solid ⇒ holds no fine liquid; dst may hold a pool
       const carried = ftot.g(dst);
@@ -9242,6 +9267,8 @@ function powderTickRoom(room) {
   {   // grain movement is a TERRAIN change; any pool it displaced rides the fine-liquid wire
     if (changedSet.size && !liquidQuiet) { const tc = []; for (const j of changedSet) tc.push(j, grid.g(j)); wireFanout(room, 'terrain-set', { cells: tc }); }
     if (fineChanged.size && !liquidQuiet) emitFineCells(room, Array.from(fineChanged));
+    // …and the fire that went with the grains, AFTER the terrain, so the cell it lands in already holds the grain
+    if (fireMv.length && !liquidQuiet) wireFanout(room, 'fire-cells', { mv: fireMv });
   }
   if (!active.size) dropPowderSet(room);
 }
