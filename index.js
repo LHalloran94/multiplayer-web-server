@@ -4997,6 +4997,128 @@ function bodyOwnTick() {
   }
 }
 setInterval(bodyOwnTick, 50);
+// ══ ROPES BURN THROUGH AND SNAP (list 13 plan step 6, 2026-09-29 — the user's choices: rope and bungee burn, chain and cable
+//   do not; a rope SNAPS where the fire touched it and both halves then burn back towards their ends like a fuse; a burning
+//   rope lights what it touches; water puts it out) ══════════════════════════════════════════════════════════════════════
+// ⭐ WHY THE BROWSERS REPORT AND THE SERVER DECIDES: every browser swings every rope itself, and this end only knows the route
+//   a rope was LAID along — so it cannot tell whether a swinging rope is in a fire. A browser that sees a rope point touching a
+//   burning cell says so (`rope-catch`: which rope, how far along it, where), this end checks there really is fire there and
+//   records the catch; after `snapMs` it SNAPS the rope into two objects (`rope-snap`), each keeping its tied end and gaining
+//   a free, burning one. Everything after that is a function of time: an end burning since `t` at `v` px/s has eaten
+//   `v·(now − t)`, so every browser trims its own rope to the same length with nothing more on the wire.
+// ⚠️ A piece keeps its ARC COORDINATES from the rope it came from (its `rl` counts from its end 0, eaten or not), so an end's
+//   burn record means the same thing before and after any number of snaps.
+// ⚠️ `rfree` marks a burnt break: a late joiner builds the piece from its route, and a route end lying on a crate would
+//   otherwise be tied to it.
+const ropeFireCfg = { on: 1, snapMs: 1500, pxPerS: 40, minLen: 14, reach: 36, gap: 6 };
+const roomRopeBurn = {};                                  // room → Set of rope ids with a catch pending or an end alight
+let ropeSnapSeq = 0;
+function ropeBurnable(o) { return !!o && o.look === 'rope' && (!o.rk || o.rk === 'rope' || o.rk === 'bungee'); }
+function ropeFireReg(room, id) { (roomRopeBurn[room] || (roomRopeBurn[room] = new Set())).add(id); }
+// …how much each end has burnt away by `now`, px
+function ropeEaten(o, now) {
+  const out = [0, 0];
+  if (Array.isArray(o.rb)) for (let k = 0; k < 2; k++) { const b = o.rb[k]; if (b) out[k] = Math.max(0, b.v * ((b.out || now) - b.t) / 1000); }
+  return out;
+}
+function ropeRouteLen(rp) { let L = 0; for (let i = 0; i + 1 < rp.length; i++) L += Math.hypot(rp[i + 1][0] - rp[i][0], rp[i + 1][1] - rp[i][1]); return L; }
+// …the route cut at path distance `d`: [before, after], both in the rope's own frame, each at least two points
+function ropeRouteSplit(rp, d) {
+  const A = [[rp[0][0], rp[0][1]]], B = [];
+  let acc = 0;
+  for (let i = 0; i + 1 < rp.length; i++) {
+    const L = Math.hypot(rp[i + 1][0] - rp[i][0], rp[i + 1][1] - rp[i][1]);
+    if (!B.length && acc + L >= d) {
+      const t = L > 1e-6 ? Math.max(0, Math.min(1, (d - acc) / L)) : 0, m = [rp[i][0] + (rp[i + 1][0] - rp[i][0]) * t, rp[i][1] + (rp[i + 1][1] - rp[i][1]) * t];
+      A.push(m); B.push(m);
+    }
+    (B.length ? B : A).push([rp[i + 1][0], rp[i + 1][1]]);
+    acc += L;
+  }
+  if (!B.length) B.push(A[A.length - 1]);
+  while (A.length < 2) A.push(A[A.length - 1]);
+  while (B.length < 2) B.push(B[B.length - 1]);
+  const fix = (r) => r.map(q => [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10, 0, 1]);
+  return [fix(A), fix(B)];
+}
+// …is anything burning within two cells of (x, y)? A cell alight in the world (terrain, oil, a crate resting in it), or a
+//   burning thing that is moving and so not in the world, near where its driver last said it was.
+function ropeFireNear(room, x, y) {
+  const st = cellsOf(room), fs = st && st.fineFire;
+  if (fs && fs.size) {
+    const ROWS = st.rows, COLS = st.cols, c0 = Math.floor(x / TERRAIN_CELL), r0 = Math.floor(y / TERRAIN_CELL);
+    for (let c = Math.max(0, c0 - 2); c <= Math.min(COLS - 1, c0 + 2); c++)
+      for (let r = Math.max(0, r0 - 2); r <= Math.min(ROWS - 1, r0 + 3); r++) if (fs.has(c * ROWS + r)) return true;
+  }
+  const bm = roomBodyBurn[room], map = roomObjects[room], P = roomLoosePose[room];
+  if (bm && map) for (const id of bm.keys()) {
+    const b = map.get(id); if (!b) continue;
+    const pp = P && P.get(id), bx = pp ? pp.x : b.x, by = pp ? pp.y : b.y, R = Math.max(b.w || 64, b.h || 64) * 0.75 + 16;
+    if (Math.abs(bx - x) < R && Math.abs(by - y) < R) return true;
+  }
+  return false;
+}
+// …water or brine (the liquids that put fire out, `FIRE_RATE_RANK` < 0) in the cell at (x, y) or the one above it
+function ropeWetAt(room, x, y) {
+  const st = cellsOf(room), amt = st && st.fineAmt, tot = st && st.fineTotal;
+  if (!amt || !tot || (st.fineSub || 1) !== 1) return false;
+  const ROWS = st.rows, c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL);
+  for (const rr of [r, r - 1]) {
+    if (c < 0 || rr < 0 || c >= st.cols || rr >= ROWS) continue;
+    const j = c * ROWS + rr; if (peekCellAt(tot, j) <= 0) continue;
+    const pw = amt.rp(j), bw = amt.o(j);
+    for (let k = 0; k < FIRE_RATE_RANK.length; k++) if (pw[bw + k] > 0 && FIRE_RATE_RANK[k] < 0) return true;
+  }
+  return false;
+}
+function ropeBurnWire(room, o, now) { emitObjToChunks(room, o, 'rope-burn', { id: o.id, rc: o.rc || null, rb: o.rb || null, rfree: o.rfree || null, sn: now }); }
+// ⭐ THE SNAP: `o` keeps its id and becomes the part before arc `s`; a new rope is the part after it. Catches still waiting on
+//   either side go with their side, and each end that was already burning keeps its record.
+function ropeSnap(room, o, s, now) {
+  const L = o.rl || ropeRouteLen(o.rp), P = ropeRouteLen(o.rp), gap = ropeFireCfg.gap;
+  const eat = ropeEaten(o, now), cur = L - eat[0] - eat[1];
+  const [ra, rbR] = ropeRouteSplit(o.rp, Math.max(0, Math.min(P, s * P / Math.max(1, L))));
+  const rb0 = Array.isArray(o.rb) ? o.rb : [null, null], fr = o.rfree || [0, 0], rc = o.rc || [];
+  const b = Object.assign({}, o); delete b.ch; delete b.chs;
+  b.id = o.id + '~' + (++ropeSnapSeq).toString(36);
+  objUnindex(room, o);
+  o.rp = ra; o.rl = Math.max(1, s - gap); o.rb = [rb0[0], { t: now, v: ropeFireCfg.pxPerS, out: 0 }]; o.rfree = [fr[0], 1];
+  b.rp = rbR; b.rl = Math.max(1, L - s - gap); b.rb = [{ t: now, v: ropeFireCfg.pxPerS, out: 0 }, rb0[1]]; b.rfree = [1, fr[1]];
+  o.rc = rc.filter(c => c[0] < s - gap); b.rc = rc.filter(c => c[0] > s + gap).map(c => [c[0] - s - gap, c[1], c[2]]);
+  if (!o.rc.length) delete o.rc; if (!b.rc.length) delete b.rc;
+  objIndex(room, o); objIndex(room, b);
+  ropeFireReg(room, o.id); ropeFireReg(room, b.id);
+  // …where the break is along the rope AS IT HANGS NOW (its unburnt part), which is what a browser's live rope can find
+  const f = cur > 0 ? Math.max(0, Math.min(1, (s - eat[0]) / cur)) : 0.5;
+  emitObjToChunks(room, { ch: o.ch, chs: [...new Set((o.chs || [o.ch]).concat(b.chs || [b.ch]))] }, 'rope-snap', { id: o.id, f, a: o, b, sn: now });
+}
+function ropeFireTick() {
+  if (!ropeFireCfg.on) return;
+  const now = Date.now();
+  for (const room of Object.keys(roomRopeBurn)) {
+    const ids = roomRopeBurn[room], map = roomObjects[room];
+    if (!map) { delete roomRopeBurn[room]; continue; }
+    for (const id of [...ids]) {
+      const o = map.get(id);
+      if (!o || o.look !== 'rope') { ids.delete(id); continue; }
+      // …a catch that has burnt long enough snaps the rope there (one a tick: the other side's comes 100ms later)
+      if (Array.isArray(o.rc) && o.rc.length) {
+        const q = o.rc.findIndex(c => now - c[1] >= c[2]);
+        if (q >= 0) { const c = o.rc[q]; o.rc.splice(q, 1); if (!o.rc.length) delete o.rc; ropeSnap(room, o, c[0], now); continue; }
+      }
+      const eat = ropeEaten(o, now), L = o.rl || ropeRouteLen(o.rp);
+      if (Array.isArray(o.rb) && L - eat[0] - eat[1] <= ropeFireCfg.minLen) {   // …burnt all the way
+        objUnindex(room, o);
+        emitObjToChunks(room, o, 'avatar-object-removed', { id: o.id, burnt: 1 });
+        ids.delete(id); continue;
+      }
+      const alight = Array.isArray(o.rb) && o.rb.some(b => b && !b.out);
+      if (!alight && !(o.rc && o.rc.length)) ids.delete(id);
+    }
+    if (!ids.size) delete roomRopeBurn[room];
+  }
+}
+setInterval(ropeFireTick, 100);
 function bodyOwnBurn(room, obj, S, st, now) {
   if (!S.kOf || S.kOf.length !== S.idx.length) return false;
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
@@ -17385,6 +17507,13 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (data.rk === 'bungee' || data.rk === 'chain' || data.rk === 'cable') obj.rk = data.rk; else if (data.rk) obj.rk = 'rope';
       if (data.re != null) obj.re = clampN(data.re, 0, 100, 0);
       if (data.rthru) obj.rthru = 1;
+      // …and a BURNING rope's state (`ropeFireTick`): `rfree` which ends are a burnt break (never re-tied), `rb` each end's
+      //   burn {t: server ms it started, v: px/s, out: ms it was put out}, `rc` catches waiting to snap [s px, t ms, after ms]
+      if (Array.isArray(data.rfree)) obj.rfree = [data.rfree[0] ? 1 : 0, data.rfree[1] ? 1 : 0];
+      if (Array.isArray(data.rb)) obj.rb = [0, 1].map(k => { const b = data.rb[k];
+        return b && isFinite(+b.t) && isFinite(+b.v) ? { t: +b.t, v: clampN(b.v, 1, 400, 40), out: isFinite(+b.out) && +b.out > 0 ? +b.out : 0 } : null; });
+      if (Array.isArray(data.rc)) { const rc = data.rc.slice(0, 8).filter(c => Array.isArray(c) && isFinite(+c[0]) && isFinite(+c[1]) && isFinite(+c[2]))
+        .map(c => [clampN(c[0], 0, 20000, 0), +c[1], clampN(c[2], 0, 10000, 1500)]); if (rc.length) obj.rc = rc; }
     }
     // ⭐⭐ A BELT is the same trick once more, and the only face here that keeps its own SOLIDITY: a
     // conveyor laid as a floor is the one-way bar everybody knows, one laid as a ceiling is solid. Which wheels
@@ -19376,6 +19505,8 @@ function objChunksOf(room, o) {
 function objIndex(room, o) {
   const map = roomObjects[room] || (roomObjects[room] = new Map());
   map.set(o.id, o);
+  // (a rope that comes back from storage still burning carries on — see `ropeFireTick`; typeof: rigs slice this file)
+  if (o.look === 'rope' && (o.rc || o.rb) && typeof ropeFireReg === 'function') ropeFireReg(room, o.id);
   if (!objChunked(room)) return;
   o.ch = dropChunkOf(room, o);                      // ⭐ rides the wire — the client must not recompute an addressing rule
   o.chs = objChunksOf(room, o);
@@ -21938,6 +22069,65 @@ io.on('connection', (socket) => {
       emitObjToChunks(currentAvatarRoom, { ch: o.ch, chs: [...new Set(oldChs.concat(o.chs || [o.ch]))] }, 'avatar-object-add', o);
       socket.emit('avatar-object-add', o);
     } else io.to(currentAvatarRoom).emit('avatar-object-add', o);
+  });
+
+  // ⭐⭐ ROPES BURNING — see `ropeFireTick`. A browser reports; this end checks the world says the same before acting.
+  //   `rope-catch` {id, f (0..1 along the unburnt rope as it hangs), x, y}: a point of it is touching fire.
+  //   `rope-douse` {id, end (0|1, or -1 for a catch still waiting), f, x, y}: that burning part is in water.
+  //   `rope-ignite` {id, end, x, y}: that burning end is touching something that burns — set it alight there.
+  // ⚠️ No build permission asked, as with any fire: fire spreading is the world acting, not a player building.
+  const ropeIgT = new Map();                                 // (id + end) → when this socket last lit something from it
+  const ropeFireObj = (d) => {
+    if (!ropeFireCfg.on || !currentAvatarRoom || !d || typeof d.id !== 'string' || !isFinite(d.x) || !isFinite(d.y)) return null;
+    const map = roomObjects[currentAvatarRoom], o = map && map.get(d.id);
+    return ropeBurnable(o) ? o : null;
+  };
+  socket.on('rope-catch', (d) => {
+    const o = ropeFireObj(d); if (!o || !isFinite(d.f)) return;
+    const room = currentAvatarRoom;
+    if (!ropeFireNear(room, d.x, d.y)) return;
+    const now = Date.now(), eat = ropeEaten(o, now), L = o.rl || ropeRouteLen(o.rp), cur = L - eat[0] - eat[1];
+    if (cur <= ropeFireCfg.minLen * 2) return;
+    const s = eat[0] + Math.max(0, Math.min(1, d.f)) * cur, R = ropeFireCfg.reach;
+    // …next to an end that is already burning: nothing to do — or, if water put that end out, it catches again from there
+    for (let k = 0; k < 2; k++) {
+      const b = o.rb && o.rb[k]; if (!b) continue;
+      if (Math.abs(s - (k ? L - eat[1] : eat[0])) >= R) continue;
+      if (!b.out) return;
+      o.rb[k] = { t: now - eat[k] * 1000 / b.v, v: b.v, out: 0 };   // …carrying on from what it had already eaten
+      ropeFireReg(room, o.id); if (objChunked(room)) objsTouch(room, o.ch); ropeBurnWire(room, o, now); return;
+    }
+    if (o.rc && (o.rc.length >= 8 || o.rc.some(c => Math.abs(c[0] - s) < R))) return;
+    (o.rc || (o.rc = [])).push([s, now, ropeFireCfg.snapMs]);
+    ropeFireReg(room, o.id); if (objChunked(room)) objsTouch(room, o.ch);
+    ropeBurnWire(room, o, now);
+  });
+  socket.on('rope-douse', (d) => {
+    const o = ropeFireObj(d); if (!o || !ropeWetAt(currentAvatarRoom, d.x, d.y)) return;
+    const room = currentAvatarRoom, now = Date.now();
+    if (d.end === 0 || d.end === 1) {
+      const b = o.rb && o.rb[d.end]; if (!b || b.out) return;
+      b.out = now;
+    } else {
+      if (!o.rc || !isFinite(d.f)) return;
+      const eat = ropeEaten(o, now), L = o.rl || ropeRouteLen(o.rp), s = eat[0] + Math.max(0, Math.min(1, d.f)) * (L - eat[0] - eat[1]);
+      const keep = o.rc.filter(c => Math.abs(c[0] - s) >= ropeFireCfg.reach);
+      if (keep.length === o.rc.length) return;
+      if (keep.length) o.rc = keep; else delete o.rc;
+    }
+    if (objChunked(room)) objsTouch(room, o.ch);
+    ropeBurnWire(room, o, now);
+  });
+  socket.on('rope-ignite', (d) => {
+    const o = ropeFireObj(d); if (!o || (d.end !== 0 && d.end !== 1)) return;
+    const b = o.rb && o.rb[d.end]; if (!b || b.out) return;
+    const key = o.id + '/' + d.end, now = Date.now();
+    if (now - (ropeIgT.get(key) || 0) < 300) return;
+    // …near the rope at all: within its own length of where it was laid (a rope hangs and swings, but not further than that)
+    const reach = (o.rl || 0) + 64;
+    if (Math.abs(d.x - o.x) > (o.w || 0) / 2 + reach || Math.abs(d.y - o.y) > reach) return;
+    ropeIgT.set(key, now); if (ropeIgT.size > 256) ropeIgT.clear();
+    igniteBox(currentAvatarRoom, d.x, d.y, TERRAIN_CELL);
   });
 
   // ---- Avatar world objects (Stage 6) — server-authoritative existence over reliable
