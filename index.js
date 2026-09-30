@@ -5097,6 +5097,34 @@ function ropeWetAt(room, x, y) {
   }
   return false;
 }
+// ⭐⭐ A THING THAT SPILLS (list 13, "after the plan", 2026-09-30): melting ice leaves water, and an oil drum broken by anything
+//   but fire spills oil — UNLIT, so setting it off is a separate choice. `kickoff_loose_physics.md` §17 expected this to need
+//   the paint path pulled apart; it does not: liquid is decoupled from the terrain grid, so putting some down is `fineSetBlock`
+//   on open cells, and none of the paint path's ledger or permission applies — this is the world acting, not a player.
+// ⚠️ Only cells that are OPEN and hold NO liquid are filled (`fineSetBlock` overwrites), one full cell each, nearest the
+//    thing's base first, from its footprint and a ring one cell round it. Where there is no room, less spills.
+function worldSpillLiquid(room, x, y, hw, hh, mat, n) {
+  const rank = LIQ_RANK[mat]; n = Math.round(n);
+  if (rank == null || !(n > 0) || !isFinite(x) || !isFinite(y)) return 0;
+  const grid = ensureTerrain(room); ensureFineArrays(room, 1);
+  const st = cellsOf(room), tot = st.fineTotal; if (!tot || (st.fineSub || 1) !== 1) return 0;
+  const ROWS = grid.geom.rows, COLS = grid.geom.cols, C = TERRAIN_CELL;
+  const c0 = Math.floor((x - hw) / C), c1 = Math.floor((x + hw) / C), r0 = Math.floor((y - hh) / C), r1 = Math.floor((y + hh) / C);
+  const cand = [];
+  for (let c = c0 - 1; c <= c1 + 1; c++) for (let r = r0 - 1; r <= r1 + 1; r++) {
+    if (c < 0 || r < 0 || c >= COLS || r >= ROWS) continue;
+    const i = c * ROWS + r; if (grid.g(i) !== 0 || peekCellAt(tot, i) > 0) continue;
+    cand.push([Math.hypot((c + 0.5) * C - x, ((r + 0.5) * C - (y + hh)) * 0.7), c, r]);
+  }
+  cand.sort((a, b) => a[0] - b[0]);
+  const ca = new Array(LIQ_T).fill(0); ca[rank] = LIQUID_MAX;
+  const changed = []; let k = 0;
+  for (; k < cand.length && k < n; k++) for (const j of fineSetBlock(room, 1, cand[k][1], cand[k][2], ca)) changed.push(j);
+  if (k) { fineWakeRect(room, c0 - 2, r0 - 2, c1 + 2, r1 + 2); emitFineCells(room, changed); }
+  return k;
+}
+// …where a thing is: a loose one where its driver last said, anything else where it was placed
+function objAtSrv(room, o) { const P = roomLoosePose[room], pp = P && P.get(o.id); return pp ? { x: pp.x, y: pp.y } : { x: o.x, y: o.y }; }
 function ropeBurnWire(room, o, now) { emitObjToChunks(room, o, 'rope-burn', { id: o.id, rc: o.rc || null, rb: o.rb || null, rfree: o.rfree || null, sn: now }); }
 // ⭐ THE SNAP: `o` keeps its id and becomes the part before arc `s`; a new rope is the part after it. Catches still waiting on
 //   either side go with their side, and each end that was already burning keeps its record.
@@ -22913,6 +22941,11 @@ io.on('connection', (socket) => {
       // one prop's deposit is one thing, and scattering it into two cairns is clutter rather than drama.
       if (obj.cost > 0 && invGatedRoom(currentAvatarRoom)) scatterMatter(currentAvatarRoom, obj.x, obj.y - 12, [], obj.cost | 0, 1);
       emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-removed', { id });
+      // ⭐ …AND WHAT WAS IN IT COMES OUT (`worldSpillLiquid`): the last of a melting block as water, a broken drum's oil —
+      //   about half its volume, and unlit (fire never reaches here: a hot hit on a drum sets it off, above)
+      const at = objAtSrv(currentAvatarRoom, obj), hw = (obj.w || 32) / 2, hh = (obj.h || 32) / 2, cells = (obj.w || 32) * (obj.h || 32) / (TERRAIN_CELL * TERRAIN_CELL);
+      if (obj.melt > 0) worldSpillLiquid(currentAvatarRoom, at.x, at.y, hw, hh, 9, cells * 0.9);
+      else if (obj.look === 'drum') worldSpillLiquid(currentAvatarRoom, at.x, at.y, hw, hh, 15, cells * 0.5);
     }
     else {
       objsTouch(currentAvatarRoom, obj.ch);
@@ -22928,10 +22961,13 @@ io.on('connection', (socket) => {
       // by being destroyed like anything else. A block that shrank to a pixel would be a thing you cannot hit.
       const upd = { id, hp: obj.hp };
       if (obj.melt > 0 && obj.hp0 > 0) {
-        const k = 0.34 + 0.66 * Math.max(0, obj.hp) / obj.hp0;
+        const k = 0.34 + 0.66 * Math.max(0, obj.hp) / obj.hp0, was = obj.w * obj.h;
         obj.w = Math.max(6, Math.round(obj.w0 * k));
         obj.h = Math.max(6, Math.round(obj.h0 * k));
         upd.w = obj.w; upd.h = obj.h;
+        // …and the ice it lost is water, at its base (list 13 "after the plan": *"producing water and shrinking itself"*)
+        const at = objAtSrv(currentAvatarRoom, obj);
+        worldSpillLiquid(currentAvatarRoom, at.x, at.y, obj.w / 2, obj.h / 2, 9, 0.9 * (was - obj.w * obj.h) / (TERRAIN_CELL * TERRAIN_CELL));
       }
       emitObjToChunks(currentAvatarRoom, obj, 'avatar-object-update', upd);
     }
