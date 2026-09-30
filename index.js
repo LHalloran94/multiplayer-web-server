@@ -1995,6 +1995,15 @@ function sanitizeEnvSpec(raw) {
     // ⚠️ It is authored per Level and not derived from the Level's TYPE, because "a Level about mining" is a
     // thing somebody should be able to build. The type only decides the default, and the default is off.
     if (l && l.econ) out.econ = 1;
+    // ⭐⭐ #176 — THE MOVES THIS LEVEL SWITCHES OFF (a powerup can give one back). Ids only, from a fixed list:
+    // it must agree with `LEVEL_MOVES` in the client's 01_state.js. Written out inline rather than as a shared
+    // constant because the probe rigs slice this file, and a bare reference across a slice throws in a guard.
+    if (l && Array.isArray(l.off)) {
+      const ok = ['glide', 'walls', 'djump', 'dash', 'slam', 'ball', 'grapple', 'punch', 'dig', 'size', 'ghost'];
+      const off = [];
+      for (const v of l.off) if (ok.includes(v) && !off.includes(v)) off.push(v);
+      if (off.length) out.off = off;
+    }
     return out;
   });
   return { levels, nav: (raw.nav === 'series') ? 'series' : 'free' };
@@ -17327,7 +17336,17 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // duplicate of the enter/leave detection that has worked since #98. So: one type, three presentations.
     // ⚠️ The empty string is today's invisible area and stays the default, so every area that already exists
     // reads back exactly as it did.
-    if (data.part === 'plate' || data.part === 'switch' || data.part === 'vortex') obj.part = data.part;
+    if (data.part === 'plate' || data.part === 'switch' || data.part === 'vortex' || data.part === 'powerup') obj.part = data.part;
+    // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
+    // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
+    // ⚠️ The kind list must agree with `POWERUP_KINDS` in the client's 01_state.js.
+    if (obj.part === 'powerup') {
+      obj.w = clampN(data.w, 24, 96, 40); obj.h = obj.w;
+      obj.pw = ['wings', 'gloves', 'boots', 'grapple'].includes(data.pw) ? data.pw : 'wings';
+      obj.pdur = ['timed', 'death', 'hit', 'ever'].includes(data.pdur) ? data.pdur : 'death';
+      if (obj.pdur === 'timed') obj.psec = clampN(data.psec, 2, 300, 15);
+      obj.pback = clampN(data.pback, 0, 600, 10);        // seconds until it comes back; 0 = never
+    }
     // ⭐⭐ #177 — A VORTEX. The card is one line ("things that suck in basically"), and the whole of it is a
     // radius, a strength and which way round it goes. It is the FOURTH presentation of this one type, and it
     // costs a branch here rather than a type because everything an area already does — being named, being
@@ -23155,6 +23174,24 @@ io.on('connection', (socket) => {
     const rec = st.get(id) || {};
     if (rec.sw) delete rec.sw; else rec.sw = 1;
     st.set(id, rec);
+    broadcastObjSt(room);
+  });
+  // ⭐⭐ #176 — SOMEBODY TOUCHED A POWERUP. The one thing the server adds is that exactly ONE person gets it:
+  // two players arriving on the same frame each see it as free on their own screen. It stores the MOMENT it was
+  // taken (`pt`, wall clock), and every client works out from the pickup's own `pback` when it comes back — so a
+  // pickup returning costs no message at all, the same "store a moment, not a state" the collapsing floor uses.
+  // ⚠️ In the per-object record, which is never saved: a taken pickup must not follow a published Level.
+  socket.on('obj-power', ({ id }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const map = roomObjects[room]; const o = map && map.get(id);
+    if (!o || o.type !== 'region' || o.part !== 'powerup') return;
+    const st = objStOf(room);
+    const rec = st.get(id) || {};
+    const now = Date.now();
+    if (rec.pt && (!o.pback || now < rec.pt + o.pback * 1000)) return;   // somebody got there first
+    rec.pt = now;
+    st.set(id, rec);
+    socket.emit('power-got', { id });
     broadcastObjSt(room);
   });
 
