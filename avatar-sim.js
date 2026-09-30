@@ -152,7 +152,9 @@
   // ("bigger… launch less far", "smaller… get launched further").
   function massOf(s) { const k = sizeOf(s); return k * k; }
   function maxVxOf(s) { return C.MAX_VX * clamp(Math.pow(sizeOf(s), C.SIZE_SPEED_POW), C.SIZE_SPEED_MIN, C.SIZE_SPEED_MAX); }
-  function jumpVyOf(s) { return C.JUMP_VY * clamp(Math.pow(sizeOf(s), C.SIZE_JUMP_POW), C.SIZE_JUMP_MIN, C.SIZE_JUMP_MAX); }
+  // `jumpMul` / `gravMul` — optional per-body multipliers (#176: moon boots). Absent = 1, so every body that has
+  // never heard of them jumps and falls exactly as before.
+  function jumpVyOf(s) { return C.JUMP_VY * clamp(Math.pow(sizeOf(s), C.SIZE_JUMP_POW), C.SIZE_JUMP_MIN, C.SIZE_JUMP_MAX) * (s.jumpMul || 1); }
 
   // ---- Platform + bounds collision (mirror of client resolveStage*) ----
   function resolveStageCollisions(s, P) {
@@ -257,7 +259,7 @@
     const prevVy = s.vy;
     const isApex = !s.onGround && Math.abs(s.vy) < C.APEX_VY_THRESH;
     const gMult = isApex ? C.GRAVITY_APEX_MULT : (s.vy < 0 ? C.GRAVITY_UP_MULT : C.GRAVITY_DOWN_MULT);
-    s.vy = Math.min(s.vy + C.GRAVITY_BASE * gMult, C.MAX_VY);
+    s.vy = Math.min(s.vy + C.GRAVITY_BASE * gMult * (s.gravMul || 1), C.MAX_VY);
 
     // Integrate + collide
     s.x += s.vx; s.y += s.vy;

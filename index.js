@@ -17342,8 +17342,11 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // ⚠️ The kind list must agree with `POWERUP_KINDS` in the client's 01_state.js.
     if (obj.part === 'powerup') {
       obj.w = clampN(data.w, 24, 96, 40); obj.h = obj.w;
-      obj.pw = ['wings', 'gloves', 'boots', 'grapple'].includes(data.pw) ? data.pw : 'wings';
+      obj.pw = ['wings', 'gloves', 'boots', 'grapple', 'ball', 'star', 'shield', 'moon', 'xjump'].includes(data.pw) ? data.pw : 'wings';
       obj.pdur = ['timed', 'death', 'hit', 'ever'].includes(data.pdur) ? data.pdur : 'death';
+      // …except where the KIND decides: a star is always timed, a shield lasts until it has saved you.
+      if (obj.pw === 'star') obj.pdur = 'timed';
+      else if (obj.pw === 'shield') obj.pdur = 'death';
       if (obj.pdur === 'timed') obj.psec = clampN(data.psec, 2, 300, 15);
       obj.pback = clampN(data.pback, 0, 600, 10);        // seconds until it comes back; 0 = never
     }
