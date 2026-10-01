@@ -17345,6 +17345,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       obj.w = ENEMY_KINDS[obj.ek].w; obj.h = ENEMY_KINDS[obj.ek].h;
       obj.erng = clampN(data.erng, 40, 3000, 240);         // px either side of where it was put
       obj.eback = clampN(data.eback, 0, 600, 10);          // seconds until it comes back; 0 = never
+      if (data.espd) obj.espd = clampN(data.espd, 10, 300, ENEMY_KINDS[obj.ek].speed);   // px/s; unset = the kind's own
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
     // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
@@ -20003,7 +20004,7 @@ function enemyStep(room, R, E, o, now, dt) {
   const wallAt = (x, y0, y1) => { for (const f of R.walls) if (x >= f.x0 && x <= f.x1 && y1 > f.y0 && y0 < f.y1) return true; return false; };
   const K = ENEMY_KINDS[E.k] || ENEMY_KINDS.walker, hw = K.w / 2;
   const stunned = E.stun > now;
-  if (!stunned) E.vx = E.ground ? E.dir * K.speed : E.vx * 0.98;
+  if (!stunned) E.vx = E.ground ? E.dir * (o.espd || K.speed) : E.vx * 0.98;
   else E.vx *= 0.9;
   E.vy = Math.min(ENEMY_FALL_MAX, E.vy + ENEMY_G * dt);
   // ── sideways: a wall turns it round, a one-cell bump is stepped up, a missing floor ahead turns it round
