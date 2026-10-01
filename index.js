@@ -19958,9 +19958,27 @@ function lastBodyPos(room, sid) {
 // ⚠️ Being hurt by one, and hurting one, is decided on the PLAYER's screen (the same rule as every hit today); the
 //    server only says yes/no to a kill (`enemy-hit`) so two players cannot both stomp the same one.
 const ENEMY_KINDS = {
-  walker: { w: 48, h: 32, speed: 42, hp: 2, stomp: 1 },
-  spiky:  { w: 56, h: 28, speed: 34, hp: 2, stomp: 0 },   // stomping a Spiky kills YOU
+  walker:  { w: 48, h: 32, speed: 42, hp: 2, stomp: 1 },
+  spiky:   { w: 56, h: 28, speed: 34, hp: 2, stomp: 0 },              // stomping a Spiky kills YOU
+  hopper:  { w: 56, h: 28, speed: 140, hp: 2, stomp: 1, hop: 1 },     // speed = how far a hop carries it sideways
+  swooper: { w: 76, h: 28, speed: 220, hp: 1, stomp: 1, fly: 1 },     // speed = how fast it dives
 };
+// ⭐ WHERE PLAYERS ARE, FOR THE ENEMIES THAT REACT TO THEM (inc 2). The view beacon only comes twice a second, which is
+// fine for "is anybody near" and too stale to dive at; so a player near an enemy reports its body centre ~10×/s
+// (`enemy-me`), and only then. Entries go stale on their own, which is also what forgets a player who left.
+const enemyTargets = new Map();                       // room → Map<sid, { x, y, t }>
+function enemyTarget(room, x, y, maxDx, dyMin, dyMax, now) {
+  const m = enemyTargets.get(room); if (!m) return null;
+  let best = null, bd = Infinity;
+  for (const [sid, p] of m) {
+    if (now - p.t > 1500) { if (now - p.t > 10000) m.delete(sid); continue; }
+    const dx = p.x - x, dy = p.y - y;
+    if (Math.abs(dx) > maxDx || dy < dyMin || dy > dyMax) continue;
+    const d = Math.abs(dx) + Math.abs(dy);
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
+}
 const ENEMY_HZ = 20, ENEMY_G = 1400, ENEMY_FALL_MAX = 900;
 const roomEnemies = new Map();                        // room → { list: [obj], at, floors, E: Map<id, body> }
 // What an enemy may stand on. Built once: air, liquids and plants (a tree trunk is passable to players too) are not.
@@ -19973,7 +19991,7 @@ const ENEMY_SOLID = (() => {
 function enemySpawnBody(o) {
   const K = ENEMY_KINDS[o.ek] || ENEMY_KINDS.walker;
   return { id: o.id, k: o.ek, x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, dir: 1, ground: false, hp: K.hp,
-           dead: 0, stun: 0, sx: o.x, ox: o.x, oy: o.y };
+           dead: 0, stun: 0, sx: o.x, hy: o.y + K.h / 2, ox: o.x, oy: o.y, next: 0, mode: 'hang' };
 }
 function enemyKill(room, R, E, how, sid) {
   E.dead = Date.now(); E.vx = E.vy = 0; E.stun = 0;
@@ -20003,20 +20021,44 @@ function enemyStep(room, R, E, o, now, dt) {
   };
   const wallAt = (x, y0, y1) => { for (const f of R.walls) if (x >= f.x0 && x <= f.x1 && y1 > f.y0 && y0 < f.y1) return true; return false; };
   const K = ENEMY_KINDS[E.k] || ENEMY_KINDS.walker, hw = K.w / 2;
-  const stunned = E.stun > now;
-  if (!stunned) E.vx = E.ground ? E.dir * (o.espd || K.speed) : E.vx * 0.98;
-  else E.vx *= 0.9;
+  const stunned = E.stun > now, spd = o.espd || K.speed, rng = o.erng || 240;
+  const groundAhead = (fx, y) => { const fc = Math.floor(fx / CELL), fr = Math.floor((y + 1) / CELL);
+    return solid(fc, fr) || solid(fc, fr + 1) || solid(fc, fr + 2) || floorAt(fx, y - 1, y + 2 * CELL + 1) !== null; };
+  if (K.fly) { enemyFly(room, E, o, K, now, dt, solid, stunned, spd, rng); return; }
+  if (stunned) E.vx *= 0.9;
+  else if (K.hop) {
+    // ⭐ THE HOPPER: sits, then hops — at you, if you are near and within its range; otherwise a small hop on its own
+    // beat, turning at the end of its range and at a ledge (an idle frog does not throw itself off a cliff; one
+    // chasing you might).
+    if (E.ground) {
+      E.vx = 0;
+      if (now >= E.next) {
+        const p = enemyTarget(room, E.x, E.y - K.h / 2, 320, -260, 200, now);
+        let d = p ? (p.x >= E.x ? 1 : -1) : E.dir;
+        if (Math.abs(E.x - E.sx) >= rng && Math.sign(E.x - E.sx) === d) {
+          if (p) { E.dir = d; E.next = now + 400; d = 0; }           // you are past its range: face you and wait
+          else d = -d;
+        }
+        if (d && !p && !groundAhead(E.x + d * (hw + 28), E.y)) { E.dir = -d; E.next = now + 600; d = 0; }
+        if (d) { E.dir = d; E.chase = !!p; E.vx = d * spd * (p ? 1 : 0.45); E.vy = p ? -440 : -280; E.ground = false; E.next = Infinity; }
+      }
+    }
+  } else E.vx = E.ground ? E.dir * spd : E.vx * 0.98;
+  const wasGround = E.ground;
   E.vy = Math.min(ENEMY_FALL_MAX, E.vy + ENEMY_G * dt);
   // ── sideways: a wall turns it round, a one-cell bump is stepped up, a missing floor ahead turns it round
   let nx = E.x + E.vx * dt;
   const sgn = E.vx > 0 ? 1 : E.vx < 0 ? -1 : E.dir;
   const lead = nx + sgn * hw, lc = Math.floor(lead / CELL);
   const rTop = Math.floor((E.y - K.h + 2) / CELL), rBot = Math.floor((E.y - 1) / CELL);
-  let blocked = wallAt(lead, E.y - K.h, E.y - 1), bump = false;
-  for (let r = rTop; r <= rBot && !blocked; r++) if (solid(lc, r)) { if (r === rBot && E.ground) bump = true; else blocked = true; }
+  let blocked = false, bump = false;
+  if (E.vx !== 0) {                                  // ⚠️ standing still is not walking into a wall (a resting hopper would spin)
+    blocked = wallAt(lead, E.y - K.h, E.y - 1);
+    for (let r = rTop; r <= rBot && !blocked; r++) if (solid(lc, r)) { if (r === rBot && E.ground) bump = true; else blocked = true; }
+  }
   if (bump && !blocked) { if (solid(lc, rTop - 1)) blocked = true; else E.y = rBot * CELL; }
   if (blocked) { if (!stunned) E.dir = -E.dir; E.vx = 0; nx = E.x; }
-  else if (E.ground && !stunned) {
+  else if (E.ground && !stunned && !K.hop) {
     const fx = nx + E.dir * hw, fc = Math.floor(fx / CELL), fr = Math.floor((E.y + 1) / CELL);
     const ground = solid(fc, fr) || solid(fc, fr + 1) || floorAt(fx, E.y - 1, E.y + CELL + 1) !== null;
     const far = Math.abs(nx - E.sx) > (o.erng || 240) && Math.sign(nx - E.sx) === E.dir;
@@ -20035,7 +20077,41 @@ function enemyStep(room, R, E, o, now, dt) {
     if (pf !== null && (!E.ground || pf < ny)) { ny = pf; E.vy = 0; E.ground = true; }
   }
   E.y = ny;
+  if (K.hop && E.ground && !wasGround) { E.vx = 0; E.next = now + (E.chase ? 450 : 1500); }   // landed: a breath, then the next hop
   if (E.y > ROWS * CELL + 200) enemyKill(room, R, E, 'fall', null);
+}
+// ⭐ THE SWOOPER: hangs where it was put; when somebody passes below it — within its reach, and in sight (a wall between
+// you hides you) — it dives at where you were, then flies home and hangs again. No gravity; ground ends a dive.
+function enemyFly(room, E, o, K, now, dt, solid, stunned, spd, rng) {
+  const CELL = TERRAIN_CELL, hx = E.sx, hy = E.hy;
+  const hitAt = (x, y) => solid(Math.floor(x / CELL), Math.floor((y - K.h / 2) / CELL));
+  const toward = (tx, ty, v) => {
+    const dx = tx - E.x, dy = ty - E.y, d = Math.hypot(dx, dy);
+    if (d <= v * dt) { E.x = tx; E.y = ty; return true; }
+    E.vx = dx / d * v; E.vy = dy / d * v; E.x += E.vx * dt; E.y += E.vy * dt; return false;
+  };
+  if (stunned) {                                        // knocked: drift, then go home
+    E.x += E.vx * dt; E.y += E.vy * dt; E.vx *= 0.88; E.vy *= 0.88; E.mode = 'back';
+  } else if (E.mode === 'dive') {
+    const nx = E.x + E.vx * dt, ny = E.y + E.vy * dt;
+    if (now > E.until || hitAt(nx, ny) || toward(E.tx, E.ty, spd)) { E.mode = 'back'; E.next = now + 250; }
+  } else if (E.mode === 'back') {
+    if (now >= E.next && toward(hx, hy, spd * 0.6)) { E.mode = 'hang'; E.next = now + 1200; E.vx = E.vy = 0; }
+  } else {
+    E.x = hx; E.y = hy + Math.sin(now / 300) * 3;
+    if (now >= E.next) {
+      const p = enemyTarget(room, hx, hy - K.h / 2, rng, -20, 460, now);
+      if (p) {
+        // in sight: nothing solid on the straight line from it to you
+        const sx = hx, sy = hy - K.h / 2, L = Math.hypot(p.x - sx, p.y - sy), n = Math.ceil(L / CELL);
+        let clear = true;
+        for (let i = 1; i < n && clear; i++) { const t = i / n; if (solid(Math.floor((sx + (p.x - sx) * t) / CELL), Math.floor((sy + (p.y - sy) * t) / CELL))) clear = false; }
+        if (clear) { E.mode = 'dive'; E.tx = p.x; E.ty = p.y + K.h / 2; E.until = now + 2500; }
+        else E.next = now + 300;
+      }
+    }
+  }
+  if (Math.abs(E.vx) > 1) E.dir = E.vx > 0 ? 1 : -1;
 }
 function enemyRoomScan(room, R, now) {
   const map = roomObjects[room];
@@ -23359,6 +23435,13 @@ io.on('connection', (socket) => {
   // server adds is that a dead enemy stays dead — two players stomping it on the same frame kill it once.
   // `how`: stomp · crush (stone skin / Mega walking into it) · punch (1 damage + knockback) · power · slam (both kill).
   // ⚠️ A loose sanity check on distance against the last beacon, so a forged message can only lie locally.
+  // #184 inc 2 — "I am here", from a player who has an enemy near them (see `enemyTargets`). Clamped to the world.
+  socket.on('enemy-me', (v) => {
+    const room = currentAvatarRoom; if (!room || !v || !isFinite(v.x) || !isFinite(v.y)) return;
+    const d = roomDims(room);
+    const m = enemyTargets.get(room) || (enemyTargets.set(room, new Map()), enemyTargets.get(room));
+    m.set(socket.id, { x: Math.max(0, Math.min(d.cols * TERRAIN_CELL, +v.x)), y: Math.max(0, Math.min(d.rows * TERRAIN_CELL, +v.y)), t: Date.now() });
+  });
   socket.on('enemy-hit', ({ id, how, dir }) => {
     const room = currentAvatarRoom; if (!room) return;
     const R = roomEnemies.get(room); const E = R && R.E.get(id);
