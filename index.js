@@ -17345,7 +17345,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // ⚠️ Two retired kinds are carried over rather than dropped to the default: a star became Stone skin and
       // moon boots became Spring boots (user, 2026-09-30), so a pickup placed before then keeps its meaning.
       const pw = data.pw === 'star' ? 'stone' : data.pw === 'moon' ? 'boots' : data.pw;
-      obj.pw = ['wings', 'gloves', 'grapple', 'ball', 'boots', 'xjump', 'stone', 'shield', 'fireproof'].includes(pw) ? pw : 'wings';
+      obj.pw = ['wings', 'gloves', 'grapple', 'ball', 'boots', 'xjump', 'stone', 'shield', 'fireproof', 'jetpack', 'power'].includes(pw) ? pw : 'wings';
       obj.pdur = ['timed', 'death', 'hit', 'ever'].includes(data.pdur) ? data.pdur : 'death';
       // …except where the KIND decides: a shield lasts until it has saved you.
       if (obj.pw === 'shield') obj.pdur = 'death';
