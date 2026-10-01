@@ -17346,6 +17346,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       obj.erng = clampN(data.erng, 40, 3000, 240);         // px either side of where it was put
       obj.eback = clampN(data.eback, 0, 600, 10);          // seconds until it comes back; 0 = never
       if (data.espd) obj.espd = clampN(data.espd, 10, 300, ENEMY_KINDS[obj.ek].speed);   // px/s; unset = the kind's own
+      if (data.ehang && ENEMY_KINDS[obj.ek].fly) obj.ehang = 1;   // a flyer placed under a ceiling hangs from it
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
     // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
@@ -20040,7 +20041,8 @@ function enemyStep(room, R, E, o, now, dt) {
           else d = -d;
         }
         if (d && !p && !groundAhead(E.x + d * (hw + 28), E.y)) { E.dir = -d; E.next = now + 600; d = 0; }
-        if (d) { E.dir = d; E.chase = !!p; E.vx = d * spd * (p ? 1 : 0.45); E.vy = p ? -440 : -280; E.ground = false; E.next = Infinity; }
+        // ⭐ Higher hops (user, 2026-10-01): ~130px at you, ~50px idle.
+        if (d) { E.dir = d; E.chase = !!p; E.vx = d * spd * (p ? 1 : 0.45); E.vy = p ? -600 : -380; E.ground = false; E.next = Infinity; }
       }
     }
   } else E.vx = E.ground ? E.dir * spd : E.vx * 0.98;
@@ -20093,12 +20095,25 @@ function enemyFly(room, E, o, K, now, dt, solid, stunned, spd, rng) {
   if (stunned) {                                        // knocked: drift, then go home
     E.x += E.vx * dt; E.y += E.vy * dt; E.vx *= 0.88; E.vy *= 0.88; E.mode = 'back';
   } else if (E.mode === 'dive') {
-    const nx = E.x + E.vx * dt, ny = E.y + E.vy * dt;
-    if (now > E.until || hitAt(nx, ny) || toward(E.tx, E.ty, spd)) { E.mode = 'back'; E.next = now + 250; }
+    // ⭐ IT PURSUES YOU FOR AS LONG AS YOU ARE INSIDE ITS AREA (user, 2026-10-01: "not just swoop to where you were").
+    // The area is measured from its HOME, not from where it has got to, so leaving it ends the chase. It steers rather
+    // than snapping onto you — a limited turn, like a homing shot's — so a sharp change of direction can shake it.
+    const p = enemyTarget(room, hx, hy - K.h / 2, rng, -20, 460, now);
+    if (!p) { E.mode = 'back'; E.next = now + 250; }
+    else {
+      const tx = p.x, ty = p.y + K.h / 2, dx = tx - E.x, dy = ty - E.y, d = Math.hypot(dx, dy) || 1;
+      const k = Math.min(1, dt * 3.2);
+      E.vx += (dx / d * spd - E.vx) * k; E.vy += (dy / d * spd - E.vy) * k;
+      let nx = E.x + E.vx * dt, ny = E.y + E.vy * dt;
+      // the ground and walls stop it on that axis only, so it skims along a floor rather than sticking to it
+      if (hitAt(nx, ny)) { if (!hitAt(nx, E.y)) { ny = E.y; E.vy = 0; } else if (!hitAt(E.x, ny)) { nx = E.x; E.vx = 0; } else { nx = E.x; ny = E.y; E.vx = E.vy = 0; } }
+      E.x = nx; E.y = ny;
+    }
   } else if (E.mode === 'back') {
     if (now >= E.next && toward(hx, hy, spd * 0.6)) { E.mode = 'hang'; E.next = now + 1200; E.vx = E.vy = 0; }
   } else {
-    E.x = hx; E.y = hy + Math.sin(now / 300) * 3;
+    // hanging from a ceiling it holds still; hovering in open air it bobs
+    E.x = hx; E.y = o.ehang ? hy : hy + Math.sin(now / 300) * 3;
     if (now >= E.next) {
       const p = enemyTarget(room, hx, hy - K.h / 2, rng, -20, 460, now);
       if (p) {
@@ -20106,7 +20121,7 @@ function enemyFly(room, E, o, K, now, dt, solid, stunned, spd, rng) {
         const sx = hx, sy = hy - K.h / 2, L = Math.hypot(p.x - sx, p.y - sy), n = Math.ceil(L / CELL);
         let clear = true;
         for (let i = 1; i < n && clear; i++) { const t = i / n; if (solid(Math.floor((sx + (p.x - sx) * t) / CELL), Math.floor((sy + (p.y - sy) * t) / CELL))) clear = false; }
-        if (clear) { E.mode = 'dive'; E.tx = p.x; E.ty = p.y + K.h / 2; E.until = now + 2500; }
+        if (clear) { E.mode = 'dive'; E.vx = 0; E.vy = spd * 0.5; }   // drops off its perch, then steers
         else E.next = now + 300;
       }
     }
