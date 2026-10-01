@@ -17336,7 +17336,16 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // duplicate of the enter/leave detection that has worked since #98. So: one type, three presentations.
     // ⚠️ The empty string is today's invisible area and stays the default, so every area that already exists
     // reads back exactly as it did.
-    if (data.part === 'plate' || data.part === 'switch' || data.part === 'vortex' || data.part === 'powerup') obj.part = data.part;
+    if (data.part === 'plate' || data.part === 'switch' || data.part === 'vortex' || data.part === 'powerup' || data.part === 'enemy') obj.part = data.part;
+    // ⭐⭐ #184 — AN ENEMY. A sixth presentation of the same area: where it starts, which kind, how far it may wander from
+    // there, and how long it takes to come back once killed. Its BODY is the server's (`enemyTick`), not this record.
+    // ⚠️ The kind list must agree with `ENEMY_KINDS` in the client's 01_state.js; the size is the kind's, not a dial.
+    if (obj.part === 'enemy') {
+      obj.ek = ENEMY_KINDS[data.ek] ? data.ek : 'walker';
+      obj.w = ENEMY_KINDS[obj.ek].w; obj.h = ENEMY_KINDS[obj.ek].h;
+      obj.erng = clampN(data.erng, 40, 3000, 240);         // px either side of where it was put
+      obj.eback = clampN(data.eback, 0, 600, 10);          // seconds until it comes back; 0 = never
+    }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
     // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
     // ⚠️ The kind list must agree with `POWERUP_KINDS` in the client's 01_state.js.
@@ -19936,6 +19945,152 @@ function lastBodyPos(room, sid) {
   if (!r || !(r.apx >= 0) || !(r.apy >= 0)) return null;
   return { x: r.apx, y: r.apy };
 }
+// ══ #184 — ENEMIES (agreed 2026-10-01; scratchpad/kickoff_list13_next.md §3) ═══════════════════════════════════
+// ⭐⭐ THE SERVER RUNS THEM — the user's choice over "the nearest player's machine" and "the clock only". Everything
+// else that moves in a Level is arithmetic on a shared clock, which is why nothing about it is ever sent; an enemy
+// is the first thing that DECIDES (turns at a wall, at a ledge, at the end of its range — and, next increment, at
+// you), so one machine has to be the one deciding, and the server is the only one every player agrees about.
+// ⭐ What the placed object stores is where it STARTS (an area with `part: 'enemy'`). Its body lives here, in
+// `roomEnemies`, and is never saved: a published Level carries the enemy, not where it had wandered to.
+// ⚠️ WHAT IT WALKS ON: terrain and STILL platforms (their tops; a `solid` one is a wall too). Not moving lifts or
+//    pushed crates — the server does not evaluate routes or poses (the cost the user accepted when choosing this).
+// ⚠️ Being hurt by one, and hurting one, is decided on the PLAYER's screen (the same rule as every hit today); the
+//    server only says yes/no to a kill (`enemy-hit`) so two players cannot both stomp the same one.
+const ENEMY_KINDS = {
+  walker: { w: 48, h: 32, speed: 42, hp: 2, stomp: 1 },
+  spiky:  { w: 56, h: 28, speed: 34, hp: 2, stomp: 0 },   // stomping a Spiky kills YOU
+};
+const ENEMY_HZ = 20, ENEMY_G = 1400, ENEMY_FALL_MAX = 900;
+const roomEnemies = new Map();                        // room → { list: [obj], at, floors, E: Map<id, body> }
+// What an enemy may stand on. Built once: air, liquids and plants (a tree trunk is passable to players too) are not.
+const ENEMY_SOLID = (() => {
+  const t = new Uint8Array(256).fill(1); t[0] = 0;
+  for (const v of LIQUID_IDS) t[v] = 0;
+  for (const v of (MATGEN.PLANT_IDS || [])) t[v] = 0;
+  return t;
+})();
+function enemySpawnBody(o) {
+  const K = ENEMY_KINDS[o.ek] || ENEMY_KINDS.walker;
+  return { id: o.id, k: o.ek, x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, dir: 1, ground: false, hp: K.hp,
+           dead: 0, stun: 0, sx: o.x, ox: o.x, oy: o.y };
+}
+function enemyKill(room, R, E, how, sid) {
+  E.dead = Date.now(); E.vx = E.vy = 0; E.stun = 0;
+  io.to(room).emit('enemy-ev', { id: E.id, k: 'die', how, x: Math.round(E.x), y: Math.round(E.y), dir: E.dir });
+  const o = roomObjects[room] && roomObjects[room].get(E.id);
+  if (o && o.tag && sid) fireRuleEvent(room, 'break', { sid, tag: o.tag, oid: o.id }, 0);   // "the boss is down"
+}
+function enemyStep(room, R, E, o, now, dt) {
+  const st = roomCells.get(room);
+  const grid = (st && st.terrain) || ensureTerrain(room);
+  const geom = grid.geom, ROWS = geom.rows, COLS = geom.cols, CELL = TERRAIN_CELL;
+  const solid = (c, r) => {
+    if (c < 0 || c >= COLS) return true;              // the world's side edges are walls
+    if (r >= ROWS) return true;                       // …and its bottom is a floor, as it is for players
+    if (r < 0) return false;
+    const v = peekCellAt(grid, c * ROWS + r);
+    // ⚠️ A PAGE NOBODY HAS MADE means two different things: on GENERATED ground it is rock not yet produced (never
+    //    read it as a hole), but in a room with no generator — a fresh Sandbox — a missing page is simply empty air.
+    if (v < 0) return !!grid.seedFn;
+    return ENEMY_SOLID[v] === 1;
+  };
+  // the highest still-platform top within [y0, y1] under x
+  const floorAt = (x, y0, y1) => {
+    let best = null;
+    for (const f of R.floors) if (x >= f.x0 && x <= f.x1 && f.y >= y0 && f.y <= y1 && (best === null || f.y < best)) best = f.y;
+    return best;
+  };
+  const wallAt = (x, y0, y1) => { for (const f of R.walls) if (x >= f.x0 && x <= f.x1 && y1 > f.y0 && y0 < f.y1) return true; return false; };
+  const K = ENEMY_KINDS[E.k] || ENEMY_KINDS.walker, hw = K.w / 2;
+  const stunned = E.stun > now;
+  if (!stunned) E.vx = E.ground ? E.dir * K.speed : E.vx * 0.98;
+  else E.vx *= 0.9;
+  E.vy = Math.min(ENEMY_FALL_MAX, E.vy + ENEMY_G * dt);
+  // ── sideways: a wall turns it round, a one-cell bump is stepped up, a missing floor ahead turns it round
+  let nx = E.x + E.vx * dt;
+  const sgn = E.vx > 0 ? 1 : E.vx < 0 ? -1 : E.dir;
+  const lead = nx + sgn * hw, lc = Math.floor(lead / CELL);
+  const rTop = Math.floor((E.y - K.h + 2) / CELL), rBot = Math.floor((E.y - 1) / CELL);
+  let blocked = wallAt(lead, E.y - K.h, E.y - 1), bump = false;
+  for (let r = rTop; r <= rBot && !blocked; r++) if (solid(lc, r)) { if (r === rBot && E.ground) bump = true; else blocked = true; }
+  if (bump && !blocked) { if (solid(lc, rTop - 1)) blocked = true; else E.y = rBot * CELL; }
+  if (blocked) { if (!stunned) E.dir = -E.dir; E.vx = 0; nx = E.x; }
+  else if (E.ground && !stunned) {
+    const fx = nx + E.dir * hw, fc = Math.floor(fx / CELL), fr = Math.floor((E.y + 1) / CELL);
+    const ground = solid(fc, fr) || solid(fc, fr + 1) || floorAt(fx, E.y - 1, E.y + CELL + 1) !== null;
+    const far = Math.abs(nx - E.sx) > (o.erng || 240) && Math.sign(nx - E.sx) === E.dir;
+    if (!ground || far) { E.dir = -E.dir; nx = E.x; }
+  }
+  E.x = Math.max(hw, Math.min(COLS * CELL - hw, nx));
+  // ── down: land on terrain (three points across the feet) or on a still platform's top
+  let ny = E.y + E.vy * dt;
+  E.ground = false;
+  if (E.vy >= 0) {
+    const cs = [Math.floor((E.x - hw + 3) / CELL), Math.floor(E.x / CELL), Math.floor((E.x + hw - 3) / CELL)];
+    for (let r = Math.floor(E.y / CELL); r <= Math.floor(ny / CELL); r++) {
+      if (cs.some(c => solid(c, r))) { ny = r * CELL; E.vy = 0; E.ground = true; break; }
+    }
+    const pf = floorAt(E.x, E.y - 1, ny);
+    if (pf !== null && (!E.ground || pf < ny)) { ny = pf; E.vy = 0; E.ground = true; }
+  }
+  E.y = ny;
+  if (E.y > ROWS * CELL + 200) enemyKill(room, R, E, 'fall', null);
+}
+function enemyRoomScan(room, R, now) {
+  const map = roomObjects[room];
+  R.list = []; R.floors = []; R.walls = [];
+  // ⚠️ A PAGE ROOM'S GROUND IS A BUILT-IN PLATFORM, not terrain (the stage layout's floor, which the shared movement
+  //    code stands every player on). The Overworld has none — its ground is all generated cells.
+  if (!overworldRooms.has(room)) for (const p of (MWSim.STAGE_LAYOUTS[0] || [])) R.floors.push({ x0: p.x, x1: p.x + p.w, y: p.y });
+  if (!map) return;
+  for (const o of map.values()) {
+    if (o.type === 'region' && o.part === 'enemy') { R.list.push(o); continue; }
+    if (o.type !== 'platform' || o.nosol || (o.path && o.path.pts && o.path.pts.length >= 2)) continue;
+    if (Math.abs(Math.sin(o.angle || 0)) > 0.08) continue;          // a tilted bar is not a floor to walk on (yet)
+    const w = o.w || 0, h = o.h || 0, x0 = o.x - w / 2, x1 = o.x + w / 2, y0 = o.y - h / 2;
+    R.floors.push({ x0, x1, y: y0 });
+    if (o.solid) R.walls.push({ x0, x1, y0, y1: o.y + h / 2 });
+  }
+  R.at = now;
+}
+function enemyTick() {
+  const now = Date.now(), dt = 1 / ENEMY_HZ;
+  for (const room in roomObjects) {
+    let R = roomEnemies.get(room);
+    if (!R) {
+      // a room with no enemies costs one scan a second, and only while somebody is in it
+      if (!(io.sockets.adapter.rooms.get(room) || {}).size) continue;
+      R = { list: [], floors: [], walls: [], at: 0, E: new Map() };
+      enemyRoomScan(room, R, now);
+      if (!R.list.length) { roomEnemies.set(room, R); continue; }
+      roomEnemies.set(room, R);
+    }
+    if (now - R.at > 1000) enemyRoomScan(room, R, now);
+    if (!R.list.length) { if (R.E.size) R.E.clear(); if (now - R.at > 900 && !(io.sockets.adapter.rooms.get(room) || {}).size) roomEnemies.delete(room); continue; }
+    const listeners = (io.sockets.adapter.rooms.get(room) || {}).size;
+    if (!listeners) continue;                          // nobody watching: everything stands still (a return is a timestamp)
+    const live = new Set();
+    const out = [], dead = [];
+    for (const o of R.list) {
+      live.add(o.id);
+      let E = R.E.get(o.id);
+      // a new one, or one the author moved or changed: start again from where it was put
+      if (!E || E.ox !== o.x || E.oy !== o.y || E.k !== o.ek) { E = enemySpawnBody(o); R.E.set(o.id, E); }
+      if (E.dead) {
+        if (o.eback > 0 && now - E.dead >= o.eback * 1000) {
+          const n = enemySpawnBody(o); R.E.set(o.id, n); E = n;
+          io.to(room).emit('enemy-ev', { id: o.id, k: 'back' });
+        } else { dead.push(o.id); continue; }
+      }
+      enemyStep(room, R, E, o, now, dt);
+      if (E.dead) { dead.push(o.id); continue; }
+      out.push([o.id, Math.round(E.x), Math.round(E.y), E.dir, E.stun > now ? 1 : 0]);
+    }
+    for (const id of R.E.keys()) if (!live.has(id)) R.E.delete(id);
+    io.to(room).emit('enemies', { e: out, d: dead });
+  }
+}
+setInterval(enemyTick, Math.round(1000 / ENEMY_HZ));
 // 🟥 THE EXPIRY SWEEP IS GONE, AND SO IS THE PER-ROOM CAP. Both destroyed matter, in an economy whose premise
 // is that matter is conserved (kickoff_prima.md §8, rows 2 and 3) — a four-minute TTL means a haul dropped and
 // not collected in time simply ceases to exist, and the 300-pile cap silently deleted the oldest to make room.
@@ -23198,6 +23353,32 @@ io.on('connection', (socket) => {
     st.set(id, rec);
     socket.emit('power-got', { id });
     broadcastObjSt(room);
+  });
+  // ⭐⭐ #184 — SOMEBODY HIT AN ENEMY. Whether the hit LANDED was decided on their screen (as every hit is); what the
+  // server adds is that a dead enemy stays dead — two players stomping it on the same frame kill it once.
+  // `how`: stomp · crush (stone skin / Mega walking into it) · punch (1 damage + knockback) · power · slam (both kill).
+  // ⚠️ A loose sanity check on distance against the last beacon, so a forged message can only lie locally.
+  socket.on('enemy-hit', ({ id, how, dir }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const R = roomEnemies.get(room); const E = R && R.E.get(id);
+    if (!E || E.dead) return;
+    const K = ENEMY_KINDS[E.k]; if (!K) return;
+    if (!['stomp', 'crush', 'punch', 'power', 'slam'].includes(how)) return;
+    if (how === 'stomp' && !K.stomp) return;
+    const p = lastBodyPos(room, socket.id);
+    if (p && Math.hypot(p.x - E.x, p.y - E.y) > 600) return;
+    const now = Date.now();
+    if (how === 'punch') {
+      if (now - (E.hitAt || 0) < 150) return;
+      E.hitAt = now;
+      if (--E.hp > 0) {
+        const d = dir < 0 ? -1 : 1;
+        E.stun = now + 450; E.vx = d * 260; E.vy = -220; E.ground = false; E.dir = -d;   // knocked away, and turns to face you
+        io.to(room).emit('enemy-ev', { id, k: 'hit' });
+        return;
+      }
+    }
+    enemyKill(room, R, E, how, socket.id);
   });
 
   // Phase 3: the host manages L2 build permissions live (owner-only). `mode` is the role default and
