@@ -19966,9 +19966,9 @@ function lastBodyPos(room, sid) {
 // ⚠️ Being hurt by one, and hurting one, is decided on the PLAYER's screen (the same rule as every hit today); the
 //    server only says yes/no to a kill (`enemy-hit`) so two players cannot both stomp the same one.
 const ENEMY_KINDS = {
-  walker:  { w: 48, h: 32, speed: 42, hp: 2, stomp: 1 },
+  walker:  { w: 48, h: 32, speed: 42, hp: 1, stomp: 1 },
   spiky:   { w: 56, h: 28, speed: 34, hp: 2, stomp: 0 },              // stomping a Spiky kills YOU
-  hopper:  { w: 64, h: 32, speed: 140, hp: 2, stomp: 1, hop: 1, vis: 320 },     // speed = how far a hop carries it sideways
+  hopper:  { w: 64, h: 32, speed: 140, hp: 1, stomp: 1, hop: 1, vis: 320 },     // speed = how far a hop carries it sideways
   swooper: { w: 76, h: 28, speed: 220, hp: 1, stomp: 1, fly: 1, vis: 240 },     // speed = how fast it dives
   // ⭐⭐ The second batch (user's picks 2026-10-02). `st` is the state a kind is in, sent with each position so every
   // screen draws the right pose and agrees about whether it can be stomped right now (see `enemyStompOk`).
@@ -23647,20 +23647,20 @@ io.on('connection', (socket) => {
     const now = Date.now();
     // ⭐⭐ HEALTH (user, 2026-10-02): a stomp and a punch take 1; a charged punch / finisher / Power punch and a slam take 3;
     // being squashed by stone skin or Mega kills. `E.hp` 0 from the start = CAN'T BE HURT (the author's "0" setting).
-    if (E.inv) return;
     if (now - (E.hitAt || 0) < 150) return;              // one hit per swing, however many messages it arrives as
     E.hitAt = now;
-    const dmg = how === 'crush' ? Infinity : (how === 'power' || how === 'slam') ? 3 : 1;
-    E.hp -= dmg;
-    if (E.hp > 0) {
-      if (how === 'punch' || how === 'power') {
-        const d = dir < 0 ? -1 : 1;
-        E.stun = now + 450; E.vx = d * 260; E.vy = -220; E.ground = false; E.dir = -d;   // knocked away, and turns to face you
-      } else E.stun = now + 300;                         // stomped / slammed and still standing: a moment's daze
-      io.to(room).emit('enemy-ev', { id, k: 'hit' });
-      return;
+    // ⭐ ONE THAT CAN'T BE HURT STILL REACTS (user, 2026-10-02: "even the invulnerable enemies should still be stunned"):
+    // it takes no damage, but is knocked back / dazed / squashed like any other.
+    if (!E.inv) {
+      const dmg = how === 'crush' ? Infinity : (how === 'power' || how === 'slam') ? 3 : 1;
+      E.hp -= dmg;
+      if (E.hp <= 0) { enemyKill(room, R, E, how, socket.id); return; }
     }
-    enemyKill(room, R, E, how, socket.id);
+    if (how === 'punch' || how === 'power') {
+      const d = dir < 0 ? -1 : 1;
+      E.stun = now + 450; E.vx = d * 260; E.vy = -220; E.ground = false; E.dir = -d;   // knocked away, and turns to face you
+    } else E.stun = now + 500;                           // stomped / slammed / squashed and still standing: dazed
+    io.to(room).emit('enemy-ev', { id, k: 'hit', how }); // `how` so every screen shows the right reaction (a stomp squashes)
   });
 
   // Phase 3: the host manages L2 build permissions live (owner-only). `mode` is the role default and
