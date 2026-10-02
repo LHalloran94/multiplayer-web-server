@@ -17352,6 +17352,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // ⭐ round 9 (user, 2026-10-02): how far it SEES you from (its trigger distance), and — a crusher — whether it slams
       // until it hits something or only as far as its reach (`erng` is then the reach)
       if (isFinite(data.evis)) obj.evis = clampN(data.evis, 0, 3000, ENEMY_KINDS[obj.ek].vis || 240);
+      if (isFinite(data.ehp)) obj.ehp = Math.round(clampN(data.ehp, 0, 20, ENEMY_KINDS[obj.ek].hp));   // health; 0 = can't be hurt
       if (ENEMY_KINDS[obj.ek].crush) obj.estop = data.estop === 'reach' ? 'reach' : 'hit';
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
@@ -19973,9 +19974,10 @@ const ENEMY_KINDS = {
   // screen draws the right pose and agrees about whether it can be stomped right now (see `enemyStompOk`).
   roller:  { w: 60, h: 32, speed: 40, hp: 2, stomp: 1, roll: 1, vis: 320 },     // walks; sees you → curls (st 1) and rolls ×6; uncurls (st 2)
   charger: { w: 68, h: 36, speed: 30, hp: 3, stomp: 1, charge: 1, vis: 360 },   // paws the ground (st 3), charges ×10 (st 4), dazed by a wall (st 2)
-  crusher: { w: 64, h: 64, speed: 160, hp: 1, stomp: 0, crush: 1, ceil: 1, vis: 16 },   // slams (st 5), stops (st 7), returns at speed (st 8); slam only
+  crusher: { w: 64, h: 64, speed: 160, hp: 1, stomp: 0, crush: 1, ceil: 1, vis: 600 },  // slams (st 5), stops (st 7), returns at speed (st 8); slam only
+  // ⚠️ a crusher's `vis` is how far ALONG ITS LINE it notices you (round 10) — not how far to the sides
   // ⭐ Round 8: the smooth one above only kills by PINNING you (decided on your screen); this one kills on any touch
-  spikecrusher: { w: 80, h: 80, speed: 160, hp: 1, stomp: 0, crush: 1, ceil: 1, vis: 16 },
+  spikecrusher: { w: 80, h: 80, speed: 160, hp: 0, stomp: 0, crush: 1, ceil: 1, vis: 600 },   // hp 0 = can't be hurt
   spitter: { w: 48, h: 52, speed: 0, hp: 1, stomp: 1, spit: 1, vis: 240 },     // stays put; rears and spits (st 6)
 };
 // Whether landing on it RIGHT NOW kills it. ⚠️ The client has the same rule (`enemyStompable`) — they must agree.
@@ -20018,7 +20020,9 @@ function enemyKindOf(k, sz) {
 }
 function enemySpawnBody(o) {
   const K = enemyKindOf(o.ek, o.esz);
-  return { id: o.id, k: o.ek, sz: o.esz || 1, x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, dir: 1, ground: false, hp: K.hp,
+  // health: the author's setting (0 = can't be hurt), else the kind's own
+  const hp = isFinite(o.ehp) ? o.ehp : K.hp;
+  return { id: o.id, k: o.ek, sz: o.esz || 1, x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, dir: 1, ground: false, hp: hp || 1, inv: hp === 0,
            dead: 0, stun: 0, sx: o.x, hy: o.y + K.h / 2, ox: o.x, oy: o.y, next: 0, mode: 'hang' };
 }
 function enemyKill(room, R, E, how, sid) {
@@ -20045,9 +20049,15 @@ function enemyStep(room, R, E, o, now, dt) {
   const floorAt = (x, y0, y1) => {
     let best = null;
     for (const f of R.floors) if (x >= f.x0 && x <= f.x1 && f.y >= y0 && f.y <= y1 && (best === null || f.y < best)) best = f.y;
+    // a crusher's top is a floor to other enemies
+    for (const b of (R.cboxes || [])) if (b.id !== E.id && x >= b.x0 && x <= b.x1 && b.y0 >= y0 && b.y0 <= y1 && (best === null || b.y0 < best)) best = b.y0;
     return best;
   };
-  const wallAt = (x, y0, y1) => { for (const f of R.walls) if (x >= f.x0 && x <= f.x1 && y1 > f.y0 && y0 < f.y1) return true; return false; };
+  const wallAt = (x, y0, y1) => {
+    for (const f of R.walls) if (x >= f.x0 && x <= f.x1 && y1 > f.y0 && y0 < f.y1) return true;
+    for (const b of (R.cboxes || [])) if (b.id !== E.id && x >= b.x0 && x <= b.x1 && y1 > b.y0 && y0 < b.y1) return true;   // …and its sides walls
+    return false;
+  };
   const K = enemyKindOf(E.k, E.sz), hw = K.w / 2;
   const stunned = E.stun > now, spd = o.espd || K.speed, rng = o.erng == null ? 240 : o.erng;   // ⚠️ 0 is a real range now
   // how far it SEES you from (round 9). A swooper's and a spitter's used to be their `erng`, so one placed before reads that.
@@ -20210,10 +20220,12 @@ function enemyCrush(room, E, o, K, now, dt, solid, floorAt, wallAt, spd, vis, re
       const cy = hy - h / 2;
       let ax = 0, ay = 0, p = null;
       // below / above: within its reach of the body's sides; beside: within its reach of the body's top and bottom
-      // (`vis`: how far past its own edges it notices you — the "Sees" setting)
-      if (mv !== 'side' && (p = enemyTarget(room, hx, hy, hw + vis, 0, 1400, now))) ay = 1;
-      else if (mv === 'all' && (p = enemyTarget(room, hx, hy - h, hw + vis, -1400, 0, now))) ay = -1;
-      else if (mv !== 'down' && (p = enemyTarget(room, hx, cy, 1400, -(h / 2 + vis), h / 2 + vis, now)) && Math.abs(p.x - hx) > hw) ax = p.x > hx ? 1 : -1;
+      // ⭐ `vis` ("Sees") is how far ALONG ITS LINE it notices you (user, 2026-10-02: it must not make the area wider);
+      // to the sides of that line it only reaches a cell past its own edges
+      const M = 8;
+      if (mv !== 'side' && (p = enemyTarget(room, hx, hy, hw + M, 0, vis, now))) ay = 1;
+      else if (mv === 'all' && (p = enemyTarget(room, hx, hy - h, hw + M, -vis, 0, now))) ay = -1;
+      else if (mv !== 'down' && (p = enemyTarget(room, hx, cy, hw + vis, -(h / 2 + M), h / 2 + M, now)) && Math.abs(p.x - hx) > hw) ax = p.x > hx ? 1 : -1;
       else p = null;
       if (p && enemySees(solid, hx + ax * (hw - 2), ay > 0 ? hy - 2 : ay < 0 ? hy - h + 2 : cy, p.x, p.y)) {
         E.ax = ax; E.ay = ay; E.st = 5; E.v = 0; E.dir = ax || E.dir;
@@ -20306,6 +20318,13 @@ function enemyTick() {
     if (!listeners) continue;                          // nobody watching: everything stands still (a return is a timestamp)
     const live = new Set();
     const out = [], dead = [];
+    // ⭐ CRUSHERS ARE IN THE WAY OF OTHER ENEMIES (user, 2026-10-02: "crushers pass right through enemies"): their boxes
+    // as of the last tick are walls and floors to everything else this tick…
+    R.cboxes = [];
+    for (const E of R.E.values()) if (!E.dead && ENEMY_KINDS[E.k] && ENEMY_KINDS[E.k].crush) {
+      const K = enemyKindOf(E.k, E.sz);
+      R.cboxes.push({ id: E.id, x0: E.x - K.w / 2, x1: E.x + K.w / 2, y0: E.y - K.h, y1: E.y });
+    }
     for (const o of R.list) {
       live.add(o.id);
       let E = R.E.get(o.id);
@@ -20319,9 +20338,24 @@ function enemyTick() {
       }
       enemyStep(room, R, E, o, now, dt);
       if (E.dead) { dead.push(o.id); continue; }
-      out.push([o.id, Math.round(E.x), Math.round(E.y), E.dir, E.stun > now ? 1 : 0, E.st | 0]);
+      out.push([o.id, Math.round(E.x), Math.round(E.y), E.dir, E.stun > now ? 1 : 0, E.st | 0, E.inv ? 0 : E.hp]);   // + hits left (0 = can't be hurt)
     }
     for (const id of R.E.keys()) if (!live.has(id)) R.E.delete(id);
+    // …and one that is SLAMMING crushes any enemy its box meets (one that can't be hurt excepted). Enemies never set a
+    // crusher off — only players do (`enemyTarget` reads players).
+    for (const C of R.E.values()) {
+      if (C.dead || C.st !== 5 || !ENEMY_KINDS[C.k] || !ENEMY_KINDS[C.k].crush) continue;
+      const CK = enemyKindOf(C.k, C.sz), cx0 = C.x - CK.w / 2, cx1 = C.x + CK.w / 2, cy0 = C.y - CK.h, cy1 = C.y;
+      for (const V of R.E.values()) {
+        if (V === C || V.dead || V.inv || (ENEMY_KINDS[V.k] && ENEMY_KINDS[V.k].crush)) continue;
+        const VK = enemyKindOf(V.k, V.sz);
+        if (V.x + VK.w / 2 > cx0 + 2 && V.x - VK.w / 2 < cx1 - 2 && V.y > cy0 + 2 && V.y - VK.h < cy1 - 2) {
+          enemyKill(room, R, V, 'crush', null);
+          const i = out.findIndex(r => r[0] === V.id); if (i >= 0) out.splice(i, 1);
+          dead.push(V.id);
+        }
+      }
+    }
     io.to(room).emit('enemies', { e: out, d: dead });
   }
 }
@@ -23611,15 +23645,20 @@ io.on('connection', (socket) => {
     const p = lastBodyPos(room, socket.id);
     if (p && Math.hypot(p.x - E.x, p.y - E.y) > 600) return;
     const now = Date.now();
-    if (how === 'punch') {
-      if (now - (E.hitAt || 0) < 150) return;
-      E.hitAt = now;
-      if (--E.hp > 0) {
+    // ⭐⭐ HEALTH (user, 2026-10-02): a stomp and a punch take 1; a charged punch / finisher / Power punch and a slam take 3;
+    // being squashed by stone skin or Mega kills. `E.hp` 0 from the start = CAN'T BE HURT (the author's "0" setting).
+    if (E.inv) return;
+    if (now - (E.hitAt || 0) < 150) return;              // one hit per swing, however many messages it arrives as
+    E.hitAt = now;
+    const dmg = how === 'crush' ? Infinity : (how === 'power' || how === 'slam') ? 3 : 1;
+    E.hp -= dmg;
+    if (E.hp > 0) {
+      if (how === 'punch' || how === 'power') {
         const d = dir < 0 ? -1 : 1;
         E.stun = now + 450; E.vx = d * 260; E.vy = -220; E.ground = false; E.dir = -d;   // knocked away, and turns to face you
-        io.to(room).emit('enemy-ev', { id, k: 'hit' });
-        return;
-      }
+      } else E.stun = now + 300;                         // stomped / slammed and still standing: a moment's daze
+      io.to(room).emit('enemy-ev', { id, k: 'hit' });
+      return;
     }
     enemyKill(room, R, E, how, socket.id);
   });
