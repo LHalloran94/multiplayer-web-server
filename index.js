@@ -19990,7 +19990,8 @@ const ENEMY_KINDS = {
   // st 40 a mound on hard ground, 44 tunnelling, 45 rumbling under you (the warning), 41 bursting up, 42 up, 43 going back down.
   // ⭐ round 14 (user): the SANDWORM is two skins of the burrower (sand, pink) — bigger, tougher, and its top is its mouth
   burrower: { w: 64, h: 36, speed: 40, hp: 2, stomp: 1, burrow: 1, vis: 300,
-              skins: { mole: {}, worm: { w: 72, h: 112, speed: 34, hp: 5, stomp: 0, vis: 360 }, wormpink: { w: 72, h: 112, speed: 34, hp: 5, stomp: 0, vis: 360 } } },
+              skins: { mole: {}, worm: { w: 60, h: 60, speed: 40, hp: 5, stomp: 0, vis: 360, worm: 1 }, wormplate: { w: 60, h: 60, speed: 40, hp: 5, stomp: 0, vis: 360, worm: 1 },
+                       wormpink: { w: 60, h: 60, speed: 40, hp: 5, stomp: 0, vis: 360, worm: 1 } } },
   ghost:    { w: 56, h: 48, speed: 50, hp: 2, stomp: 0, ghost: 1, vis: 400 },  // st 50 drifting at you through walls, 51 frozen (you face it)
   // ⭐⭐ Round 13 (user, 2026-10-02). The burrowers now TUNNEL through soft ground (st 44 = underground; 40 = a mound on the
   // surface, where the ground is too hard to go into). `skins` = looks that may change rules (the first is the kind itself).
@@ -20183,7 +20184,8 @@ function enemyStep(room, R, E, o, now, dt) {
     if (enemySoft(room, peekCellAt(grid, cc * ROWS + cr))) { E.st = 44; E.vy = 0; E.ground = false; }
     else if (solid(cc, cr)) { let r = cr; for (let n = 0; n < 80 && r > 0 && solid(cc, r); n++) r--; E.y = (r + 1) * CELL; E.st = 40; E.vy = 0; }
   }
-  if (K.burrow && (E.st === 44 || E.st === 45 || E.st === 46)) { if (!stunned || E.flush) enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid); return; }
+  if (K.worm && E.st === 41) { enemyWormArch(room, E, K, now, dt, solid, grid); enemyWormTrail(E, K); return; }
+  if (K.burrow && (E.st === 44 || E.st === 45 || E.st === 46)) { if (!stunned || E.flush) enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid); if (K.worm) enemyWormTrail(E, K); return; }
   // ⭐ round 17 (user: "burrowers should be able to pop out of the sides of walls as well, rotated accordingly"): out of a
   // WALL FACE — 47 bursting out, 48 out, 49 going back in. Its feet are on the face (`E.x`), its body sticks out sideways
   // (`E.dir` = which way), centred on `E.y`; nothing pulls it down. Then back into the wall and tunnelling again.
@@ -20330,7 +20332,7 @@ function enemyStep(room, R, E, o, now, dt) {
             if (E.seekX != null) break;
           }
         }
-        const worm = K.h > 60;
+        const worm = !!K.worm;
         if (E.seekX != null) { E.dir = E.seekX >= E.x ? 1 : -1; mv = spd * (worm ? 1.2 : 2.2); }
         else { mv = spd * (worm ? 0.9 : 1.8); if (now >= (E.scurry || 0)) { E.scurry = now + 900 + Math.random() * 1800; if (Math.random() < 0.5) E.dir = -E.dir; } }
         E.hunt = E.seekX != null;
@@ -20457,6 +20459,7 @@ function enemyStep(room, R, E, o, now, dt) {
   }
   E.y = ny;
   if (K.hop && E.ground && !wasGround) { E.vx = 0; E.next = now + (E.chase ? 450 : 1500); }   // landed: a breath, then the next hop
+  if (K.worm) enemyWormTrail(E, K);                   // (round 18: crawling on the surface, the body follows too)
   if (E.y > ROWS * CELL + 200) enemyKill(room, R, E, 'fall', null);
 }
 // ⭐ THE SWOOPER: hangs where it was put; when somebody passes below it — within its reach, and in sight (a wall between
@@ -20657,10 +20660,15 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
     while (r < ROWS && !solid(c, r)) { if (++n > 60) return null; r++; } return r * CELL; };
   const emerge = () => {                                 // up through whatever is above it, feet on the surface
     const sy = surfaceAbove(E.x, cy()); if (sy == null) return;
+    // ⭐ round 18 — A SANDWORM BURSTS OUT IN AN ARCH (user: a full body that moves through the ground): its head leaps up
+    // out of the surface, high enough to pass over where you are, and dives back in; the body follows the head's path.
+    if (K.worm) { const rise = Math.max(140, (sy - (E.tgtY || sy)) + 110); E.y = sy + h / 2; E.vy = -Math.sqrt(2 * ENEMY_G * 0.55 * rise); E.vx = E.dir * 90; E.st = 41; E.until = now + 450; return; }
     E.y = sy; E.vy = 0; E.ground = true; E.st = 41; E.until = now + 300;
   };
   // …or SIDEWAYS out of a wall face (round 17): feet on the face, body out towards the side it faces
-  const emergeSide = () => { E.x = E.wallX; E.y = E.wallY; E.vy = 0; E.st = 47; E.until = now + 300; };
+  const emergeSide = () => {
+    if (K.worm) { E.x = E.wallX - E.dir * h / 2; E.y = E.wallY + h / 2; E.vx = E.dir * 300; E.vy = -300; E.st = 41; E.until = now + 450; return; }   // (a worm: out of the face and arching down)
+    E.x = E.wallX; E.y = E.wallY; E.vy = 0; E.st = 47; E.until = now + 300; };
   if (E.flush) { E.flush = 0; if (E.st === 46) emergeSide(); else emerge(); return; }
   if (E.st === 46) { if (now >= E.until) emergeSide(); return; }
   // ⭐ RUMBLING (45): right under you, just beneath the surface — the mound shakes and throws up dirt for half a second (the
@@ -20679,6 +20687,7 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
     under = gy != null && Math.abs(p.x - E.x) < Math.max(40, K.w * 0.75);
     const sy = surfaceAbove(E.x, cy());
     ty = under ? gy + 2 + h / 2 : (sy != null ? sy + DEPTH + h / 2 : cy());
+    E.tgtY = p.y;                                        // (round 18: how high a sandworm's arch has to reach)
     // ⭐ round 17: a WALL beside you it can come out of — the first solid column from you towards it, within a body's
     // reach of you, soft for the whole width it comes out with. Taken when getting there is shorter than getting under you.
     // (its lower side level with your feet — a body's radius under your centre — so beside a floor it comes out ON the
@@ -20790,6 +20799,37 @@ function enemySlime(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, rng) {
   // (blobs CLINGING to somebody are still this slime — it is not dead while any are)
   if (!E.blobs.length && !(E.clung && E.clung.length)) { enemyKill(room, R, E, 'pop', null); return; }
   if (E.blobs.length) { E.x = E.blobs[0].x; E.y = E.blobs[0].y; }
+}
+// ⭐⭐ round 18 — THE SANDWORM'S BODY. The head is the enemy's box (60×60); the body is WORM_SEG segments spaced along the
+// path the head has taken (`E.trail`, its centre, recorded every few px), so whatever the head did — tunnel, arch out of the
+// ground, crawl — the body does after it. Sent as row[7]: [[x, y], …] head first (centres). The client draws the ones above
+// ground, churns the ground under the rest, and they are what you touch.
+const WORM_SEG = 12;
+function enemyWormTrail(E, K) {
+  const hx = E.x, hy = E.y - K.h / 2, T = E.trail || (E.trail = []);
+  if (!T.length || Math.hypot(hx - T[0][0], hy - T[0][1]) > 3) T.unshift([hx, hy]);
+  if (T.length > 500) T.length = 500;
+  const gap = K.w * 0.48, segs = [[Math.round(hx), Math.round(hy)]];
+  let acc = 0;
+  for (let i = 1; i < T.length && segs.length < WORM_SEG; i++) {
+    acc += Math.hypot(T[i][0] - T[i - 1][0], T[i][1] - T[i - 1][1]);
+    if (acc >= gap * segs.length) segs.push([Math.round(T[i][0]), Math.round(T[i][1])]);
+  }
+  // (a new one, before it has moved far enough to have a trail, lies behind its head)
+  while (segs.length < WORM_SEG) { const L = segs[segs.length - 1]; segs.push([L[0] - E.dir * gap, L[1]]); }
+  E.segs = segs;
+}
+// the arch: the head flies (lightly — it hangs in the air), and dives back in where it comes down; on hard ground it lands
+// and crawls (st 40) instead
+function enemyWormArch(room, E, K, now, dt, solid, grid) {
+  const CELL = TERRAIN_CELL, ROWS = grid.geom.rows;
+  E.vy = Math.min(ENEMY_FALL_MAX, E.vy + ENEMY_G * 0.55 * dt);
+  E.x += E.vx * dt; E.y += E.vy * dt;
+  if (E.vy > 0 && now > E.until) {
+    const cx = E.x, cy = E.y - K.h / 2;
+    if (enemySoft(room, peekCellAt(grid, Math.floor(cx / CELL) * ROWS + Math.floor(cy / CELL)))) { E.st = 44; E.vx = E.vy = 0; E.next = now + 1800; }
+    else if (solid(Math.floor(cx / CELL), Math.floor(E.y / CELL))) { E.y = Math.floor(E.y / CELL) * CELL; E.st = 40; E.vx = E.vy = 0; E.ground = true; }
+  }
 }
 function enemyBoom(room, R, E, K) {
   const cx = E.x, cy = E.y - K.h / 2;
@@ -20911,7 +20951,7 @@ function enemyTick() {
       enemyStep(room, R, E, o, now, dt);
       if (E.dead) { dead.push(o.id); continue; }
       out.push([o.id, Math.round(E.x), Math.round(E.y), E.dir, E.stun > now ? 1 : 0, E.st | 0, E.inv ? 0 : E.hp,   // + hits left (0 = can't be hurt)
-                ...(E.blobs ? [E.blobs.map(b => [Math.round(b.x), Math.round(b.y), b.s, b.dir || 1])] : [])]);       // (round 17: a slime's blobs)
+                ...(E.blobs ? [E.blobs.map(b => [Math.round(b.x), Math.round(b.y), b.s, b.dir || 1])] : E.segs ? [E.segs] : [])]);   // (round 17: a slime's blobs · round 18: a sandworm's body)
     }
     for (const id of R.E.keys()) if (!live.has(id)) R.E.delete(id);
     // …and one that is SLAMMING crushes any enemy its box meets (one that can't be hurt excepted). Enemies never set a
