@@ -19961,7 +19961,7 @@ function lastBodyPos(room, sid) {
 const ENEMY_KINDS = {
   walker:  { w: 48, h: 32, speed: 42, hp: 2, stomp: 1 },
   spiky:   { w: 56, h: 28, speed: 34, hp: 2, stomp: 0 },              // stomping a Spiky kills YOU
-  hopper:  { w: 56, h: 28, speed: 140, hp: 2, stomp: 1, hop: 1 },     // speed = how far a hop carries it sideways
+  hopper:  { w: 64, h: 32, speed: 140, hp: 2, stomp: 1, hop: 1 },     // speed = how far a hop carries it sideways
   swooper: { w: 76, h: 28, speed: 220, hp: 1, stomp: 1, fly: 1 },     // speed = how fast it dives
 };
 // ⭐ WHERE PLAYERS ARE, FOR THE ENEMIES THAT REACT TO THEM (inc 2). The view beacon only comes twice a second, which is
