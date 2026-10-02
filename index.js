@@ -17342,7 +17342,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // ⚠️ The kind list must agree with `ENEMY_KINDS` in the client's 01_state.js; the size is the kind's, not a dial.
     if (obj.part === 'enemy') {
       obj.ek = ENEMY_KINDS[data.ek] ? data.ek : 'walker';
-      obj.w = ENEMY_KINDS[obj.ek].w; obj.h = ENEMY_KINDS[obj.ek].h;
+      if ([0.5, 1.5, 2, 3].includes(data.esz)) obj.esz = data.esz;   // size step (1 = left off)
+      obj.w = enemyKindOf(obj.ek, obj.esz).w; obj.h = enemyKindOf(obj.ek, obj.esz).h;
       obj.erng = clampN(data.erng, 0, 3000, 240);          // px either side of where it was put
       obj.eback = clampN(data.eback, 0, 600, 10);          // seconds until it comes back; 0 = never
       if (data.espd) obj.espd = clampN(data.espd, 10, 300, ENEMY_KINDS[obj.ek].speed);   // px/s; unset = the kind's own
@@ -20004,9 +20005,20 @@ const ENEMY_SOLID = (() => {
   for (const v of (MATGEN.PLANT_IDS || [])) t[v] = 0;
   return t;
 })();
+// ⭐ SIZE (user, 2026-10-02): a sized kind is the kind with its box scaled — "just bigger", same speed and hits.
+// ⚠️ The client has the same rule (`enemySized` in 01) — the box must agree on both ends.
+const ENEMY_SIZED = new Map();
+function enemyKindOf(k, sz) {
+  const K = ENEMY_KINDS[k] || ENEMY_KINDS.walker;
+  if (!sz || sz === 1) return K;
+  const key = k + '|' + sz;
+  let S = ENEMY_SIZED.get(key);
+  if (!S) { S = Object.create(K); S.w = K.w * sz; S.h = K.h * sz; ENEMY_SIZED.set(key, S); }
+  return S;
+}
 function enemySpawnBody(o) {
-  const K = ENEMY_KINDS[o.ek] || ENEMY_KINDS.walker;
-  return { id: o.id, k: o.ek, x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, dir: 1, ground: false, hp: K.hp,
+  const K = enemyKindOf(o.ek, o.esz);
+  return { id: o.id, k: o.ek, sz: o.esz || 1, x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, dir: 1, ground: false, hp: K.hp,
            dead: 0, stun: 0, sx: o.x, hy: o.y + K.h / 2, ox: o.x, oy: o.y, next: 0, mode: 'hang' };
 }
 function enemyKill(room, R, E, how, sid) {
@@ -20036,7 +20048,7 @@ function enemyStep(room, R, E, o, now, dt) {
     return best;
   };
   const wallAt = (x, y0, y1) => { for (const f of R.walls) if (x >= f.x0 && x <= f.x1 && y1 > f.y0 && y0 < f.y1) return true; return false; };
-  const K = ENEMY_KINDS[E.k] || ENEMY_KINDS.walker, hw = K.w / 2;
+  const K = enemyKindOf(E.k, E.sz), hw = K.w / 2;
   const stunned = E.stun > now, spd = o.espd || K.speed, rng = o.erng == null ? 240 : o.erng;   // ⚠️ 0 is a real range now
   // how far it SEES you from (round 9). A swooper's and a spitter's used to be their `erng`, so one placed before reads that.
   const vis = isFinite(o.evis) ? o.evis : (K.fly || K.spit) && o.erng != null ? o.erng : (K.vis || 240);
@@ -20298,7 +20310,7 @@ function enemyTick() {
       live.add(o.id);
       let E = R.E.get(o.id);
       // a new one, or one the author moved or changed: start again from where it was put
-      if (!E || E.ox !== o.x || E.oy !== o.y || E.k !== o.ek) { E = enemySpawnBody(o); R.E.set(o.id, E); }
+      if (!E || E.ox !== o.x || E.oy !== o.y || E.k !== o.ek || E.sz !== (o.esz || 1)) { E = enemySpawnBody(o); R.E.set(o.id, E); }
       if (E.dead) {
         if (o.eback > 0 && now - E.dead >= o.eback * 1000) {
           const n = enemySpawnBody(o); R.E.set(o.id, n); E = n;
