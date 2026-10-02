@@ -19995,6 +19995,17 @@ const ENEMY_KINDS = {
   crab:     { w: 88, h: 52, speed: 60, hp: 1, stomp: 1, crab: 1, vis: 200, skins: { red: {}, blue: { stomp: 0, hp: 2 } } },   // st 60 buried, 61 eyes up, 62 out, 63 digging in
   // punches / slams only count from BEHIND; touching it only pushes you (round 14); the plain one can be stomped, the spiked can't
   plough:   { w: 76, h: 36, speed: 36, hp: 2, stomp: 1, armour: 1, vis: 300, skins: { plain: {}, spiked: { stomp: 0, h: 44 } } },
+  // ⭐⭐ ROUND 16 (user's picks from look/enemies/round16.html; drawn in half-size cells).
+  // SHELL CREATURE: a stomp or a punch sends it into its shell (st 70); a still shell is KICKED by a touch or a hit and
+  // slides (st 71) fast, bouncing off walls and knocking out every enemy it meets; stomping a sliding shell stops it; a
+  // still one comes out again after a while (st 72 = wobbling, about to). Only a slam / power punch / crush hurts it.
+  shell:    { w: 52, h: 32, speed: 42, hp: 1, stomp: 1, shell: 1, skins: { turtle: {}, snail: { w: 52, h: 36, speed: 30 } } },
+  // BONE PILE: a stomp or a punch makes it fall apart (st 80, harmless) and pull itself back together (st 81). Only a
+  // slam (or being crushed) finishes it.
+  bones:    { w: 48, h: 52, speed: 36, hp: 1, stomp: 1, bones: 1, skins: { skeleton: {}, hound: { w: 56, h: 36, speed: 64 } } },
+  // LEAPER: lurks where it was put (in a pool — st 90, only its eyes show) and when somebody passes over it leaps
+  // straight up at them (91 rising, 92 falling) and drops back in. `vis` = how high it can see and leap.
+  leaper:   { w: 40, h: 42, speed: 0, hp: 1, stomp: 0, leap: 1, vis: 260, skins: { fire: {}, fish: { stomp: 1, w: 40, h: 30 } } },
 };
 // ⭐ Round 14: two kinds became SKINS — a Level saved before then still says 'spiky' / 'sandworm'. Read as the walker / the
 // burrower with that skin. ⚠️ The client has the same mapping (`enemyKindId` / `enemySkinId` in 01).
@@ -20015,7 +20026,11 @@ function enemyChunkAway(room, c, r) {
 function enemySoft(room, v) { return v > 0 && ENEMY_SOLID[v] === 1 && matStrengthSrv(roomMats[room] || {}, v) <= 2; }
 // Whether landing on it RIGHT NOW kills it. ⚠️ The client has the same rule (`enemyStompable`) — they must agree.
 function enemyStompOk(K, st) { if (K.crush) return false; if (K.roll) return st !== 1; if (K.charge) return st === 2;
-  if (K.crawl) return st === 20 || st >= 24; if (K.burrow && (st === 40 || st === 44 || st === 45 || st === 41)) return false; return !!K.stomp; }
+  if (K.crawl) return st === 20 || st >= 24; if (K.burrow && (st === 40 || st === 44 || st === 45 || st === 41)) return false;
+  if (K.leap && st === 90) return false; if (K.bones && st >= 80) return false; return !!K.stomp; }
+// ⭐ round 16: a hit that does NO DAMAGE to this kind — it does something else instead (hides a shell creature / kicks its
+// shell; collapses a bone pile). ⚠️ The client has the same rule (`enemyNoDamage` in 01).
+function enemyNoDamage(K, how) { return (K.shell && (how === 'stomp' || how === 'punch' || how === 'kick')) || (K.bones && how !== 'slam' && how !== 'crush'); }
 // ⭐ WHERE PLAYERS ARE, FOR THE ENEMIES THAT REACT TO THEM (inc 2). The view beacon only comes twice a second, which is
 // fine for "is anybody near" and too stale to dive at; so a player near an enemy reports its body centre ~10×/s
 // (`enemy-me`), and only then. Entries go stale on their own, which is also what forgets a player who left.
@@ -20063,7 +20078,7 @@ function enemySpawnBody(o) {
            dead: 0, stun: 0, sx: o.x, hy: o.y + K.h / 2, ox: o.x, oy: o.y, next: 0, mode: 'hang',
            // a crawler holds on at a whole pixel ON the surface: the floor under its feet, or the ceiling over its back
            ...(K.crawl ? { x: Math.round(o.x), y: Math.round(o.ehang ? o.y - K.h / 2 : o.y + K.h / 2), st: o.ehang ? 22 : 20, mv: 1, acc: 0, trav: 0 } : null),
-           ...(K.burrow ? { st: 40 } : null), ...(K.crab ? { st: 60 } : null) };
+           ...(K.burrow ? { st: 40 } : null), ...(K.crab ? { st: 60 } : null), ...(K.leap ? { st: 90 } : null) };
 }
 function enemyKill(room, R, E, how, sid) {
   E.dead = Date.now(); E.vx = E.vy = 0; E.stun = 0;
@@ -20109,8 +20124,19 @@ function enemyStep(room, R, E, o, now, dt) {
   if (K.crush) { enemyCrush(room, E, o, K, now, dt, solid, floorAt, wallAt, spd, vis, o.estop === 'reach' ? rng : 0); return; }
   if (K.ghost) { enemyGhost(room, E, o, K, now, dt, stunned, spd, vis); return; }
   if (K.crawl) { enemyCrawl(room, R, E, o, K, now, dt, solid, stunned, spd, vis, rng); return; }
+  if (K.leap) { enemyLeap(room, E, o, K, now, dt, solid, vis); return; }
   // ── what the second batch is doing this tick: `mv` is its ground speed (the shared walking code below does the rest)
   let mv = spd;
+  // ⭐ round 16 — the shell creature in its shell, and the bone pile in pieces: the walking code below moves it (or not)
+  if (K.shell) {
+    E.st = E.st | 0;
+    if (E.st === 70 || E.st === 72) { mv = 0; if (now >= E.until) E.st = 0; else if (now >= E.until - 900) E.st = 72; }
+    else if (E.st === 71) { mv = spd * 8; if (now >= E.until) { E.st = 70; E.until = now + 5000; } }
+  } else if (K.bones) {
+    E.st = E.st | 0;
+    if (E.st === 80) { mv = 0; if (now >= E.until) { E.st = 81; E.until = now + 650; } }
+    else if (E.st === 81) { mv = 0; if (now >= E.until) E.st = 0; }
+  }
   // ⭐ ROUND 13: a burrower underground TUNNELS — its own movement, no gravity, no walking (`enemyTunnel`); a slam over it
   // (`E.flush`) or reaching you brings it up through the surface.
   if (K.burrow && (E.st === 44 || E.st === 45)) { if (!stunned || E.flush) enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid); return; }
@@ -20281,7 +20307,8 @@ function enemyStep(room, R, E, o, now, dt) {
   else if (E.ground && !stunned && !K.hop && E.vx !== 0) {   // ⚠️ only while moving: a spitter by a ledge would spin
     // ⭐ ROUND 15 (user, 2026-10-02): walkers just WALK OFF EDGES — there is no ledge-turn any more. An author who does
     // not want one going over limits it with its Wanders range, which is the only thing that turns it here.
-    const far = Math.abs(nx - E.sx) > rng && Math.sign(nx - E.sx) === E.dir;
+    // (a kicked shell is not wandering — its range does not stop it; walls turn it, and it goes off edges)
+    const far = !(K.shell && E.st === 71) && Math.abs(nx - E.sx) > rng && Math.sign(nx - E.sx) === E.dir;
     if (far) {
       if (K.charge && E.st === 4) { E.st = 0; E.next = now + 1000; nx = E.x; }   // skids to a stop at the edge
       else if (K.roll && E.st === 1) { E.st = 2; E.until = now + 700; nx = E.x; }   // …and so does a rolling roller
@@ -20557,6 +20584,27 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
 // bomb does); the CRATER is dug by exactly one of them — the player it was going for (`dig`). Enemies caught in it are
 // killed here (not one that can't be hurt, and not a crusher — iron).
 const ENEMY_BOOM_R = 114;            // ⚠️ the client's bang for a bomb of size 26 (`bombBlastR`) — keep the two together
+// ⭐ round 16 — THE LEAPER: lurks at home; somebody overhead (within its own width + a little, and within how high it sees)
+// → it leaps straight up at them, high enough to reach where they are, and falls back in. Straight up and down, so it
+// always comes home into the pool it left; a ceiling stops its rise.
+function enemyLeap(room, E, o, K, now, dt, solid, vis) {
+  const CELL = TERRAIN_CELL;
+  E.x = E.sx; E.vx = 0;
+  if (E.st !== 91 && E.st !== 92) {
+    E.st = 90; E.y = E.hy; E.vy = 0;
+    if (now < (E.next || 0) || E.stun > now) return;
+    const p = enemyTarget(room, E.x, E.y - K.h / 2, K.w / 2 + 50, -(vis + K.h), 0, now);
+    if (!p) return;
+    const rise = Math.max(40, Math.min(vis, E.hy - (p.y + K.h * 0.5) + 16));
+    E.vy = -Math.sqrt(2 * ENEMY_G * rise); E.st = 91;
+  }
+  E.vy = Math.min(ENEMY_FALL_MAX, E.vy + ENEMY_G * dt);
+  let ny = E.y + E.vy * dt;
+  if (E.vy < 0 && solid(Math.floor(E.x / CELL), Math.floor((ny - K.h) / CELL))) { E.vy = 0; ny = E.y; }
+  E.st = E.vy < 0 ? 91 : 92;
+  if (E.vy > 0 && ny >= E.hy) { ny = E.hy; E.vy = 0; E.st = 90; E.next = now + 900; }
+  E.y = ny;
+}
 function enemyBoom(room, R, E, K) {
   const cx = E.x, cy = E.y - K.h / 2;
   io.to(room).emit('enemy-ev', { id: E.id, k: 'boom', x: Math.round(cx), y: Math.round(cy), dig: E.tgt || null });
@@ -20679,6 +20727,23 @@ function enemyTick() {
         if (V === C || V.dead || V.inv || (ENEMY_KINDS[V.k] && ENEMY_KINDS[V.k].crush)) continue;
         const VK = enemyKindOf(V.k, V.sz);
         if (V.x + VK.w / 2 > cx0 + 2 && V.x - VK.w / 2 < cx1 - 2 && V.y > cy0 + 2 && V.y - VK.h < cy1 - 2) {
+          enemyKill(room, R, V, 'crush', null);
+          const i = out.findIndex(r => r[0] === V.id); if (i >= 0) out.splice(i, 1);
+          dead.push(V.id);
+        }
+      }
+    }
+    // ⭐ round 16: a KICKED SHELL knocks out every enemy it slides into (one that can't be hurt, a crusher, and one
+    // underground / lurking excepted)
+    for (const C of R.E.values()) {
+      if (C.dead || C.st !== 71 || !ENEMY_KINDS[C.k] || !ENEMY_KINDS[C.k].shell) continue;
+      const CK = enemyKindOf(C.k, C.sz, C.skin), cx0 = C.x - CK.w / 2, cx1 = C.x + CK.w / 2, cy0 = C.y - CK.h, cy1 = C.y;
+      for (const V of R.E.values()) {
+        if (V === C || V.dead || V.inv) continue;
+        const VKb = ENEMY_KINDS[V.k]; if (!VKb || VKb.crush) continue;
+        if ((VKb.burrow && (V.st === 40 || V.st === 44 || V.st === 45)) || (VKb.crab && V.st === 60) || (VKb.leap && V.st === 90)) continue;
+        const VK = enemyKindOf(V.k, V.sz, V.skin);
+        if (V.x + VK.w / 2 > cx0 + 4 && V.x - VK.w / 2 < cx1 - 4 && V.y > cy0 + 4 && V.y - VK.h < cy1 - 4) {
           enemyKill(room, R, V, 'crush', null);
           const i = out.findIndex(r => r[0] === V.id); if (i >= 0) out.splice(i, 1);
           dead.push(V.id);
@@ -23973,7 +24038,9 @@ io.on('connection', (socket) => {
     if (!E || E.dead) return;
     if (!ENEMY_KINDS[E.k]) return;
     const K = enemyKindOf(E.k, E.sz, E.skin);            // (its skin may change the rules: a blue crab cannot be stomped)
-    if (!['stomp', 'crush', 'punch', 'power', 'slam'].includes(how)) return;
+    if (!['stomp', 'crush', 'punch', 'power', 'slam', 'kick'].includes(how)) return;
+    if (how === 'kick' && !K.shell) return;               // (round 16: only a still shell is kicked by a touch)
+    if (K.leap && E.st === 90) return;                    // lurking in its pool: nothing reaches it
     if (how === 'stomp' && !enemyStompOk(K, E.st | 0)) return;
     if (K.crush && how !== 'slam') return;               // a crusher is iron: only a slam (and, later, a bomb) breaks it
     if (K.burrow && (E.st === 40 || E.st === 44 || E.st === 45) && how !== 'slam') return;   // underground: only a slam reaches it
@@ -23991,6 +24058,22 @@ io.on('connection', (socket) => {
     // being squashed by stone skin or Mega kills. `E.hp` 0 from the start = CAN'T BE HURT (the author's "0" setting).
     if (now - (E.hitAt || 0) < 150) return;              // one hit per swing, however many messages it arrives as
     E.hitAt = now;
+    // ⭐ ROUND 16 — hits that do something OTHER than damage (`enemyNoDamage`, the client has the same rule)
+    if (enemyNoDamage(K, how)) {
+      if (K.bones) { if ((E.st | 0) < 80) { E.st = 80; E.until = now + 3000; E.vx = 0; } }
+      else {
+        // which way a kick sends the shell: away from whoever hit it
+        const hx = isFinite(px) ? +px : (p ? p.x : E.x), d = how === 'stomp' ? (E.x >= hx ? 1 : -1) : (dir < 0 ? -1 : 1);
+        const st = E.st | 0;
+        if (st === 71 && how === 'stomp') { E.st = 70; E.until = now + 5000; E.vx = 0; }          // stomping a sliding shell stops it
+        else if (st === 70 || st === 72) { E.st = 71; E.dir = d; E.until = now + 12000; }          // a still one is kicked
+        else if (st === 71) E.dir = d;                                                          // punching a sliding one turns it
+        else { E.st = 70; E.until = now + 5000; E.vx = 0; }                                     // walking: into its shell
+        E.stun = 0;
+      }
+      io.to(room).emit('enemy-ev', { id, k: 'hit', how });
+      return;
+    }
     // ⭐ ONE THAT CAN'T BE HURT STILL REACTS (user, 2026-10-02: "even the invulnerable enemies should still be stunned"):
     // it takes no damage, but is knocked back / dazed / squashed like any other.
     if (!E.inv) {
