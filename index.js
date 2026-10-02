@@ -17346,7 +17346,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if ([0.5, 1.5, 2, 3].includes(data.esz)) obj.esz = data.esz;   // size step (1 = left off)
       { const sk = ENEMY_KINDS[obj.ek].skins;                         // its skin (the first = the kind itself, left off)
         if (sk && typeof data.eskin === 'string' && sk[data.eskin] && data.eskin !== Object.keys(sk)[0]) obj.eskin = data.eskin; }
-      obj.w = enemyKindOf(obj.ek, obj.esz).w; obj.h = enemyKindOf(obj.ek, obj.esz).h;
+      obj.w = enemyKindOf(obj.ek, obj.esz, obj.eskin).w; obj.h = enemyKindOf(obj.ek, obj.esz, obj.eskin).h;   // (its look may have its own box: a barrel mimic)
       obj.erng = clampN(data.erng, 0, 3000, 240);          // px either side of where it was put
       obj.eback = clampN(data.eback, 0, 600, 10);          // seconds until it comes back; 0 = never
       if (data.espd) obj.espd = clampN(data.espd, 10, 300, ENEMY_KINDS[obj.ek].speed);   // px/s; unset = the kind's own
@@ -17357,6 +17357,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (isFinite(data.evis)) obj.evis = clampN(data.evis, 0, 3000, ENEMY_KINDS[obj.ek].vis || 240);
       if (isFinite(data.ehp)) obj.ehp = Math.round(clampN(data.ehp, 0, 20, ENEMY_KINDS[obj.ek].hp));   // health; 0 = can't be hurt
       if (ENEMY_KINDS[obj.ek].crush) obj.estop = data.estop === 'reach' ? 'reach' : 'hit';
+      if (data.efree) obj.efree = 1;                          // round 18: roams anywhere (no range)
+      if (data.epat === 'random') obj.epat = 'random';        // round 18: wanders at random rather than back and forth
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
     // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
@@ -20009,7 +20011,8 @@ const ENEMY_KINDS = {
   // ⭐⭐ ROUND 17 (user's picks from look/enemies/round17.html + round17b.html).
   // MIMIC: shut (st 110), looking like a crate / a present; somebody within `vis` → springs open (111) and hops after them
   // (112); lost them for 2s → back home (113) and shut again.
-  mimic:    { w: 44, h: 40, speed: 50, hp: 2, stomp: 1, mimic: 1, vis: 90, skins: { crate: {}, gift: { h: 46 } } },
+  // (round 18: every look is the SIZE OF THE OBJECT it pretends to be — the client draws it with that object's own picture)
+  mimic:    { w: 64, h: 64, speed: 50, hp: 2, stomp: 1, mimic: 1, vis: 90, skins: { crate: {}, metal: {}, barrel: { w: 58, h: 74 }, ball: { w: 58, h: 58 }, bomb: { w: 34, h: 34 }, powerup: { w: 40, h: 40 }, gift: { w: 44, h: 46 } } },
   // THIEF (a raccoon): sneaks up on all fours (st 0), hopping over what is in its way; a touch steals the powerup you
   // were given last (decided on YOUR screen — `enemy-steal`) and it scurries away on its hind legs with it (101). Hit it
   // and it lets go — the powerup goes back to whoever lost it (`enemy-ev` 'loot'). Touching it never hurts you.
@@ -20018,8 +20021,11 @@ const ENEMY_KINDS = {
   // (size 3 → 2 → 1), and a size-1 blob pops. It is dead when the last one has.
   slime:    { w: 42, h: 30, speed: 70, hp: 1, stomp: 1, slime: 1, vis: 260 },
 };
-// the box of a slime blob of each size (before the enemy's own Size scales it)
-const SLIME_BOX = { 3: [42, 30], 2: [30, 20], 1: [20, 12] };
+// the box of a slime blob at each level. ⭐ round 18 (user: "making them bigger should make them have MORE DIVISIONS"): the
+// enemy's Size does not scale a blob — it picks the level the slime STARTS at (½× 2 · 1× 3 · 1½× 4 · 2× 5 · 3× 6), and
+// every level splits into two of the one below. ⚠️ The client has the same table (`SLIME_BOX` in 01).
+const SLIME_BOX = { 6: [96, 68], 5: [72, 52], 4: [56, 40], 3: [42, 30], 2: [30, 20], 1: [20, 12] };
+function slimeStart(sz) { return sz <= 0.5 ? 2 : sz <= 1 ? 3 : sz <= 1.5 ? 4 : sz <= 2 ? 5 : 6; }
 // ⭐ Round 14: two kinds became SKINS — a Level saved before then still says 'spiky' / 'sandworm'. Read as the walker / the
 // burrower with that skin. ⚠️ The client has the same mapping (`enemyKindId` / `enemySkinId` in 01).
 function enemyLegacy(o) {
@@ -20039,7 +20045,7 @@ function enemyChunkAway(room, c, r) {
 function enemySoft(room, v) { return v > 0 && ENEMY_SOLID[v] === 1 && matStrengthSrv(roomMats[room] || {}, v) <= 2; }
 // Whether landing on it RIGHT NOW kills it. ⚠️ The client has the same rule (`enemyStompable`) — they must agree.
 function enemyStompOk(K, st) { if (K.crush) return false; if (K.roll) return st !== 1; if (K.charge) return st === 2;
-  if (K.crawl) return st === 20 || st >= 24; if (K.burrow && (st === 40 || (st >= 44 && st <= 47) || st === 41)) return false;
+  if (K.crawl) return st === 20 || st >= 24; if (K.burrow && ((st >= 44 && st <= 47) || st === 41)) return false;   // (round 18: out of the ground, st 40, it is just a creature)
   if (K.leap && st === 90) return false; if (K.bones && st >= 80) return false; return !!K.stomp; }
 // ⭐ round 16: a hit that does NO DAMAGE to this kind — it does something else instead (hides a shell creature / kicks its
 // shell; collapses a bone pile). ⚠️ The client has the same rule (`enemyNoDamage` in 01).
@@ -20092,17 +20098,23 @@ function enemySpawnBody(o) {
            // a crawler holds on at a whole pixel ON the surface: the floor under its feet, or the ceiling over its back
            ...(K.crawl ? { x: Math.round(o.x), y: Math.round(o.ehang ? o.y - K.h / 2 : o.y + K.h / 2), st: o.ehang ? 22 : 20, mv: 1, acc: 0, trav: 0 } : null),
            ...(K.burrow ? { st: 40 } : null), ...(K.crab ? { st: 60 } : null), ...(K.leap ? { st: 90 } : null), ...(K.mimic ? { st: 110 } : null),
-           ...(K.slime ? { blobs: [{ x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, s: 3, ground: false, next: 0 }] } : null) };
+           ...(K.slime ? { blobs: [{ x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, s: slimeStart(o.esz || 1), ground: false, next: 0 }], clung: [] } : null) };
 }
 // ⭐ round 17: a THIEF carrying something lets go of it — the powerup goes back to whoever it was taken from (`to`); `to`
 // null = it got away with it for good, and the owner's screen forgets it.
-function enemyDropLoot(room, E, back) {
-  if (!E.loot) return;
-  io.to(room).emit('enemy-ev', { id: E.id, k: 'loot', kind: E.loot, to: back ? E.owner : null, x: Math.round(E.x), y: Math.round(E.y) });
-  E.loot = null; E.owner = null;
+// ⭐ round 18 (user: "when you kill the raccoon … it should DROP the powerup/s, rather than automatically returning them"):
+// what it carried falls where it died as pickups ANYBODY can take (`loot-take`, first come). They stay until taken
+// (never saved: a restart clears them). Each keeps how long it had left (`dur`/`ms`), so a timed one is not made new.
+const roomLootDrops = new Map();                         // room → Map<did, { kind, dur, ms, x, y }>
+let lootDropSeq = 0;
+function enemyDropLoot(room, E) {
+  if (!E.loot || !E.loot.length) return;
+  const M = roomLootDrops.get(room) || (roomLootDrops.set(room, new Map()), roomLootDrops.get(room));
+  E.loot.forEach((L, i) => M.set('L' + (++lootDropSeq), { kind: L.kind, dur: L.dur, ms: L.ms, x: Math.round(E.x + (i - (E.loot.length - 1) / 2) * 30), y: Math.round(E.y - 16) }));
+  E.loot = null;
 }
 function enemyKill(room, R, E, how, sid) {
-  enemyDropLoot(room, E, true);
+  enemyDropLoot(room, E);
   E.dead = Date.now(); E.vx = E.vy = 0; E.stun = 0;
   io.to(room).emit('enemy-ev', { id: E.id, k: 'die', how, x: Math.round(E.x), y: Math.round(E.y), dir: E.dir });
   const o = roomObjects[room] && roomObjects[room].get(E.id);
@@ -20121,7 +20133,7 @@ function enemyStep(room, R, E, o, now, dt) {
     //    read it as a hole), but in a room with no generator — a fresh Sandbox — a missing page is simply empty air.
     //    …and a page PUT AWAY because nobody is near is whatever it was — a wall to an enemy, never a hole.
     if (v < 0) return !!grid.seedFn || enemyChunkAway(room, c, r);
-    return ENEMY_SOLID[v] === 1;
+    return ENEMY_SOLID[v] === 1 || !!(R.cover && R.cover.has(c * ROWS + r));   // (round 18: …or a loose object resting there)
   };
   // standing in put-away ground itself: it waits until somebody comes near enough for the ground to be back
   if (enemyChunkAway(room, Math.floor(E.x / CELL), Math.floor((E.y - 1) / CELL))) return;
@@ -20139,7 +20151,8 @@ function enemyStep(room, R, E, o, now, dt) {
     return false;
   };
   const K = enemyKindOf(E.k, E.sz, E.skin), hw = K.w / 2;
-  const stunned = E.stun > now, spd = o.espd || K.speed, rng = o.erng == null ? 240 : o.erng;   // ⚠️ 0 is a real range now
+  // ⭐ round 18 (user): `efree` = ROAMS ANYWHERE — no range at all (every "past its range" test below simply never fires)
+  const stunned = E.stun > now, spd = o.espd || K.speed, rng = o.efree ? 1e9 : o.erng == null ? 240 : o.erng;   // ⚠️ 0 is a real range now
   // how far it SEES you from (round 9). A swooper's and a spitter's used to be their `erng`, so one placed before reads that.
   const vis = isFinite(o.evis) ? o.evis : (K.fly || K.spit) && o.erng != null ? o.erng : (K.vis || 240);
   if (K.fly) { enemyFly(room, E, o, K, now, dt, solid, stunned, spd, vis); return; }
@@ -20162,6 +20175,14 @@ function enemyStep(room, R, E, o, now, dt) {
   }
   // ⭐ ROUND 13: a burrower underground TUNNELS — its own movement, no gravity, no walking (`enemyTunnel`); a slam over it
   // (`E.flush`) or reaching you brings it up through the surface.
+  // ⭐ round 18 (user: "place the enemy inside of appropriate terrain"): a burrower PLACED INSIDE soft ground starts there,
+  // tunnelling; placed inside hard ground it comes up onto the surface (and goes looking for soft ground, st 40).
+  if (K.burrow && !E.placed) {
+    E.placed = 1;
+    const cc = Math.floor(E.x / CELL), cr = Math.floor((E.y - K.h / 2) / CELL);
+    if (enemySoft(room, peekCellAt(grid, cc * ROWS + cr))) { E.st = 44; E.vy = 0; E.ground = false; }
+    else if (solid(cc, cr)) { let r = cr; for (let n = 0; n < 80 && r > 0 && solid(cc, r); n++) r--; E.y = (r + 1) * CELL; E.st = 40; E.vy = 0; }
+  }
   if (K.burrow && (E.st === 44 || E.st === 45 || E.st === 46)) { if (!stunned || E.flush) enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid); return; }
   // ⭐ round 17 (user: "burrowers should be able to pop out of the sides of walls as well, rotated accordingly"): out of a
   // WALL FACE — 47 bursting out, 48 out, 49 going back in. Its feet are on the face (`E.x`), its body sticks out sideways
@@ -20252,14 +20273,13 @@ function enemyStep(room, R, E, o, now, dt) {
       if (E.st === 101) {
         // (nobody within ~600px: it stops and stands there, still holding it — it does not run to the edge of the world)
         const p = enemyTarget(room, E.x, E.y - K.h / 2, 600, -300, 300, now);
-        if (p) { E.dir = p.x >= E.x ? -1 : 1; mv = spd * 4; E.hunt = true; } else { mv = 0; E.hunt = false; }
-        if (now >= E.until) { enemyDropLoot(room, E, false); E.st = 0; E.next = now + 3000; }
+        if (p) { E.dir = p.x >= E.x ? -1 : 1; mv = spd * 6; E.hunt = true; }   // (round 18: faster — "scurry away with some speed") else { mv = 0; E.hunt = false; }
       } else {
         const p0 = now >= (E.next || 0) ? enemyTarget(room, E.x, E.y - K.h / 2, vis, -160, 160, now) : null;
         const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 && enemySees(solid, E.x, eyeY, p0.x, p0.y) ? p0 : null;
         E.hunt = !!p;
         if (p) {
-          E.dir = p.x >= E.x ? 1 : -1; mv = spd * 1.3;
+          E.dir = p.x >= E.x ? 1 : -1; mv = spd * 2;                       // (round 18: it sneaks faster too)
           // "jumping between things around it": a hop now and then on the way to you
           if (E.ground && now >= (E.hopAt || 0)) { if (E.hopAt) { E.vy = -460; E.ground = false; } E.hopAt = now + 1100 + Math.random() * 1400; }
         }
@@ -20290,17 +20310,30 @@ function enemyStep(room, R, E, o, now, dt) {
       // far it senses, hurries under you and bursts up; stays up a moment (stompable, punchable), then goes back down.
       // ⭐ ROUND 13 (user): it really goes INTO soft ground (st 44, `enemyTunnel`). It only walks the surface as a mound
       // (st 40) where the ground under it is too hard to dig into.
-      const softBelow = () => enemySoft(room, peekCellAt(grid, Math.floor(E.x / CELL) * ROWS + Math.floor((E.y + K.h / 2) / CELL)));
-      if (E.flush && (E.st === 40)) { E.flush = 0; E.st = 41; E.until = now + 280; }
+      const softAt = (x, y) => enemySoft(room, peekCellAt(grid, Math.floor(x / CELL) * ROWS + Math.floor(y / CELL)));
+      const softBelow = () => softAt(E.x, E.y + CELL + 1) && softAt(E.x, E.y + 2 * CELL + 1);
       if (E.st === 40 && E.ground && softBelow()) { E.st = 44; E.y += K.h; E.vy = 0; E.ground = false; return; }
+      // (round 18: …or a SOFT WALL it has run up against — it digs straight in sideways)
+      if (E.st === 40) { const sw = softAt(E.x + K.w / 2 + 4, E.y - K.h / 2) ? 1 : softAt(E.x - K.w / 2 - 4, E.y - K.h / 2) ? -1 : 0;
+        if (sw) { E.st = 44; E.dir = sw; E.x += sw * (K.w / 2); E.vy = 0; E.ground = false; return; } }
       if (E.st === 43 && now > E.until && softBelow()) { E.st = 44; E.y += K.h + 2 * CELL; E.vy = 0; E.ground = false; E.next = now + 1500; return; }
       if (E.st === 40) {
-        const p0 = now >= (E.next || 0) ? enemyTarget(room, E.x, E.y - K.h / 2, vis, -90, 60, now) : null;
-        const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 ? p0 : null;
-        if (p) {
-          E.dir = p.x >= E.x ? 1 : -1; mv = spd * 2.5;
-          if (Math.abs(p.x - E.x) < 12 && E.ground) { E.st = 41; E.until = now + 280; mv = 0; }
+        // ⭐ round 18 (user): OUT OF THE GROUND it does not hunt you — the mole runs about, the sandworm crawls, and both
+        // make for the NEAREST GROUND IT CAN DIG INTO (the first column either side, within ~60 cells, whose ground at
+        // about its own level is soft). Nothing in reach: it just runs about.
+        if (now >= (E.seekAt || 0)) {
+          E.seekAt = now + 800; E.seekX = null;
+          for (let k = 1; k <= 60 && E.seekX == null; k++) for (const s of [-1, 1]) {
+            const x = E.x + s * k * CELL;
+            if (softAt(x, E.y - K.h / 2)) { E.seekX = x; break; }   // a soft wall at its own height
+            for (let dy = -3 * CELL; dy <= 3 * CELL; dy += CELL) if (softAt(x, E.y + CELL + 1 + dy) && softAt(x, E.y + 2 * CELL + 1 + dy) && !solid(Math.floor(x / CELL), Math.floor((E.y - CELL + dy) / CELL))) { E.seekX = x; break; }
+            if (E.seekX != null) break;
+          }
         }
+        const worm = K.h > 60;
+        if (E.seekX != null) { E.dir = E.seekX >= E.x ? 1 : -1; mv = spd * (worm ? 1.2 : 2.2); }
+        else { mv = spd * (worm ? 0.9 : 1.8); if (now >= (E.scurry || 0)) { E.scurry = now + 900 + Math.random() * 1800; if (Math.random() < 0.5) E.dir = -E.dir; } }
+        E.hunt = E.seekX != null;
       } else if (E.st === 41) { mv = 0; if (now > E.until) { E.st = 42; E.until = now + 1600; } }
       else if (E.st === 42) { mv = 0; if (now > E.until) { E.st = 43; E.until = now + 400; } }
       else { mv = 0; if (now > E.until) { E.st = 40; E.next = now + 1500; } }
@@ -20322,6 +20355,17 @@ function enemyStep(room, R, E, o, now, dt) {
       }
       E.st = now - (E.spitAt || 0) < 450 ? 6 : 0;
     }
+  }
+  // ⭐ round 18 (user: "options that aren't just moving back and forth, like more random patrolling"): `epat: 'random'` —
+  // while it is only wandering (nothing has changed its pace), now and then it stops for a moment or turns round, so it
+  // covers its range in uneven stretches instead of pacing wall to wall.
+  if (o.epat === 'random' && !stunned && mv === spd && !E.hunt) {
+    if (now >= (E.wanderAt || 0)) {
+      const r = Math.random();
+      if (r < 0.35) E.pauseUntil = now + 500 + Math.random() * 1700; else if (r < 0.7) E.dir = -E.dir;
+      E.wanderAt = now + 900 + Math.random() * 2600;
+    }
+    if (now < (E.pauseUntil || 0)) mv = 0;
   }
   if (stunned) E.vx *= 0.9;
   else if (K.hop) {
@@ -20705,9 +20749,9 @@ function enemyLeap(room, E, o, K, now, dt, solid, vis) {
 // sees), otherwise a small idle hop about its range. Smaller blobs hop a bit faster. Walls bounce a blob back; it lands on
 // terrain and still platforms like any walker. The enemy's own x/y follow its first blob (for range, put-away ground…).
 function enemySlime(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, rng) {
-  const CELL = TERRAIN_CELL, sz = E.sz || 1;
+  const CELL = TERRAIN_CELL;
   for (let i = E.blobs.length - 1; i >= 0; i--) {
-    const b = E.blobs[i], bw = SLIME_BOX[b.s][0] * sz, bh = SLIME_BOX[b.s][1] * sz, hw = bw / 2;
+    const b = E.blobs[i], bw = SLIME_BOX[b.s][0], bh = SLIME_BOX[b.s][1], hw = bw / 2;
     if (b.ground) {
       b.vx = 0;
       if (now >= b.next) {
@@ -20715,7 +20759,7 @@ function enemySlime(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, rng) {
         const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 ? p0 : null;
         let d = p ? (p.x >= b.x ? 1 : -1) : (b.dir || (Math.random() < 0.5 ? -1 : 1));
         if (!p && Math.abs(b.x - E.sx) >= rng && Math.sign(b.x - E.sx) === d) d = -d;   // idle: stay in the strip
-        const quick = 1 + (3 - b.s) * 0.25;
+        const quick = Math.max(0.6, 1 + (3 - b.s) * 0.25);
         b.dir = d; b.vx = d * spd * (p ? 1.5 : 0.6) * quick; b.vy = p ? -430 : -260; b.ground = false; b.next = Infinity;
       }
     }
@@ -20739,8 +20783,13 @@ function enemySlime(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, rng) {
     b.y = ny;
     if (b.y > 1e6 || b.y > (R.worldH || 1e6)) E.blobs.splice(i, 1);
   }
-  if (!E.blobs.length) { enemyKill(room, R, E, 'pop', null); return; }
-  E.x = E.blobs[0].x; E.y = E.blobs[0].y;
+  // (a blob clinging to somebody who has LEFT drops back down where the slime is)
+  if (E.clung && E.clung.length) for (let i = E.clung.length - 1; i >= 0; i--) if (!io.sockets.sockets.has(E.clung[i])) {
+    E.clung.splice(i, 1); E.blobs.push({ x: E.x, y: E.y, vx: 0, vy: -200, s: 1, ground: false, next: Infinity, dir: 1 });
+  }
+  // (blobs CLINGING to somebody are still this slime — it is not dead while any are)
+  if (!E.blobs.length && !(E.clung && E.clung.length)) { enemyKill(room, R, E, 'pop', null); return; }
+  if (E.blobs.length) { E.x = E.blobs[0].x; E.y = E.blobs[0].y; }
 }
 function enemyBoom(room, R, E, K) {
   const cx = E.x, cy = E.y - K.h / 2;
@@ -20805,6 +20854,14 @@ function enemyRoomScan(room, R, now) {
   if (!map) return;
   for (const o of map.values()) {
     if (o.type === 'region' && o.part === 'enemy') { enemyLegacy(o); R.list.push(o); continue; }
+    // ⭐ round 18 (user: "objects are not solid to enemies, which they should be"): a PINNED stamp (a crate, a barrel… that
+    // does not move) is a box to stand on and walk into. A LOOSE one is solid where it last came to rest — the same cells
+    // falling sand piles on (`coverSync`, read each tick in `enemyTick`). A wooden one is also in the ground as cells.
+    if (o.type === 'stamp' && !bodyLoose(o) && !o.nosol && !(o.path && o.path.pts && o.path.pts.length >= 2) && Math.abs(Math.sin(o.angle || 0)) <= 0.08) {
+      const w = o.w || 0, h = o.h || 0, x0 = o.x - w / 2, x1 = o.x + w / 2, y0 = o.y - h / 2;
+      R.floors.push({ x0, x1, y: y0 }); R.boxes.push({ x0, x1, y0, y1: o.y + h / 2 }); R.walls.push({ x0, x1, y0, y1: o.y + h / 2 });
+      continue;
+    }
     if (o.type !== 'platform' || o.nosol || (o.path && o.path.pts && o.path.pts.length >= 2)) continue;
     if (Math.abs(Math.sin(o.angle || 0)) > 0.08) continue;          // a tilted bar is not a floor to walk on (yet)
     const w = o.w || 0, h = o.h || 0, x0 = o.x - w / 2, x1 = o.x + w / 2, y0 = o.y - h / 2;
@@ -20830,6 +20887,7 @@ function enemyTick() {
     if (!R.list.length) { if (R.E.size) R.E.clear(); if (now - R.at > 900 && !(io.sockets.adapter.rooms.get(room) || {}).size) roomEnemies.delete(room); continue; }
     const listeners = (io.sockets.adapter.rooms.get(room) || {}).size;
     if (!listeners) continue;                          // nobody watching: everything stands still (a return is a timestamp)
+    R.cover = coverSync(room);                         // (round 18: loose objects, where they rest — solid to enemies)
     const live = new Set();
     const out = [], dead = [];
     // ⭐ CRUSHERS ARE IN THE WAY OF OTHER ENEMIES (user, 2026-10-02: "crushers pass right through enemies"): their boxes
@@ -20879,7 +20937,7 @@ function enemyTick() {
       for (const V of R.E.values()) {
         if (V === C || V.dead || V.inv) continue;
         const VKb = ENEMY_KINDS[V.k]; if (!VKb || VKb.crush) continue;
-        if ((VKb.burrow && (V.st === 40 || V.st === 44 || V.st === 45)) || (VKb.crab && V.st === 60) || (VKb.leap && V.st === 90)) continue;
+        if ((VKb.burrow && V.st >= 44 && V.st <= 46) || (VKb.crab && V.st === 60) || (VKb.leap && V.st === 90)) continue;
         const VK = enemyKindOf(V.k, V.sz, V.skin);
         if (V.x + VK.w / 2 > cx0 + 4 && V.x - VK.w / 2 < cx1 - 4 && V.y > cy0 + 4 && V.y - VK.h < cy1 - 4) {
           enemyKill(room, R, V, 'crush', null);
@@ -20890,7 +20948,8 @@ function enemyTick() {
     }
     // anything killed during the tick by something else's step (a bomber's blast) is reported dead, not where it stood
     for (let i = out.length - 1; i >= 0; i--) { const V = R.E.get(out[i][0]); if (V && V.dead) { dead.push(out[i][0]); out.splice(i, 1); } }
-    io.to(room).emit('enemies', { e: out, d: dead });
+    const LD = roomLootDrops.get(room);
+    io.to(room).emit('enemies', { e: out, d: dead, ...(LD && LD.size ? { l: [...LD].map(([did, L]) => [did, L.kind, L.x, L.y]) } : null) });
   }
 }
 setInterval(enemyTick, Math.round(1000 / ENEMY_HZ));
@@ -24172,16 +24231,51 @@ io.on('connection', (socket) => {
   });
   // ⭐ round 17 — A THIEF TOOK SOMETHING. Whether it touched you was decided on your screen (as every touch is), and so was
   // WHAT it took (your powerups live there). The server records that it is carrying it and sends it running.
-  socket.on('enemy-steal', ({ id, kind }) => {
+  socket.on('enemy-steal', ({ id, kind, dur, ms }) => {
     const room = currentAvatarRoom; if (!room || typeof kind !== 'string' || kind.length > 24) return;
     const R = roomEnemies.get(room); const E = R && R.E.get(id);
-    if (!E || E.dead || !ENEMY_KINDS[E.k] || !ENEMY_KINDS[E.k].thief || E.loot || (E.st | 0) === 101) return;
+    if (!E || E.dead || !ENEMY_KINDS[E.k] || !ENEMY_KINDS[E.k].thief || (E.st | 0) === 101) return;
     const p = lastBodyPos(room, socket.id);
     if (p && Math.hypot(p.x - E.x, p.y - E.y) > 400) return;
-    const now = Date.now();
-    E.loot = kind; E.owner = socket.id; E.st = 101; E.until = now + 20000; E.stun = 0;
+    // (round 18: it KEEPS what it takes — no time limit — until it is killed, and then drops all of it)
+    (E.loot || (E.loot = [])).push({ kind, dur: ['timed', 'hit', 'death', 'ever'].includes(dur) ? dur : 'death', ms: Math.max(0, Math.min(3600000, +ms || 0)) });
+    E.st = 101; E.stun = 0;
     if (p) E.dir = p.x >= E.x ? -1 : 1;
     io.to(room).emit('enemy-ev', { id, k: 'steal', kind, by: socket.id });
+  });
+  // ⭐ round 18 — SOMEBODY PICKED UP WHAT A THIEF DROPPED. First come: the server says who got it.
+  socket.on('loot-take', ({ did }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const M = roomLootDrops.get(room), L = M && M.get(did); if (!L) return;
+    const p = lastBodyPos(room, socket.id);
+    if (p && Math.hypot(p.x - L.x, p.y - L.y) > 300) return;
+    M.delete(did); if (!M.size) roomLootDrops.delete(room);
+    socket.emit('loot-got', { kind: L.kind, dur: L.dur, ms: L.ms });
+  });
+  // ⭐ round 18 (user): THE SMALLEST SLIME BLOBS CLING. Touching one (decided on your screen, as every touch is) sticks it to
+  // you: it leaves the floor and is kept on the slime as `clung` until you shake it off (`enemy-unclung`: a punch, a slam,
+  // liquid — also sent on death), when it drops back down beside you as a blob. They slow you (on your screen). They do no
+  // damage yet: there is no health to take — noted to come back to once there is.
+  socket.on('enemy-cling', ({ id, blob }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const R = roomEnemies.get(room); const E = R && R.E.get(id);
+    if (!E || E.dead || !E.blobs) return;
+    const b = E.blobs[blob | 0]; if (!b || b.s !== 1) return;
+    const p = lastBodyPos(room, socket.id); if (p && Math.hypot(p.x - b.x, p.y - b.y) > 400) return;
+    E.blobs.splice(blob | 0, 1); (E.clung || (E.clung = [])).push(socket.id);
+    io.to(room).emit('enemy-ev', { id, k: 'cling', sid: socket.id });
+  });
+  socket.on('enemy-unclung', ({ x, y }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const R = roomEnemies.get(room); if (!R) return;
+    const p = lastBodyPos(room, socket.id), px = isFinite(x) ? +x : p ? p.x : 0, py = isFinite(y) ? +y : p ? p.y : 0, now = Date.now();
+    for (const E of R.E.values()) {
+      if (!E.clung || !E.clung.includes(socket.id)) continue;
+      let n = 0;
+      E.clung = E.clung.filter(sid => { if (sid !== socket.id) return true; n++; return false; });
+      for (let i = 0; i < n; i++) { const d = i % 2 ? 1 : -1; E.blobs.push({ x: px + d * (10 + i * 6), y: py, vx: d * (160 + i * 30), vy: -280, s: 1, ground: false, next: Infinity, dir: d, hitAt: now }); }
+      io.to(room).emit('enemy-ev', { id: E.id, k: 'unclung', sid: socket.id, n });
+    }
   });
   socket.on('enemy-hit', ({ id, how, dir, px, blob }) => {
     const room = currentAvatarRoom; if (!room) return;
@@ -24194,7 +24288,7 @@ io.on('connection', (socket) => {
     if (K.leap && E.st === 90) return;                    // lurking in its pool: nothing reaches it
     if (how === 'stomp' && !enemyStompOk(K, E.st | 0)) return;
     if (K.crush && how !== 'slam') return;               // a crusher is iron: only a slam (and, later, a bomb) breaks it
-    if (K.burrow && (E.st === 40 || E.st === 44 || E.st === 45 || E.st === 46) && how !== 'slam') return;   // underground: only a slam reaches it
+    if (K.burrow && (E.st === 44 || E.st === 45 || E.st === 46) && how !== 'slam') return;   // underground: only a slam reaches it
     if (K.crab && E.st === 60 && how !== 'slam') return;  // buried: only a slam reaches it
     const p = lastBodyPos(room, socket.id);
     if (p && Math.hypot(p.x - E.x, p.y - E.y) > 600 && !K.slime) return;
@@ -24207,15 +24301,14 @@ io.on('connection', (socket) => {
       if (now - (b.hitAt || 0) < 150) return;
       E.blobs.splice(i, 1);
       if (b.s > 1 && how !== 'crush') {
-        const s = b.s - 1, off = SLIME_BOX[s][0] * (E.sz || 1) / 2;
+        const s = b.s - 1, off = SLIME_BOX[s][0] / 2;
         for (const d of [-1, 1]) E.blobs.push({ x: b.x + d * off, y: b.y, vx: d * 170, vy: -320, s, ground: false, next: Infinity, dir: d, hitAt: now });
         io.to(room).emit('enemy-ev', { id, k: 'split', x: Math.round(b.x), y: Math.round(b.y), s: b.s });
       } else io.to(room).emit('enemy-ev', { id, k: 'pop', x: Math.round(b.x), y: Math.round(b.y), s: b.s });
-      if (!E.blobs.length) enemyKill(room, R, E, 'pop', socket.id);
+      if (!E.blobs.length && !(E.clung && E.clung.length)) enemyKill(room, R, E, 'pop', socket.id);
       return;
     }
     // ⭐ round 17 — a THIEF carrying something lets go of it when it is hit (and still takes the hit)
-    if (K.thief && E.loot && now - (E.hitAt || 0) >= 150) { enemyDropLoot(room, E, true); E.st = 0; E.next = now + 2500; }
     // ⭐ ARMOUR (round 13, the plough beetle): only a hit from BEHIND counts. `px` is where the hitter's body was on their
     // own screen when they swung (the beacon is up to half a second stale). Being crushed by stone skin / Mega still counts.
     if (K.armour && how !== 'crush' && how !== 'stomp') {    // (round 14: a stomp from above counts — the plate is only in front)
@@ -24253,7 +24346,7 @@ io.on('connection', (socket) => {
       const d = dir < 0 ? -1 : 1;
       E.stun = now + 450; E.vx = d * 260; E.vy = -220; E.ground = false; E.dir = -d;   // knocked away, and turns to face you
     } else E.stun = now + 500;                           // stomped / slammed / squashed and still standing: dazed
-    if (K.burrow && (E.st === 40 || E.st === 44 || E.st === 45 || E.st === 46)) E.flush = 1;   // a slam over it flushes it out of the ground
+    if (K.burrow && (E.st === 44 || E.st === 45 || E.st === 46)) E.flush = 1;   // a slam over it flushes it out of the ground
     if (K.crab && E.st === 60) { E.st = 62; E.until = now + 15000; E.seenAt = now; }   // …and a buried crab out of hiding
     if (K.mimic && E.st === 110) { E.st = 111; E.until = now + 380; }                  // (round 17) hitting a mimic gives it away
     io.to(room).emit('enemy-ev', { id, k: 'hit', how }); // `how` so every screen shows the right reaction (a stomp squashes)
