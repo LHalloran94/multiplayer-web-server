@@ -20026,7 +20026,7 @@ function enemyChunkAway(room, c, r) {
 function enemySoft(room, v) { return v > 0 && ENEMY_SOLID[v] === 1 && matStrengthSrv(roomMats[room] || {}, v) <= 2; }
 // Whether landing on it RIGHT NOW kills it. ⚠️ The client has the same rule (`enemyStompable`) — they must agree.
 function enemyStompOk(K, st) { if (K.crush) return false; if (K.roll) return st !== 1; if (K.charge) return st === 2;
-  if (K.crawl) return st === 20 || st >= 24; if (K.burrow && (st === 40 || st === 44 || st === 45 || st === 41)) return false;
+  if (K.crawl) return st === 20 || st >= 24; if (K.burrow && (st === 40 || (st >= 44 && st <= 47) || st === 41)) return false;
   if (K.leap && st === 90) return false; if (K.bones && st >= 80) return false; return !!K.stomp; }
 // ⭐ round 16: a hit that does NO DAMAGE to this kind — it does something else instead (hides a shell creature / kicks its
 // shell; collapses a bone pile). ⚠️ The client has the same rule (`enemyNoDamage` in 01).
@@ -20139,7 +20139,18 @@ function enemyStep(room, R, E, o, now, dt) {
   }
   // ⭐ ROUND 13: a burrower underground TUNNELS — its own movement, no gravity, no walking (`enemyTunnel`); a slam over it
   // (`E.flush`) or reaching you brings it up through the surface.
-  if (K.burrow && (E.st === 44 || E.st === 45)) { if (!stunned || E.flush) enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid); return; }
+  if (K.burrow && (E.st === 44 || E.st === 45 || E.st === 46)) { if (!stunned || E.flush) enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid); return; }
+  // ⭐ round 17 (user: "burrowers should be able to pop out of the sides of walls as well, rotated accordingly"): out of a
+  // WALL FACE — 47 bursting out, 48 out, 49 going back in. Its feet are on the face (`E.x`), its body sticks out sideways
+  // (`E.dir` = which way), centred on `E.y`; nothing pulls it down. Then back into the wall and tunnelling again.
+  if (K.burrow && E.st >= 47 && E.st <= 49) {
+    E.vx = E.vy = 0;
+    if (now < E.until) return;
+    if (E.st === 47) { E.st = 48; E.until = now + 1600; }
+    else if (E.st === 48) { E.st = 49; E.until = now + 400; }
+    else { E.st = 44; E.x -= E.dir * (K.w / 2 + 2 * TERRAIN_CELL); E.y += K.h / 2; E.next = now + 1500; }
+    return;
+  }
   if (!stunned && (K.roll || K.charge || K.spit || K.bomb || K.burrow || K.crab || K.armour)) {
     const eyeY = E.y - K.h + 8;
     // ⭐ IT ONLY SEES WHAT IS IN FRONT OF IT (user, 2026-10-02: "you should be able to sneak up on it") — and in sight.
@@ -20540,7 +20551,10 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
     const sy = surfaceAbove(E.x, cy()); if (sy == null) return;
     E.y = sy; E.vy = 0; E.ground = true; E.st = 41; E.until = now + 300;
   };
-  if (E.flush) { E.flush = 0; emerge(); return; }
+  // …or SIDEWAYS out of a wall face (round 17): feet on the face, body out towards the side it faces
+  const emergeSide = () => { E.x = E.wallX; E.y = E.wallY; E.vy = 0; E.st = 47; E.until = now + 300; };
+  if (E.flush) { E.flush = 0; if (E.st === 46) emergeSide(); else emerge(); return; }
+  if (E.st === 46) { if (now >= E.until) emergeSide(); return; }
   // ⭐ RUMBLING (45): right under you, just beneath the surface — the mound shakes and throws up dirt for half a second (the
   // warning: user, round 14, "you can get killed by the burrower before it has visually emerged"), then it bursts out
   if (E.st === 45) { if (now >= E.until) emerge(); return; }
@@ -20550,13 +20564,29 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
   const DEPTH = 3 * CELL + Math.round(h * 0.25);
   const p0 = now >= (E.next || 0) ? enemyTarget(room, E.x, cy(), vis, -vis, vis, now) : null;
   const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 ? p0 : null;
-  let tx, ty, v, under = false;
+  let tx, ty, v, under = false, side = null;
   if (p) {
     tx = p.x; v = spd * 2.5; E.dir = p.x >= E.x ? 1 : -1;
     const gy = groundBelow(p.x, p.y);                    // the ground the player is standing on
     under = gy != null && Math.abs(p.x - E.x) < Math.max(40, K.w * 0.75);
     const sy = surfaceAbove(E.x, cy());
     ty = under ? gy + 2 + h / 2 : (sy != null ? sy + DEPTH + h / 2 : cy());
+    // ⭐ round 17: a WALL beside you it can come out of — the first solid column from you towards it, within a body's
+    // reach of you, soft for the whole width it comes out with. Taken when getting there is shorter than getting under you.
+    // (its lower side level with your feet — a body's radius under your centre — so beside a floor it comes out ON the
+    //  floor, not half into it; a page's floor is a platform, not ground, so it cannot be looked for)
+    const wy = p.y + 18 - K.w / 2;
+    const pr = Math.floor(wy / CELL), pc = Math.floor(p.x / CELL), sg = E.x >= p.x ? 1 : -1, half = Math.floor(K.w / 2 / CELL) - 1;
+    for (let k = 1; k <= 5; k++) {
+      const c = pc + sg * k; if (!solid(c, Math.floor(p.y / CELL)) && !solid(c, pr)) continue;
+      let ok = true; for (let j = -half; j <= half && ok; j++) if (!soft(c * CELL + CELL / 2, (pr + j) * CELL + CELL / 2)) ok = false;
+      if (ok) {
+        const fx = sg > 0 ? c * CELL : (c + 1) * CELL, wx = fx + sg * (K.w / 2 + 2);
+        const dWall = Math.hypot(wx - E.x, wy - cy()), dUnder = gy != null ? Math.hypot(p.x - E.x, gy + 2 - cy()) : Infinity;
+        if (dWall < dUnder) { tx = wx; ty = wy; side = { x: fx, y: wy, out: -sg }; under = false; }
+      }
+      break;
+    }
   } else {
     if (Math.abs(E.x - E.sx) > rng && Math.sign(E.x - E.sx) === E.dir) E.dir = -E.dir;
     const sy = surfaceAbove(E.x, cy());
@@ -20579,6 +20609,8 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
   }
   // under you and up to just below the surface: rumble, then burst out
   if (p && under && Math.abs(p.x - E.x) < 14 && Math.abs(cy() - ty) < CELL) { E.st = 45; E.until = now + 500; }
+  // …or just inside the wall beside you: rumble there (46), then burst out of its face
+  if (p && side && Math.abs(tx - E.x) < 6 && Math.abs(cy() - ty) < CELL) { E.st = 46; E.until = now + 500; E.wallX = side.x; E.wallY = side.y; E.dir = side.out; }
 }
 // ⭐ THE BOMBER GOES OFF. Every screen draws the bang and throws / kills its own player (`bombBlast` on the client, as a
 // bomb does); the CRATER is dug by exactly one of them — the player it was going for (`dig`). Enemies caught in it are
@@ -24043,7 +24075,7 @@ io.on('connection', (socket) => {
     if (K.leap && E.st === 90) return;                    // lurking in its pool: nothing reaches it
     if (how === 'stomp' && !enemyStompOk(K, E.st | 0)) return;
     if (K.crush && how !== 'slam') return;               // a crusher is iron: only a slam (and, later, a bomb) breaks it
-    if (K.burrow && (E.st === 40 || E.st === 44 || E.st === 45) && how !== 'slam') return;   // underground: only a slam reaches it
+    if (K.burrow && (E.st === 40 || E.st === 44 || E.st === 45 || E.st === 46) && how !== 'slam') return;   // underground: only a slam reaches it
     if (K.crab && E.st === 60 && how !== 'slam') return;  // buried: only a slam reaches it
     const p = lastBodyPos(room, socket.id);
     if (p && Math.hypot(p.x - E.x, p.y - E.y) > 600) return;
@@ -24085,7 +24117,7 @@ io.on('connection', (socket) => {
       const d = dir < 0 ? -1 : 1;
       E.stun = now + 450; E.vx = d * 260; E.vy = -220; E.ground = false; E.dir = -d;   // knocked away, and turns to face you
     } else E.stun = now + 500;                           // stomped / slammed / squashed and still standing: dazed
-    if (K.burrow && (E.st === 40 || E.st === 44 || E.st === 45)) E.flush = 1;   // a slam over it flushes it out of the ground
+    if (K.burrow && (E.st === 40 || E.st === 44 || E.st === 45 || E.st === 46)) E.flush = 1;   // a slam over it flushes it out of the ground
     if (K.crab && E.st === 60) { E.st = 62; E.until = now + 15000; E.seenAt = now; }   // …and a buried crab out of hiding
     io.to(room).emit('enemy-ev', { id, k: 'hit', how }); // `how` so every screen shows the right reaction (a stomp squashes)
   });
