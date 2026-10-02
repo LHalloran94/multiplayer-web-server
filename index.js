@@ -20105,8 +20105,6 @@ function enemyStep(room, R, E, o, now, dt) {
   const stunned = E.stun > now, spd = o.espd || K.speed, rng = o.erng == null ? 240 : o.erng;   // ⚠️ 0 is a real range now
   // how far it SEES you from (round 9). A swooper's and a spitter's used to be their `erng`, so one placed before reads that.
   const vis = isFinite(o.evis) ? o.evis : (K.fly || K.spit) && o.erng != null ? o.erng : (K.vis || 240);
-  const groundAhead = (fx, y) => { const fc = Math.floor(fx / CELL), fr = Math.floor((y + 1) / CELL);
-    return solid(fc, fr) || solid(fc, fr + 1) || solid(fc, fr + 2) || floorAt(fx, y - 1, y + 2 * CELL + 1) !== null; };
   if (K.fly) { enemyFly(room, E, o, K, now, dt, solid, stunned, spd, vis); return; }
   if (K.crush) { enemyCrush(room, E, o, K, now, dt, solid, floorAt, wallAt, spd, vis, o.estop === 'reach' ? rng : 0); return; }
   if (K.ghost) { enemyGhost(room, E, o, K, now, dt, stunned, spd, vis); return; }
@@ -20229,8 +20227,7 @@ function enemyStep(room, R, E, o, now, dt) {
   if (stunned) E.vx *= 0.9;
   else if (K.hop) {
     // ⭐ THE HOPPER: sits, then hops — at you, if you are near and within its range; otherwise a small hop on its own
-    // beat, turning at the end of its range and at a ledge (an idle frog does not throw itself off a cliff; one
-    // chasing you might).
+    // beat, turning at the end of its range (round 15: not at a ledge any more — it hops off, like a walker walks off).
     if (E.ground) {
       E.vx = 0;
       if (now >= E.next) {
@@ -20242,7 +20239,7 @@ function enemyStep(room, R, E, o, now, dt) {
           if (p) { E.dir = d; E.next = now + 400; d = 0; }           // you are past its range: face you and wait
           else d = -d;
         }
-        if (d && !p && !groundAhead(E.x + d * (hw + 28), E.y)) { E.dir = -d; E.next = now + 600; d = 0; }
+        // (round 15: no ledge-turn — an idle hopper hops off an edge too; its Wanders range is what keeps it home)
         // ⭐ Higher hops (user, 2026-10-01): ~130px at you, ~50px idle.
         if (d) { E.dir = d; E.chase = !!p; E.vx = d * spd * (p ? 1 : 0.45); E.vy = p ? -600 : -380; E.ground = false; E.next = Infinity; }
       }
@@ -20282,11 +20279,10 @@ function enemyStep(room, R, E, o, now, dt) {
     E.vx = 0; nx = E.x;
   }
   else if (E.ground && !stunned && !K.hop && E.vx !== 0) {   // ⚠️ only while moving: a spitter by a ledge would spin
-    const fx = nx + E.dir * hw, fc = Math.floor(fx / CELL), fr = Math.floor((E.y + 1) / CELL);
-    let ground = floorAt(fx, E.y - 1, E.y + downRows * CELL + 1) !== null;   // a step down it can walk off is still ground
-    for (let k = 0; k <= downRows && !ground; k++) if (solid(fc, fr + k)) ground = true;
+    // ⭐ ROUND 15 (user, 2026-10-02): walkers just WALK OFF EDGES — there is no ledge-turn any more. An author who does
+    // not want one going over limits it with its Wanders range, which is the only thing that turns it here.
     const far = Math.abs(nx - E.sx) > rng && Math.sign(nx - E.sx) === E.dir;
-    if (!ground || far) {
+    if (far) {
       if (K.charge && E.st === 4) { E.st = 0; E.next = now + 1000; nx = E.x; }   // skids to a stop at the edge
       else if (K.roll && E.st === 1) { E.st = 2; E.until = now + 700; nx = E.x; }   // …and so does a rolling roller
       else if (K.bomb && E.st === 30) nx = E.x;                                    // …and a lit bomber waits there
