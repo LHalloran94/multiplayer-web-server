@@ -17357,8 +17357,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (isFinite(data.evis)) obj.evis = clampN(data.evis, 0, 3000, ENEMY_KINDS[obj.ek].vis || 240);
       if (isFinite(data.ehp)) obj.ehp = Math.round(clampN(data.ehp, 0, 20, ENEMY_KINDS[obj.ek].hp));   // health; 0 = can't be hurt
       if (ENEMY_KINDS[obj.ek].crush) obj.estop = data.estop === 'reach' ? 'reach' : 'hit';
-      if (data.efree) obj.efree = 1;                          // round 18: roams anywhere (no range)
-      if (data.epat === 'random') obj.epat = 'random';        // round 18: wanders at random rather than back and forth
+      if (data.efree === 1 || data.efree === 0) obj.efree = data.efree;   // round 18: roams anywhere (no range); unset = the kind's default
+      if (data.epat === 'random' || data.epat === 'pace') obj.epat = data.epat;   // round 18: wanders at random / back and forth
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
     // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
@@ -19989,9 +19989,9 @@ const ENEMY_KINDS = {
   bomber:   { w: 48, h: 48, speed: 36, hp: 1, stomp: 1, bomb: 1, vis: 280 },   // st 30 lit: hurries at you, then blows up (`enemyBoom`)
   // st 40 a mound on hard ground, 44 tunnelling, 45 rumbling under you (the warning), 41 bursting up, 42 up, 43 going back down.
   // ⭐ round 14 (user): the SANDWORM is two skins of the burrower (sand, pink) — bigger, tougher, and its top is its mouth
-  burrower: { w: 64, h: 36, speed: 40, hp: 2, stomp: 1, burrow: 1, vis: 300,
-              skins: { mole: {}, worm: { w: 60, h: 60, speed: 40, hp: 5, stomp: 0, vis: 360, worm: 1 }, wormplate: { w: 60, h: 60, speed: 40, hp: 5, stomp: 0, vis: 360, worm: 1 },
-                       wormpink: { w: 60, h: 60, speed: 40, hp: 5, stomp: 0, vis: 360, worm: 1 } } },
+  burrower: { w: 64, h: 36, speed: 40, hp: 2, stomp: 1, burrow: 1, vis: 300, free: 1, pat: 'random',
+              skins: { mole: {}, worm: { w: 60, h: 60, speed: 95, hp: 5, stomp: 0, vis: 360, worm: 1 }, wormplate: { w: 60, h: 60, speed: 95, hp: 5, stomp: 0, vis: 360, worm: 1 },
+                       wormpink: { w: 60, h: 60, speed: 95, hp: 5, stomp: 0, vis: 360, worm: 1 } } },
   ghost:    { w: 56, h: 48, speed: 50, hp: 2, stomp: 0, ghost: 1, vis: 400 },  // st 50 drifting at you through walls, 51 frozen (you face it)
   // ⭐⭐ Round 13 (user, 2026-10-02). The burrowers now TUNNEL through soft ground (st 44 = underground; 40 = a mound on the
   // surface, where the ground is too hard to go into). `skins` = looks that may change rules (the first is the kind itself).
@@ -20017,7 +20017,7 @@ const ENEMY_KINDS = {
   // THIEF (a raccoon): sneaks up on all fours (st 0), hopping over what is in its way; a touch steals the powerup you
   // were given last (decided on YOUR screen — `enemy-steal`) and it scurries away on its hind legs with it (101). Hit it
   // and it lets go — the powerup goes back to whoever lost it (`enemy-ev` 'loot'). Touching it never hurts you.
-  thief:    { w: 56, h: 36, speed: 46, hp: 1, stomp: 1, thief: 1, vis: 320 },
+  thief:    { w: 56, h: 36, speed: 60, hp: 1, stomp: 1, thief: 1, vis: 320, free: 1, pat: 'random' },
   // SPLITTING SLIME: one enemy made of BLOBS (`E.blobs`, sent as row[7]); a hit on a blob splits it into two smaller ones
   // (size 3 → 2 → 1), and a size-1 blob pops. It is dead when the last one has.
   slime:    { w: 42, h: 30, speed: 70, hp: 1, stomp: 1, slime: 1, vis: 260 },
@@ -20153,7 +20153,7 @@ function enemyStep(room, R, E, o, now, dt) {
   };
   const K = enemyKindOf(E.k, E.sz, E.skin), hw = K.w / 2;
   // ⭐ round 18 (user): `efree` = ROAMS ANYWHERE — no range at all (every "past its range" test below simply never fires)
-  const stunned = E.stun > now, spd = o.espd || K.speed, rng = o.efree ? 1e9 : o.erng == null ? 240 : o.erng;   // ⚠️ 0 is a real range now
+  const stunned = E.stun > now, spd = o.espd || K.speed, rng = (o.efree != null ? o.efree : K.free) ? 1e9 : o.erng == null ? 240 : o.erng;   // ⚠️ 0 is a real range now
   // how far it SEES you from (round 9). A swooper's and a spitter's used to be their `erng`, so one placed before reads that.
   const vis = isFinite(o.evis) ? o.evis : (K.fly || K.spit) && o.erng != null ? o.erng : (K.vis || 240);
   if (K.fly) { enemyFly(room, E, o, K, now, dt, solid, stunned, spd, vis); return; }
@@ -20275,7 +20275,7 @@ function enemyStep(room, R, E, o, now, dt) {
       if (E.st === 101) {
         // (nobody within ~600px: it stops and stands there, still holding it — it does not run to the edge of the world)
         const p = enemyTarget(room, E.x, E.y - K.h / 2, 600, -300, 300, now);
-        if (p) { E.dir = p.x >= E.x ? -1 : 1; mv = spd * 6; E.hunt = true; }   // (round 18: faster — "scurry away with some speed") else { mv = 0; E.hunt = false; }
+        if (p) { E.dir = p.x >= E.x ? -1 : 1; mv = spd * 8; E.hunt = true; }   // (round 19: much faster again)   // (round 18: faster — "scurry away with some speed") else { mv = 0; E.hunt = false; }
       } else {
         const p0 = now >= (E.next || 0) ? enemyTarget(room, E.x, E.y - K.h / 2, vis, -160, 160, now) : null;
         const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 && enemySees(solid, E.x, eyeY, p0.x, p0.y) ? p0 : null;
@@ -20361,7 +20361,7 @@ function enemyStep(room, R, E, o, now, dt) {
   // ⭐ round 18 (user: "options that aren't just moving back and forth, like more random patrolling"): `epat: 'random'` —
   // while it is only wandering (nothing has changed its pace), now and then it stops for a moment or turns round, so it
   // covers its range in uneven stretches instead of pacing wall to wall.
-  if (o.epat === 'random' && !stunned && mv === spd && !E.hunt) {
+  if ((o.epat || K.pat) === 'random' && !stunned && mv === spd && !E.hunt) {
     if (now >= (E.wanderAt || 0)) {
       const r = Math.random();
       if (r < 0.35) E.pauseUntil = now + 500 + Math.random() * 1700; else if (r < 0.7) E.dir = -E.dir;
