@@ -20084,6 +20084,12 @@ function enemyStep(room, R, E, o, now, dt) {
 }
 // ⭐ THE SWOOPER: hangs where it was put; when somebody passes below it — within its reach, and in sight (a wall between
 // you hides you) — it dives at where you were, then flies home and hangs again. No gravity; ground ends a dive.
+// in sight: nothing solid on the straight line from (sx, sy) to (px, py)
+function enemySees(solid, sx, sy, px, py) {
+  const CELL = TERRAIN_CELL, n = Math.ceil(Math.hypot(px - sx, py - sy) / CELL);
+  for (let i = 1; i < n; i++) { const t = i / n; if (solid(Math.floor((sx + (px - sx) * t) / CELL), Math.floor((sy + (py - sy) * t) / CELL))) return false; }
+  return true;
+}
 function enemyFly(room, E, o, K, now, dt, solid, stunned, spd, rng) {
   const CELL = TERRAIN_CELL, hx = E.sx, hy = E.hy;
   const hitAt = (x, y) => solid(Math.floor(x / CELL), Math.floor((y - K.h / 2) / CELL));
@@ -20110,18 +20116,18 @@ function enemyFly(room, E, o, K, now, dt, solid, stunned, spd, rng) {
       E.x = nx; E.y = ny;
     }
   } else if (E.mode === 'back') {
-    if (now >= E.next && toward(hx, hy, spd * 0.6)) { E.mode = 'hang'; E.next = now + 1200; E.vx = E.vy = 0; }
+    // ⭐ Come back into its area while it is flying home and it turns round and chases you again (user, 2026-10-01) —
+    // as long as it can see you from where it IS (not from home).
+    const p = now >= E.next ? enemyTarget(room, hx, hy - K.h / 2, rng, -20, 460, now) : null;
+    if (p && enemySees(solid, E.x, E.y - K.h / 2, p.x, p.y)) E.mode = 'dive';
+    else if (now >= E.next && toward(hx, hy, spd * 0.6)) { E.mode = 'hang'; E.next = now + 1200; E.vx = E.vy = 0; }
   } else {
     // hanging from a ceiling it holds still; hovering in open air it bobs
     E.x = hx; E.y = o.ehang ? hy : hy + Math.sin(now / 300) * 3;
     if (now >= E.next) {
       const p = enemyTarget(room, hx, hy - K.h / 2, rng, -20, 460, now);
       if (p) {
-        // in sight: nothing solid on the straight line from it to you
-        const sx = hx, sy = hy - K.h / 2, L = Math.hypot(p.x - sx, p.y - sy), n = Math.ceil(L / CELL);
-        let clear = true;
-        for (let i = 1; i < n && clear; i++) { const t = i / n; if (solid(Math.floor((sx + (p.x - sx) * t) / CELL), Math.floor((sy + (p.y - sy) * t) / CELL))) clear = false; }
-        if (clear) { E.mode = 'dive'; E.vx = 0; E.vy = spd * 0.5; }   // drops off its perch, then steers
+        if (enemySees(solid, hx, hy - K.h / 2, p.x, p.y)) { E.mode = 'dive'; E.vx = 0; E.vy = spd * 0.5; }   // drops off its perch, then steers
         else E.next = now + 300;
       }
     }
