@@ -17341,6 +17341,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // there, and how long it takes to come back once killed. Its BODY is the server's (`enemyTick`), not this record.
     // ⚠️ The kind list must agree with `ENEMY_KINDS` in the client's 01_state.js; the size is the kind's, not a dial.
     if (obj.part === 'enemy') {
+      if (data.ek === 'spiky' || data.ek === 'sandworm') { const t = { ek: data.ek, eskin: data.eskin }; enemyLegacy(t); data = Object.assign({}, data, t); }
       obj.ek = ENEMY_KINDS[data.ek] ? data.ek : 'walker';
       if ([0.5, 1.5, 2, 3].includes(data.esz)) obj.esz = data.esz;   // size step (1 = left off)
       { const sk = ENEMY_KINDS[obj.ek].skins;                         // its skin (the first = the kind itself, left off)
@@ -19968,8 +19969,8 @@ function lastBodyPos(room, sid) {
 // ⚠️ Being hurt by one, and hurting one, is decided on the PLAYER's screen (the same rule as every hit today); the
 //    server only says yes/no to a kill (`enemy-hit`) so two players cannot both stomp the same one.
 const ENEMY_KINDS = {
-  walker:  { w: 48, h: 32, speed: 42, hp: 1, stomp: 1 },
-  spiky:   { w: 56, h: 28, speed: 34, hp: 2, stomp: 0 },              // stomping a Spiky kills YOU
+  // ⭐ round 14 (user): the Spiky is a SKIN of the walker now (stomping it kills YOU); the old kind id still loads (`enemyLegacy`)
+  walker:  { w: 48, h: 32, speed: 42, hp: 1, stomp: 1, skins: { walker: {}, spiky: { w: 56, h: 28, speed: 34, hp: 2, stomp: 0 } } },
   hopper:  { w: 64, h: 32, speed: 140, hp: 1, stomp: 1, hop: 1, vis: 320 },     // speed = how far a hop carries it sideways
   swooper: { w: 76, h: 28, speed: 220, hp: 1, stomp: 1, fly: 1, vis: 240 },     // speed = how fast it dives
   // ⭐⭐ The second batch (user's picks 2026-10-02). `st` is the state a kind is in, sent with each position so every
@@ -19984,14 +19985,23 @@ const ENEMY_KINDS = {
   // ⭐⭐ The third batch (user's picks 2026-10-02: spider, powder keg, mole, sheet ghost).
   crawler:  { w: 84, h: 52, speed: 50, hp: 1, stomp: 1, crawl: 1, vis: 600 },  // (round 13: redrawn bigger; sees 600 down — 300 never reached the floor of an ordinary cave)  // st 20–23 crawling (surface below/right/above/left), 24 drop, 25 landed, 26 climbing back
   bomber:   { w: 48, h: 48, speed: 36, hp: 1, stomp: 1, bomb: 1, vis: 280 },   // st 30 lit: hurries at you, then blows up (`enemyBoom`)
-  burrower: { w: 64, h: 36, speed: 40, hp: 2, stomp: 1, burrow: 1, vis: 300 }, // st 40 a mound on hard ground, 44 tunnelling, 41 bursting up, 42 up, 43 going back down
+  // st 40 a mound on hard ground, 44 tunnelling, 45 rumbling under you (the warning), 41 bursting up, 42 up, 43 going back down.
+  // ⭐ round 14 (user): the SANDWORM is two skins of the burrower (sand, pink) — bigger, tougher, and its top is its mouth
+  burrower: { w: 64, h: 36, speed: 40, hp: 2, stomp: 1, burrow: 1, vis: 300,
+              skins: { mole: {}, worm: { w: 72, h: 112, speed: 34, hp: 5, stomp: 0, vis: 360 }, wormpink: { w: 72, h: 112, speed: 34, hp: 5, stomp: 0, vis: 360 } } },
   ghost:    { w: 56, h: 48, speed: 50, hp: 2, stomp: 0, ghost: 1, vis: 400 },  // st 50 drifting at you through walls, 51 frozen (you face it)
   // ⭐⭐ Round 13 (user, 2026-10-02). The burrowers now TUNNEL through soft ground (st 44 = underground; 40 = a mound on the
   // surface, where the ground is too hard to go into). `skins` = looks that may change rules (the first is the kind itself).
-  sandworm: { w: 72, h: 112, speed: 34, hp: 5, stomp: 0, burrow: 1, vis: 360, skins: { sand: {}, pink: {} } },
   crab:     { w: 88, h: 52, speed: 60, hp: 1, stomp: 1, crab: 1, vis: 200, skins: { red: {}, blue: { stomp: 0, hp: 2 } } },   // st 60 buried, 61 eyes up, 62 out, 63 digging in
-  plough:   { w: 76, h: 36, speed: 36, hp: 2, stomp: 0, armour: 1, vis: 300 },  // only hurt from BEHIND
+  // punches / slams only count from BEHIND; touching it only pushes you (round 14); the plain one can be stomped, the spiked can't
+  plough:   { w: 76, h: 36, speed: 36, hp: 2, stomp: 1, armour: 1, vis: 300, skins: { plain: {}, spiked: { stomp: 0, h: 44 } } },
 };
+// ⭐ Round 14: two kinds became SKINS — a Level saved before then still says 'spiky' / 'sandworm'. Read as the walker / the
+// burrower with that skin. ⚠️ The client has the same mapping (`enemyKindId` / `enemySkinId` in 01).
+function enemyLegacy(o) {
+  if (o.ek === 'spiky') { o.ek = 'walker'; o.eskin = 'spiky'; }
+  else if (o.ek === 'sandworm') { o.ek = 'burrower'; o.eskin = o.eskin === 'pink' ? 'wormpink' : 'worm'; }
+}
 // ⭐ GROUND NOBODY IS NEAR IS PUT AWAY (chunk eviction): its pages are gone, and a peek there reads -1 — air. Found in round
 // 13's test: a mole placed off-screen dropped straight through a field of dirt. So an enemy standing in put-away ground
 // WAITS (as the whole room does when nobody is in it), and put-away ground beside one is a wall to it, never a hole.
@@ -20005,7 +20015,7 @@ function enemyChunkAway(room, c, r) {
 function enemySoft(room, v) { return v > 0 && ENEMY_SOLID[v] === 1 && matStrengthSrv(roomMats[room] || {}, v) <= 2; }
 // Whether landing on it RIGHT NOW kills it. ⚠️ The client has the same rule (`enemyStompable`) — they must agree.
 function enemyStompOk(K, st) { if (K.crush) return false; if (K.roll) return st !== 1; if (K.charge) return st === 2;
-  if (K.crawl) return st === 20 || st >= 24; if (K.burrow && (st === 40 || st === 44)) return false; return !!K.stomp; }
+  if (K.crawl) return st === 20 || st >= 24; if (K.burrow && (st === 40 || st === 44 || st === 45 || st === 41)) return false; return !!K.stomp; }
 // ⭐ WHERE PLAYERS ARE, FOR THE ENEMIES THAT REACT TO THEM (inc 2). The view beacon only comes twice a second, which is
 // fine for "is anybody near" and too stale to dive at; so a player near an enemy reports its body centre ~10×/s
 // (`enemy-me`), and only then. Entries go stale on their own, which is also what forgets a player who left.
@@ -20042,7 +20052,7 @@ function enemyKindOf(k, sz, skin) {
   if ((!sz || sz === 1) && !(sk && Object.keys(sk).length)) return K;
   const key = k + '|' + sz + '|' + (skin || '');
   let S = ENEMY_SIZED.get(key);
-  if (!S) { S = Object.create(K); if (sk) Object.assign(S, sk); S.w = K.w * (sz || 1); S.h = K.h * (sz || 1); ENEMY_SIZED.set(key, S); }
+  if (!S) { S = Object.create(K); if (sk) Object.assign(S, sk); S.w = ((sk && sk.w) || K.w) * (sz || 1); S.h = ((sk && sk.h) || K.h) * (sz || 1); ENEMY_SIZED.set(key, S); }
   return S;
 }
 function enemySpawnBody(o) {
@@ -20105,7 +20115,7 @@ function enemyStep(room, R, E, o, now, dt) {
   let mv = spd;
   // ⭐ ROUND 13: a burrower underground TUNNELS — its own movement, no gravity, no walking (`enemyTunnel`); a slam over it
   // (`E.flush`) or reaching you brings it up through the surface.
-  if (K.burrow && E.st === 44) { if (!stunned || E.flush) enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid); return; }
+  if (K.burrow && (E.st === 44 || E.st === 45)) { if (!stunned || E.flush) enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid); return; }
   if (!stunned && (K.roll || K.charge || K.spit || K.bomb || K.burrow || K.crab || K.armour)) {
     const eyeY = E.y - K.h + 8;
     // ⭐ IT ONLY SEES WHAT IS IN FRONT OF IT (user, 2026-10-02: "you should be able to sneak up on it") — and in sight.
@@ -20186,7 +20196,7 @@ function enemyStep(room, R, E, o, now, dt) {
       const softBelow = () => enemySoft(room, peekCellAt(grid, Math.floor(E.x / CELL) * ROWS + Math.floor((E.y + K.h / 2) / CELL)));
       if (E.flush && (E.st === 40)) { E.flush = 0; E.st = 41; E.until = now + 280; }
       if (E.st === 40 && E.ground && softBelow()) { E.st = 44; E.y += K.h; E.vy = 0; E.ground = false; return; }
-      if (E.st === 43 && now > E.until && softBelow()) { E.st = 44; E.y += K.h; E.vy = 0; E.ground = false; E.next = now + 1500; return; }
+      if (E.st === 43 && now > E.until && softBelow()) { E.st = 44; E.y += K.h + 2 * CELL; E.vy = 0; E.ground = false; E.next = now + 1500; return; }
       if (E.st === 40) {
         const p0 = now >= (E.next || 0) ? enemyTarget(room, E.x, E.y - K.h / 2, vis, -90, 60, now) : null;
         const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 ? p0 : null;
@@ -20247,8 +20257,11 @@ function enemyStep(room, R, E, o, now, dt) {
   const rTop = Math.floor((E.y - K.h + 2) / CELL), rBot = Math.floor((E.y - 1) / CELL);
   // ⭐ STEPS (round 13, user: "they should be able to walk up and down terrain steps in the same way as the player can"):
   // anything up to 3 cells (24px — the player's step is 28) is stepped onto rather than turned away from, if there is
-  // headroom above it. A small enemy's step is smaller (never more than about two-thirds of its height).
-  const stepRows = Math.max(1, Math.min(3, Math.floor(K.h * 0.67 / CELL)));
+  // headroom above it.
+  // ⭐ Round 14 (user: "enemies will walk up steps, but not down them"): the step USED to shrink with the enemy's height, so
+  // a standard walker (32px tall) only managed 2 cells and turned back at the edge of anything taller. Now EVERY walking
+  // enemy steps UP 3 cells and walks DOWN off a drop of up to 4 (the player steps 28px) — as long as there is headroom.
+  const stepRows = 3, downRows = 4;
   let blocked = false, stepTop = -1;
   if (E.vx !== 0) {                                  // ⚠️ standing still is not walking into a wall (a resting hopper would spin)
     blocked = wallAt(lead, E.y - K.h, E.y - 1);
@@ -20270,8 +20283,8 @@ function enemyStep(room, R, E, o, now, dt) {
   }
   else if (E.ground && !stunned && !K.hop && E.vx !== 0) {   // ⚠️ only while moving: a spitter by a ledge would spin
     const fx = nx + E.dir * hw, fc = Math.floor(fx / CELL), fr = Math.floor((E.y + 1) / CELL);
-    let ground = floorAt(fx, E.y - 1, E.y + stepRows * CELL + 1) !== null;   // a step down it can walk off is still ground
-    for (let k = 0; k <= stepRows && !ground; k++) if (solid(fc, fr + k)) ground = true;
+    let ground = floorAt(fx, E.y - 1, E.y + downRows * CELL + 1) !== null;   // a step down it can walk off is still ground
+    for (let k = 0; k <= downRows && !ground; k++) if (solid(fc, fr + k)) ground = true;
     const far = Math.abs(nx - E.sx) > rng && Math.sign(nx - E.sx) === E.dir;
     if (!ground || far) {
       if (K.charge && E.st === 4) { E.st = 0; E.next = now + 1000; nx = E.x; }   // skids to a stop at the edge
@@ -20296,7 +20309,7 @@ function enemyStep(room, R, E, o, now, dt) {
     // …and down a step it walks off the edge of, it STEPS rather than falling (as the player does): within a step below,
     // land on it now
     if (!E.ground && wasGround && !K.hop) {
-      for (let r = Math.floor(E.y / CELL); r <= Math.floor(E.y / CELL) + stepRows && !E.ground; r++)
+      for (let r = Math.floor(E.y / CELL); r <= Math.floor(E.y / CELL) + downRows && !E.ground; r++)
         if (cs.some(c => solid(c, r))) { ny = r * CELL; E.vy = 0; E.ground = true; }
     }
   }
@@ -20495,21 +20508,36 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
   const soft = (x, y) => { const c = Math.floor(x / CELL), r = Math.floor(y / CELL);
     return c >= 0 && r >= 0 && r < ROWS && c < COLS && enemySoft(room, peekCellAt(grid, c * ROWS + r)); };
   const cy = () => E.y - h / 2;
+  // the ground's surface above a point inside it (null: too deep to find), and the ground under a point in the air
+  const surfaceAbove = (x, y) => { const c = Math.floor(x / CELL); let r = Math.floor(y / CELL), n = 0;
+    while (r > 0 && solid(c, r)) { if (++n > 60) return null; r--; } return (r + 1) * CELL; };
+  const groundBelow = (x, y) => { const c = Math.floor(x / CELL); let r = Math.floor(y / CELL), n = 0;
+    while (r < ROWS && !solid(c, r)) { if (++n > 60) return null; r++; } return r * CELL; };
   const emerge = () => {                                 // up through whatever is above it, feet on the surface
-    const c = Math.floor(E.x / CELL);
-    let r = Math.floor(cy() / CELL), n = 0;
-    while (r > 0 && solid(c, r) && n++ < 80) r--;
-    if (n >= 80) return;                                 // buried too deep to find the surface: stay down
-    E.y = (r + 1) * CELL; E.vy = 0; E.ground = true; E.st = 41; E.until = now + 280;
+    const sy = surfaceAbove(E.x, cy()); if (sy == null) return;
+    E.y = sy; E.vy = 0; E.ground = true; E.st = 41; E.until = now + 300;
   };
   if (E.flush) { E.flush = 0; emerge(); return; }
+  // ⭐ RUMBLING (45): right under you, just beneath the surface — the mound shakes and throws up dirt for half a second (the
+  // warning: user, round 14, "you can get killed by the burrower before it has visually emerged"), then it bursts out
+  if (E.st === 45) { if (now >= E.until) emerge(); return; }
+  // ⭐ ROUND 14 (user: "the burrower needs to actually move through terrain, not just on the surface of it"): it travels
+  // DEEP — its back DEPTH below the surface, out of sight — and only comes up to just under the surface once it is close
+  // to you. The mound only shows when it is that shallow (the client draws it).
+  const DEPTH = 3 * CELL + Math.round(h * 0.25);
   const p0 = now >= (E.next || 0) ? enemyTarget(room, E.x, cy(), vis, -vis, vis, now) : null;
   const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 ? p0 : null;
-  let tx, ty, v;
-  if (p) { tx = p.x; ty = p.y + 26 + h / 2; v = spd * 2.5; E.dir = p.x >= E.x ? 1 : -1; }
-  else {
+  let tx, ty, v, under = false;
+  if (p) {
+    tx = p.x; v = spd * 2.5; E.dir = p.x >= E.x ? 1 : -1;
+    const gy = groundBelow(p.x, p.y);                    // the ground the player is standing on
+    under = gy != null && Math.abs(p.x - E.x) < Math.max(40, K.w * 0.75);
+    const sy = surfaceAbove(E.x, cy());
+    ty = under ? gy + 2 + h / 2 : (sy != null ? sy + DEPTH + h / 2 : cy());
+  } else {
     if (Math.abs(E.x - E.sx) > rng && Math.sign(E.x - E.sx) === E.dir) E.dir = -E.dir;
-    tx = E.x + E.dir * 40; ty = cy(); v = spd;
+    const sy = surfaceAbove(E.x, cy());
+    tx = E.x + E.dir * 40; ty = sy != null ? sy + DEPTH + h / 2 : cy(); v = spd;
   }
   let left = v * dt;
   while (left > 0) {
@@ -20526,7 +20554,8 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
       if (soft(ax, cy() - 4)) E.y -= 4; else if (soft(ax, cy() + 4)) E.y += 4; else { E.dir = -E.dir; break; }
     }
   }
-  if (p && Math.abs(p.x - E.x) < 14 && Math.abs(cy() - ty) < h) emerge();
+  // under you and up to just below the surface: rumble, then burst out
+  if (p && under && Math.abs(p.x - E.x) < 14 && Math.abs(cy() - ty) < CELL) { E.st = 45; E.until = now + 500; }
 }
 // ⭐ THE BOMBER GOES OFF. Every screen draws the bang and throws / kills its own player (`bombBlast` on the client, as a
 // bomb does); the CRATER is dug by exactly one of them — the player it was going for (`dig`). Enemies caught in it are
@@ -20594,7 +20623,7 @@ function enemyRoomScan(room, R, now) {
   if (!overworldRooms.has(room)) for (const p of (MWSim.STAGE_LAYOUTS[0] || [])) { R.floors.push({ x0: p.x, x1: p.x + p.w, y: p.y }); R.boxes.push({ x0: p.x, x1: p.x + p.w, y0: p.y, y1: p.y + (p.h || 70) }); }
   if (!map) return;
   for (const o of map.values()) {
-    if (o.type === 'region' && o.part === 'enemy') { R.list.push(o); continue; }
+    if (o.type === 'region' && o.part === 'enemy') { enemyLegacy(o); R.list.push(o); continue; }
     if (o.type !== 'platform' || o.nosol || (o.path && o.path.pts && o.path.pts.length >= 2)) continue;
     if (Math.abs(Math.sin(o.angle || 0)) > 0.08) continue;          // a tilted bar is not a floor to walk on (yet)
     const w = o.w || 0, h = o.h || 0, x0 = o.x - w / 2, x1 = o.x + w / 2, y0 = o.y - h / 2;
@@ -23951,14 +23980,14 @@ io.on('connection', (socket) => {
     if (!['stomp', 'crush', 'punch', 'power', 'slam'].includes(how)) return;
     if (how === 'stomp' && !enemyStompOk(K, E.st | 0)) return;
     if (K.crush && how !== 'slam') return;               // a crusher is iron: only a slam (and, later, a bomb) breaks it
-    if (K.burrow && (E.st === 40 || E.st === 44) && how !== 'slam') return;   // underground: only a slam reaches it
+    if (K.burrow && (E.st === 40 || E.st === 44 || E.st === 45) && how !== 'slam') return;   // underground: only a slam reaches it
     if (K.crab && E.st === 60 && how !== 'slam') return;  // buried: only a slam reaches it
     const p = lastBodyPos(room, socket.id);
     if (p && Math.hypot(p.x - E.x, p.y - E.y) > 600) return;
     const now = Date.now();
     // ⭐ ARMOUR (round 13, the plough beetle): only a hit from BEHIND counts. `px` is where the hitter's body was on their
     // own screen when they swung (the beacon is up to half a second stale). Being crushed by stone skin / Mega still counts.
-    if (K.armour && how !== 'crush') {
+    if (K.armour && how !== 'crush' && how !== 'stomp') {    // (round 14: a stomp from above counts — the plate is only in front)
       const hx = isFinite(px) ? +px : p ? p.x : E.x;
       if ((hx - E.x) * E.dir > -K.w * 0.15) { io.to(room).emit('enemy-ev', { id, k: 'hit', how: 'clang' }); return; }
     }
@@ -23977,7 +24006,7 @@ io.on('connection', (socket) => {
       const d = dir < 0 ? -1 : 1;
       E.stun = now + 450; E.vx = d * 260; E.vy = -220; E.ground = false; E.dir = -d;   // knocked away, and turns to face you
     } else E.stun = now + 500;                           // stomped / slammed / squashed and still standing: dazed
-    if (K.burrow && (E.st === 40 || E.st === 44)) E.flush = 1;   // a slam over it flushes it out of the ground
+    if (K.burrow && (E.st === 40 || E.st === 44 || E.st === 45)) E.flush = 1;   // a slam over it flushes it out of the ground
     if (K.crab && E.st === 60) { E.st = 62; E.until = now + 15000; E.seenAt = now; }   // …and a buried crab out of hiding
     io.to(room).emit('enemy-ev', { id, k: 'hit', how }); // `how` so every screen shows the right reaction (a stomp squashes)
   });
