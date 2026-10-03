@@ -20218,8 +20218,9 @@ function enemyStep(room, R, E, o, now, dt) {
   if (K.grab) { enemyGrab(room, R, E, o, K, now, dt, solid, spd, vis, rng); return; }   // (round 27)
   // ── what the second batch is doing this tick: `mv` is its ground speed (the shared walking code below does the rest)
   let mv = spd;
-  // ⭐ round 27 — a FIRE CREATURE sets alight what it touches, and liquid puts it out (`enemyFireTick`); doused, it stands
-  if (K.fire) { if (enemyFireTick(room, R, E, K, now, st)) return; if ((E.st | 0) === 141) mv = 0; }
+  // ⭐ round 27 — a FIRE CREATURE sets alight what it touches, and liquid puts it out (`enemyFireTick`); doused, it walks on
+  // regardless (user: "should keep moving around and doing things while extinguished") — it just lights nothing
+  if (K.fire) { if (enemyFireTick(room, R, E, K, now, st)) return; }
   // ⭐ round 16 — the shell creature in its shell, and the bone pile in pieces: the walking code below moves it (or not)
   if (K.shell) {
     E.st = E.st | 0;
@@ -20717,7 +20718,9 @@ function enemyCrawl(room, R, E, o, K, now, dt, solid, stunned, spd, vis, rng) {
   // and it let go. It now holds on if ANY foot touches (across its length, plus just past each end), and SMALL steps (up to
   // `STEP`) are stepped over in its own frame rather than climbed as walls — climbing a face shorter than half its body
   // left its contact point beyond the face, which was the other way it let go.
-  const STEP = Math.min(24, Math.floor(h * 0.5));
+  // (round 27b: the acid creature is low, so half its height made a two-cell step a WALL — it turned up it and flicked back
+  //  over the top; it takes steps up to three cells as steps)
+  const STEP = K.acid ? 24 : Math.min(24, Math.floor(h * 0.5));
   const FEET = [-(hw + 1), -(hw - 2), 0, hw - 2, hw + 1];
   const holds = (x, y, g) => { const t0 = g[1], t1 = -g[0];
     for (const f of FEET) if (S(x + t0 * f + g[0] * 0.5, y + t1 * f + g[1] * 0.5)) return true; return false; };
@@ -20746,6 +20749,9 @@ function enemyCrawl(room, R, E, o, K, now, dt, solid, stunned, spd, vis, rng) {
       let H = 1; while (H <= h && lead(H)) H++;            // how tall it is
       if (H <= STEP) {
         // a small step: lift itself a pixel (in its own frame) and carry on — unless it has no headroom
+        // (round 27b: the acid creature takes the WHOLE step at once and walks on — its screen eases it up and tilts it, so it
+        //  glides up the step; lifting a pixel at a time stood it still and rose it straight up, "levitating")
+        if (K.acid) { if (S(E.x - g[0] * (h + H), E.y - g[1] * (h + H))) { mv = -mv; continue; } E.x -= g[0] * H; E.y -= g[1] * H; continue; }
         if (S(E.x - g[0] * (h + 0.5), E.y - g[1] * (h + 0.5))) { mv = -mv; continue; }
         E.x -= g[0]; E.y -= g[1]; continue;
       }
