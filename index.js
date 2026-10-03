@@ -17384,7 +17384,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
         obj.w = dr.w * ENEMY_DRAW_CELL * (obj.esz || 1); obj.h = dr.h * ENEMY_DRAW_CELL * (obj.esz || 1);
         if (data.estomp === 'spiky' || data.estomp === 'bounce') obj.estomp = data.estomp;   // unset = landing on it squashes it
         const mv = enemyMoveClean(data.emov); if (mv) obj.emov = mv;          // round 31: a movement of its own (`enemyMovement`)
+        const sv = enemyViewClean(data.esee, obj.ek); if (sv) obj.esee = sv;  // round 33: what it notices you in, from the editor
       }
+      // round 33: …and this one placed enemy's own (any kind that notices you; wins over the editor's)
+      { const vv = enemyViewClean(data.eview, obj.ek); if (vv) obj.eview = vv; }
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
     // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
@@ -20119,11 +20122,15 @@ function enemyNoDamage(K, how) { return (K.shell && (how === 'stomp' || how === 
 const enemyTargets = new Map();                       // room → Map<sid, { x, y, t }>
 function enemyTarget(room, x, y, maxDx, dyMin, dyMax, now) {
   const m = enemyTargets.get(room); if (!m) return null;
+  // (round 33) an enemy with a VIEW AREA: its shape replaces the kind's rectangle, and rock blocks it unless it sees through
+  const W = enemyView, shape = W && W.V.k ? W.V : null, sight = W && !W.V.t && (shape || !W.zone) ? W.solid : null;
   let best = null, bd = Infinity;
   for (const [sid, p] of m) {
     if (now - p.t > 1500) { if (now - p.t > 10000) m.delete(sid); continue; }
     const dx = p.x - x, dy = p.y - y;
-    if (Math.abs(dx) > maxDx || dy < dyMin || dy > dyMax) continue;
+    if (shape) { if (!enemyViewHas(shape, x, y, W.E.dir || 1, p.x, p.y)) continue; }
+    else if (Math.abs(dx) > maxDx || dy < dyMin || dy > dyMax) continue;
+    if (sight && !enemyLos(sight, x, y, p.x, p.y)) continue;
     const d = Math.abs(dx) + Math.abs(dy);
     if (d < bd) { bd = d; best = p; }
   }
@@ -20200,6 +20207,69 @@ function enemyMoveClean(m) {
   if (p.length < 2 && !(p.length === 1 && p[0][2])) return null;
   return m.air ? { p, air: 1 } : { p };
 }
+// ⭐⭐ #184 round 33 — VIEW AREAS (user, 2026-10-03, question tool): the shape an enemy NOTICES YOU IN — `k` box · cone (turns
+// with it) · circle · drawn (8px cells, painted for facing right; it flips when it turns) — `r` its reach, and `t` whether it
+// sees THROUGH rock (0 = rock blocks its sight; the shadowed part of its shape is where you hide). Set in the enemy editor
+// (`esee`, carried by a drawn one) and/or on ONE placed enemy (`eview`, which wins). Shapes are measured from the middle of
+// its box, facing right: `b` = [x0, y0, x1, y1] px, `a` = where a cone looks (degrees, + = down), `w` = its width, `c` = rows
+// of painted cells [[row, from, to]…].
+// ⭐ It plugs into EVERY kind's own "do I see you" without touching them: while an enemy with one takes its turn
+// (`enemyView`, set in `enemyTick`), `enemyTarget` answers "is anybody in this shape, and in sight?" instead of the kind's own
+// rectangle, and `enemySees` answers the walls question. No `k` = the kind's own shape with only the walls choice — which is
+// ALL a kind whose "sight" is where it STRIKES gets (crusher, grabber, ceiling crawler: a cone would make it strike where it
+// cannot reach). Kinds that never notice anybody (walker, bones, fire, acid) get nothing.
+// ⚠️ The client has the same two lists and the same shape test (`ENEMY_VIEW_KINDS` / `ENEMY_VIEW_ZONE` / `enemyViewHas` in 01).
+const ENEMY_VIEW_KINDS = new Set(['hopper', 'swooper', 'spitter', 'ghost', 'roller', 'charger', 'bomber', 'burrower', 'crab', 'plough', 'thief', 'thrower', 'slime', 'cloud']);
+const ENEMY_VIEW_ZONE = new Set(['crusher', 'spikecrusher', 'grab', 'crawler']);
+const ENEMY_VIEW_CELL = 8;
+function enemyViewClean(v, ek) {
+  if (!v || typeof v !== 'object') return null;
+  const zone = ENEMY_VIEW_ZONE.has(ek);
+  if (!zone && !ENEMY_VIEW_KINDS.has(ek)) return null;
+  const out = { t: v.t ? 1 : 0 };
+  if (zone || !['box', 'cone', 'circle', 'drawn'].includes(v.k)) return out;
+  out.k = v.k;
+  out.r = Math.round(clampN(v.r, 16, 3000, 300));
+  if (v.k === 'cone') { out.w = Math.round(clampN(v.w, 10, 360, 70)); out.a = Math.round(clampN(v.a, -90, 90, 0)); }
+  if (v.k === 'box') {
+    const b = Array.isArray(v.b) ? v.b : [];
+    const x0 = Math.round(clampN(b[0], -3000, 3000, -150)), y0 = Math.round(clampN(b[1], -3000, 3000, -80));
+    const x1 = Math.round(clampN(b[2], -3000, 3000, 150)), y1 = Math.round(clampN(b[3], -3000, 3000, 40));
+    out.b = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+  }
+  if (v.k === 'drawn') {
+    const c = [], M = 3000 / ENEMY_VIEW_CELL;
+    for (const q of (Array.isArray(v.c) ? v.c : []).slice(0, 800)) {
+      if (!Array.isArray(q) || q.length < 3 || !isFinite(q[0]) || !isFinite(q[1]) || !isFinite(q[2])) continue;
+      const j = Math.round(clampN(q[0], -M, M, 0)), i0 = Math.round(clampN(q[1], -M, M, 0)), i1 = Math.round(clampN(q[2], -M, M, 0));
+      c.push([j, Math.min(i0, i1), Math.max(i0, i1)]);
+    }
+    if (!c.length) return out;
+    out.c = c;
+  }
+  return out;
+}
+const ENEMY_VIEW_ROWS = new WeakMap();                      // a drawn view area → Map<row, [[from, to]…]>, worked out once
+function enemyViewHas(V, ox, oy, dir, px, py) {
+  const dx = (px - ox) * (dir < 0 ? -1 : 1), dy = py - oy;
+  if (V.k === 'circle') return dx * dx + dy * dy <= V.r * V.r;
+  if (V.k === 'box') return dx >= V.b[0] && dx <= V.b[2] && dy >= V.b[1] && dy <= V.b[3];
+  if (V.k === 'cone') {
+    const d2 = dx * dx + dy * dy; if (d2 > V.r * V.r) return false; if (d2 < 1) return true;
+    let da = Math.atan2(dy, dx) - V.a * Math.PI / 180; da = Math.atan2(Math.sin(da), Math.cos(da));
+    return Math.abs(da) <= V.w * Math.PI / 360;
+  }
+  if (V.k === 'drawn') {
+    let rows = ENEMY_VIEW_ROWS.get(V);
+    if (!rows) { rows = new Map(); for (const [j, a, b] of V.c) { if (!rows.has(j)) rows.set(j, []); rows.get(j).push([a, b]); } ENEMY_VIEW_ROWS.set(V, rows); }
+    const L = rows.get(Math.floor(dy / ENEMY_VIEW_CELL)); if (!L) return false;
+    const i = Math.floor(dx / ENEMY_VIEW_CELL);
+    for (const [a, b] of L) if (i >= a && i <= b) return true;
+  }
+  return false;
+}
+// the view area this enemy is taking its turn with (null = its kind's own, exactly as before)
+let enemyView = null;
 // Is it only WANDERING right now (so its own movement may take over)? Not while it reacts to somebody, is knocked about, or is
 // somewhere its movement means nothing (underground, lurking in its pool, on a wall or a ceiling).
 function enemyIdle(K, E, now) {
@@ -20376,6 +20446,7 @@ function enemyStep(room, R, E, o, now, dt) {
     if (v < 0) return !!grid.seedFn || enemyChunkAway(room, c, r);
     return ENEMY_SOLID[v] === 1 || !!(R.cover && R.cover.has(c * ROWS + r));   // (round 18: …or a loose object resting there)
   };
+  if (enemyView) enemyView.solid = solid;           // (round 33: what its view area's "rock blocks it" tests against)
   // standing in put-away ground itself: it waits until somebody comes near enough for the ground to be back
   if (enemyChunkAway(room, Math.floor(E.x / CELL), Math.floor((E.y - 1) / CELL))) return;
   // the highest still-platform top within [y0, y1] under x
@@ -20454,7 +20525,7 @@ function enemyStep(room, R, E, o, now, dt) {
     // within the strip it may wander (user, 2026-10-02: "limited by the wander distance, since they can't move out of this").
     const strip = !K.spit && !K.thrower;                 // (round 23: a thrower throws from where it is — it need not reach you)
     const seen = (maxDx, dyMin, dyMax) => { const p = enemyTarget(room, E.x, E.y - K.h / 2, maxDx, dyMin, dyMax, now);
-      return p && (p.x - E.x) * E.dir > -K.w / 4 && (!strip || Math.abs(p.x - E.sx) <= rng + K.w / 2)
+      return p && ((enemyView && enemyView.V.k) || (p.x - E.x) * E.dir > -K.w / 4) && (!strip || Math.abs(p.x - E.sx) <= rng + K.w / 2)
         && enemySees(solid, E.x, eyeY, p.x, p.y) ? p : null; };
     E.st = E.st | 0;
     // ⚠️ A roller and a charger only go for you when you are ON THEIR LEVEL — a charge at somebody on a ledge overhead
@@ -20861,7 +20932,9 @@ function enemyCrush(room, E, o, K, now, dt, solid, floorAt, wallAt, spd, vis, re
   }
 }
 // in sight: nothing solid on the straight line from (sx, sy) to (px, py)
-function enemySees(solid, sx, sy, px, py) {
+// (round 33: …unless its view area says it sees through rock)
+function enemySees(solid, sx, sy, px, py) { return (enemyView && enemyView.V.t) ? true : enemyLos(solid, sx, sy, px, py); }
+function enemyLos(solid, sx, sy, px, py) {
   const CELL = TERRAIN_CELL, n = Math.ceil(Math.hypot(px - sx, py - sy) / CELL);
   for (let i = 1; i < n; i++) { const t = i / n; if (solid(Math.floor((sx + (px - sx) * t) / CELL), Math.floor((sy + (py - sy) * t) / CELL))) return false; }
   return true;
@@ -21824,7 +21897,9 @@ function enemyTick() {
           io.to(room).emit('enemy-ev', { id: o.id, k: 'back' });
         } else { dead.push(o.id); continue; }
       }
-      enemyStep(room, R, E, o, now, dt);
+      { const V = o.eview || o.esee;                   // (round 33: its view area, the placed one's own first)
+        enemyView = V && (ENEMY_VIEW_KINDS.has(E.k) || ENEMY_VIEW_ZONE.has(E.k)) ? { V, E, zone: ENEMY_VIEW_ZONE.has(E.k), solid: null } : null; }
+      try { enemyStep(room, R, E, o, now, dt); } finally { enemyView = null; }
       if (o.path && !E.dead) enemyPathStep(room, R, E, o, now, dt);    // (round 32: a path in the world, while it is only wandering — it wins over a movement)
       else if (o.emov && !E.dead) enemyMovement(room, R, E, o, now, dt);   // (round 31: its own movement, while it is only wandering)
       if (E.dead) { dead.push(o.id); continue; }
