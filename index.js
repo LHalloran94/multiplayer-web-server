@@ -17366,6 +17366,15 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (data.erev === 'mouth' || data.erev === 'burst') obj.erev = data.erev;   // round 19: how a mimic gives itself away
       // round 23: the kind's own choice — a cactus's shape, what a cloud dropper drops, what a thrower throws (the client's `K.opts`)
       if (ENEMY_KINDS[obj.ek].opts && ENEMY_KINDS[obj.ek].opts.includes(data.eopt)) obj.eopt = data.eopt;
+      // ⭐ round 32 — A PATH IN THE WORLD (optional, set on a placed enemy — any enemy, drawn or built-in): it glides along
+      // it at its speed while only wandering (`enemyPathStep`). `loop` = round and round · `stop` = stops at the end ·
+      // neither = back and forth. Points are the centre of its box, as an object's path is everywhere else.
+      if (data.path && Array.isArray(data.path.pts) && data.path.pts.length >= 2) {
+        const pts = [];
+        for (const p of data.path.pts) { if (!p || !isFinite(p.x) || !isFinite(p.y)) continue; pts.push({ x: Math.max(0, Math.min(WW, p.x)), y: Math.max(0, Math.min(WH, p.y)) }); if (pts.length >= 64) break; }
+        if (pts.length >= 2) { obj.path = { pts, loop: !!data.path.loop, speed: clampN(data.path.speed, 0.02, 1.2, 0.18), phase: clampN(data.path.phase, 0, 1, 0) };
+          if (data.path.stop && !data.path.loop) obj.path.stop = 1; }
+      }
       // ⭐⭐ #184 — A CREATOR-DRAWN ENEMY (2026-10-03): the behaviour it borrows (`ek`) wearing the creator's own pictures.
       // The drawing rides ON the object, as an animated painting's frames do, so a save, a publish and every joiner get
       // it with nothing new on the wire. Its box is the outline drawn (half-size 2px cells × Size), never a kind's.
@@ -20260,6 +20269,43 @@ function enemyMovement(room, R, E, o, now, dt) {
   E.ground = !M.air && oy >= -0.5;
   E.mvs = q && q.wait ? 3 : (!M.air && oy < -0.5) ? 2 : 1;      // what the client animates: 1 moving · 2 in the air · 3 pausing
 }
+// ⭐⭐ round 32 — FOLLOWING A PATH (user, 2026-10-03: optional, on a placed enemy; "everything, then back to the path"). It glides
+// along the drawn line exactly, at its speed — through the air if the line goes there, as a moving platform does. While its
+// behaviour reacts to somebody it is the behaviour's; afterwards it glides straight back to the NEAREST point of the path and
+// carries on from there. `E.pth.d` = how far along the path it is (a looping path is closed back to its start).
+function enemyPathStep(room, R, E, o, now, dt) {
+  const K = enemyKindOf(E.k, E.sz, E.skin), P = o.path.pts, loop = !!o.path.loop;
+  if (!enemyIdle(K, E, now)) { if (E.pth) E.pth.back = true; E.mvs = 0; return; }
+  const pts = loop ? P.concat([P[0]]) : P, cum = [0];
+  for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y));
+  const L = cum[cum.length - 1] || 1, feet = K.h / 2;
+  const at = d => { for (let i = 1; i < pts.length; i++) if (d <= cum[i] || i === pts.length - 1) { const f = cum[i] > cum[i - 1] ? Math.max(0, Math.min(1, (d - cum[i - 1]) / (cum[i] - cum[i - 1]))) : 0;
+    return { x: pts[i - 1].x + (pts[i].x - pts[i - 1].x) * f, y: pts[i - 1].y + (pts[i].y - pts[i - 1].y) * f + feet }; } return { x: pts[0].x, y: pts[0].y + feet }; };
+  const spd = Math.max(15, o.espd || K.speed || 60);
+  let s = E.pth; if (!s) s = E.pth = { d: 0, dir: 1, back: false };
+  let nx, ny;
+  if (s.back) {
+    // the nearest point of the path to where it ended up
+    let bd = Infinity, bestD = 0;
+    for (let i = 1; i < pts.length; i++) { const ax = pts[i - 1].x, ay = pts[i - 1].y + feet, bx = pts[i].x, by = pts[i].y + feet, vx = bx - ax, vy = by - ay, l2 = vx * vx + vy * vy || 1;
+      const f = Math.max(0, Math.min(1, ((E.x - ax) * vx + (E.y - ay) * vy) / l2)), qx = ax + vx * f, qy = ay + vy * f, dd = (E.x - qx) ** 2 + (E.y - qy) ** 2;
+      if (dd < bd) { bd = dd; bestD = cum[i - 1] + f * (cum[i] - cum[i - 1]); } }
+    const q = at(bestD), dx = q.x - E.x, dy = q.y - E.y, d = Math.hypot(dx, dy);
+    if (d <= spd * dt) { s.back = false; s.d = bestD; nx = q.x; ny = q.y; }
+    else { nx = E.x + dx / d * spd * dt; ny = E.y + dy / d * spd * dt; }
+    E.mvs = 1;
+  } else {
+    let d = s.d + s.dir * spd * dt, stopped = false;
+    if (loop) d = ((d % L) + L) % L;
+    else if (o.path.stop) { if (d >= L) { d = L; stopped = true; } }
+    else { if (d > L) { d = 2 * L - d; s.dir = -1; } else if (d < 0) { d = -d; s.dir = 1; } }
+    s.d = d; const q = at(d); nx = q.x; ny = q.y;
+    E.mvs = stopped ? 3 : 1;
+  }
+  if (Math.abs(nx - E.x) > 0.01) E.dir = nx > E.x ? 1 : -1;
+  E.vx = (nx - E.x) / dt; E.vy = (ny - E.y) / dt; E.x = nx; E.y = ny; E.ground = false;
+  E.sx = E.x; E.hy = E.y;    // its "home" travels with it: it notices you, dives / slams / chases from here, and comes back here
+}
 // a drawn enemy's body as a "skin" key, so every `enemyKindOf(E.k, E.sz, E.skin)` site gets its box and rules for nothing
 function enemyDrawSkin(o) { return o.edraw ? 'd:' + o.edraw.w + 'x' + o.edraw.h + ':' + (o.estomp || '') : ''; }
 function enemyKindOf(k, sz, skin) {
@@ -21779,7 +21825,8 @@ function enemyTick() {
         } else { dead.push(o.id); continue; }
       }
       enemyStep(room, R, E, o, now, dt);
-      if (o.emov && !E.dead) enemyMovement(room, R, E, o, now, dt);   // (round 31: its own movement, while it is only wandering)
+      if (o.path && !E.dead) enemyPathStep(room, R, E, o, now, dt);    // (round 32: a path in the world, while it is only wandering — it wins over a movement)
+      else if (o.emov && !E.dead) enemyMovement(room, R, E, o, now, dt);   // (round 31: its own movement, while it is only wandering)
       if (E.dead) { dead.push(o.id); continue; }
       out.push([o.id, Math.round(E.x), Math.round(E.y), E.dir, E.stun > now ? 1 : 0, E.st | 0, E.inv ? 0 : E.hp,   // + hits left (0 = can't be hurt)
                 ...(E.blobs ? [E.blobs.map(b => [Math.round(b.x), Math.round(b.y), b.s, b.dir || 1])] : E.segs ? [E.segs] : [])]);   // (round 17: a slime's blobs · round 18: a sandworm's body)
