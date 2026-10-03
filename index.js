@@ -20137,9 +20137,13 @@ const ENEMY_SIZED = new Map();
 // (2px) cells, the outline cropped to its box, one strip of frames per state. ⚠️ EVERY BOUND IS A WIRE BOUND — the
 // drawing goes to everyone in the room and every joiner (the painting's reasoning). ⚠️ The client has the same shape
 // (`enemyDrawnK` in 01, the editor in 16b).
-const ENEMY_DRAW_KINDS = ['walker'];
-const ENEMY_DRAW_CELL = 2, ENEMY_DRAW_MAX = 64, ENEMY_DRAW_FRAMES = 8;
-const ENEMY_DRAW_STATES = ['stand', 'move', 'air', 'hit'];
+// (round 30: every kind but the six with an unusual body — slime, cactus, cloud, mimic, grabber; the sandworm is a skin)
+const ENEMY_DRAW_KINDS = ['walker', 'hopper', 'swooper', 'roller', 'charger', 'crusher', 'spikecrusher', 'spitter', 'crawler', 'bomber',
+                          'burrower', 'ghost', 'crab', 'plough', 'bones', 'leaper', 'thief', 'thrower', 'fire', 'acid'];
+const ENEMY_DRAW_CELL = 2, ENEMY_DRAW_MAX = 64, ENEMY_DRAW_FRAMES = 8, ENEMY_DRAW_TOTAL = 40;
+// the basic four, then every behaviour's own moments (⚠️ the client's ENEMY_DRAW_STATES + ENEMY_DRAW_EXTRA)
+const ENEMY_DRAW_STATES = ['stand', 'move', 'air', 'hit', 'hang', 'roll', 'warn', 'charge', 'dazed', 'slam', 'spit', 'drop', 'lit', 'under', 'rise',
+                           'frozen', 'buried', 'peek', 'down', 'lurk', 'carry', 'climb', 'wind', 'throw', 'dizzy', 'flung'];
 function enemyDrawClean(d) {
   if (!d || typeof d !== 'object' || !d.st || typeof d.st !== 'object' || !Array.isArray(d.pal)) return null;
   const w = d.w | 0, h = d.h | 0;
@@ -20156,10 +20160,12 @@ function enemyDrawClean(d) {
     }
     return runs;
   };
-  const st = {};
+  const st = {}; let total = 0;
   for (const s of ENEMY_DRAW_STATES) {
-    const fr = (Array.isArray(d.st[s]) ? d.st[s] : []).slice(0, ENEMY_DRAW_FRAMES).map(runsOf).filter(r => r.some(q => q[0]));
-    if (fr.length) st[s] = fr;
+    // ⚠️ AND A CAP ON ALL OF THEM TOGETHER (round 30): with a behaviour's own strips a drawing could otherwise carry 26 × 8
+    // frames — the frame count is the multiplier on what it costs everyone in the room
+    const fr = (Array.isArray(d.st[s]) ? d.st[s] : []).slice(0, Math.min(ENEMY_DRAW_FRAMES, ENEMY_DRAW_TOTAL - total)).map(runsOf).filter(r => r.some(q => q[0]));
+    if (fr.length) { st[s] = fr; total += fr.length; }
   }
   if (!st.stand) return null;                                    // a state left empty uses Standing — so Standing must exist
   const out = { w, h, pal, st, fps: clampN(d.fps, 1, 24, 6), name: (typeof d.name === 'string' ? d.name : '').slice(0, 32) };
