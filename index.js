@@ -20042,7 +20042,7 @@ const ENEMY_KINDS = {
   // (round 25: the troll is the kind itself; `optDef` = a look's own default throw; the cinder golem EXPLODES when flung)
   thrower:  { w: 72, h: 60, speed: 40, hp: 1, stomp: 1, thrower: 1, vis: 360, opts: ['rock', 'bone', 'bomb', 'snow'],
               skins: { troll: {}, yeti: { w: 68, h: 70, optDef: 'bone' }, snowman: { w: 60, h: 86, optDef: 'snow' }, penguin: { w: 56, h: 60, optDef: 'snow' },
-                       cinder: { w: 68, h: 72, optDef: 'bomb', boomFling: 1 } } },
+                       cinder: { w: 72, h: 72, optDef: 'bomb', boomFling: 1 } } },
 };
 // round 23 — a cactus starts with this many segments under its head, by Size; its box is as tall as its stack. ⚠️ The
 // client's `cactusStart` / `cactusK`.
