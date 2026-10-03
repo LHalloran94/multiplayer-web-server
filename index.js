@@ -20039,8 +20039,10 @@ const ENEMY_KINDS = {
   cloud:    { w: 76, h: 46, speed: 150, hp: 1, stomp: 1, cloud: 1, vis: 420, opts: ['spiky', 'bomb', 'rock', 'water', 'acid', 'shoot'], skins: { imp: {}, living: {} } },
   // THROWER: walks; sees you → winds up (131) and throws (132); punched / stomped → dizzy (133); again → flung (134).
   // (round 24: the yeti is the kind itself; the goblin is gone; troll / snowman / penguin are looks — boxes as the client's)
-  thrower:  { w: 68, h: 70, speed: 40, hp: 1, stomp: 1, thrower: 1, vis: 360, opts: ['rock', 'bone', 'bomb', 'snow'],
-              skins: { yeti: {}, troll: { w: 72, h: 60 }, snowman: { w: 60, h: 86 }, penguin: { w: 56, h: 60 } } },
+  // (round 25: the troll is the kind itself; `optDef` = a look's own default throw; the cinder golem EXPLODES when flung)
+  thrower:  { w: 72, h: 60, speed: 40, hp: 1, stomp: 1, thrower: 1, vis: 360, opts: ['rock', 'bone', 'bomb', 'snow'],
+              skins: { troll: {}, yeti: { w: 68, h: 70, optDef: 'bone' }, snowman: { w: 60, h: 86, optDef: 'snow' }, penguin: { w: 56, h: 60, optDef: 'snow' },
+                       cinder: { w: 68, h: 72, optDef: 'bomb', boomFling: 1 } } },
 };
 // round 23 — a cactus starts with this many segments under its head, by Size; its box is as tall as its stack. ⚠️ The
 // client's `cactusStart` / `cactusK`.
@@ -20912,7 +20914,7 @@ function enemyLeap(room, E, o, K, now, dt, solid, vis) {
 // THROWN_G, from its hand to where the target was when it let go: a flight time that grows with the distance, and the
 // launch that lands it there in that time. Whether it HIT is decided by the player it hits (as every hit is).
 function enemyThrow(room, E, K, o, p) {
-  const what = o.eopt || 'rock', sx = E.x + E.dir * K.w * 0.35, sy = E.y - K.h * 0.85, dx = p.x - sx, dy = p.y - sy;
+  const what = o.eopt || K.optDef || 'rock', sx = E.x + E.dir * K.w * 0.35, sy = E.y - K.h * 0.85, dx = p.x - sx, dy = p.y - sy;
   const T = Math.max(0.5, Math.min(1.4, Math.abs(dx) / 280)), vx = dx / T, vy = (dy - 0.5 * THROWN_G * T * T) / T;
   io.to(room).emit('enemy-ev', { id: E.id, k: 'throw', what, x: Math.round(sx), y: Math.round(sy), vx: Math.round(vx), vy: Math.round(vy), tgt: p.sid || null });
 }
@@ -20925,7 +20927,8 @@ function enemyFlung(room, R, E, K, now, dt, solid, floorAt) {
   const nx = E.x + E.vx * dt, lead = Math.floor((nx + Math.sign(E.vx || 1) * hw * 0.6) / CELL);
   let ny = E.y + E.vy * dt, wall = false;
   for (let r = Math.floor((E.y - K.h * 0.8) / CELL); r <= Math.floor((E.y - 4) / CELL) && !wall; r++) if (solid(lead, r)) wall = true;
-  if (wall || now - (E.flyAt || 0) > 2500 || ny > (R.worldH || 1e7)) { enemyKill(room, R, E, 'fling', null); return; }
+  // (round 25: a cinder golem BLOWS UP instead — at the wall it rolled into, or where it stopped)
+  if (wall || now - (E.flyAt || 0) > 2500 || ny > (R.worldH || 1e7)) { if (K.boomFling && ny <= (R.worldH || 1e7)) enemyBoom(room, R, E, K); else enemyKill(room, R, E, 'fling', null); return; }
   if (E.vy >= 0) {
     const cs = [Math.floor((nx - hw * 0.5) / CELL), Math.floor(nx / CELL), Math.floor((nx + hw * 0.5) / CELL)];
     for (let r = Math.floor(E.y / CELL); r <= Math.floor(ny / CELL); r++) if (cs.some(c => solid(c, r))) { ny = r * CELL; E.vy = 0; break; }
@@ -21554,6 +21557,9 @@ function enemyTick() {
         if ((VKb.burrow && V.st >= 44 && V.st <= 46) || (VKb.crab && V.st === 60) || (VKb.leap && V.st === 90)) continue;
         const VK = enemyKindOf(V.k, V.sz, V.skin);
         if (V.x + VK.w / 2 > cx0 + 4 && V.x - VK.w / 2 < cx1 - 4 && V.y > cy0 + 4 && V.y - VK.h < cy1 - 4) {
+          // (round 25: a flung CINDER GOLEM blows up on whatever it runs into — the blast takes this one and any nearby;
+          //  the sweep after this loop reports everything it killed as dead)
+          if (CK.boomFling) { enemyBoom(room, R, C, CK); break; }
           enemyKill(room, R, V, 'crush', null);
           const i = out.findIndex(r => r[0] === V.id); if (i >= 0) out.splice(i, 1);
           dead.push(V.id);
@@ -24952,7 +24958,7 @@ io.on('connection', (socket) => {
       E.hitAt = now;
       const hx = isFinite(px) ? +px : (p ? p.x : E.x), d = E.x >= hx ? 1 : -1;
       // dizzy already (or walked into while dizzy): sent flying away from the hitter · otherwise: dizzy for 3s
-      if ((E.st | 0) === 133 || how === 'kick') { E.st = 134; E.dir = d; E.vx = d * 520; E.vy = -380; E.ground = false; E.flyAt = now; E.stun = 0; }
+      if ((E.st | 0) === 133 || how === 'kick') { E.st = 134; E.dir = d; E.vx = d * 520; E.vy = -380; E.ground = false; E.flyAt = now; E.stun = 0; E.tgt = socket.id; }   // (E.tgt: whose screen digs a cinder golem's crater)
       else { E.st = 133; E.until = now + 3000; E.vx = 0; E.stun = 0; }
       io.to(room).emit('enemy-ev', { id, k: 'hit', how }); return;
     }
