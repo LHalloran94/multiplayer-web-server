@@ -17374,6 +17374,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
         obj.edraw = dr; delete obj.eskin;
         obj.w = dr.w * ENEMY_DRAW_CELL * (obj.esz || 1); obj.h = dr.h * ENEMY_DRAW_CELL * (obj.esz || 1);
         if (data.estomp === 'spiky' || data.estomp === 'bounce') obj.estomp = data.estomp;   // unset = landing on it squashes it
+        const mv = enemyMoveClean(data.emov); if (mv) obj.emov = mv;          // round 31: a movement of its own (`enemyMovement`)
       }
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
@@ -20173,6 +20174,92 @@ function enemyDrawClean(d) {
   if (d.sfps && typeof d.sfps === 'object') { const sf = {}; for (const s of ENEMY_DRAW_STATES) if (isFinite(d.sfps[s])) sf[s] = clampN(d.sfps[s], 1, 24, out.fps); out.sfps = sf; }
   return out;
 }
+// ⭐⭐ round 31 — A MOVEMENT OF ITS OWN, set in the enemy editor (user, 2026-10-03): ONE CYCLE of points relative to its feet,
+// `p: [[dx, dy, wait]…]` (px; dy up is negative; wait in tenths of a second), repeated. A cycle that ends further along
+// TRAVELS (and turns round — mirrored — at a wall, a ledge or the end of its range); one that ends where it began stays put.
+// Its height comes back to where it began every cycle (only the sideways distance carries on). `air: 1` = flies the shape as
+// drawn; otherwise it FOLLOWS THE GROUND (the shape's height is above the ground under it). It replaces only the behaviour's
+// WANDERING: anything the behaviour does about you (charge, dive, spit, chase…) happens as before, and the movement starts
+// again from wherever that leaves it. ⚠️ The client's editor writes exactly this (`enemyEdObj`, 16b).
+function enemyMoveClean(m) {
+  if (!m || typeof m !== 'object' || !Array.isArray(m.p)) return null;
+  const p = [];
+  for (const q of m.p.slice(0, 200)) {
+    if (!Array.isArray(q) || q.length < 2 || !isFinite(q[0]) || !isFinite(q[1])) continue;
+    p.push([Math.round(clampN(q[0], -1500, 1500, 0)), Math.round(clampN(q[1], -1500, 1500, 0)), Math.round(clampN(q[2], 0, 50, 0))]);
+  }
+  if (p.length < 2 && !(p.length === 1 && p[0][2])) return null;
+  return m.air ? { p, air: 1 } : { p };
+}
+// Is it only WANDERING right now (so its own movement may take over)? Not while it reacts to somebody, is knocked about, or is
+// somewhere its movement means nothing (underground, lurking in its pool, on a wall or a ceiling).
+function enemyIdle(K, E, now) {
+  if (E.stun > now) return false;
+  const st = E.st | 0;
+  if (K.fly) return E.mode === 'hang' || E.mode == null;
+  if (K.crush || K.ghost || K.roll || K.charge || K.shell || K.bones || K.thrower) return st === 0;
+  if (K.crawl) return st === 20;
+  if (K.leap) return false;
+  if (K.burrow) return st === 40 || st === 42;
+  if (K.crab) return st === 62 && !E.hunt;
+  if (K.bomb) return st !== 30;
+  if (K.spit) return st !== 6;
+  if (K.thief) return st === 0 && !E.hunt;
+  if (K.hop) return !E.chase;
+  return true;
+}
+const ENEMY_MOVE_CYC = new WeakMap();                       // a movement → its lengths and timing, worked out once
+function enemyMoveAt(M, t, spd) {
+  let c = ENEMY_MOVE_CYC.get(M);
+  if (!c || c.spd !== spd) {
+    const segs = []; let T = 0;
+    for (let i = 1; i < M.p.length; i++) { const a = M.p[i - 1], b = M.p[i], d = Math.hypot(b[0] - a[0], b[1] - a[1]);
+      segs.push({ a, b, t0: T, t1: T + d / spd }); T += d / spd; if (b[2]) { segs.push({ a: b, b, t0: T, t1: T + b[2] / 10, wait: 1 }); T += b[2] / 10; } }
+    if (M.p[0][2]) { segs.unshift({ a: M.p[0], b: M.p[0], t0: 0, t1: M.p[0][2] / 10, wait: 1 }); for (let i = 1; i < segs.length; i++) { segs[i].t0 += M.p[0][2] / 10; segs[i].t1 += M.p[0][2] / 10; } T += M.p[0][2] / 10; }
+    c = { spd, segs, T: Math.max(0.05, T), net: M.p[M.p.length - 1][0] - M.p[0][0] }; ENEMY_MOVE_CYC.set(M, c);
+  }
+  return c;
+}
+function enemyMovement(room, R, E, o, now, dt) {
+  const M = o.emov, K = enemyKindOf(E.k, E.sz, E.skin);
+  if (!enemyIdle(K, E, now)) { E.mv = null; E.mvs = 0; return; }   // reacting: its behaviour moves it; the movement starts again from where it ends up
+  const st = roomCells.get(room), grid = (st && st.terrain) || ensureTerrain(room), ROWS = grid.geom.rows, COLS = grid.geom.cols, CELL = TERRAIN_CELL;
+  const solid = (c, r) => { if (c < 0 || c >= COLS || r >= ROWS) return true; if (r < 0) return false;
+    const v = peekCellAt(grid, c * ROWS + r); if (v < 0) return !!grid.seedFn || enemyChunkAway(room, c, r);
+    return ENEMY_SOLID[v] === 1 || !!(R.cover && R.cover.has(c * ROWS + r)); };
+  const floorTop = (x, y0, y1) => { let best = null; for (const f of R.floors) if (x >= f.x0 && x <= f.x1 && f.y >= y0 && f.y <= y1 && (best === null || f.y < best)) best = f.y; return best; };
+  const spd = Math.max(15, o.espd || K.speed || 60), cyc = enemyMoveAt(M, 0, spd), hw = K.w / 2;
+  let m = E.mv;
+  if (!m) m = E.mv = { ax: E.x, ay: E.y, gy: E.y, t: 0, dir: E.dir || 1 };
+  m.t += dt;
+  while (m.t >= cyc.T) { m.t -= cyc.T; m.ax += m.dir * cyc.net; }
+  let q = null; for (const s of cyc.segs) if (m.t <= s.t1) { q = s; break; } if (!q) q = cyc.segs[cyc.segs.length - 1];
+  const f = q ? (q.t1 > q.t0 ? (m.t - q.t0) / (q.t1 - q.t0) : 1) : 0;
+  const ox = q ? q.a[0] + (q.b[0] - q.a[0]) * f - M.p[0][0] : 0, oy = q ? q.a[1] + (q.b[1] - q.a[1]) * f - M.p[0][1] : 0;
+  const nx = m.ax + m.dir * ox;
+  const turn = () => { m.ax = E.x; m.ay = E.y; m.t = 0; m.dir = -m.dir; E.dir = m.dir; };
+  // the end of its range (measured from where it was put, as always), going outward
+  const rng = (o.efree != null ? o.efree : K.free) ? 1e9 : o.erng == null ? 240 : o.erng;
+  if (Math.abs(nx - E.sx) > rng && Math.sign(nx - E.x) === Math.sign(nx - E.sx)) { turn(); return; }
+  let ny;
+  if (M.air) ny = m.ay + oy;
+  else {
+    // the ground under it: up a step of up to 3 cells, or down up to 4 — more than that is a wall or a ledge, and it turns
+    const c = Math.floor(nx / CELL), r0 = Math.floor(m.gy / CELL);
+    let g = null;
+    for (let r = r0 - 3; r <= r0 + 4; r++) if (solid(c, r) && !solid(c, r - 1)) { g = r * CELL; break; }
+    const pf = floorTop(nx, m.gy - 3 * CELL, m.gy + 4 * CELL); if (pf !== null && (g === null || pf < g)) g = pf;
+    if (g === null) { turn(); return; }
+    m.gy = g; ny = g + Math.min(0, oy);
+  }
+  // its body may not go into anything solid (sampled at its sides and middle, half-way up)
+  const my = ny - K.h / 2, cr = Math.floor(my / CELL);
+  if ([nx - hw + 2, nx, nx + hw - 2].some(px => solid(Math.floor(px / CELL), cr))) { turn(); return; }
+  if (Math.abs(nx - E.x) > 0.01) E.dir = nx > E.x ? 1 : -1;
+  E.vx = (nx - E.x) / dt; E.vy = (ny - E.y) / dt; E.x = nx; E.y = ny;
+  E.ground = !M.air && oy >= -0.5;
+  E.mvs = q && q.wait ? 3 : (!M.air && oy < -0.5) ? 2 : 1;      // what the client animates: 1 moving · 2 in the air · 3 pausing
+}
 // a drawn enemy's body as a "skin" key, so every `enemyKindOf(E.k, E.sz, E.skin)` site gets its box and rules for nothing
 function enemyDrawSkin(o) { return o.edraw ? 'd:' + o.edraw.w + 'x' + o.edraw.h + ':' + (o.estomp || '') : ''; }
 function enemyKindOf(k, sz, skin) {
@@ -21692,6 +21779,7 @@ function enemyTick() {
         } else { dead.push(o.id); continue; }
       }
       enemyStep(room, R, E, o, now, dt);
+      if (o.emov && !E.dead) enemyMovement(room, R, E, o, now, dt);   // (round 31: its own movement, while it is only wandering)
       if (E.dead) { dead.push(o.id); continue; }
       out.push([o.id, Math.round(E.x), Math.round(E.y), E.dir, E.stun > now ? 1 : 0, E.st | 0, E.inv ? 0 : E.hp,   // + hits left (0 = can't be hurt)
                 ...(E.blobs ? [E.blobs.map(b => [Math.round(b.x), Math.round(b.y), b.s, b.dir || 1])] : E.segs ? [E.segs] : [])]);   // (round 17: a slime's blobs · round 18: a sandworm's body)
@@ -21700,6 +21788,7 @@ function enemyTick() {
       if (E.cn != null) out[out.length - 1][7] = { n: E.cn, g: E.growT0 && now >= E.growT0 ? Math.round(Math.min(1, (now - E.growT0) / 900) * 100) / 100 : 0 };
       else if (E.kids) out[out.length - 1][7] = { kids: E.kids.map(k => [Math.round(k.x), Math.round(k.y), k.dir, k.ball]), ...(E.rider && now - E.riderAt < 600 ? { rider: E.rider } : null) };
       else if (E.cy != null) out[out.length - 1][7] = { cy: Math.round(E.cy), c: E.carry || 0 };   // (round 27: a grabber's ceiling, and who it is carrying)
+      else if (E.mvs) out[out.length - 1][7] = { m: E.mvs };   // (round 31: a drawn one doing its own movement — which frames to show)
     }
     for (const [id, E] of R.E) if (!live.has(id)) {
       // (round 19: a mimic taken out of the Level takes its object with it)
