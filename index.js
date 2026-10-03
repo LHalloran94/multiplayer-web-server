@@ -17366,6 +17366,15 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (data.erev === 'mouth' || data.erev === 'burst') obj.erev = data.erev;   // round 19: how a mimic gives itself away
       // round 23: the kind's own choice — a cactus's shape, what a cloud dropper drops, what a thrower throws (the client's `K.opts`)
       if (ENEMY_KINDS[obj.ek].opts && ENEMY_KINDS[obj.ek].opts.includes(data.eopt)) obj.eopt = data.eopt;
+      // ⭐⭐ #184 — A CREATOR-DRAWN ENEMY (2026-10-03): the behaviour it borrows (`ek`) wearing the creator's own pictures.
+      // The drawing rides ON the object, as an animated painting's frames do, so a save, a publish and every joiner get
+      // it with nothing new on the wire. Its box is the outline drawn (half-size 2px cells × Size), never a kind's.
+      const dr = enemyDrawClean(data.edraw);
+      if (dr && ENEMY_DRAW_KINDS.includes(obj.ek)) {
+        obj.edraw = dr; delete obj.eskin;
+        obj.w = dr.w * ENEMY_DRAW_CELL * (obj.esz || 1); obj.h = dr.h * ENEMY_DRAW_CELL * (obj.esz || 1);
+        if (data.estomp === 'spiky' || data.estomp === 'bounce') obj.estomp = data.estomp;   // unset = landing on it squashes it
+      }
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
     // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
@@ -20124,8 +20133,50 @@ const ENEMY_SOLID = (() => {
 const ENEMY_SIZED = new Map();
 // ⭐ …and a SKIN may change its rules (round 13: a blue crab cannot be stomped and takes two hits). ⚠️ The client has the
 // same table (`skins` on ENEMY_KINDS in 01, `enemySkin`).
+// ⭐⭐ A CREATOR-DRAWN ENEMY (2026-10-03). Which behaviours one may borrow (round 1: the walker), and its pictures: half-size
+// (2px) cells, the outline cropped to its box, one strip of frames per state. ⚠️ EVERY BOUND IS A WIRE BOUND — the
+// drawing goes to everyone in the room and every joiner (the painting's reasoning). ⚠️ The client has the same shape
+// (`enemyDrawnK` in 01, the editor in 16b).
+const ENEMY_DRAW_KINDS = ['walker'];
+const ENEMY_DRAW_CELL = 2, ENEMY_DRAW_MAX = 64, ENEMY_DRAW_FRAMES = 8;
+const ENEMY_DRAW_STATES = ['stand', 'move', 'air', 'hit'];
+function enemyDrawClean(d) {
+  if (!d || typeof d !== 'object' || !d.st || typeof d.st !== 'object' || !Array.isArray(d.pal)) return null;
+  const w = d.w | 0, h = d.h | 0;
+  if (w < 1 || h < 1 || w > ENEMY_DRAW_MAX || h > ENEMY_DRAW_MAX) return null;
+  const pal = d.pal.slice(0, 64).map((v, i) => (i && typeof v === 'string' && /^#[0-9a-f]{6}$/i.test(v)) ? v.toLowerCase() : null);
+  const runsOf = (list) => {
+    const runs = []; let total = 0;
+    for (const r of (Array.isArray(list) ? list : [])) {
+      if (!Array.isArray(r) || r.length < 2) continue;
+      const v = r[0] | 0, n = Math.max(0, Math.min(w * h, r[1] | 0));
+      if (!n || v < 0 || v >= pal.length) continue;
+      runs.push([v, n]); total += n;
+      if (runs.length > w * h || total >= w * h) break;
+    }
+    return runs;
+  };
+  const st = {};
+  for (const s of ENEMY_DRAW_STATES) {
+    const fr = (Array.isArray(d.st[s]) ? d.st[s] : []).slice(0, ENEMY_DRAW_FRAMES).map(runsOf).filter(r => r.some(q => q[0]));
+    if (fr.length) st[s] = fr;
+  }
+  if (!st.stand) return null;                                    // a state left empty uses Standing — so Standing must exist
+  return { w, h, pal, st, fps: clampN(d.fps, 1, 24, 6), name: (typeof d.name === 'string' ? d.name : '').slice(0, 32) };
+}
+// a drawn enemy's body as a "skin" key, so every `enemyKindOf(E.k, E.sz, E.skin)` site gets its box and rules for nothing
+function enemyDrawSkin(o) { return o.edraw ? 'd:' + o.edraw.w + 'x' + o.edraw.h + ':' + (o.estomp || '') : ''; }
 function enemyKindOf(k, sz, skin) {
   let K = ENEMY_KINDS[k] || ENEMY_KINDS.walker;
+  if (typeof skin === 'string' && skin.startsWith('d:')) {
+    const key = k + '|' + sz + '|' + skin;
+    let S = ENEMY_SIZED.get(key);
+    if (!S) { const [, wh, sm] = skin.split(':'), [dw, dh] = wh.split('x').map(Number);
+      S = Object.create(K); S.drawn = 1; S.w = dw * ENEMY_DRAW_CELL * (sz || 1); S.h = dh * ENEMY_DRAW_CELL * (sz || 1);
+      S.stomp = sm === 'spiky' || sm === 'bounce' ? 0 : 1;    // (a 'bounce' one is never stomped: the client bounces you off)
+      ENEMY_SIZED.set(key, S); }
+    return S;
+  }
   const sk = K.skins && skin && K.skins[skin];
   if ((!sz || sz === 1) && !(sk && Object.keys(sk).length)) return K;
   const key = k + '|' + sz + '|' + (skin || '');
@@ -20136,10 +20187,10 @@ function enemyKindOf(k, sz, skin) {
   return S;
 }
 function enemySpawnBody(o) {
-  const K = enemyKindOf(o.ek, o.esz, o.eskin);
+  const K = enemyKindOf(o.ek, o.esz, o.edraw ? enemyDrawSkin(o) : o.eskin);
   // health: the author's setting (0 = can't be hurt), else the kind's own
   const hp = isFinite(o.ehp) ? o.ehp : K.hp;
-  return { id: o.id, k: o.ek, sz: o.esz || 1, skin: o.eskin || '', x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, dir: 1, ground: false, hp: hp || 1, inv: hp === 0,
+  return { id: o.id, k: o.ek, sz: o.esz || 1, skin: (o.edraw ? enemyDrawSkin(o) : o.eskin) || '', x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, dir: 1, ground: false, hp: hp || 1, inv: hp === 0,
            dead: 0, stun: 0, sx: o.x, hy: o.y + K.h / 2, ox: o.x, oy: o.y, next: 0, mode: 'hang',
            // a crawler holds on at a whole pixel ON the surface: the floor under its feet, or the ceiling over its back
            ...(K.crawl ? { x: Math.round(o.x), y: Math.round(o.ehang ? o.y - K.h / 2 : o.y + K.h / 2), st: o.ehang ? 22 : 20, mv: 1, acc: 0, trav: 0 } : null),
@@ -21517,7 +21568,7 @@ function enemyBoom(room, R, E, K) {
   enemyKill(room, R, E, 'boom', null);
   for (const V of R.E.values()) {
     if (V === E || V.dead || V.inv || (ENEMY_KINDS[V.k] && ENEMY_KINDS[V.k].crush)) continue;
-    const VK = enemyKindOf(V.k, V.sz);
+    const VK = enemyKindOf(V.k, V.sz, V.skin);
     if (Math.hypot(V.x - cx, V.y - VK.h / 2 - cy) < ENEMY_BOOM_R + VK.w / 2) enemyKill(room, R, V, 'boom', null);
   }
 }
@@ -21614,7 +21665,7 @@ function enemyTick() {
     // as of the last tick are walls and floors to everything else this tick…
     R.cboxes = [];
     for (const E of R.E.values()) if (!E.dead && ENEMY_KINDS[E.k] && ENEMY_KINDS[E.k].crush) {
-      const K = enemyKindOf(E.k, E.sz);
+      const K = enemyKindOf(E.k, E.sz, E.skin);
       R.cboxes.push({ id: E.id, x0: E.x - K.w / 2, x1: E.x + K.w / 2, y0: E.y - K.h, y1: E.y });
     }
     for (const o of R.list) {
@@ -21650,10 +21701,10 @@ function enemyTick() {
     // crusher off — only players do (`enemyTarget` reads players).
     for (const C of R.E.values()) {
       if (C.dead || C.st !== 5 || !ENEMY_KINDS[C.k] || !ENEMY_KINDS[C.k].crush) continue;
-      const CK = enemyKindOf(C.k, C.sz), cx0 = C.x - CK.w / 2, cx1 = C.x + CK.w / 2, cy0 = C.y - CK.h, cy1 = C.y;
+      const CK = enemyKindOf(C.k, C.sz, C.skin), cx0 = C.x - CK.w / 2, cx1 = C.x + CK.w / 2, cy0 = C.y - CK.h, cy1 = C.y;
       for (const V of R.E.values()) {
         if (V === C || V.dead || V.inv || (ENEMY_KINDS[V.k] && ENEMY_KINDS[V.k].crush)) continue;
-        const VK = enemyKindOf(V.k, V.sz);
+        const VK = enemyKindOf(V.k, V.sz, V.skin);
         if (V.x + VK.w / 2 > cx0 + 2 && V.x - VK.w / 2 < cx1 - 2 && V.y > cy0 + 2 && V.y - VK.h < cy1 - 2) {
           enemyKill(room, R, V, 'crush', null);
           const i = out.findIndex(r => r[0] === V.id); if (i >= 0) out.splice(i, 1);
