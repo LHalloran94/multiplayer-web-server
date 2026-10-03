@@ -20162,7 +20162,10 @@ function enemyDrawClean(d) {
     if (fr.length) st[s] = fr;
   }
   if (!st.stand) return null;                                    // a state left empty uses Standing — so Standing must exist
-  return { w, h, pal, st, fps: clampN(d.fps, 1, 24, 6), name: (typeof d.name === 'string' ? d.name : '').slice(0, 32) };
+  const out = { w, h, pal, st, fps: clampN(d.fps, 1, 24, 6), name: (typeof d.name === 'string' ? d.name : '').slice(0, 32) };
+  // round 29 (user): each state may play at its own speed; unset = `fps`
+  if (d.sfps && typeof d.sfps === 'object') { const sf = {}; for (const s of ENEMY_DRAW_STATES) if (isFinite(d.sfps[s])) sf[s] = clampN(d.sfps[s], 1, 24, out.fps); out.sfps = sf; }
+  return out;
 }
 // a drawn enemy's body as a "skin" key, so every `enemyKindOf(E.k, E.sz, E.skin)` site gets its box and rules for nothing
 function enemyDrawSkin(o) { return o.edraw ? 'd:' + o.edraw.w + 'x' + o.edraw.h + ':' + (o.estomp || '') : ''; }
@@ -21672,7 +21675,7 @@ function enemyTick() {
       live.add(o.id);
       let E = R.E.get(o.id);
       // a new one, or one the author moved or changed: start again from where it was put
-      if (!E || E.ox !== o.x || E.oy !== o.y || E.k !== o.ek || E.sz !== (o.esz || 1) || E.skin !== (o.eskin || '')) {
+      if (!E || E.ox !== o.x || E.oy !== o.y || E.k !== o.ek || E.sz !== (o.esz || 1) || E.skin !== ((o.edraw ? enemyDrawSkin(o) : o.eskin) || '')) {   // (a drawn one's skin is its drawing's key — round 29: comparing it to `eskin` rebuilt it EVERY tick, so it never died for long)
         const was = E; E = enemySpawnBody(o); R.E.set(o.id, E);
         if (was && (was.ox !== o.x || was.oy !== o.y)) E.moved = 1;   // (round 19: a mimic's object follows its marker)
       }
