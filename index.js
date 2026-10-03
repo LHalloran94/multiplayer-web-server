@@ -17364,6 +17364,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (data.efree === 1 || data.efree === 0) obj.efree = data.efree;   // round 18: roams anywhere (no range); unset = the kind's default
       if (data.epat === 'random' || data.epat === 'pace') obj.epat = data.epat;   // round 18: wanders at random / back and forth
       if (data.erev === 'mouth' || data.erev === 'burst') obj.erev = data.erev;   // round 19: how a mimic gives itself away
+      // round 23: the kind's own choice — a cactus's shape, what a cloud dropper drops, what a thrower throws (the client's `K.opts`)
+      if (ENEMY_KINDS[obj.ek].opts && ENEMY_KINDS[obj.ek].opts.includes(data.eopt)) obj.eopt = data.eopt;
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
     // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
@@ -20026,7 +20028,25 @@ const ENEMY_KINDS = {
   // SPLITTING SLIME: one enemy made of BLOBS (`E.blobs`, sent as row[7]); a hit on a blob splits it into two smaller ones
   // (size 3 → 2 → 1), and a size-1 blob pops. It is dead when the last one has.
   slime:    { w: 42, h: 30, speed: 70, hp: 1, stomp: 1, slime: 1, vis: 260 },
+  // ⭐⭐ ROUND 23 (user's picks from look/enemies/round23.html — both designs of each, as looks). `opts` = what `eopt` may be (the first
+  // is the default and is never stored). ⚠️ The client has the same kinds (ENEMY_KINDS in 01_state.js).
+  // STACKED CACTUS: `E.cn` segments under a head, a box as tall as the stack (`cactusK`). Size = how many it starts with.
+  // punch (green): a punch knocks off the segment at the hitter's height, the head alone dies to a punch, stomping it kills
+  // YOU · head (armoured): only a stomp (or slam) on it hurts, worn down by health · grow (pink): as green, and regrows.
+  cactus:   { w: 36, h: 107, speed: 24, hp: 1, stomp: 0, cactus: 1, segStep: 23, headH: 38, opts: ['ball', 'barrel'],
+              skins: { punch: {}, head: { stomp: 1, weak: 1 }, grow: { regrow: 1 } } },
+  // CLOUD DROPPER (`enemyCloud`): hovers over you, drops; knocked off (121) its cloud is left to ride (122) for ~10s.
+  cloud:    { w: 76, h: 46, speed: 150, hp: 1, stomp: 1, cloud: 1, vis: 420, opts: ['spiky', 'bomb', 'rock', 'water', 'acid', 'shoot'], skins: { imp: {}, living: {} } },
+  // THROWER: walks; sees you → winds up (131) and throws (132); punched / stomped → dizzy (133); again → flung (134).
+  thrower:  { w: 52, h: 52, speed: 40, hp: 1, stomp: 1, thrower: 1, vis: 360, opts: ['rock', 'bone', 'bomb', 'snow'], skins: { goblin: {}, yeti: { w: 64, h: 64 } } },
 };
+// round 23 — a cactus starts with this many segments under its head, by Size; its box is as tall as its stack. ⚠️ The
+// client's `cactusStart` / `cactusK`.
+function cactusStart(sz) { return sz <= 0.5 ? 2 : sz <= 1 ? 3 : sz <= 1.5 ? 4 : sz <= 2 ? 5 : 6; }
+const ENEMY_CACTI = new Map();
+function cactusK(K, n) { const key = (K.weak ? 'w' : K.regrow ? 'g' : 'p') + n; let S = ENEMY_CACTI.get(key);
+  if (!S) { S = Object.create(K); S.h = K.headH + n * K.segStep; ENEMY_CACTI.set(key, S); } return S; }
+const THROWN_G = 900;                 // ⚠️ the client's gravity for a thrown / dropped thing (`enemyThrown` in 16b)
 // the box of a slime blob at each level. ⭐ round 18 (user: "making them bigger should make them have MORE DIVISIONS"): the
 // enemy's Size does not scale a blob — it picks the level the slime STARTS at (½× 2 · 1× 3 · 1½× 4 · 2× 5 · 3× 6), and
 // every level splits into two of the one below. ⚠️ The client has the same table (`SLIME_BOX` in 01).
@@ -20092,7 +20112,9 @@ function enemyKindOf(k, sz, skin) {
   if ((!sz || sz === 1) && !(sk && Object.keys(sk).length)) return K;
   const key = k + '|' + sz + '|' + (skin || '');
   let S = ENEMY_SIZED.get(key);
-  if (!S) { S = Object.create(K); if (sk) Object.assign(S, sk); S.w = ((sk && sk.w) || K.w) * (sz || 1); S.h = ((sk && sk.h) || K.h) * (sz || 1); ENEMY_SIZED.set(key, S); }
+  if (!S) { S = Object.create(K); if (sk) Object.assign(S, sk); S.w = ((sk && sk.w) || K.w) * (sz || 1); S.h = ((sk && sk.h) || K.h) * (sz || 1);
+    if (K.cactus) { S.w = K.w; S.h = K.headH + cactusStart(sz || 1) * K.segStep; }   // (round 23: size = segments, not a bigger picture)
+    ENEMY_SIZED.set(key, S); }
   return S;
 }
 function enemySpawnBody(o) {
@@ -20104,6 +20126,7 @@ function enemySpawnBody(o) {
            // a crawler holds on at a whole pixel ON the surface: the floor under its feet, or the ceiling over its back
            ...(K.crawl ? { x: Math.round(o.x), y: Math.round(o.ehang ? o.y - K.h / 2 : o.y + K.h / 2), st: o.ehang ? 22 : 20, mv: 1, acc: 0, trav: 0 } : null),
            ...(K.burrow ? { st: 40 } : null), ...(K.crab ? { st: 60 } : null), ...(K.leap ? { st: 90 } : null), ...(K.mimic ? { st: 110 } : null),
+           ...(K.cactus ? { cn: cactusStart(o.esz || 1), cmax: cactusStart(o.esz || 1) } : null), ...(K.cloud ? { kids: [], hy: o.y + K.h / 2 } : null),
            ...(K.slime ? { blobs: [{ x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, s: slimeStart(o.esz || 1), ground: false, next: 0 }], clung: [] } : null) };
 }
 // ⭐ round 17: a THIEF carrying something lets go of it — the powerup goes back to whoever it was taken from (`to`); `to`
@@ -20156,7 +20179,11 @@ function enemyStep(room, R, E, o, now, dt) {
     for (const b of (R.cboxes || [])) if (b.id !== E.id && x >= b.x0 && x <= b.x1 && y1 > b.y0 && y0 < b.y1) return true;   // …and its sides walls
     return false;
   };
-  const K = enemyKindOf(E.k, E.sz, E.skin), hw = K.w / 2;
+  const K0 = enemyKindOf(E.k, E.sz, E.skin);
+  // ⭐ round 23 — a CACTUS: the pink one grows a segment back from the bottom, one at a time (`E.growT0` = when the next starts
+  // growing; it takes 0.9s, sent as `g`), and its box is always as tall as its stack is now
+  if (K0.cactus && K0.regrow && E.growT0 && now >= E.growT0 + 900) { E.cn = Math.min(E.cmax, E.cn + 1); E.growT0 = E.cn < E.cmax ? now + 3200 : 0; }
+  const K = K0.cactus ? cactusK(K0, E.cn) : K0, hw = K.w / 2;
   // ⭐ round 18 (user): `efree` = ROAMS ANYWHERE — no range at all (every "past its range" test below simply never fires)
   const stunned = E.stun > now, spd = o.espd || K.speed, rng = (o.efree != null ? o.efree : K.free) ? 1e9 : o.erng == null ? 240 : o.erng;   // ⚠️ 0 is a real range now
   // how far it SEES you from (round 9). A swooper's and a spitter's used to be their `erng`, so one placed before reads that.
@@ -20167,6 +20194,8 @@ function enemyStep(room, R, E, o, now, dt) {
   if (K.crawl) { enemyCrawl(room, R, E, o, K, now, dt, solid, stunned, spd, vis, rng); return; }
   if (K.leap) { enemyLeap(room, E, o, K, now, dt, solid, vis); return; }
   if (K.slime) { enemySlime(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, rng); return; }
+  if (K.cloud) { enemyCloud(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, grid); return; }
+  if (K.thrower && E.st === 134) { enemyFlung(room, R, E, K, now, dt, solid, floorAt); return; }
   // ── what the second batch is doing this tick: `mv` is its ground speed (the shared walking code below does the rest)
   let mv = spd;
   // ⭐ round 16 — the shell creature in its shell, and the bone pile in pieces: the walking code below moves it (or not)
@@ -20202,12 +20231,12 @@ function enemyStep(room, R, E, o, now, dt) {
     else { E.st = 44; E.x -= E.dir * (K.w / 2 + 2 * TERRAIN_CELL); E.y += K.h / 2; E.next = now + 1500; }
     return;
   }
-  if (!stunned && (K.roll || K.charge || K.spit || K.bomb || K.burrow || K.crab || K.armour || K.thief || K.mimic)) {
+  if (!stunned && (K.roll || K.charge || K.spit || K.bomb || K.burrow || K.crab || K.armour || K.thief || K.mimic || K.thrower)) {
     const eyeY = E.y - K.h + 8;
     // ⭐ IT ONLY SEES WHAT IS IN FRONT OF IT (user, 2026-10-02: "you should be able to sneak up on it") — and in sight.
     // ⭐ It only notices you IN FRONT, IN SIGHT, within how far it sees (`vis`) — and, for a thing that moves, only
     // within the strip it may wander (user, 2026-10-02: "limited by the wander distance, since they can't move out of this").
-    const strip = !K.spit;
+    const strip = !K.spit && !K.thrower;                 // (round 23: a thrower throws from where it is — it need not reach you)
     const seen = (maxDx, dyMin, dyMax) => { const p = enemyTarget(room, E.x, E.y - K.h / 2, maxDx, dyMin, dyMax, now);
       return p && (p.x - E.x) * E.dir > -K.w / 4 && (!strip || Math.abs(p.x - E.sx) <= rng + K.w / 2)
         && enemySees(solid, E.x, eyeY, p.x, p.y) ? p : null; };
@@ -20329,6 +20358,18 @@ function enemyStep(room, R, E, o, now, dt) {
       } else {
         mv = 0; E.hunt = false;
         if (now >= E.until && E.ground) { mimicSettle(room, E, o, K); return; }
+      }
+    } else if (K.thrower) {
+      // ⭐ round 23 — THE THROWER: walks; sees you (in front, in sight, within its strip) → stops, winds up (131, 0.45s) and
+      // throws (132) at where you are THEN, in an arc (`enemyThrow`); then walks on for a while before it can throw again.
+      // Dizzy (133) it stands still until it comes round. (Flung, 134, is `enemyFlung`.)
+      E.st = E.st | 0;
+      if (E.st === 133) { mv = 0; if (now >= E.until) { E.st = 0; E.next = now + 800; } }
+      else if (E.st === 131) { mv = 0; if (now >= E.until) { if (E.tgtP) enemyThrow(room, E, K, o, E.tgtP); E.st = 132; E.until = now + 300; } }
+      else if (E.st === 132) { mv = 0; if (now >= E.until) { E.st = 0; E.next = now + 1700; } }
+      else if (E.ground && now >= (E.next || 0)) {
+        const p = seen(vis, -260, 220);
+        if (p) { E.dir = p.x >= E.x ? 1 : -1; E.st = 131; E.until = now + 450; E.tgtP = p; mv = 0; }
       }
     } else if (K.burrow) {
       // ⭐ THE BURROWER (user's pick: a mole): hidden under the ground it wanders like a walker, and all you see is a
@@ -20865,6 +20906,109 @@ function enemyLeap(room, E, o, K, now, dt, solid, vis) {
   if (E.vy > 0 && ny >= E.hy) { ny = E.hy; E.vy = 0; E.st = 90; E.next = now + 900; }
   E.y = ny;
 }
+// ⭐⭐ ROUND 23 — THE THROWER'S THROW. One message; every screen flies the thing itself (`enemyThrown` in 16b) under
+// THROWN_G, from its hand to where the target was when it let go: a flight time that grows with the distance, and the
+// launch that lands it there in that time. Whether it HIT is decided by the player it hits (as every hit is).
+function enemyThrow(room, E, K, o, p) {
+  const what = o.eopt || 'rock', sx = E.x + E.dir * K.w * 0.35, sy = E.y - K.h * 0.85, dx = p.x - sx, dy = p.y - sy;
+  const T = Math.max(0.5, Math.min(1.4, Math.abs(dx) / 280)), vx = dx / T, vy = (dy - 0.5 * THROWN_G * T * T) / T;
+  io.to(room).emit('enemy-ev', { id: E.id, k: 'throw', what, x: Math.round(sx), y: Math.round(sy), vx: Math.round(vx), vy: Math.round(vy), tgt: p.sid || null });
+}
+// …FLUNG (134): punched while dizzy it flies like a kicked shell — up off the ground, then skidding along it at the same
+// speed, off edges, no steering — and knocks out what it meets (`enemyTick`'s shell loop). The first wall it hits (or 2.5s,
+// or the bottom of the world) and it is out.
+function enemyFlung(room, R, E, K, now, dt, solid, floorAt) {
+  const CELL = TERRAIN_CELL, hw = K.w / 2;
+  E.vy = Math.min(ENEMY_FALL_MAX, E.vy + ENEMY_G * dt);
+  const nx = E.x + E.vx * dt, lead = Math.floor((nx + Math.sign(E.vx || 1) * hw * 0.6) / CELL);
+  let ny = E.y + E.vy * dt, wall = false;
+  for (let r = Math.floor((E.y - K.h * 0.8) / CELL); r <= Math.floor((E.y - 4) / CELL) && !wall; r++) if (solid(lead, r)) wall = true;
+  if (wall || now - (E.flyAt || 0) > 2500 || ny > (R.worldH || 1e7)) { enemyKill(room, R, E, 'fling', null); return; }
+  if (E.vy >= 0) {
+    const cs = [Math.floor((nx - hw * 0.5) / CELL), Math.floor(nx / CELL), Math.floor((nx + hw * 0.5) / CELL)];
+    for (let r = Math.floor(E.y / CELL); r <= Math.floor(ny / CELL); r++) if (cs.some(c => solid(c, r))) { ny = r * CELL; E.vy = 0; break; }
+    const pf = floorAt(nx, E.y - 1, ny); if (pf !== null && pf <= ny) { ny = pf; E.vy = 0; }
+  }
+  E.x = nx; E.y = ny;
+}
+// ⭐⭐ ROUND 23 — THE CLOUD DROPPER. No gravity. Somebody within `vis` of its HOME: it flies to a spot ~200px over them (lower
+// if a ceiling is in the way — never into anything solid) and, when it is roughly over them, holds its drop up for a beat
+// (120) and lets go of it. What it drops is `o.eopt`: SPIKY balls (its own little Spikies, `E.kids`, which fall, land and
+// walk — sent with it), BOMBS / ROCKS (flown on every screen, like a thrower's throw), WATER / ACID rain (124: real liquid
+// cells under it for ~1.8s), or it SHOOTS at you from where it is (the spitter's venom message, coloured as fire).
+// Nobody near: it drifts home. Knocked off (121, `enemy-hit`): it stays where it was, and after the tumble its cloud is
+// left (122) for ~10s, ridden and steered by whoever stands on it (`enemy-ride`); then it is gone.
+function enemyCloud(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, grid) {
+  const CELL = TERRAIN_CELL, hw = K.w / 2, drop = o.eopt || 'spiky';
+  E.st = E.st | 0;
+  enemyCloudKids(room, R, E, now, dt, solid, floorAt);
+  if (E.st === 121) { if (now >= E.until) { E.st = 122; E.until = now + 10000; } return; }
+  if (E.st === 122) { if (now >= E.until) enemyKill(room, R, E, 'fade', null); return; }
+  // is the cloud's box clear of anything solid, if it stood with its feet (its underside) at (x, y)?
+  const free = (x, y) => { for (const px of [x - hw * 0.8, x, x + hw * 0.8]) for (const py of [y - K.h + 4, y - 4]) if (solid(Math.floor(px / CELL), Math.floor(py / CELL))) return false; return true; };
+  const p = enemyTarget(room, E.sx, E.hy - K.h / 2, vis, -vis, vis, now);
+  let tx = E.sx, ty = E.hy;
+  if (p) { tx = p.x; ty = p.y - 200; for (let k = 0; k < 22 && !free(tx, ty) && ty < p.y - 70; k++) ty += 8; if (!free(tx, ty)) ty = E.y; }
+  const step = spd * dt, ddx = Math.max(-step, Math.min(step, tx - E.x)), ddy = Math.max(-step * 0.7, Math.min(step * 0.7, ty - E.y));
+  if (free(E.x + ddx, E.y)) E.x += ddx;
+  if (free(E.x, E.y + ddy)) E.y += ddy;
+  if (p) E.dir = p.x >= E.x ? 1 : -1; else if (Math.abs(ddx) > 0.5) E.dir = ddx > 0 ? 1 : -1;
+  if (E.st === 124) {                                        // raining: a cell or two of real liquid under it, every tick
+    const mat = drop === 'acid' ? 12 : 9, st = cellsOf(room), ROWS = grid.geom.rows, changed = [];
+    for (let n = 0; n < 2; n++) {
+      const c = Math.floor((E.x + (Math.random() - 0.5) * K.w * 0.75) / CELL), r = Math.floor(E.y / CELL) + 1;
+      if (c < 0 || c >= grid.geom.cols || r < 0 || r >= ROWS) continue;
+      const i = c * ROWS + r; if (peekCellAt(grid, i) !== 0 || st.fineTotal.g(i) > 0) continue;
+      const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[mat]] = LIQUID_MAX;
+      for (const x of fineSetBlock(room, 1, c, r, ca)) changed.push(x);
+    }
+    if (changed.length) emitFineCells(room, changed);
+    if (now >= E.until) { E.st = 0; E.next = now + 3500; }
+    return;
+  }
+  if (E.st === 120) {
+    if (now < E.until) return;
+    E.st = 0;
+    const q = E.tgtP;
+    if (drop === 'spiky') { if (E.kids.length < 3) E.kids.push({ x: E.x, y: E.y + 6, vx: 0, vy: 0, ball: 1, dir: q && q.x < E.x ? -1 : 1, ground: false }); E.next = now + 2600; }
+    else if (drop === 'bomb' || drop === 'rock') { io.to(room).emit('enemy-ev', { id: E.id, k: 'throw', what: drop, x: Math.round(E.x), y: Math.round(E.y + 6), vx: 0, vy: 0, tgt: q ? q.sid : null }); E.next = now + (drop === 'bomb' ? 3200 : 2200); }
+    else if (drop === 'water' || drop === 'acid') { E.st = 124; E.until = now + 1800; }
+    return;
+  }
+  if (!p || now < (E.next || 0) || p.y < E.y) return;
+  if (drop === 'shoot') {                                    // it shoots from where it is, as long as it can see you
+    if (!enemySees(solid, E.x, E.y - K.h / 2, p.x, p.y)) return;
+    const sx = E.x, sy = E.y, ddx2 = p.x - sx, ddy2 = p.y - sy, d = Math.hypot(ddx2, ddy2) || 1;
+    io.to(room).emit('enemy-ev', { id: E.id, k: 'spit', c: 'fire', x: Math.round(sx), y: Math.round(sy), vx: Math.round(ddx2 / d * 300), vy: Math.round(ddy2 / d * 300) });
+    E.next = now + 1500; return;
+  }
+  if (Math.abs(p.x - E.x) < 60) { E.st = 120; E.until = now + 500; E.tgtP = p; }
+}
+// …ITS SPIKIES: little Spiky walkers that belong to it (sent with it, `L.kids` on the client), at most three. Each falls as a
+// spiky ball, lands and walks, turning at walls; off the bottom of the world (or ~1500px from the dropper's home) it is gone.
+// They go when the dropper does.
+const CLOUD_KID_W = 56, CLOUD_KID_H = 28;                    // ⚠️ the walker's Spiky look at 1× (the client draws them with it)
+function enemyCloudKids(room, R, E, now, dt, solid, floorAt) {
+  const CELL = TERRAIN_CELL, hw = CLOUD_KID_W / 2;
+  for (let i = E.kids.length - 1; i >= 0; i--) {
+    const k = E.kids[i];
+    k.vy = Math.min(ENEMY_FALL_MAX, k.vy + ENEMY_G * dt);
+    k.vx = k.ball ? 0 : k.dir * 34;
+    let nx = k.x + k.vx * dt;
+    if (k.vx) { const lc = Math.floor((nx + k.dir * hw) / CELL);
+      for (let r = Math.floor((k.y - CLOUD_KID_H + 2) / CELL); r <= Math.floor((k.y - 2) / CELL); r++) if (solid(lc, r)) { nx = k.x; k.dir = -k.dir; break; } }
+    k.x = nx;
+    let ny = k.y + k.vy * dt; k.ground = false;
+    if (k.vy >= 0) {
+      const cs = [Math.floor((k.x - hw + 1) / CELL), Math.floor(k.x / CELL), Math.floor((k.x + hw - 1) / CELL)];
+      for (let r = Math.floor(k.y / CELL); r <= Math.floor(ny / CELL); r++) if (cs.some(c => solid(c, r))) { ny = r * CELL; k.ground = true; break; }
+      const pf = floorAt(k.x, k.y - 1, ny); if (pf !== null && (!k.ground || pf < ny)) { ny = pf; k.ground = true; }
+      if (k.ground) { k.vy = 0; k.ball = 0; }
+    }
+    k.y = ny;
+    if (k.y > (R.worldH || 1e7) || Math.abs(k.x - E.sx) > 1500 || k.y > E.hy + 3000) E.kids.splice(i, 1);
+  }
+}
 // ⭐ round 17 — THE SPLITTING SLIME: each blob hops on its own — at somebody it can reach (in its strip, within how far it
 // sees), otherwise a small idle hop about its range. Smaller blobs hop a bit faster. Walls bounce a blob back; it lands on
 // terrain and still platforms like any walker. The enemy's own x/y follow its first blob (for range, put-away ground…).
@@ -21363,6 +21507,10 @@ function enemyTick() {
       if (E.dead) { dead.push(o.id); continue; }
       out.push([o.id, Math.round(E.x), Math.round(E.y), E.dir, E.stun > now ? 1 : 0, E.st | 0, E.inv ? 0 : E.hp,   // + hits left (0 = can't be hurt)
                 ...(E.blobs ? [E.blobs.map(b => [Math.round(b.x), Math.round(b.y), b.s, b.dir || 1])] : E.segs ? [E.segs] : [])]);   // (round 17: a slime's blobs · round 18: a sandworm's body)
+      // (round 23: an OBJECT in that slot is a kind's own extra — a cactus's segments and the one growing back, a cloud
+      //  dropper's Spikies)
+      if (E.cn != null) out[out.length - 1][7] = { n: E.cn, g: E.growT0 && now >= E.growT0 ? Math.round(Math.min(1, (now - E.growT0) / 900) * 100) / 100 : 0 };
+      else if (E.kids) out[out.length - 1][7] = { kids: E.kids.map(k => [Math.round(k.x), Math.round(k.y), k.dir, k.ball]) };
     }
     for (const [id, E] of R.E) if (!live.has(id)) {
       // (round 19: a mimic taken out of the Level takes its object with it)
@@ -21386,8 +21534,9 @@ function enemyTick() {
     }
     // ⭐ round 16: a KICKED SHELL knocks out every enemy it slides into (one that can't be hurt, a crusher, and one
     // underground / lurking excepted)
+    // (round 23: …and so does a FLUNG thrower, 134)
     for (const C of R.E.values()) {
-      if (C.dead || C.st !== 71 || !ENEMY_KINDS[C.k] || !ENEMY_KINDS[C.k].shell) continue;
+      if (C.dead || !ENEMY_KINDS[C.k] || !((ENEMY_KINDS[C.k].shell && C.st === 71) || (ENEMY_KINDS[C.k].thrower && C.st === 134))) continue;
       const CK = enemyKindOf(C.k, C.sz, C.skin), cx0 = C.x - CK.w / 2, cx1 = C.x + CK.w / 2, cy0 = C.y - CK.h, cy1 = C.y;
       for (const V of R.E.values()) {
         if (V === C || V.dead || V.inv) continue;
@@ -24737,21 +24886,30 @@ io.on('connection', (socket) => {
       io.to(room).emit('enemy-ev', { id: E.id, k: 'unclung', sid: socket.id, n });
     }
   });
-  socket.on('enemy-hit', ({ id, how, dir, px, blob }) => {
+  // ⭐ round 23 — SOMEBODY IS RIDING A BEATEN CLOUD (122) and steering it: where it is now, from their screen (that is where
+  // the ride is felt). Bounded by a sane step per message, so a forged one can only nudge it.
+  socket.on('enemy-ride', ({ id, x, y }) => {
+    const room = currentAvatarRoom; if (!room || !isFinite(x) || !isFinite(y)) return;
+    const R = roomEnemies.get(room); const E = R && R.E.get(id);
+    if (!E || E.dead || ((E.st | 0) !== 122 && (E.st | 0) !== 121)) return;
+    if (Math.hypot(x - E.x, y - E.y) > 400) return;
+    const d = roomDims(room); E.x = Math.max(0, Math.min(d.cols * TERRAIN_CELL, +x)); E.y = Math.max(0, Math.min(d.rows * TERRAIN_CELL, +y));
+  });
+  socket.on('enemy-hit', ({ id, how, dir, px, py, blob, kid }) => {
     const room = currentAvatarRoom; if (!room) return;
     const R = roomEnemies.get(room); const E = R && R.E.get(id);
     if (!E || E.dead) return;
     if (!ENEMY_KINDS[E.k]) return;
     const K = enemyKindOf(E.k, E.sz, E.skin);            // (its skin may change the rules: a blue crab cannot be stomped)
     if (!['stomp', 'crush', 'punch', 'power', 'slam', 'kick'].includes(how)) return;
-    if (how === 'kick' && !K.shell) return;               // (round 16: only a still shell is kicked by a touch)
+    if (how === 'kick' && !K.shell && !K.thrower) return;   // (round 16: only a still shell is kicked by a touch · round 23: or a dizzy thrower)
     if (K.leap && E.st === 90) return;                    // lurking in its pool: nothing reaches it
     if (how === 'stomp' && !enemyStompOk(K, E.st | 0)) return;
     if (K.crush && how !== 'slam') return;               // a crusher is iron: only a slam (and, later, a bomb) breaks it
     if (K.burrow && (E.st === 44 || E.st === 45 || E.st === 46) && how !== 'slam') return;   // underground: only a slam reaches it
     if (K.crab && E.st === 60 && how !== 'slam') return;  // buried: only a slam reaches it
     const p = lastBodyPos(room, socket.id);
-    if (p && Math.hypot(p.x - E.x, p.y - E.y) > 600 && !K.slime) return;
+    if (p && Math.hypot(p.x - E.x, p.y - E.y) > 600 && !K.slime && !(K.cloud && kid != null)) return;   // (a dropper's Spikies wander off from it)
     const now = Date.now();
     // ⭐ round 17 — A SLIME: the hit is on ONE BLOB (`blob`). It splits into two the next size down, flung apart; the
     // smallest pops. The slime is dead when its last blob has gone.
@@ -24766,6 +24924,42 @@ io.on('connection', (socket) => {
         io.to(room).emit('enemy-ev', { id, k: 'split', x: Math.round(b.x), y: Math.round(b.y), s: b.s });
       } else io.to(room).emit('enemy-ev', { id, k: 'pop', x: Math.round(b.x), y: Math.round(b.y), s: b.s });
       if (!E.blobs.length && !(E.clung && E.clung.length)) enemyKill(room, R, E, 'pop', socket.id);
+      return;
+    }
+    // ⭐⭐ ROUND 23 — the three new kinds' hits, none of which is plain damage
+    if (K.cloud) {
+      // one of its SPIKIES (`kid`): any hit that reaches one kills it
+      if (kid != null) { const k = E.kids && E.kids[kid | 0]; if (!k) return; E.kids.splice(kid | 0, 1);
+        io.to(room).emit('enemy-ev', { id, k: 'kid', x: Math.round(k.x), y: Math.round(k.y) }); return; }
+      // the dropper itself: knocked off its cloud, whatever hit it (the cloud stays to be ridden)
+      if ((E.st | 0) >= 121) return;
+      E.st = 121; E.until = now + 700; E.vx = E.vy = 0;
+      io.to(room).emit('enemy-ev', { id, k: 'hit', how: 'knock' }); return;
+    }
+    if (K.thrower && (how === 'stomp' || how === 'punch' || how === 'kick')) {
+      if (now - (E.hitAt || 0) < 150 || (E.st | 0) === 134) return;
+      E.hitAt = now;
+      const hx = isFinite(px) ? +px : (p ? p.x : E.x), d = E.x >= hx ? 1 : -1;
+      // dizzy already (or walked into while dizzy): sent flying away from the hitter · otherwise: dizzy for 3s
+      if ((E.st | 0) === 133 || how === 'kick') { E.st = 134; E.dir = d; E.vx = d * 520; E.vy = -380; E.ground = false; E.flyAt = now; E.stun = 0; }
+      else { E.st = 133; E.until = now + 3000; E.vx = 0; E.stun = 0; }
+      io.to(room).emit('enemy-ev', { id, k: 'hit', how }); return;
+    }
+    if (K.cactus && !(K.weak && (how === 'stomp' || how === 'slam' || how === 'crush'))) {
+      if (K.weak) { io.to(room).emit('enemy-ev', { id, k: 'hit', how: 'clang' }); return; }   // armoured: punches bounce off
+      if (how === 'stomp' || now - (E.hitAt || 0) < 150) return;                             // (it can't be stomped — the stomper dies)
+      E.hitAt = now;
+      if (how === 'crush' || E.cn <= 0) { enemyKill(room, R, E, how, socket.id); return; }   // the head alone: a punch kills it
+      // the segment at the hitter's height (`py`, their body's middle) is knocked out; a big hit takes three
+      const KC = cactusK(K, E.cn);
+      let k = isFinite(py) ? Math.floor((E.y - py) / KC.segStep) : 0;
+      for (let j = 0, take = how === 'power' || how === 'slam' ? 3 : 1; j < take && E.cn > 0; j++) {
+        k = Math.max(0, Math.min(E.cn - 1, k));
+        io.to(room).emit('enemy-ev', { id, k: 'seg', i: k, x: Math.round(E.x), y: Math.round(E.y - (k + 0.5) * KC.segStep), dir: dir < 0 ? -1 : 1 });
+        E.cn--;
+      }
+      if (K.regrow) E.growT0 = now + 3200;
+      E.stun = now + 250;
       return;
     }
     // ⭐ round 17 — a THIEF carrying something lets go of it when it is hit (and still takes the hit)
