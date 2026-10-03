@@ -20043,6 +20043,18 @@ const ENEMY_KINDS = {
   thrower:  { w: 72, h: 60, speed: 40, hp: 1, stomp: 1, thrower: 1, vis: 360, opts: ['rock', 'bone', 'bomb', 'snow'],
               skins: { troll: {}, yeti: { w: 68, h: 70, optDef: 'bone' }, snowman: { w: 60, h: 86, optDef: 'snow' }, penguin: { w: 56, h: 60, optDef: 'snow' },
                        cinder: { w: 72, h: 72, optDef: 'bomb', boomFling: 1 } } },
+  // ⭐⭐ ROUND 27 (user's picks from look/enemies/round27.html — both designs of each, as looks). Boxes as the client's.
+  // FIRE: a walker that is REAL FIRE (`enemyFireTick` lights what can burn around it). Touch kills, no stomp, a punch knocks
+  // it back. Liquid: the living flame is put out for good ('douse'); the salamander (`douse`) is only DOUSED — st 141, dark
+  // and harmless for a few seconds, when a stomp or a punch beats it — then relights.
+  fire:     { w: 42, h: 64, speed: 46, hp: 1, stomp: 0, fire: 1, skins: { flame: {}, salamander: { w: 88, h: 44, speed: 40, douse: 1 } } },
+  // ACID: the crawler's movement (no thread), and a TRAIL of the cells it crawled over that it eats a moment later
+  // (`enemyAcidTrail`). Stompable on a floor, as the crawler is.
+  acid:     { w: 64, h: 30, speed: 30, hp: 1, stomp: 1, crawl: 1, acid: 1, skins: { slug: {}, blob: { w: 52, h: 42 } } },
+  // GRABBER HAND (`enemyGrab`): hides above a ceiling (150) → follows you along it while a shadow grows under you (151) →
+  // drops (152) → caught: carries you up (153) and you are put back at your checkpoint · missed: waits (154), goes back up
+  // (155). `speed` = how fast it drops, `vis` = how far down it reaches. Two hits beat it; one knocks it back up.
+  grab:     { w: 66, h: 60, speed: 520, hp: 2, stomp: 0, grab: 1, vis: 500, skins: { hand: {}, claw: { w: 64, h: 60 } } },
 };
 // round 23 — a cactus starts with this many segments under its head, by Size; its box is as tall as its stack. ⚠️ The
 // client's `cactusStart` / `cactusK`.
@@ -20076,7 +20088,9 @@ function enemySoft(room, v) { return v > 0 && ENEMY_SOLID[v] === 1 && matStrengt
 // Whether landing on it RIGHT NOW kills it. ⚠️ The client has the same rule (`enemyStompable`) — they must agree.
 function enemyStompOk(K, st) { if (K.crush) return false; if (K.roll) return st !== 1; if (K.charge) return st === 2;
   if (K.crawl) return st === 20 || st >= 24; if (K.burrow && ((st >= 44 && st <= 47) || st === 41)) return false;   // (round 18: out of the ground, st 40, it is just a creature)
-  if (K.leap && st === 90) return false; if (K.bones && st >= 80) return false; return !!K.stomp; }
+  if (K.leap && st === 90) return false; if (K.bones && st >= 80) return false;
+  if (K.fire && K.douse && st === 141) return true;      // (round 27: a doused salamander can be stomped)
+  return !!K.stomp; }
 // ⭐ round 16: a hit that does NO DAMAGE to this kind — it does something else instead (hides a shell creature / kicks its
 // shell; collapses a bone pile). ⚠️ The client has the same rule (`enemyNoDamage` in 01).
 function enemyNoDamage(K, how) { return (K.shell && (how === 'stomp' || how === 'punch' || how === 'kick')) || (K.bones && how !== 'slam' && how !== 'crush'); }
@@ -20131,6 +20145,7 @@ function enemySpawnBody(o) {
            ...(K.crawl ? { x: Math.round(o.x), y: Math.round(o.ehang ? o.y - K.h / 2 : o.y + K.h / 2), st: o.ehang ? 22 : 20, mv: 1, acc: 0, trav: 0 } : null),
            ...(K.burrow ? { st: 40 } : null), ...(K.crab ? { st: 60 } : null), ...(K.leap ? { st: 90 } : null), ...(K.mimic ? { st: 110 } : null),
            ...(K.cactus ? { cn: cactusStart(o.esz || 1), cmax: cactusStart(o.esz || 1) } : null), ...(K.cloud ? { kids: [], hy: o.y + K.h / 2 } : null),
+           ...(K.acid ? { trail: [] } : null), ...(K.grab ? { st: 150, cy: null, y: o.y + K.h / 2 } : null),   // (round 27)
            ...(K.slime ? { blobs: [{ x: o.x, y: o.y + K.h / 2, vx: 0, vy: 0, s: slimeStart(o.esz || 1), ground: false, next: 0 }], clung: [] } : null) };
 }
 // ⭐ round 17: a THIEF carrying something lets go of it — the powerup goes back to whoever it was taken from (`to`); `to`
@@ -20195,13 +20210,16 @@ function enemyStep(room, R, E, o, now, dt) {
   if (K.fly) { enemyFly(room, E, o, K, now, dt, solid, stunned, spd, vis); return; }
   if (K.crush) { enemyCrush(room, E, o, K, now, dt, solid, floorAt, wallAt, spd, vis, o.estop === 'reach' ? rng : 0); return; }
   if (K.ghost) { enemyGhost(room, E, o, K, now, dt, stunned, spd, vis); return; }
-  if (K.crawl) { enemyCrawl(room, R, E, o, K, now, dt, solid, stunned, spd, vis, rng); return; }
+  if (K.crawl) { enemyCrawl(room, R, E, o, K, now, dt, solid, stunned, spd, vis, rng); if (K.acid) enemyAcidTrail(room, E, K, now, grid); return; }
   if (K.leap) { enemyLeap(room, E, o, K, now, dt, solid, vis); return; }
   if (K.slime) { enemySlime(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, rng); return; }
   if (K.cloud) { enemyCloud(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, grid); return; }
   if (K.thrower && E.st === 134) { enemyFlung(room, R, E, K, now, dt, solid, floorAt); return; }
+  if (K.grab) { enemyGrab(room, R, E, o, K, now, dt, solid, spd, vis, rng); return; }   // (round 27)
   // ── what the second batch is doing this tick: `mv` is its ground speed (the shared walking code below does the rest)
   let mv = spd;
+  // ⭐ round 27 — a FIRE CREATURE sets alight what it touches, and liquid puts it out (`enemyFireTick`); doused, it stands
+  if (K.fire) { if (enemyFireTick(room, R, E, K, now, st)) return; if ((E.st | 0) === 141) mv = 0; }
   // ⭐ round 16 — the shell creature in its shell, and the bone pile in pieces: the walking code below moves it (or not)
   if (K.shell) {
     E.st = E.st | 0;
@@ -20714,7 +20732,7 @@ function enemyCrawl(room, R, E, o, K, now, dt, solid, stunned, spd, vis, rng) {
     }
   }
   // on a ceiling: somebody under it, in sight, within how far it sees → it drops on them on its thread
-  if (gi === 2 && now >= (E.next || 0)) {
+  if (gi === 2 && now >= (E.next || 0) && !K.acid) {    // (round 27: the acid creature has no thread)
     const p = enemyTarget(room, E.x, E.y, hw + 16, 0, vis, now);
     if (p && enemySees(solid, E.x, E.y + h / 2, p.x, p.y)) { E.ax = E.x; E.ay = E.y; E.y += h; E.vy = 0; E.st = 24; return; }
   }
@@ -21021,6 +21039,97 @@ function enemyCloudKids(room, R, E, now, dt, solid, floorAt) {
     k.y = ny;
     if (k.y > (R.worldH || 1e7) || Math.abs(k.x - E.sx) > 1500 || k.y > E.hy + 3000) E.kids.splice(i, 1);
   }
+}
+// ⭐⭐ ROUND 27 — THE FIRE CREATURE. Every ~0.2s it lights what can burn in its box and a cell around it — the Fire tool's
+// own `igniteBox`, so it is the world's real fire and spreads as that does. Liquid in its box (anything but lava and oil):
+// the living flame is out for good ('douse' — the client gutters it to ash); the salamander is DOUSED (141) for 6s, kept
+// doused while it stays wet, then relights. Returns true when it is gone.
+function enemyFireTick(room, R, E, K, now, cs) {
+  const CELL = TERRAIN_CELL, hw = K.w / 2, amt = cs && cs.fineAmt, tot = cs && cs.fineTotal, ROWS = cs && cs.rows;
+  let wet = false;
+  if (amt && tot && (cs.fineSub || 1) === 1) {
+    const c0 = Math.floor((E.x - hw * 0.6) / CELL), c1 = Math.floor((E.x + hw * 0.6) / CELL), r0 = Math.floor((E.y - K.h * 0.7) / CELL), r1 = Math.floor((E.y - 2) / CELL);
+    for (let c = c0; c <= c1 && !wet; c++) for (let r = r0; r <= r1 && !wet; r++) {
+      if (c < 0 || r < 0 || c >= cs.cols || r >= ROWS) continue;
+      const i = c * ROWS + r; if (!(tot.g(i) > 0)) continue;
+      const pa = amt.rp(i), b = amt.o(i);
+      if (pa[b + 1] > 0 || pa[b + 2] > 0 || pa[b + 3] > 0 || pa[b + 4] > 0) wet = true;   // quicksand, brine, acid, water — not lava (0), not oil (5)
+    }
+  }
+  if (wet) {
+    if (!K.douse) { enemyKill(room, R, E, 'douse', null); return true; }
+    if ((E.st | 0) !== 141) { E.st = 141; io.to(room).emit('enemy-ev', { id: E.id, k: 'hit', how: 'douse' }); }
+    E.until = now + 6000; return false;
+  }
+  if ((E.st | 0) === 141) { if (now < E.until) return false; E.st = 0; }
+  if (now >= (E.burnAt || 0)) { E.burnAt = now + 200; igniteBox(room, E.x, E.y - K.h / 2, hw * 0.7, K.h / 2); }
+  return false;
+}
+// ⭐⭐ ROUND 27 — THE ACID CREATURE'S TRAIL. Each surface cell it crawls OFF (never the one it is on — so it cannot eat away
+// its own footing) is remembered; ~0.9s later it is bitten — a bite every 0.4s takes one point of the cell's strength, as
+// liquid acid does — until it is gone. Bedrock, glass, a cell of an object, and what cannot be broken are left alone. After
+// 6s a cell is forgotten. ⚠️ The glowing trail the player sees is the CLIENT's (`drawAcidTrail`), from where it has been.
+function enemyAcidTrail(room, E, K, now, grid) {
+  if ((E.st | 0) >= 20 && (E.st | 0) <= 23) {
+    const g = CRAWL_G[(E.st | 0) - 20], c = Math.floor((E.x + g[0] * 0.5) / TERRAIN_CELL), r = Math.floor((E.y + g[1] * 0.5) / TERRAIN_CELL);
+    const i = c >= 0 && r >= 0 && c < grid.geom.cols && r < grid.geom.rows ? c * grid.geom.rows + r : -1;
+    if (i !== E.acell) { if (E.acell >= 0 && E.trail.length < 96 && !E.trail.some(q => q.i === E.acell)) E.trail.push({ i: E.acell, t: now + 900 }); E.acell = i; }
+  }
+  if (!E.trail.length) return;
+  const hp = ensureTerrainHp(room), mats = roomMats[room] || {}, ROWS = grid.geom.rows, FLOOR = Math.floor(roomFloorTop(room) / TERRAIN_CELL), gone = [];
+  for (let k = E.trail.length - 1; k >= 0; k--) {
+    const q = E.trail[k];
+    if (now < q.t) continue;
+    if (now - q.t > 6000 || q.i === E.acell) { E.trail.splice(k, 1); continue; }
+    const v = peekCellAt(grid, q.i);
+    if (v <= 0 || isFluidId(v) || isBodyId(v) || v === 16 || (q.i % ROWS) >= FLOOR || !matBreakableSrv(mats, v) || !(hp.g(q.i) > 0)) { E.trail.splice(k, 1); continue; }
+    if (hp.g(q.i) > 1) { hp.s(q.i, hp.g(q.i) - 1); q.t = now + 400; continue; }
+    grid.s(q.i, 0); hp.s(q.i, 0); gone.push(q.i, 0); E.trail.splice(k, 1);
+    if ((q.i % ROWS) > 0 && isPowderId(peekCellAt(grid, q.i - 1))) powderSet(room).add(q.i - 1);   // what lay on it falls
+    seedFineReactAround(room, q.i);
+  }
+  if (gone.length) wireFanout(room, 'terrain-set', { cells: gone });
+}
+// ⭐⭐ ROUND 27 — THE GRABBER HAND. Its HOME is the underside of the ceiling over where it was put (`E.cy`, found once; with
+// none within ~600px it hides where it was put). `E.y` is the bottom of the hand, as every enemy's feet; hidden (150) it sits
+// with its bottom AT the ceiling, wholly inside it. Somebody under it — within its range of home, within `vis` below, in
+// sight — and it follows them along the ceiling for 0.9s while their shadow grows (151), then drops (152) at `speed`. What
+// it reaches is decided on the screens of the players it touches (`enemy-grab` → 153, carried up; the carried player's own
+// screen sends them back to their checkpoint when it gets there). The floor, or the end of its reach, and it waits (154),
+// then goes back up (155) and hides. A hit knocks it back up (and drops whoever it is carrying); two beat it.
+function enemyGrab(room, R, E, o, K, now, dt, solid, spd, vis, rng) {
+  const CELL = TERRAIN_CELL, hw = K.w / 2;
+  if (E.cy == null) {
+    E.cy = o.y - K.h / 2;
+    for (let y = o.y; y > o.y - 600; y -= 4) if (solid(Math.floor(o.x / CELL), Math.floor(y / CELL))) { E.cy = Math.floor(y / CELL) * CELL + CELL; break; }
+    E.y = E.cy; E.x = o.x;
+  }
+  const st = E.st | 0;
+  if (st === 150) {
+    E.y = E.cy;
+    if (now < (E.next || 0)) return;
+    const p = enemyTarget(room, E.x, E.cy, Math.min(rng, 1e5) + hw, 0, vis, now);
+    if (p && Math.abs(p.x - E.sx) <= rng + hw && enemySees(solid, p.x, E.cy + 2, p.x, p.y)) { E.st = 151; E.until = now + 900; E.tgt = p.sid; }
+    return;
+  }
+  if (st === 151) {                                       // the warning: it follows its target along the ceiling
+    const m = enemyTargets.get(room), p = m && m.get(E.tgt);
+    if (p && now < E.until - 250) { const tx = Math.max(E.sx - rng, Math.min(E.sx + rng, p.x)), s = 260 * dt; E.x += Math.max(-s, Math.min(s, tx - E.x)); E.dir = tx >= E.x ? 1 : -1; }
+    if (now >= E.until) { E.st = 152; E.vy = 120; }
+    return;
+  }
+  if (st === 152) {
+    E.vy = Math.min(spd, E.vy + 2400 * dt);
+    const ny = E.y + E.vy * dt;
+    let stop = ny >= E.cy + vis + K.h;
+    for (let y = Math.floor(E.y); y <= Math.ceil(ny) && !stop; y += 2) if (solid(Math.floor((E.x - hw * 0.5) / CELL), Math.floor(y / CELL)) || solid(Math.floor((E.x + hw * 0.5) / CELL), Math.floor(y / CELL))) { E.y = y; stop = true; }
+    if (stop) { E.st = 154; E.until = now + 650; E.vy = 0; if (ny >= E.cy + vis + K.h) E.y = E.cy + vis + K.h; return; }
+    E.y = ny; return;
+  }
+  if (st === 154) { if (now >= E.until) E.st = 155; return; }
+  // 153 carrying / 155 going back: up to the ceiling at a steady pace (carrying, slower) — then hidden, and a rest
+  E.y -= (st === 153 ? 300 : 420) * dt;
+  if (E.y <= E.cy) { E.y = E.cy; E.st = 150; E.carry = null; E.tgt = null; E.next = now + 2500; }
 }
 // ⭐ round 17 — THE SPLITTING SLIME: each blob hops on its own — at somebody it can reach (in its strip, within how far it
 // sees), otherwise a small idle hop about its range. Smaller blobs hop a bit faster. Walls bounce a blob back; it lands on
@@ -21524,6 +21633,7 @@ function enemyTick() {
       //  dropper's Spikies)
       if (E.cn != null) out[out.length - 1][7] = { n: E.cn, g: E.growT0 && now >= E.growT0 ? Math.round(Math.min(1, (now - E.growT0) / 900) * 100) / 100 : 0 };
       else if (E.kids) out[out.length - 1][7] = { kids: E.kids.map(k => [Math.round(k.x), Math.round(k.y), k.dir, k.ball]), ...(E.rider && now - E.riderAt < 600 ? { rider: E.rider } : null) };
+      else if (E.cy != null) out[out.length - 1][7] = { cy: Math.round(E.cy), c: E.carry || 0 };   // (round 27: a grabber's ceiling, and who it is carrying)
     }
     for (const [id, E] of R.E) if (!live.has(id)) {
       // (round 19: a mimic taken out of the Level takes its object with it)
@@ -24904,6 +25014,15 @@ io.on('connection', (socket) => {
   });
   // ⭐ round 23 — SOMEBODY IS RIDING A BEATEN CLOUD (122) and steering it: where it is now, from their screen (that is where
   // the ride is felt). Bounded by a sane step per message, so a forged one can only nudge it.
+  // ⭐ round 27 — A GRABBER HAND CAUGHT ME (decided on my screen, as every touch is): it carries me up (153). First to touch it
+  // wins; it must be out (falling or waiting at the bottom) and near where I last said I was.
+  socket.on('enemy-grab', ({ id }) => {
+    const room = currentAvatarRoom; if (!room) return;
+    const R = roomEnemies.get(room); const E = R && R.E.get(id);
+    if (!E || E.dead || !ENEMY_KINDS[E.k] || !ENEMY_KINDS[E.k].grab || ((E.st | 0) !== 152 && (E.st | 0) !== 154)) return;
+    const p = lastBodyPos(room, socket.id); if (p && Math.hypot(p.x - E.x, p.y - E.y) > 400) return;
+    E.st = 153; E.carry = socket.id; E.vy = 0;
+  });
   socket.on('enemy-ride', ({ id, x, y }) => {
     const room = currentAvatarRoom; if (!room || !isFinite(x) || !isFinite(y)) return;
     const R = roomEnemies.get(room); const E = R && R.E.get(id);
@@ -24960,6 +25079,22 @@ io.on('connection', (socket) => {
       // dizzy already (or walked into while dizzy): sent flying away from the hitter · otherwise: dizzy for 3s
       if ((E.st | 0) === 133 || how === 'kick') { E.st = 134; E.dir = d; E.vx = d * 520; E.vy = -380; E.ground = false; E.flyAt = now; E.stun = 0; E.tgt = socket.id; }   // (E.tgt: whose screen digs a cinder golem's crater)
       else { E.st = 133; E.until = now + 3000; E.vx = 0; E.stun = 0; }
+      io.to(room).emit('enemy-ev', { id, k: 'hit', how }); return;
+    }
+    // ⭐⭐ ROUND 27 — a FIRE CREATURE: doused (141), any hit beats it; lit, only being squashed does — a punch knocks it back
+    if (K.fire) {
+      if (now - (E.hitAt || 0) < 150) return; E.hitAt = now;
+      if ((E.st | 0) === 141 || how === 'crush') { enemyKill(room, R, E, how, socket.id); return; }
+      if (how === 'stomp') return;                         // (it can't be stomped — the stomper dies)
+      const d = dir < 0 ? -1 : 1;
+      E.stun = now + 450; E.vx = d * 260; E.vy = -220; E.ground = false; E.dir = -d;
+      io.to(room).emit('enemy-ev', { id, k: 'hit', how }); return;
+    }
+    // …a GRABBER HAND: hidden, nothing reaches it; out, a hit takes one (two beat it), knocks it back up and lets go
+    if (K.grab) {
+      if ((E.st | 0) <= 151 || how === 'stomp' || now - (E.hitAt || 0) < 150) return; E.hitAt = now;
+      if (!E.inv) { E.hp -= how === 'crush' ? Infinity : (how === 'power' || how === 'slam') ? 3 : 1; if (E.hp <= 0) { enemyKill(room, R, E, how, socket.id); return; } }
+      E.st = 155; E.carry = null; E.vy = 0;
       io.to(room).emit('enemy-ev', { id, k: 'hit', how }); return;
     }
     if (K.cactus) {
