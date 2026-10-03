@@ -21060,9 +21060,18 @@ function enemyThiefParkour(R, E, K, now, solid, floorAt, wallAt, mv) {
   const headR = Math.ceil(K.h / CELL);
   if (solid(lc, -1)) return false;                       // (the world's side edge: `solid` is true there at any height)
   // 1 · a wall ahead, taller than a step (the walking code steps up five cells for a thief by itself — round 21)
-  let bot = -1; for (let r = feetR; r >= feetR - 3; r--) if (blk(lc, r)) { bot = r; break; }
+  // ⭐ round 22: judged over the next FOUR columns, not just the one at its nose — a steep stepped face (each step under a
+  //   step's height, leaning back a little per step) was walked up like stairs it could not stand on, and it slid back off
+  //   it again and again; over a few columns it is plainly a wall.
+  let bot = -1, top = 0;
+  for (let k = 0; k <= 3; k++) {
+    const c = lc + d * k; let b = -1;
+    for (let r = feetR; r >= feetR - 3; r--) if (blk(c, r)) { b = r; break; }
+    if (b < 0) continue;
+    let t = b; while (t > feetR - 60 && blk(c, t - 1)) t--;
+    if (bot < 0 || t < top) { bot = b; top = t; }
+  }
   if (bot >= 0) {
-    let top = bot; while (top > feetR - 60 && blk(lc, top - 1)) top--;
     const hgt = (feetR - top + 1) * CELL;
     if (hgt > 5 * CELL) {
       let clear = true; for (let r = top - headR; r < top && clear; r++) if (blk(lc, r) || blk(lc + d, r)) clear = false;
@@ -21114,24 +21123,37 @@ function enemyThiefParkour(R, E, K, now, solid, floorAt, wallAt, mv) {
 // grabbed, leapt… every tick or two. Now it FOLLOWS THE FACE: each tick it finds the wall within four cells of its side at
 // its feet and at its middle, slides in or out to stay flat against it, and is only over the top when there is no wall
 // beside either. Faster: ~240 px/s empty, ~420 carrying. ⚠️ The client's `enemyClimbPull` draws its pulls at this speed.
+// ⭐ round 22 (user, with a picture of a leaning, stepped face: "it will frequently not be flush with the terrain when climbing
+// it, or it will be too far overlapping with it. I even witnessed it crawl directly upwards through the terrain"): it rose
+// ~21px a tick but could slide sideways only 6px to follow the face, and it looked for the face starting at its own edge — so
+// where the face stepped back it fell behind (not flush), and where it stepped out it ran into it, and once the rock was
+// past its edge it was never found again (straight up through it). Now it climbs in sub-steps of at most a cell; at each it
+// finds the face across its whole height (feet, middle, head), scanning from BEHIND its middle towards the wall so rock that
+// has pushed into its body is found too, and SITS FLAT against the part sticking out furthest. A ceiling over its head that the
+// face does not explain stops the climb. Faster again carrying (round 22: ×9).
 function enemyThiefClimb(E, K, now, dt, solid, wallAt, spd) {
   const CELL = TERRAIN_CELL, hw = K.w / 2, d = E.dir, carry = E.st === 103;
   const blk = (c, r) => solid(c, r) || wallAt(c * CELL + CELL / 2, r * CELL + 1, r * CELL + CELL - 1);
   E.vx = 0; E.vy = 0; E.ground = false;
-  E.y -= Math.max(240, spd * (carry ? 7 : 4)) * dt;
-  // the face at a height: the first blocked column from its body's edge outward (up to four cells), or null
-  const faceAt = (y) => { const r = Math.floor(y / CELL), c0 = Math.floor((E.x + d * (hw - 2)) / CELL);
-    for (let k = 0; k <= 4; k++) if (blk(c0 + d * k, r)) return d > 0 ? (c0 + d * k) * CELL : (c0 + d * k + 1) * CELL; return null; };
-  const bc = Math.floor(E.x / CELL);
-  if (blk(bc, Math.floor((E.y - K.h - 2) / CELL)) || now - (E.climbT || now) > 7000) {
-    E.dir = -d; E.vx = -d * 140; E.st = carry ? 105 : 104; return;
+  if (now - (E.climbT || now) > 7000) { E.dir = -d; E.vx = -d * 140; E.st = carry ? 105 : 104; return; }
+  // the face at a height: scanning from its far side, across its body and up to four cells past it, the first blocked column
+  // (from a quarter of its half-width behind its middle, not its very far edge: in a narrow shaft the far wall would be found)
+  const faceAt = (y) => { const r = Math.floor(y / CELL), c0 = Math.floor((E.x - d * hw * 0.25) / CELL), n = Math.ceil(hw * 1.25 / CELL) + 4;
+    for (let k = 0; k <= n; k++) { const c = c0 + d * k; if (blk(c, r)) return d > 0 ? c * CELL : (c + 1) * CELL; } return null; };
+  let left = Math.max(240, spd * (carry ? 9 : 4)) * dt;   // ⚠️ the client's `enemyClimbPull` paces its frames by this speed
+  while (left > 0) {
+    const step = Math.min(CELL, left); left -= step;
+    const y1 = E.y - step;
+    const fs = [faceAt(y1 - 3), faceAt(y1 - K.h / 2), faceAt(y1 - K.h + 3)].filter(f => f != null);
+    if (!fs.length) { E.y = y1; E.vy = -300; E.vx = d * 200; E.st = carry ? 105 : 104; E.leapAt = now; return; }   // over the top
+    const face = d > 0 ? Math.min(...fs) : Math.max(...fs), x1 = face - d * (hw + 0.5);
+    // nothing in the way of its body at the new place (a ceiling the face does not account for): give up and drop back
+    const bc = Math.floor(x1 / CELL);
+    if (blk(bc, Math.floor((y1 - K.h + 1) / CELL)) && blk(Math.floor((x1 - d * (hw - 2)) / CELL), Math.floor((y1 - K.h + 1) / CELL))) {
+      E.dir = -d; E.vx = -d * 140; E.st = carry ? 105 : 104; return;
+    }
+    E.x = x1; E.y = y1;
   }
-  const fFeet = faceAt(E.y - 3), fMid = faceAt(E.y - K.h / 2);
-  if (fFeet == null && fMid == null) { E.vy = -300; E.vx = d * 200; E.st = carry ? 105 : 104; E.leapAt = now; return; }   // over the top
-  // stay flat against whichever part of the face sticks out furthest towards it
-  const face = fFeet == null ? fMid : fMid == null ? fFeet : (d > 0 ? Math.min(fFeet, fMid) : Math.max(fFeet, fMid));
-  const want = face - d * (hw + 0.5);
-  E.x += Math.max(-6, Math.min(6, want - E.x));
 }
 // ⭐ round 19 — A SANDWORM CRAWLING ON THE SURFACE (st 40). It glides along the top of the ground, its feet easing up and
 // down to it (a player-sized step is climbed, not jumped in whole cells), and falls off a drop. It never flips round on
