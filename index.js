@@ -14973,7 +14973,10 @@ const CREATION_OBJS_MAX  = 200;      // the clipboard's own cap
 const CREATION_MATS_MAX  = 160;      // a Level has 160 custom-block slots, so more than that could never land
 const CREATION_DIM_MAX   = 400;      // cells across / down, as templates had
 const CREATION_STR_MAX   = 8192;     // any one string in the blob (a stamp's content is the longest legitimate one)
-const CREATION_NODES_MAX = 40000;    // total values walked — a bound on shape as well as on size
+// (#184 round 35: 40000 → 200000. A creator-drawn enemy is up to 40 frames of RLE runs — three values a run — and a detailed
+//  one passed 40k long before it came near the 600KB byte cap, which is the bound that actually limits size; at that cap a
+//  blob cannot hold more than ~300k values, so this still bounds the walk.)
+const CREATION_NODES_MAX = 200000;   // total values walked — a bound on shape as well as on size
 // 🟥 A REFERENCE, NEVER BYTES — the shared-face library's rule, and it has to hold here for the same reason.
 // A creation carries pictures (a painting's layers, a stamp's image) and every one of them travels as an
 // `i:<hash>` into the picture store, which has its OWN size cap, per-user count and takedown. Let a `data:`
@@ -15055,15 +15058,18 @@ registerLibrary({
     // said nothing about why. The client's own shelf has classified them this way since increment 3b; this is
     // the same partition, on the side that decides what everybody else's search finds.
     const LOOK_KIND = { gate: 'door', spikes: 'spikes', shooter: 'shooter', bomb: 'bomb', belt: 'belt' };
+    // (#184 round 35: …and a CREATOR-DRAWN ENEMY is an area underneath — filed as an enemy, as the client's shelf files it)
     const kind = one
-      ? ((one.type === 'platform' && LOOK_KIND[one.look]) || KIND_OF[typeof one.type === 'string' ? one.type : ''] || 'marker')
+      ? ((one.type === 'platform' && LOOK_KIND[one.look]) || (one.type === 'region' && one.part === 'enemy' && one.edraw ? 'enemy' : '')
+         || KIND_OF[typeof one.type === 'string' ? one.type : ''] || 'marker')
       : 'template';
     // …and the qualities, which are things you might genuinely want to filter ON rather than restatements of
     // the kind: does it move by itself, does it animate, has the author given it named arrangements.
     const f = new Set([kind]);
     for (const o of objs) {
       if (o && o.type === 'painting' && Array.isArray(o.frames) && o.frames.length > 1) f.add('animated');
-      if (o && (o.path || o.spin || o.osc)) f.add('moving');
+      if (o && (o.path || o.spin || o.osc || o.emov)) f.add('moving');   // (round 35: a drawn enemy's own movement counts)
+      if (o && o.edraw && o.edraw.st && typeof o.edraw.st === 'object' && Object.values(o.edraw.st).some(a => Array.isArray(a) && a.length > 1)) f.add('animated');
       if (o && Array.isArray(o.poses) && o.poses.length) f.add('poses');
     }
     if (solid) f.add('terrain');
