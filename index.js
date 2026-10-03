@@ -20189,7 +20189,7 @@ function enemyStep(room, R, E, o, now, dt) {
     if (enemySoft(room, peekCellAt(grid, cc * ROWS + cr))) { E.st = 44; E.vy = 0; E.ground = false; }
     else if (solid(cc, cr)) { let r = cr; for (let n = 0; n < 80 && r > 0 && solid(cc, r); n++) r--; E.y = (r + 1) * CELL; E.st = 40; E.vy = 0; }
   }
-  if (K.worm && E.st === 41) { enemyWormArch(room, E, K, now, dt, solid, grid); enemyWormTrail(E, K); return; }
+  if (K.worm && E.st === 41) { enemyWormArch(room, E, K, now, dt, solid, grid, floorAt); enemyWormTrail(E, K); return; }
   if (K.burrow && (E.st === 44 || E.st === 45 || E.st === 46)) { if (!stunned || E.flush) enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid); if (K.worm) enemyWormTrail(E, K); return; }
   // ⭐ round 17 (user: "burrowers should be able to pop out of the sides of walls as well, rotated accordingly"): out of a
   // WALL FACE — 47 bursting out, 48 out, 49 going back in. Its feet are on the face (`E.x`), its body sticks out sideways
@@ -20283,11 +20283,23 @@ function enemyStep(room, R, E, o, now, dt) {
       E.st = E.st | 0;
       if (E.st === 102 || E.st === 103) { enemyThiefClimb(E, K, now, dt, solid, wallAt, spd); return; }
       if (thiefCarrying(E.st)) {
-        // (nobody within ~600px: it stops and stands there, still holding it — it does not run to the edge of the world)
-        const p = enemyTarget(room, E.x, E.y - K.h / 2, 600, -300, 300, now);
-        // (round 19: much faster again · round 18: faster — "scurry away with some speed")
-        // 🟥 round 19: the "nobody near: stand still" half of this line had ended up INSIDE the comment, so it never ran
-        if (p) { E.dir = p.x >= E.x ? -1 : 1; mv = spd * 8; E.hunt = true; } else { mv = 0; E.hunt = false; }
+        // ⭐⭐ round 20 (user: "it should keep running away from the player it stole from … as a character trait it should seek
+        // out higher places to run and hide to, or lower places if that is what is nearby — a large tree, a mountain, or down
+        // a mineshaft, forcing you to follow"). It flees THE PLAYER IT ROBBED (`E.victim`), wherever they are — not whoever
+        // happens to be within 600px — and makes for a HIDING PLACE (`enemyThiefHide`): the highest ground or the deepest
+        // drop near it, away from them. There it sits, until they come within ~350px; then it is off to the next one.
+        const TM = enemyTargets.get(room), vt = E.victim && TM && TM.get(E.victim);
+        const threat = vt && now - vt.t < 10000 ? vt : enemyTarget(room, E.x, E.y - K.h / 2, 600, -300, 300, now);
+        if (now >= (E.hideAt || 0)) { E.hideAt = now + 1500; E.hide = enemyThiefHide(E, K, solid, threat); }
+        const G = E.hide, close = threat && Math.hypot(threat.x - E.x, threat.y - E.y) < 350;
+        E.goLow = !!(G && G.low);
+        if (G && Math.abs(G.x - E.x) < 24 && E.ground) {
+          if (close) { E.hideAt = 0; E.hideBad = G.x; E.dir = threat.x >= E.x ? -1 : 1; mv = spd * 11; E.hunt = true; }   // found: away, and somewhere else
+          else { mv = 0; E.hunt = false; }                                                                                  // hiding
+        } else if (G) { E.dir = G.x >= E.x ? 1 : -1; mv = spd * 11; E.hunt = true; }
+        // (round 20: faster again — ×11 · round 19: ×8 · round 18: "scurry away with some speed")
+        else if (threat) { E.dir = threat.x >= E.x ? -1 : 1; mv = spd * 11; E.hunt = true; }
+        else { mv = 0; E.hunt = false; }
       } else {
         const p0 = now >= (E.next || 0) ? enemyTarget(room, E.x, E.y - K.h / 2, vis, -160, 160, now) : null;
         const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 && enemySees(solid, E.x, eyeY, p0.x, p0.y) ? p0 : null;
@@ -20330,12 +20342,31 @@ function enemyStep(room, R, E, o, now, dt) {
         for (let y = y0; y <= y1 + 0.01; y += Math.min(CELL, Math.max(1, y1 - y0))) for (let x = x0; x <= x1 + 0.01; x += Math.min(CELL, Math.max(1, x1 - x0))) if (!softAt(x, y)) return false;
         return true; };
       const diggableBelow = (x, feet) => roomy(x - K.w * 0.3, x + K.w * 0.3, feet + CELL / 2 + 1, feet + K.h + CELL);
-      const diggableBeside = (xFace, s) => roomy(xFace, xFace + s * K.w * 0.6, E.y - K.h + CELL / 2, E.y - CELL / 2);
       const softBelow = () => diggableBelow(E.x, E.y);
       if (E.st === 40 && E.ground && softBelow()) { E.st = 44; E.y += K.h; E.vy = 0; E.ground = false; return; }
+      // ⭐ round 20 (user: "it still can't get into terrain if the wall isn't even enough … it might help if the sandworm can
+      // sort of rear up on its body and enter at different heights"): a wall is entered wherever along its face there is ROOM
+      // — tried from its own height up (a sandworm rears up to 1.2 bodies, a mole half a body), and the face itself may be
+      // ragged: at each height the first solid column within three cells is the face, and the soft box starts there. The
+      // old test wanted the whole box right beside its body, which an uneven face never gives.
+      const wallEntry = (s) => {
+        const maxUp = K.worm ? K.h * 1.2 : K.h * 0.5, x0 = E.x + s * (K.w / 2 + 2);
+        for (let dy = 0; dy <= maxUp; dy += CELL) {
+          const y = E.y - K.h / 2 - dy;
+          let face = null; for (let k = 0; k <= 3; k++) { const x = x0 + s * k * CELL; if (solid(Math.floor(x / CELL), Math.floor(y / CELL))) { face = x; break; } }
+          if (face == null) continue;
+          if (roomy(face, face + s * K.w * 0.5, y - K.h * 0.25, y + K.h * 0.25)) return { s, y, face };
+        }
+        return null;
+      };
       // (round 18: …or a SOFT WALL it has run up against — it digs straight in sideways)
-      if (E.st === 40 && !E.turn) { const sw = diggableBeside(E.x + K.w / 2 + 4, 1) ? 1 : diggableBeside(E.x - K.w / 2 - 4, -1) ? -1 : 0;
-        if (sw) { E.st = 44; E.dir = sw; E.x += sw * (K.w / 2); E.vy = 0; E.ground = false; return; } }
+      if (E.st === 40 && !E.turn && !E.rear) { const we = wallEntry(E.dir) || wallEntry(-E.dir);
+        if (we) {
+          E.dir = we.s; E.vy = 0;
+          // a sandworm REARS UP to it — `enemyWormCrawl` lifts the head along a curve into the face, then it is tunnelling
+          if (K.worm && Math.abs(E.y - K.h / 2 - we.y) > CELL) { E.rear = { t0: now, ms: 300 + Math.abs(E.y - K.h / 2 - we.y) * 3, x0: E.x, y0: E.y, x1: we.face + we.s * K.w * 0.3, y1: we.y + K.h / 2 }; E.ground = false; }
+          else { E.st = 44; E.x = we.face + we.s * K.w * 0.3; E.y = we.y + K.h / 2; E.ground = false; return; }
+        } }
       if (E.st === 43 && now > E.until && softBelow()) { E.st = 44; E.y += K.h + 2 * CELL; E.vy = 0; E.ground = false; E.next = now + 1500; return; }
       if (E.st === 40) {
         // ⭐ round 18 (user): OUT OF THE GROUND it does not hunt you — the mole runs about, the sandworm crawls, and both
@@ -20348,7 +20379,10 @@ function enemyStep(room, R, E, o, now, dt) {
           const bad = (x) => now < (E.badUntil || 0) && Math.abs(x - E.badX) < 120;
           for (let k = 1; k <= 60 && E.seekX == null; k++) for (const s of [-1, 1]) {
             const x = E.x + s * k * CELL; if (bad(x)) continue;
-            if (softAt(x, E.y - K.h / 2) && diggableBeside(x - s * CELL / 2, s)) { E.seekX = x; break; }   // a soft wall at its own height
+            // a soft wall at its own height — or, round 20, as high up as it can rear
+            let wall = false; for (let dy = 0; dy <= (K.worm ? K.h * 1.2 : K.h * 0.5) && !wall; dy += CELL) { const y = E.y - K.h / 2 - dy;
+              if (softAt(x, y) && roomy(x, x + s * K.w * 0.5, y - K.h * 0.25, y + K.h * 0.25)) wall = true; }
+            if (wall) { E.seekX = x; break; }
             for (let dy = -3 * CELL; dy <= 3 * CELL; dy += CELL) if (diggableBelow(x, E.y + dy) && !solid(Math.floor(x / CELL), Math.floor((E.y - CELL + dy) / CELL))) { E.seekX = x; break; }
             if (E.seekX != null) break;
           }
@@ -20945,6 +20979,33 @@ function mimicHitWake(room, S, hx) {
 // A leap is st 104 (105 carrying) until it lands — its speed was aimed, so it does not steer in the air.
 // ⚠️ Terrain cells and still objects/platforms are both obstacles (`wallAt` / `floorAt` are the objects').
 function thiefCarrying(st) { return st === 101 || st === 103 || st === 105; }
+// ⭐ round 20 — WHERE A THIEF HIDES: looking up to ~1000px either way (every second column), the top of the ground in each
+// column (high places: a tree, a mountain, a tall stack) and how far the ground drops below its own level (low places: a
+// shaft, a pit). Worth = how high / how deep, less a quarter of the distance; never towards the player it is fleeing, and
+// never the spot it was just found in (`hideBad`). Needs ≥100px up or ≥120px down to count. `low`: it drops in rather than
+// leaping the gap (`enemyThiefParkour`). null = nowhere: it just runs.
+function enemyThiefHide(E, K, solid, threat) {
+  const CELL = TERRAIN_CELL, c0 = Math.floor(E.x / CELL), r0 = Math.floor((E.y - 1) / CELL);
+  let best = null;
+  for (let k = 2; k <= 125; k += 2) for (const s of [-1, 1]) {
+    const c = c0 + s * k, dx = k * CELL, x = c * CELL + CELL / 2;
+    if (solid(c, -1)) continue;                                        // past the world's edge
+    if (threat && (threat.x - E.x) * s > 0 && Math.abs(threat.x - E.x) < dx + 250) continue;   // that way is them
+    if (E.hideBad != null && Math.abs(x - E.hideBad) < 160) continue;
+    // high: the top of the ground in this column, within 75 cells above its level
+    // (…and solid all the way down to its level — a cave's ROOF has a top too, and cannot be climbed to)
+    let top = null; for (let r = r0 - 75; r <= r0; r++) if (solid(c, r) && !solid(c, r - 1)) { top = r; break; }
+    if (top != null) for (let r = top; r <= r0; r++) if (!solid(c, r)) { top = null; break; }
+    const up = top != null ? (r0 + 1 - top) * CELL : 0;
+    // low: from its own level down, the first ground (a drop of more than 15 cells, up to 75)
+    let down = 0; if (!solid(c, r0) && !solid(c, r0 - 1)) { let r = r0 + 1; while (r < r0 + 75 && !solid(c, r)) r++; down = (r - r0 - 1) * CELL; }
+    const v = up >= 100 && up >= down ? up : down >= 120 ? down : 0;
+    if (!v) continue;
+    const score = v - dx * 0.25;
+    if (!best || score > best.score) best = { x, score, low: v === down && down >= 120 && !(up >= 100 && up >= down) };
+  }
+  return best;
+}
 function enemyThiefParkour(R, E, K, now, solid, floorAt, wallAt, mv) {
   const CELL = TERRAIN_CELL, hw = K.w / 2, d = E.dir, carry = thiefCarrying(E.st), leapSt = carry ? 105 : 104;
   const blk = (c, r) => solid(c, r) || wallAt(c * CELL + CELL / 2, r * CELL + 1, r * CELL + CELL - 1);
@@ -20974,7 +21035,8 @@ function enemyThiefParkour(R, E, K, now, solid, floorAt, wallAt, mv) {
   // 2 · a gap: nothing under the leading foot for five cells (no platform either), and ground again within ten cells
   let floorUnder = false;
   for (let r = feetR + 1; r <= feetR + 5 && !floorUnder; r++) if (blk(lc, r)) floorUnder = true;
-  if (!floorUnder && floorAt(lead, E.y - 1, E.y + 5 * CELL) === null) {
+  // (round 20: not when it is making for a hiding place DOWN there — then it drops in)
+  if (!floorUnder && !E.goLow && floorAt(lead, E.y - 1, E.y + 5 * CELL) === null) {
     for (let k = 2; k <= 10; k++) {
       const c = lc + d * k;
       for (let r = feetR - 2; r <= feetR + 3; r++) if (blk(c, r) && !blk(c, r - 1)) return leapTo(k * CELL + hw, (feetR + 1 - r) * CELL);
@@ -21024,6 +21086,21 @@ function enemyThiefClimb(E, K, now, dt, solid, wallAt, spd) {
 // the head's path over the loop. No room overhead for that: it just turns, as before.
 function enemyWormCrawl(E, K, now, dt, solid, floorAt, mv, rng) {
   const CELL = TERRAIN_CELL, hh = K.h / 2;
+  // ⭐ round 20 — REARING UP into a wall face (set by `wallEntry` in the burrow block): the head rises along a curve to the
+  // soft spot and goes in; then it is tunnelling
+  if (E.rear) {
+    const Rr = E.rear, u = Math.min(1, (now - Rr.t0) / Rr.ms);
+    E.x = Rr.x0 + (Rr.x1 - Rr.x0) * u * u; E.y = Rr.y0 + (Rr.y1 - Rr.y0) * Math.sin(u * Math.PI / 2); E.vy = 0; E.ground = false;
+    if (u >= 1) { E.rear = null; E.st = 44; E.next = now + 600; }
+    return;
+  }
+  // ⭐ round 20 (user: "it fell through the floor … and then it just crawled around aimlessly trapped in the floor"): never
+  // left INSIDE hard ground — if its head is in it, it is lifted to the surface above
+  if (!E.turn && solid(Math.floor(E.x / CELL), Math.floor((E.y - hh) / CELL)) && solid(Math.floor(E.x / CELL), Math.floor((E.y - 2) / CELL))) {
+    let r = Math.floor((E.y - 2) / CELL), n = 0; const c = Math.floor(E.x / CELL);
+    while (n++ < 200 && r > 0 && solid(c, r)) r--;
+    E.y = (r + 1) * CELL; E.vy = 0; E.ground = true;
+  }
   if (E.turn) {
     const T = E.turn, u = Math.min(1, (now - T.t0) / T.ms), a = Math.PI * u;
     E.x = T.cx + T.d * T.r * Math.cos(a); E.y = T.y0 - T.r * Math.sin(a); E.vy = 0; E.ground = false;
@@ -21067,14 +21144,23 @@ function enemyWormCrawl(E, K, now, dt, solid, floorAt, mv, rng) {
 }
 // the arch: the head flies (lightly — it hangs in the air), and dives back in where it comes down; on hard ground it lands
 // and crawls (st 40) instead
-function enemyWormArch(room, E, K, now, dt, solid, grid) {
-  const CELL = TERRAIN_CELL, ROWS = grid.geom.rows;
+// ⭐ round 20 (user: "it fell through the floor when it jumped out of some terrain and arced into the floor, and then it just
+// crawled around trapped in the floor"): coming down it lands on a still PLATFORM too (a page's floor is one — it only knew
+// terrain), and on terrain it lands on the SURFACE of the ground it hit, found from the first solid row its feet crossed
+// this tick and then up — it used to snap its feet to the top of whatever cell they had fallen into, i.e. inside the ground.
+function enemyWormArch(room, E, K, now, dt, solid, grid, floorAt) {
+  const CELL = TERRAIN_CELL, ROWS = grid.geom.rows, y0 = E.y;
   E.vy = Math.min(ENEMY_FALL_MAX, E.vy + ENEMY_G * 0.55 * dt);
   E.x += E.vx * dt; E.y += E.vy * dt;
   if (E.vy > 0 && now > E.until) {
-    const cx = E.x, cy = E.y - K.h / 2;
-    if (enemySoft(room, peekCellAt(grid, Math.floor(cx / CELL) * ROWS + Math.floor(cy / CELL)))) { E.st = 44; E.vx = E.vy = 0; E.next = now + 1800; }
-    else if (solid(Math.floor(cx / CELL), Math.floor(E.y / CELL))) { E.y = Math.floor(E.y / CELL) * CELL; E.st = 40; E.vx = E.vy = 0; E.ground = true; }
+    const cx = E.x, cy = E.y - K.h / 2, c = Math.floor(cx / CELL);
+    const land = (y) => { E.y = y; E.st = 40; E.vx = E.vy = 0; E.ground = true; };
+    if (enemySoft(room, peekCellAt(grid, c * ROWS + Math.floor(cy / CELL)))) { E.st = 44; E.vx = E.vy = 0; E.next = now + 1800; return; }
+    const pf = floorAt(cx, y0 - 1, E.y); if (pf !== null) { land(pf); return; }
+    for (let r = Math.floor(y0 / CELL); r <= Math.floor(E.y / CELL); r++) if (solid(c, r)) {
+      let t = r, n = 0; while (n++ < 200 && t > 0 && solid(c, t - 1)) t--;
+      land(t * CELL); return;
+    }
   }
 }
 function enemyBoom(room, R, E, K) {
@@ -24537,6 +24623,7 @@ io.on('connection', (socket) => {
     (E.loot || (E.loot = [])).push({ kind, dur: ['timed', 'hit', 'death', 'ever'].includes(dur) ? dur : 'death', ms: Math.max(0, Math.min(3600000, +ms || 0)) });
     // (round 19: caught mid-climb or mid-leap it keeps doing that, now carrying)
     E.st = E.st === 102 ? 103 : E.st === 104 ? 105 : 101; E.stun = 0;
+    E.victim = socket.id; E.hideAt = 0; E.hideBad = null;   // (round 20: it flees THIS player, however far)
     if (p && E.st === 101) E.dir = p.x >= E.x ? -1 : 1;
     io.to(room).emit('enemy-ev', { id, k: 'steal', kind, by: socket.id });
   });
