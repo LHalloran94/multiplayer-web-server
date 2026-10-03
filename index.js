@@ -17252,6 +17252,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // would put arbitrary author text into everybody's draw path; one that forgot the field entirely would
     // silently hand every client back a plain emoji stamp, which is the fault `probe_loose` S2 exists for.
     if (STAMP_LOOKS.includes(data.look)) obj.look = data.look;
+    // ⭐ #184 round 19 — A MIMIC'S OBJECT: which enemy it really is (`mimic`, that enemy's id) and the small odd detail
+    //   that gives it away (`mtell`, 0–8). Kept through every rebuild, or a reloaded mimic would lose its object and grow
+    //   a second one.
+    if (typeof data.mimic === 'string' && data.mimic.length <= 96) { obj.mimic = data.mimic; obj.mtell = Math.max(0, Math.min(8, data.mtell | 0)); }
     // ⭐ …and whether it goes up when something sets it off, as the seconds it burns for first. Clamped like
     // every other dial: a fuse of zero would blast in the same frame as the hit that lit it, and a very long
     // one is indistinguishable from a thing that never goes off.
@@ -17359,6 +17363,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (ENEMY_KINDS[obj.ek].crush) obj.estop = data.estop === 'reach' ? 'reach' : 'hit';
       if (data.efree === 1 || data.efree === 0) obj.efree = data.efree;   // round 18: roams anywhere (no range); unset = the kind's default
       if (data.epat === 'random' || data.epat === 'pace') obj.epat = data.epat;   // round 18: wanders at random / back and forth
+      if (data.erev === 'mouth' || data.erev === 'burst') obj.erev = data.erev;   // round 19: how a mimic gives itself away
     }
     // ⭐⭐ #176 — A POWERUP. A fifth presentation of the same area: a small square you touch, which hands you
     // one ability back. What it gives, how long that lasts, and how long the pickup takes to come back.
@@ -20013,7 +20018,7 @@ const ENEMY_KINDS = {
   // MIMIC: shut (st 110), looking like a crate / a present; somebody within `vis` → springs open (111) and hops after them
   // (112); lost them for 2s → back home (113) and shut again.
   // (round 18: every look is the SIZE OF THE OBJECT it pretends to be — the client draws it with that object's own picture)
-  mimic:    { w: 64, h: 64, speed: 50, hp: 2, stomp: 1, mimic: 1, vis: 90, skins: { crate: {}, metal: {}, barrel: { w: 58, h: 74 }, ball: { w: 58, h: 58 }, bomb: { w: 34, h: 34 }, powerup: { w: 40, h: 40 }, gift: { w: 44, h: 46 } } },
+  mimic:    { w: 64, h: 64, speed: 50, hp: 2, stomp: 1, mimic: 1, vis: 90, skins: { crate: {}, metal: {}, barrel: { w: 58, h: 74 }, ball: { w: 58, h: 58 } } },   // (round 19: bomb / powerup / present dropped)
   // THIEF (a raccoon): sneaks up on all fours (st 0), hopping over what is in its way; a touch steals the powerup you
   // were given last (decided on YOUR screen — `enemy-steal`) and it scurries away on its hind legs with it (101). Hit it
   // and it lets go — the powerup goes back to whoever lost it (`enemy-ev` 'loot'). Touching it never hurts you.
@@ -20270,41 +20275,44 @@ function enemyStep(room, R, E, o, now, dt) {
       } else E.turnAt = 0;
     } else if (K.thief) {
       // ⭐ round 17 — THE THIEF. Carrying (101): runs from whoever is nearest, fast, on its hind legs, for 20s — then it
-      // has got away with it. Otherwise it sneaks up on whoever it can see, any direction, hopping now and then.
+      // has got away with it. Otherwise it sneaks up on whoever it can see, any direction.
+      // ⭐ round 19 (user: "make the raccoon hard to catch: it climbs walls and jumps over obstacles and between objects
+      // and trees as it moves — remove the random on-the-spot hops"): the hops are gone; how it gets about is
+      // `enemyThiefParkour` (below, in the walking code) and `enemyThiefClimb`. States: 102 / 103 climbing (empty-handed /
+      // carrying), 104 / 105 leaping (the same). ⚠️ "Carrying" is 101, 103 or 105 everywhere (`thiefCarrying`).
       E.st = E.st | 0;
-      if (E.st === 101) {
+      if (E.st === 102 || E.st === 103) { enemyThiefClimb(E, K, now, dt, solid, wallAt, spd); return; }
+      if (thiefCarrying(E.st)) {
         // (nobody within ~600px: it stops and stands there, still holding it — it does not run to the edge of the world)
         const p = enemyTarget(room, E.x, E.y - K.h / 2, 600, -300, 300, now);
-        if (p) { E.dir = p.x >= E.x ? -1 : 1; mv = spd * 8; E.hunt = true; }   // (round 19: much faster again)   // (round 18: faster — "scurry away with some speed") else { mv = 0; E.hunt = false; }
+        // (round 19: much faster again · round 18: faster — "scurry away with some speed")
+        // 🟥 round 19: the "nobody near: stand still" half of this line had ended up INSIDE the comment, so it never ran
+        if (p) { E.dir = p.x >= E.x ? -1 : 1; mv = spd * 8; E.hunt = true; } else { mv = 0; E.hunt = false; }
       } else {
         const p0 = now >= (E.next || 0) ? enemyTarget(room, E.x, E.y - K.h / 2, vis, -160, 160, now) : null;
         const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 && enemySees(solid, E.x, eyeY, p0.x, p0.y) ? p0 : null;
         E.hunt = !!p;
-        if (p) {
-          E.dir = p.x >= E.x ? 1 : -1; mv = spd * 2;                       // (round 18: it sneaks faster too)
-          // "jumping between things around it": a hop now and then on the way to you
-          if (E.ground && now >= (E.hopAt || 0)) { if (E.hopAt) { E.vy = -460; E.ground = false; } E.hopAt = now + 1100 + Math.random() * 1400; }
-        }
+        if (p) { E.dir = p.x >= E.x ? 1 : -1; mv = spd * 2; }               // (round 18: it sneaks faster too)
       }
     } else if (K.mimic) {
-      // ⭐ round 17 — THE MIMIC: shut (110) and still until somebody comes within `vis`; then it springs open (111, a hop),
-      // and hops after them (112) while it can see them in its strip; 2s without → home (113) and shut.
+      // ⭐ round 17 — THE MIMIC. ⭐⭐ round 19 (user: "mimics should BE real objects — stack, collide, interact"): while it is
+      // hiding (110) it IS an ordinary object — a real crate/barrel/ball in the room, with `mimic` naming this enemy — and
+      // the enemy only follows where that object is (`enemyMimicDormant`). Somebody comes within `vis`, or hits the
+      // object: the object is taken away and the creature is there instead (111, revealing — long legs unfold), then
+      // scuttles after them (112) while it can see them; 2s without, it folds up where it stands (113) and becomes the
+      // object again THERE (user: "becomes the object again where it stops").
       E.st = E.st | 0;
-      if (E.st === 110) {
-        mv = 0;
-        const p = enemyTarget(room, E.x, E.y - K.h / 2, vis + K.w / 2, -vis, vis, now);
-        if (p && E.ground) { E.st = 111; E.until = now + 380; E.dir = p.x >= E.x ? 1 : -1; E.vy = -300; E.ground = false; }
-      } else if (E.st === 111) { mv = 0; if (now >= E.until) { E.st = 112; E.seenAt = now; } }
+      if (E.st === 110) { enemyMimicDormant(room, R, E, o, K, now, vis); return; }
+      if (E.st === 111) { mv = 0; if (now >= E.until) { E.st = 112; E.seenAt = now; } }
       else if (E.st === 112) {
         const p0 = enemyTarget(room, E.x, E.y - K.h / 2, 420, -160, 160, now);
         const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 && enemySees(solid, E.x, eyeY, p0.x, p0.y) ? p0 : null;
         if (p) { E.seenAt = now; E.dir = p.x >= E.x ? 1 : -1; }
         mv = spd * 2.4; E.hunt = !!p;
-        if (E.ground && now >= (E.hopAt || 0)) { E.vy = -340; E.ground = false; E.hopAt = now + 520; }
-        if (now - E.seenAt > 2000) { E.st = 113; E.until = now + 8000; }
+        if (now - E.seenAt > 2000) { E.st = 113; E.until = now + 650; }
       } else {
-        E.dir = E.sx >= E.x ? 1 : -1; mv = spd; E.hunt = false;
-        if (Math.abs(E.x - E.sx) < 6 || now >= E.until) { E.st = 110; mv = 0; }
+        mv = 0; E.hunt = false;
+        if (now >= E.until && E.ground) { mimicSettle(room, E, o, K); return; }
       }
     } else if (K.burrow) {
       // ⭐ THE BURROWER (user's pick: a mole): hidden under the ground it wanders like a walker, and all you see is a
@@ -20313,10 +20321,20 @@ function enemyStep(room, R, E, o, now, dt) {
       // ⭐ ROUND 13 (user): it really goes INTO soft ground (st 44, `enemyTunnel`). It only walks the surface as a mound
       // (st 40) where the ground under it is too hard to dig into.
       const softAt = (x, y) => enemySoft(room, peekCellAt(grid, Math.floor(x / CELL) * ROWS + Math.floor(y / CELL)));
-      const softBelow = () => softAt(E.x, E.y + CELL + 1) && softAt(E.x, E.y + 2 * CELL + 1);
+      // ⭐ round 19 (user: "a burrower froze heading for uneven ground with gaps in its surface"). Reproduced: it dug into
+      // soft ground that was TOO SMALL TO MOVE IN — a one-cell skin of dirt over stone, a pocket a few cells across — and,
+      // underground, could never move again (and could not be seen: it simply vanished, or sat churning). Ground counts as
+      // diggable only if there is ROOM in it: soft over a box most of its width wide and a body deep (below it, or beside
+      // it for a wall). The old test was two cells straight down.
+      const roomy = (xa, xb, ya, yb) => { const x0 = Math.min(xa, xb), x1 = Math.max(xa, xb), y0 = Math.min(ya, yb), y1 = Math.max(ya, yb);
+        for (let y = y0; y <= y1 + 0.01; y += Math.min(CELL, Math.max(1, y1 - y0))) for (let x = x0; x <= x1 + 0.01; x += Math.min(CELL, Math.max(1, x1 - x0))) if (!softAt(x, y)) return false;
+        return true; };
+      const diggableBelow = (x, feet) => roomy(x - K.w * 0.3, x + K.w * 0.3, feet + CELL / 2 + 1, feet + K.h + CELL);
+      const diggableBeside = (xFace, s) => roomy(xFace, xFace + s * K.w * 0.6, E.y - K.h + CELL / 2, E.y - CELL / 2);
+      const softBelow = () => diggableBelow(E.x, E.y);
       if (E.st === 40 && E.ground && softBelow()) { E.st = 44; E.y += K.h; E.vy = 0; E.ground = false; return; }
       // (round 18: …or a SOFT WALL it has run up against — it digs straight in sideways)
-      if (E.st === 40) { const sw = softAt(E.x + K.w / 2 + 4, E.y - K.h / 2) ? 1 : softAt(E.x - K.w / 2 - 4, E.y - K.h / 2) ? -1 : 0;
+      if (E.st === 40 && !E.turn) { const sw = diggableBeside(E.x + K.w / 2 + 4, 1) ? 1 : diggableBeside(E.x - K.w / 2 - 4, -1) ? -1 : 0;
         if (sw) { E.st = 44; E.dir = sw; E.x += sw * (K.w / 2); E.vy = 0; E.ground = false; return; } }
       if (E.st === 43 && now > E.until && softBelow()) { E.st = 44; E.y += K.h + 2 * CELL; E.vy = 0; E.ground = false; E.next = now + 1500; return; }
       if (E.st === 40) {
@@ -20324,17 +20342,26 @@ function enemyStep(room, R, E, o, now, dt) {
         // make for the NEAREST GROUND IT CAN DIG INTO (the first column either side, within ~60 cells, whose ground at
         // about its own level is soft). Nothing in reach: it just runs about.
         if (now >= (E.seekAt || 0)) {
+          const was = E.seekX;
           E.seekAt = now + 800; E.seekX = null;
+          // (round 19: …and never the spot it just gave up on — see `enemyTunnel`'s stuck test and the 6s limit below)
+          const bad = (x) => now < (E.badUntil || 0) && Math.abs(x - E.badX) < 120;
           for (let k = 1; k <= 60 && E.seekX == null; k++) for (const s of [-1, 1]) {
-            const x = E.x + s * k * CELL;
-            if (softAt(x, E.y - K.h / 2)) { E.seekX = x; break; }   // a soft wall at its own height
-            for (let dy = -3 * CELL; dy <= 3 * CELL; dy += CELL) if (softAt(x, E.y + CELL + 1 + dy) && softAt(x, E.y + 2 * CELL + 1 + dy) && !solid(Math.floor(x / CELL), Math.floor((E.y - CELL + dy) / CELL))) { E.seekX = x; break; }
+            const x = E.x + s * k * CELL; if (bad(x)) continue;
+            if (softAt(x, E.y - K.h / 2) && diggableBeside(x - s * CELL / 2, s)) { E.seekX = x; break; }   // a soft wall at its own height
+            for (let dy = -3 * CELL; dy <= 3 * CELL; dy += CELL) if (diggableBelow(x, E.y + dy) && !solid(Math.floor(x / CELL), Math.floor((E.y - CELL + dy) / CELL))) { E.seekX = x; break; }
             if (E.seekX != null) break;
           }
+          // making for one spot for 6s without getting into it (a gap it cannot get down into, a ledge it cannot get up
+          // onto): give it up for a while and look elsewhere
+          if (E.seekX != null && was != null && Math.abs(E.seekX - was) < 2 * CELL) { if (!E.seekT0) E.seekT0 = now; else if (now - E.seekT0 > 6000) { E.badX = E.seekX; E.badUntil = now + 12000; E.seekX = null; E.seekT0 = 0; } }
+          else E.seekT0 = 0;
         }
         const worm = !!K.worm;
-        if (E.seekX != null) { E.dir = E.seekX >= E.x ? 1 : -1; mv = spd * (worm ? 1.2 : 2.2); }
-        else { mv = spd * (worm ? 0.9 : 1.8); if (now >= (E.scurry || 0)) { E.scurry = now + 900 + Math.random() * 1800; if (Math.random() < 0.5) E.dir = -E.dir; } }
+        // (round 19: a SANDWORM never just flips round — it says which way it WANTS to go, and `enemyWormCrawl` turns it
+        //  the long way, up and over its own body; nor does it scurry back and forth at random, which a worm cannot do)
+        if (E.seekX != null) { const d = E.seekX >= E.x ? 1 : -1; if (worm) E.want = d; else E.dir = d; mv = spd * (worm ? 1.2 : 2.2); }
+        else { mv = spd * (worm ? 0.9 : 1.8); if (!worm && now >= (E.scurry || 0)) { E.scurry = now + 900 + Math.random() * 1800; if (Math.random() < 0.5) E.dir = -E.dir; } }
         E.hunt = E.seekX != null;
       } else if (E.st === 41) { mv = 0; if (now > E.until) { E.st = 42; E.until = now + 1600; } }
       else if (E.st === 42) { mv = 0; if (now > E.until) { E.st = 43; E.until = now + 400; } }
@@ -20358,6 +20385,9 @@ function enemyStep(room, R, E, o, now, dt) {
       E.st = now - (E.spitAt || 0) < 450 ? 6 : 0;
     }
   }
+  // ⭐ round 19 (user: "make the sandworm's crawl smoother when it's out of the ground"): a sandworm on the surface has its
+  // own crawl — no stepping in whole cells, no instant turn-round (see `enemyWormCrawl`)
+  if (K.worm && E.st === 40 && !stunned) { enemyWormCrawl(E, K, now, dt, solid, floorAt, mv, rng); enemyWormTrail(E, K); return; }
   // ⭐ round 18 (user: "options that aren't just moving back and forth, like more random patrolling"): `epat: 'random'` —
   // while it is only wandering (nothing has changed its pace), now and then it stops for a moment or turns round, so it
   // covers its range in uneven stretches instead of pacing wall to wall.
@@ -20369,6 +20399,9 @@ function enemyStep(room, R, E, o, now, dt) {
     }
     if (now < (E.pauseUntil || 0)) mv = 0;
   }
+  // (round 19: a thief knocked off a wall it was climbing just falls — back to running, or to carrying)
+  if (K.thief && stunned && E.st >= 102 && E.st <= 105) E.st = thiefCarrying(E.st) ? 101 : 0;
+  if (K.thief && !stunned && E.ground && mv > 0 && enemyThiefParkour(R, E, K, now, solid, floorAt, wallAt, mv)) return;
   if (stunned) E.vx *= 0.9;
   else if (K.hop) {
     // ⭐ THE HOPPER: sits, then hops — at you, if you are near and within its range; otherwise a small hop on its own
@@ -20389,7 +20422,8 @@ function enemyStep(room, R, E, o, now, dt) {
         if (d) { E.dir = d; E.chase = !!p; E.vx = d * spd * (p ? 1 : 0.45); E.vy = p ? -600 : -380; E.ground = false; E.next = Infinity; }
       }
     }
-  } else E.vx = E.ground || ((K.thief || K.mimic) && E.hunt) ? E.dir * mv : E.vx * 0.98;   // (round 17: a thief / mimic steers in the air)
+  } else if (K.thief && !E.ground && (E.st === 104 || E.st === 105)) { /* round 19: a leap keeps the speed it was aimed with */ }
+  else E.vx = E.ground || ((K.thief || K.mimic) && E.hunt) ? E.dir * mv : E.vx * 0.98;   // (round 17: a thief / mimic steers in the air)
   const wasGround = E.ground;
   E.vy = Math.min(ENEMY_FALL_MAX, E.vy + ENEMY_G * dt);
   // ── sideways: a wall turns it round, a one-cell bump is stepped up, a missing floor ahead turns it round
@@ -20420,8 +20454,11 @@ function enemyStep(room, R, E, o, now, dt) {
     if (K.charge && E.st === 4) { E.st = 2; E.until = now + 1500; }   // ran into a wall: dazed (and stompable)
     else if (K.roll && E.st === 1) { E.st = 2; E.until = now + 700; }   // a rolling roller stops at a wall and uncurls
     else if (K.bomb && E.st === 30) { /* lit: it waits at the wall, still facing you */ }
-    // round 17: a thief or mimic going for you (or a thief getting away) HOPS a wall rather than turning back from it
-    else if ((K.thief || K.mimic) && E.hunt && !stunned) { if (E.ground) { E.vy = -560; E.ground = false; } }
+    // round 17: a mimic going for you HOPS a wall rather than turning back from it · round 19: a thief CLIMBS it
+    // (…a leap that falls short of a ledge catches hold of its face and climbs from there)
+    // (⚠️ never the world's own side edge, which `solid` calls a wall all the way up into the sky)
+    else if (K.thief && !stunned && lc >= 0 && lc < COLS) { E.st = thiefCarrying(E.st) ? 103 : 102; E.climbT = now; E.vy = 0; }
+    else if (K.mimic && E.hunt && !stunned) { if (E.ground) { E.vy = -560; E.ground = false; } }
     else if (!stunned) E.dir = -E.dir;
     E.vx = 0; nx = E.x;
   }
@@ -20429,7 +20466,7 @@ function enemyStep(room, R, E, o, now, dt) {
     // ⭐ ROUND 15 (user, 2026-10-02): walkers just WALK OFF EDGES — there is no ledge-turn any more. An author who does
     // not want one going over limits it with its Wanders range, which is the only thing that turns it here.
     // (a kicked shell is not wandering — its range does not stop it; walls turn it, and it goes off edges)
-    const far = !(K.shell && E.st === 71) && !(K.thief && E.st === 101) && Math.abs(nx - E.sx) > rng && Math.sign(nx - E.sx) === E.dir;
+    const far = !(K.shell && E.st === 71) && !(K.thief && thiefCarrying(E.st)) && Math.abs(nx - E.sx) > rng && Math.sign(nx - E.sx) === E.dir;
     if (far) {
       if (K.charge && E.st === 4) { E.st = 0; E.next = now + 1000; nx = E.x; }   // skids to a stop at the edge
       else if (K.roll && E.st === 1) { E.st = 2; E.until = now + 700; nx = E.x; }   // …and so does a rolling roller
@@ -20459,6 +20496,7 @@ function enemyStep(room, R, E, o, now, dt) {
   }
   E.y = ny;
   if (K.hop && E.ground && !wasGround) { E.vx = 0; E.next = now + (E.chase ? 450 : 1500); }   // landed: a breath, then the next hop
+  if (K.thief && E.ground && (E.st === 104 || E.st === 105)) E.st = E.st === 105 ? 101 : 0;   // (round 19: a leap is over)
   if (K.worm) enemyWormTrail(E, K);                   // (round 18: crawling on the surface, the body follows too)
   if (E.y > ROWS * CELL + 200) enemyKill(room, R, E, 'fall', null);
 }
@@ -20724,6 +20762,17 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
       if (soft(ax, cy() - 4)) E.y -= 4; else if (soft(ax, cy() + 4)) E.y += 4; else { E.dir = -E.dir; break; }
     }
   }
+  // ⭐ round 19 — STUCK UNDERGROUND (the freeze the user saw): wandering, not waiting under somebody, and it has not moved
+  // 3px in 2s — the ground it is in is too small to go anywhere. It climbs out onto the surface above (visible again,
+  // st 40) and keeps away from this spot for a while, so it does not dive straight back in. ("Moved" = got two cells away
+  // from where it was: in a pocket it jiggles back and forth a few pixels for ever.)
+  if (!p && E.st === 44) {
+    if (E.tunX == null || Math.hypot(E.x - E.tunX, E.y - E.tunY) > 2 * CELL) { E.tunX = E.x; E.tunY = E.y; E.tunAt = now; }
+    else if (now - E.tunAt > 2500) {
+      const sy = surfaceAbove(E.x, E.y - h - 1);
+      if (sy != null) { E.y = sy; E.st = 40; E.vy = 0; E.ground = true; E.badX = E.x; E.badUntil = now + 12000; E.seekAt = 0; E.tunX = null; return; }
+    }
+  } else E.tunX = null;
   // under you and up to just below the surface: rumble, then burst out
   if (p && under && Math.abs(p.x - E.x) < 14 && Math.abs(cy() - ty) < CELL) { E.st = 45; E.until = now + 500; }
   // …or just inside the wall beside you: rumble there (46), then burst out of its face
@@ -20805,19 +20854,216 @@ function enemySlime(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, rng) {
 // ground, crawl — the body does after it. Sent as row[7]: [[x, y], …] head first (centres). The client draws the ones above
 // ground, churns the ground under the rest, and they are what you touch.
 const WORM_SEG = 12;
+// ⭐ round 19 (user: "make the sandworm's crawl smoother"): each segment sits EXACTLY its distance back along the path,
+// measured from where the head is NOW and interpolated between recorded points. It used to be the first recorded point
+// past that distance — points 3–4px apart — so every segment jumped by up to a point's spacing from one update to the
+// next, out of step with its neighbours: the body shivered while the head moved smoothly.
 function enemyWormTrail(E, K) {
   const hx = E.x, hy = E.y - K.h / 2, T = E.trail || (E.trail = []);
-  if (!T.length || Math.hypot(hx - T[0][0], hy - T[0][1]) > 3) T.unshift([hx, hy]);
-  if (T.length > 500) T.length = 500;
+  if (!T.length || Math.hypot(hx - T[0][0], hy - T[0][1]) > 2) T.unshift([hx, hy]);
   const gap = K.w * 0.48, segs = [[Math.round(hx), Math.round(hy)]];
-  let acc = 0;
-  for (let i = 1; i < T.length && segs.length < WORM_SEG; i++) {
-    acc += Math.hypot(T[i][0] - T[i - 1][0], T[i][1] - T[i - 1][1]);
-    if (acc >= gap * segs.length) segs.push([Math.round(T[i][0]), Math.round(T[i][1])]);
+  let px = hx, py = hy, need = gap, used = 0;
+  for (let i = 0; i < T.length && segs.length < WORM_SEG; i++) {
+    let d = Math.hypot(T[i][0] - px, T[i][1] - py);
+    while (d >= need && segs.length < WORM_SEG) {
+      const f = need / d; px += (T[i][0] - px) * f; py += (T[i][1] - py) * f;
+      segs.push([Math.round(px), Math.round(py)]); d -= need; need = gap;
+    }
+    need -= d; px = T[i][0]; py = T[i][1]; used = i;
   }
+  if (T.length > used + 8) T.length = used + 8;          // (nothing past the tail is ever read again)
   // (a new one, before it has moved far enough to have a trail, lies behind its head)
-  while (segs.length < WORM_SEG) { const L = segs[segs.length - 1]; segs.push([L[0] - E.dir * gap, L[1]]); }
+  while (segs.length < WORM_SEG) { const L = segs[segs.length - 1]; segs.push([Math.round(L[0] - E.dir * gap), L[1]]); }
   E.segs = segs;
+}
+// ⭐⭐ round 19 — THE MIMIC'S OBJECT. What a mimic hides as, by its look (`eskin`): the same stamp the build menu's preset
+// makes (look, shape, weight, bounce), at the mimic's own size. Only these four — the user dropped the bomb, powerup and
+// present looks once mimics became real objects ("only crate, metal crate, barrel, ball").
+const MIMIC_FAKE = {
+  crate:  { look: 'crate', shape: 'rect', content: '📦', lwt: 4, lbnc: 1 },
+  metal:  { look: 'metal', shape: 'rect', content: '🗄️', lwt: 15, lbnc: 0 },
+  barrel: { look: 'barrel', shape: 'cyl', content: '🛢️', lwt: 8, lbnc: 1 },
+  ball:   { look: 'basketball', shape: 'ellipse', content: '🏀', lwt: 3, lbnc: 5 },
+};
+let mimicSeq = 0;
+function mimicMakeStamp(room, o, K, skin, x, y) {
+  const F = MIMIC_FAKE[skin] || MIMIC_FAKE.crate;
+  const data = { type: 'stamp', x, y, content: F.content, look: F.look, shape: F.shape, w: K.w, h: K.h, angle: 0, stretch: false,
+                 breakable: true, hp: 2, loose: 1, lwt: F.lwt, lbnc: F.lbnc, mimic: o.id, mtell: Math.floor(Math.random() * 9) };
+  const S = buildWorldObject('stamp', data, o.id + '~m' + (++mimicSeq), o.ownerId, o.owner, room);
+  if (!S) return null;
+  S.lwt = F.lwt; S.lbnc = F.lbnc; S.loose = 1;           // (whatever the rebuild keeps of these, the preset's own values)
+  objIndex(room, S); emitObjToChunks(room, S, 'avatar-object-add', S);
+  return S;
+}
+function mimicHideStamp(room, S) {
+  objUnindex(room, S);
+  if (typeof coverDrop === 'function') coverDrop(room, S.id);
+  emitObjToChunks(room, S, 'avatar-object-removed', { id: S.id });
+}
+function mimicReveal(room, E, S, dir, now) {
+  if (S) mimicHideStamp(room, S);
+  E.stamp = null; E.hadStamp = 0; E.st = 111; E.until = now + 800; E.dir = dir; E.sx = E.x; E.seenAt = now; E.vx = E.vy = 0; E.ground = true;
+}
+// hiding (st 110): be wherever its object is; no object yet → make one where it was placed; its object GONE (smashed,
+// burnt, erased) → it is dead. Somebody within `vis` → reveal.
+function enemyMimicDormant(room, R, E, o, K, now, vis) {
+  const map = roomObjects[room]; if (!map) return;
+  let S = E.stamp ? map.get(E.stamp) : null;
+  if (!S && !E.hadStamp) for (const q of map.values()) if (q.type === 'stamp' && q.mimic === o.id) { S = q; break; }
+  const F = MIMIC_FAKE[E.skin] || MIMIC_FAKE.crate;
+  // the author moved its marker, or changed what it looks like: its object goes where it now is, as what it now is
+  if (S && (E.moved || S.look !== F.look || Math.abs((S.w || 0) - K.w) > 1)) { mimicHideStamp(room, S); S = null; E.moved = 0; E.hadStamp = 0; }
+  if (!S) {
+    if (E.hadStamp) { enemyKill(room, R, E, 'pop', null); return; }
+    S = mimicMakeStamp(room, o, K, E.skin, o.x, o.y); if (!S) return;
+  }
+  E.stamp = S.id; E.hadStamp = 1;
+  const P = roomLoosePose[room] && roomLoosePose[room].get(S.id);
+  E.x = P ? P.x : S.x; E.y = (P ? P.y : S.y) + K.h / 2; E.vx = E.vy = 0; E.ground = true;
+  if (now < (E.next || 0)) return;
+  const p = enemyTarget(room, E.x, E.y - K.h / 2, vis + K.w / 2, -vis, vis, now);
+  if (p) mimicReveal(room, E, S, p.x >= E.x ? 1 : -1, now);
+}
+// folded up (end of 113): the object again, right here
+function mimicSettle(room, E, o, K) {
+  const S = mimicMakeStamp(room, o, K, E.skin, E.x, E.y - K.h / 2);
+  E.st = 110; E.next = Date.now() + 2500; E.vx = E.vy = 0; E.hunt = false;
+  if (S) { E.stamp = S.id; E.hadStamp = 1; }
+}
+// somebody hit its object (`avatar-object-hit`): it gives itself away at once, facing them
+function mimicHitWake(room, S, hx) {
+  const R = roomEnemies.get(room), E = R && R.E.get(S.mimic);
+  if (!E || E.dead || (E.st | 0) !== 110) return;
+  mimicReveal(room, E, S, isFinite(hx) && hx < E.x ? -1 : 1, Date.now());
+}
+// ⭐⭐ round 19 — THE THIEF'S PARKOUR (user: "make the raccoon hard to catch: it climbs walls … jumps over obstacles and
+// between objects and trees as it moves"). Every tick it is on the ground and moving, it looks ahead and, in this order:
+//   · a WALL taller than a step: jumps it if it can clear it (up to ~140px), otherwise climbs it (`enemyThiefClimb`);
+//   · a GAP with ground beyond it at about its own level: leaps across instead of dropping in;
+//   · while it is going for you or getting away, a LEDGE, object or tree top up ahead and above it: leaps up onto it.
+// A leap is st 104 (105 carrying) until it lands — its speed was aimed, so it does not steer in the air.
+// ⚠️ Terrain cells and still objects/platforms are both obstacles (`wallAt` / `floorAt` are the objects').
+function thiefCarrying(st) { return st === 101 || st === 103 || st === 105; }
+function enemyThiefParkour(R, E, K, now, solid, floorAt, wallAt, mv) {
+  const CELL = TERRAIN_CELL, hw = K.w / 2, d = E.dir, carry = thiefCarrying(E.st), leapSt = carry ? 105 : 104;
+  const blk = (c, r) => solid(c, r) || wallAt(c * CELL + CELL / 2, r * CELL + 1, r * CELL + CELL - 1);
+  const leapTo = (dist, up) => {                         // a leap that comes down `up` px higher, `dist` px on
+    const vy = -Math.sqrt(2 * ENEMY_G * Math.max(30, up + 30)), down = (-vy) * (-vy) - 2 * ENEMY_G * up;
+    const t = (-vy + Math.sqrt(Math.max(0, down))) / ENEMY_G;
+    E.vy = vy; E.vx = d * Math.max(mv, Math.min(520, dist / t)); E.ground = false; E.st = leapSt; E.leapAt = now;
+    return true;
+  };
+  const feetR = Math.floor((E.y - 1) / CELL), lead = E.x + d * (hw + CELL * 0.5), lc = Math.floor(lead / CELL);
+  const headR = Math.ceil(K.h / CELL);
+  if (solid(lc, -1)) return false;                       // (the world's side edge: `solid` is true there at any height)
+  // 1 · a wall ahead, taller than a step (the walking code steps up three cells by itself)
+  let bot = -1; for (let r = feetR; r >= feetR - 3; r--) if (blk(lc, r)) { bot = r; break; }
+  if (bot >= 0) {
+    let top = bot; while (top > feetR - 60 && blk(lc, top - 1)) top--;
+    const hgt = (feetR - top + 1) * CELL;
+    if (hgt > 3 * CELL) {
+      let clear = true; for (let r = top - headR; r < top && clear; r++) if (blk(lc, r) || blk(lc + d, r)) clear = false;
+      if (clear && hgt <= 140) return leapTo((lc - Math.floor(E.x / CELL)) * d * CELL + hw + CELL, hgt);
+      E.st = carry ? 103 : 102; E.climbT = now; E.vx = E.vy = 0;
+      E.x = (d > 0 ? lc * CELL : (lc + 1) * CELL) - d * (hw + 0.5);   // flat against it
+      return true;
+    }
+    return false;
+  }
+  // 2 · a gap: nothing under the leading foot for five cells (no platform either), and ground again within ten cells
+  let floorUnder = false;
+  for (let r = feetR + 1; r <= feetR + 5 && !floorUnder; r++) if (blk(lc, r)) floorUnder = true;
+  if (!floorUnder && floorAt(lead, E.y - 1, E.y + 5 * CELL) === null) {
+    for (let k = 2; k <= 10; k++) {
+      const c = lc + d * k;
+      for (let r = feetR - 2; r <= feetR + 3; r++) if (blk(c, r) && !blk(c, r - 1)) return leapTo(k * CELL + hw, (feetR + 1 - r) * CELL);
+      const pf = floorAt(c * CELL + CELL / 2, E.y - 2 * CELL, E.y + 3 * CELL);
+      if (pf !== null) return leapTo(k * CELL + hw, E.y - pf);
+    }
+    return false;                                        // a real drop: it runs off it
+  }
+  // 3 · up onto something ahead and above, while it is in a hurry (not too often: it reads as running, not hopping)
+  if (!(E.hunt || carry) || now < (E.pkAt || 0)) return false;
+  E.pkAt = now + 650;
+  let best = null;
+  const take = (x, y) => { const dx = (x - E.x) * d, up = E.y - y; if (dx < 50 || dx > 210 || up < 30 || up > 150) return;
+    if (!best || dx < best.dx) best = { dx, up }; };
+  for (const f of R.floors) { const x = d > 0 ? Math.max(f.x0 + hw, E.x + 50) : Math.min(f.x1 - hw, E.x - 50); if (x >= f.x0 && x <= f.x1) take(x, f.y); }
+  for (let k = 6; k <= 26; k++) {
+    const c = Math.floor(E.x / CELL) + d * k;
+    for (let r = feetR - 19; r <= feetR - 4; r++) if (blk(c, r) && !blk(c, r - 1)) {
+      let room = true; for (let q = r - headR; q < r && room; q++) if (blk(c, q)) room = false;
+      if (room) take(c * CELL + CELL / 2, r * CELL);
+      break;
+    }
+  }
+  // …only if the way up is open: nothing solid over its head on the way
+  if (best) { for (let r = feetR - Math.ceil((best.up + K.h) / CELL); r < feetR - headR; r++) if (blk(Math.floor(E.x / CELL), r)) return false;
+    return leapTo(best.dx, best.up); }
+  return false;
+}
+// Climbing (st 102 / 103): flat against the wall on its `dir` side, straight up, until the wall beside its FEET ends —
+// then over the top and onto it. A ceiling, or 7s on the wall, and it lets go and drops back the way it came.
+function enemyThiefClimb(E, K, now, dt, solid, wallAt, spd) {
+  const CELL = TERRAIN_CELL, hw = K.w / 2, d = E.dir, carry = E.st === 103;
+  const blk = (c, r) => solid(c, r) || wallAt(c * CELL + CELL / 2, r * CELL + 1, r * CELL + CELL - 1);
+  E.vx = 0; E.vy = 0; E.ground = false;
+  E.y -= Math.max(130, spd * (carry ? 3.4 : 2.4)) * dt;   // ⚠️ the client's `enemyClimbPull` draws its pulls at this speed
+  const wc = Math.floor((E.x + d * (hw + 2)) / CELL), bc = Math.floor(E.x / CELL);
+  if (blk(bc, Math.floor((E.y - K.h - 2) / CELL)) || now - (E.climbT || now) > 7000) {
+    E.dir = -d; E.vx = -d * 140; E.st = carry ? 105 : 104; return;
+  }
+  // over the top: the wall has ended beside its feet
+  if (!blk(wc, Math.floor((E.y - 2) / CELL))) { E.vy = -260; E.vx = d * 170; E.st = carry ? 105 : 104; E.leapAt = now; }
+}
+// ⭐ round 19 — A SANDWORM CRAWLING ON THE SURFACE (st 40). It glides along the top of the ground, its feet easing up and
+// down to it (a player-sized step is climbed, not jumped in whole cells), and falls off a drop. It never flips round on
+// the spot — the head reversing ran it straight back into its own body. To turn (it wants the other way, its range ends,
+// a wall) it REARS UP AND OVER ITS OWN BODY, a half circle landing just behind where its body lay, and the body follows
+// the head's path over the loop. No room overhead for that: it just turns, as before.
+function enemyWormCrawl(E, K, now, dt, solid, floorAt, mv, rng) {
+  const CELL = TERRAIN_CELL, hh = K.h / 2;
+  if (E.turn) {
+    const T = E.turn, u = Math.min(1, (now - T.t0) / T.ms), a = Math.PI * u;
+    E.x = T.cx + T.d * T.r * Math.cos(a); E.y = T.y0 - T.r * Math.sin(a); E.vy = 0; E.ground = false;
+    if (u >= 1) { E.turn = null; E.dir = -T.d; E.want = 0; E.y = T.y0; E.ground = true; }
+    return;
+  }
+  const far = Math.abs(E.x - E.sx) > rng && Math.sign(E.x - E.sx) === E.dir;
+  const startTurn = () => {
+    const r = K.h * 0.85, cx = E.x - E.dir * r;
+    // headroom along the arc (the head's top at a quarter, half and three quarters of the way)
+    const roomy = [0.25, 0.5, 0.75].every(q => { const a = Math.PI * q, x = cx + E.dir * r * Math.cos(a), y = E.y - r * Math.sin(a) - K.h;
+      return !solid(Math.floor(x / CELL), Math.floor(y / CELL)) && !solid(Math.floor(x / CELL), Math.floor((y + hh) / CELL)); });
+    if (roomy && E.ground) E.turn = { t0: now, ms: 1000, d: E.dir, cx, r, y0: E.y };
+    else { E.dir = -E.dir; E.want = 0; }
+  };
+  if ((E.want && E.want !== E.dir) || far) { startTurn(); if (E.turn) return; }
+  // the ground under the head at x: the first surface from three cells above the feet to four below — terrain, or a still
+  // platform's top (a page room's floor is one)
+  const groundAt = (x) => {
+    const c = Math.floor(x / CELL), r0 = Math.floor((E.y - 1) / CELL);
+    let gy = null;
+    for (let r = r0 - 3; r <= r0 + 4; r++) if (solid(c, r) && !solid(c, r - 1)) { gy = r * CELL; break; }
+    const pf = floorAt(x, E.y - 3 * CELL, E.y + 4 * CELL);
+    if (pf !== null && (gy === null || pf < gy)) gy = pf;
+    return gy;
+  };
+  // a wall: solid at its head's height, past a step, just ahead → turn
+  const ahead = E.x + E.dir * (K.w / 2 + 2), ar = Math.floor((E.y - 4 * CELL) / CELL), ac = Math.floor(ahead / CELL);
+  if (E.ground && (solid(ac, ar) || solid(ac, ar - 1))) { startTurn(); return; }
+  const nx = E.x + E.dir * mv * dt, gy = E.ground || E.vy >= 0 ? groundAt(nx) : null;
+  if (gy !== null && (E.ground || gy <= E.y + E.vy * dt + 1)) {
+    E.x = nx; E.vy = 0; E.ground = true;
+    const step = 160 * dt;                                // feet ease to the ground — about 8px a tick at most
+    E.y += Math.max(-step, Math.min(step, gy - E.y));
+  } else {
+    E.x = nx; E.ground = false;                          // over a drop: it falls
+    E.vy = Math.min(ENEMY_FALL_MAX, E.vy + ENEMY_G * dt); E.y += E.vy * dt;
+    const r = Math.floor(E.y / CELL), c = Math.floor(E.x / CELL);
+    if (solid(c, r)) { E.y = r * CELL; E.vy = 0; E.ground = true; }
+  }
 }
 // the arch: the head flies (lightly — it hangs in the air), and dives back in where it comes down; on hard ground it lands
 // and crawls (st 40) instead
@@ -20941,7 +21187,10 @@ function enemyTick() {
       live.add(o.id);
       let E = R.E.get(o.id);
       // a new one, or one the author moved or changed: start again from where it was put
-      if (!E || E.ox !== o.x || E.oy !== o.y || E.k !== o.ek || E.sz !== (o.esz || 1) || E.skin !== (o.eskin || '')) { E = enemySpawnBody(o); R.E.set(o.id, E); }
+      if (!E || E.ox !== o.x || E.oy !== o.y || E.k !== o.ek || E.sz !== (o.esz || 1) || E.skin !== (o.eskin || '')) {
+        const was = E; E = enemySpawnBody(o); R.E.set(o.id, E);
+        if (was && (was.ox !== o.x || was.oy !== o.y)) E.moved = 1;   // (round 19: a mimic's object follows its marker)
+      }
       if (E.dead) {
         if (o.eback > 0 && now - E.dead >= o.eback * 1000) {
           const n = enemySpawnBody(o); R.E.set(o.id, n); E = n;
@@ -20953,7 +21202,11 @@ function enemyTick() {
       out.push([o.id, Math.round(E.x), Math.round(E.y), E.dir, E.stun > now ? 1 : 0, E.st | 0, E.inv ? 0 : E.hp,   // + hits left (0 = can't be hurt)
                 ...(E.blobs ? [E.blobs.map(b => [Math.round(b.x), Math.round(b.y), b.s, b.dir || 1])] : E.segs ? [E.segs] : [])]);   // (round 17: a slime's blobs · round 18: a sandworm's body)
     }
-    for (const id of R.E.keys()) if (!live.has(id)) R.E.delete(id);
+    for (const [id, E] of R.E) if (!live.has(id)) {
+      // (round 19: a mimic taken out of the Level takes its object with it)
+      const S = E.stamp && roomObjects[room] && roomObjects[room].get(E.stamp); if (S && S.mimic === id) mimicHideStamp(room, S);
+      R.E.delete(id);
+    }
     // …and one that is SLAMMING crushes any enemy its box meets (one that can't be hurt excepted). Enemies never set a
     // crusher off — only players do (`enemyTarget` reads players).
     for (const C of R.E.values()) {
@@ -23964,6 +24217,9 @@ io.on('connection', (socket) => {
     // ⚠️ COLLAPSED FIRST, before anything is decided. A repeat of world-dealt damage must not light a drum
     // either, or five clients watching one flame jet would each arm it and the last one would win.
     if (typeof src === 'string' && src && !worldHitOk(currentAvatarRoom, id, src.slice(0, 48), obj)) return;
+    // ⭐ #184 round 19 — HITTING A MIMIC'S OBJECT WAKES IT rather than damaging the object (fire still burns it). Punching
+    //   a suspicious crate is how you find out.
+    if (obj && obj.mimic && !fire && !douse) { mimicHitWake(currentAvatarRoom, obj, x); return; }
     // ⭐⭐ ONLY HEAT LIGHTS A DRUM (user, 2026-09-10: *"a punch shouldn't set oil drums off, nor should a slam or
     // dig, only flame and similar things that would ignite a flammable substance"*). A BOMB is different and
     // stays different: hitting one is the whole of what a bomb is (#183's card says "could punch it to throw
@@ -24274,13 +24530,14 @@ io.on('connection', (socket) => {
   socket.on('enemy-steal', ({ id, kind, dur, ms }) => {
     const room = currentAvatarRoom; if (!room || typeof kind !== 'string' || kind.length > 24) return;
     const R = roomEnemies.get(room); const E = R && R.E.get(id);
-    if (!E || E.dead || !ENEMY_KINDS[E.k] || !ENEMY_KINDS[E.k].thief || (E.st | 0) === 101) return;
+    if (!E || E.dead || !ENEMY_KINDS[E.k] || !ENEMY_KINDS[E.k].thief || thiefCarrying(E.st | 0)) return;
     const p = lastBodyPos(room, socket.id);
     if (p && Math.hypot(p.x - E.x, p.y - E.y) > 400) return;
     // (round 18: it KEEPS what it takes — no time limit — until it is killed, and then drops all of it)
     (E.loot || (E.loot = [])).push({ kind, dur: ['timed', 'hit', 'death', 'ever'].includes(dur) ? dur : 'death', ms: Math.max(0, Math.min(3600000, +ms || 0)) });
-    E.st = 101; E.stun = 0;
-    if (p) E.dir = p.x >= E.x ? -1 : 1;
+    // (round 19: caught mid-climb or mid-leap it keeps doing that, now carrying)
+    E.st = E.st === 102 ? 103 : E.st === 104 ? 105 : 101; E.stun = 0;
+    if (p && E.st === 101) E.dir = p.x >= E.x ? -1 : 1;
     io.to(room).emit('enemy-ev', { id, k: 'steal', kind, by: socket.id });
   });
   // ⭐ round 18 — SOMEBODY PICKED UP WHAT A THIEF DROPPED. First come: the server says who got it.
@@ -24358,6 +24615,8 @@ io.on('connection', (socket) => {
     // ⭐⭐ HEALTH (user, 2026-10-02): a stomp and a punch take 1; a charged punch / finisher / Power punch and a slam take 3;
     // being squashed by stone skin or Mega kills. `E.hp` 0 from the start = CAN'T BE HURT (the author's "0" setting).
     if (now - (E.hitAt || 0) < 150) return;              // one hit per swing, however many messages it arrives as
+    // (round 19: a HIDING mimic is its object — a hit on it is a hit on the object, which wakes it: `mimicHitWake`)
+    if (K.mimic && (E.st | 0) === 110) return;
     E.hitAt = now;
     // ⭐ ROUND 16 — hits that do something OTHER than damage (`enemyNoDamage`, the client has the same rule)
     if (enemyNoDamage(K, how)) {
