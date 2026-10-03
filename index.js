@@ -20038,7 +20038,9 @@ const ENEMY_KINDS = {
   // CLOUD DROPPER (`enemyCloud`): hovers over you, drops; knocked off (121) its cloud is left to ride (122) for ~10s.
   cloud:    { w: 76, h: 46, speed: 150, hp: 1, stomp: 1, cloud: 1, vis: 420, opts: ['spiky', 'bomb', 'rock', 'water', 'acid', 'shoot'], skins: { imp: {}, living: {} } },
   // THROWER: walks; sees you → winds up (131) and throws (132); punched / stomped → dizzy (133); again → flung (134).
-  thrower:  { w: 52, h: 52, speed: 40, hp: 1, stomp: 1, thrower: 1, vis: 360, opts: ['rock', 'bone', 'bomb', 'snow'], skins: { goblin: {}, yeti: { w: 64, h: 64 } } },
+  // (round 24: the yeti is the kind itself; the goblin is gone; troll / snowman / penguin are looks — boxes as the client's)
+  thrower:  { w: 68, h: 70, speed: 40, hp: 1, stomp: 1, thrower: 1, vis: 360, opts: ['rock', 'bone', 'bomb', 'snow'],
+              skins: { yeti: {}, troll: { w: 72, h: 60 }, snowman: { w: 60, h: 86 }, penguin: { w: 56, h: 60 } } },
 };
 // round 23 — a cactus starts with this many segments under its head, by Size; its box is as tall as its stack. ⚠️ The
 // client's `cactusStart` / `cactusK`.
