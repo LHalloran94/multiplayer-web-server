@@ -20958,7 +20958,15 @@ function enemyCloud(room, R, E, o, K, now, dt, solid, floorAt, spd, vis, grid) {
     for (let n = 0; n < 2; n++) {
       const c = Math.floor((E.x + (Math.random() - 0.5) * K.w * 0.75) / CELL), r = Math.floor(E.y / CELL) + 1;
       if (c < 0 || c >= grid.geom.cols || r < 0 || r >= ROWS) continue;
-      const i = c * ROWS + r; if (peekCellAt(grid, i) !== 0 || st.fineTotal.g(i) > 0) continue;
+      // 🟥 round 23 (user: "at first the rain worked, then it stopped producing liquid"): open SKY nobody has stored reads -1
+      //   (a page not made), and that was refused as "not air" — so it only rained where the sky had been stored already. A
+      //   page not made is air in a room with no generator (as `solid` reads it); put-away or not-yet-generated ground is not.
+      //   On GENERATED ground a page not made could be sky or rock, so there it is read for real (produced — it is right over
+      //   a player, so it is about to be anyway).
+      const i = c * ROWS + r; let v = peekCellAt(grid, i);
+      if (v < 0 && enemyChunkAway(room, c, r)) continue;
+      if (v < 0 && grid.seedFn) v = grid.g(i);
+      if (v > 0 || st.fineTotal.g(i) > 0) continue;
       const ca = new Array(LIQ_T).fill(0); ca[LIQ_RANK[mat]] = LIQUID_MAX;
       for (const x of fineSetBlock(room, 1, c, r, ca)) changed.push(x);
     }
@@ -21510,7 +21518,7 @@ function enemyTick() {
       // (round 23: an OBJECT in that slot is a kind's own extra — a cactus's segments and the one growing back, a cloud
       //  dropper's Spikies)
       if (E.cn != null) out[out.length - 1][7] = { n: E.cn, g: E.growT0 && now >= E.growT0 ? Math.round(Math.min(1, (now - E.growT0) / 900) * 100) / 100 : 0 };
-      else if (E.kids) out[out.length - 1][7] = { kids: E.kids.map(k => [Math.round(k.x), Math.round(k.y), k.dir, k.ball]) };
+      else if (E.kids) out[out.length - 1][7] = { kids: E.kids.map(k => [Math.round(k.x), Math.round(k.y), k.dir, k.ball]), ...(E.rider && now - E.riderAt < 600 ? { rider: E.rider } : null) };
     }
     for (const [id, E] of R.E) if (!live.has(id)) {
       // (round 19: a mimic taken out of the Level takes its object with it)
@@ -24894,6 +24902,7 @@ io.on('connection', (socket) => {
     if (!E || E.dead || ((E.st | 0) !== 122 && (E.st | 0) !== 121)) return;
     if (Math.hypot(x - E.x, y - E.y) > 400) return;
     const d = roomDims(room); E.x = Math.max(0, Math.min(d.cols * TERRAIN_CELL, +x)); E.y = Math.max(0, Math.min(d.rows * TERRAIN_CELL, +y));
+    E.rider = socket.id; E.riderAt = Date.now();             // (round 24: so every screen draws them INSIDE it)
   });
   socket.on('enemy-hit', ({ id, how, dir, px, py, blob, kid }) => {
     const room = currentAvatarRoom; if (!room) return;
@@ -24945,14 +24954,18 @@ io.on('connection', (socket) => {
       else { E.st = 133; E.until = now + 3000; E.vx = 0; E.stun = 0; }
       io.to(room).emit('enemy-ev', { id, k: 'hit', how }); return;
     }
-    if (K.cactus && !(K.weak && (how === 'stomp' || how === 'slam' || how === 'crush'))) {
-      if (K.weak) { io.to(room).emit('enemy-ev', { id, k: 'hit', how: 'clang' }); return; }   // armoured: punches bounce off
-      if (how === 'stomp' || now - (E.hitAt || 0) < 150) return;                             // (it can't be stomped — the stomper dies)
+    if (K.cactus) {
+      const fromAbove = how === 'stomp' || how === 'slam';
+      if (K.weak && !fromAbove && how !== 'crush') { io.to(room).emit('enemy-ev', { id, k: 'hit', how: 'clang' }); return; }   // armoured: punches bounce off
+      if (!K.weak && how === 'stomp') return;                                                // (green / pink can't be stomped — the stomper dies)
+      if (now - (E.hitAt || 0) < 150) return;
       E.hitAt = now;
-      if (how === 'crush' || E.cn <= 0) { enemyKill(room, R, E, how, socket.id); return; }   // the head alone: a punch kills it
+      if (how === 'crush' || E.cn <= 0) { enemyKill(room, R, E, how, socket.id); return; }   // the head alone: one more hit kills it
       // the segment at the hitter's height (`py`, their body's middle) is knocked out; a big hit takes three
+      // (round 24, user: "the armoured version should only lose a SEGMENT each time it is bounced upon"): landing on its head
+      // knocks out the segment under the head, so it sinks by one; the head alone, a bounce kills it
       const KC = cactusK(K, E.cn);
-      let k = isFinite(py) ? Math.floor((E.y - py) / KC.segStep) : 0;
+      let k = K.weak ? E.cn - 1 : isFinite(py) ? Math.floor((E.y - py) / KC.segStep) : 0;
       for (let j = 0, take = how === 'power' || how === 'slam' ? 3 : 1; j < take && E.cn > 0; j++) {
         k = Math.max(0, Math.min(E.cn - 1, k));
         io.to(room).emit('enemy-ev', { id, k: 'seg', i: k, x: Math.round(E.x), y: Math.round(E.y - (k + 0.5) * KC.segStep), dir: dir < 0 ? -1 : 1 });
