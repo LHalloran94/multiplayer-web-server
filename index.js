@@ -20293,18 +20293,22 @@ function enemyStep(room, R, E, o, now, dt) {
         if (now >= (E.hideAt || 0)) { E.hideAt = now + 1500; E.hide = enemyThiefHide(E, K, solid, threat); }
         const G = E.hide, close = threat && Math.hypot(threat.x - E.x, threat.y - E.y) < 350;
         E.goLow = !!(G && G.low);
-        if (G && Math.abs(G.x - E.x) < 24 && E.ground) {
-          if (close) { E.hideAt = 0; E.hideBad = G.x; E.dir = threat.x >= E.x ? -1 : 1; mv = spd * 11; E.hunt = true; }   // found: away, and somewhere else
-          else { mv = 0; E.hunt = false; }                                                                                  // hiding
-        } else if (G) { E.dir = G.x >= E.x ? 1 : -1; mv = spd * 11; E.hunt = true; }
-        // (round 20: faster again — ×11 · round 19: ×8 · round 18: "scurry away with some speed")
-        else if (threat) { E.dir = threat.x >= E.x ? -1 : 1; mv = spd * 11; E.hunt = true; }
+        // (round 21: ×12 — round 20 ×11, round 19 ×8, round 18 "scurry away with some speed")
+        // 🟥 round 21 (user: "when it's falling with an item it spins back and forth rapidly"): over its hiding place it
+        //   steered at it — in the air, every tick, overshooting and flipping round. It never TURNS in the air now, and over
+        //   the spot (within 24px) it just drops.
+        const turn = (d) => { if (E.ground) E.dir = d; };
+        if (G && Math.abs(G.x - E.x) < 24) {
+          if (E.ground && close) { E.hideAt = 0; E.hideBad = G.x; turn(threat.x >= E.x ? -1 : 1); mv = spd * 12; E.hunt = true; }   // found: away, and somewhere else
+          else { mv = 0; E.hunt = false; }                                                                                  // hiding (or dropping onto it)
+        } else if (G) { turn(G.x >= E.x ? 1 : -1); mv = spd * 12; E.hunt = true; }
+        else if (threat) { turn(threat.x >= E.x ? -1 : 1); mv = spd * 12; E.hunt = true; }
         else { mv = 0; E.hunt = false; }
       } else {
         const p0 = now >= (E.next || 0) ? enemyTarget(room, E.x, E.y - K.h / 2, vis, -160, 160, now) : null;
         const p = p0 && Math.abs(p0.x - E.sx) <= rng + K.w / 2 && enemySees(solid, E.x, eyeY, p0.x, p0.y) ? p0 : null;
         E.hunt = !!p;
-        if (p) { E.dir = p.x >= E.x ? 1 : -1; mv = spd * 2; }               // (round 18: it sneaks faster too)
+        if (p && E.ground) { E.dir = p.x >= E.x ? 1 : -1; mv = spd * 2; } else if (p) mv = spd * 2;   // (round 18: it sneaks faster too · round 21: never turns in the air)
       }
     } else if (K.mimic) {
       // ⭐ round 17 — THE MIMIC. ⭐⭐ round 19 (user: "mimics should BE real objects — stack, collide, interact"): while it is
@@ -20378,7 +20382,9 @@ function enemyStep(room, R, E, o, now, dt) {
           // (round 19: …and never the spot it just gave up on — see `enemyTunnel`'s stuck test and the 6s limit below)
           const bad = (x) => now < (E.badUntil || 0) && Math.abs(x - E.badX) < 120;
           for (let k = 1; k <= 60 && E.seekX == null; k++) for (const s of [-1, 1]) {
-            const x = E.x + s * k * CELL; if (bad(x)) continue;
+            // (round 21: …and only within its range — ground just past the end of it had a sandworm turning back at the end of its
+            //  range and round again towards that ground, U-turning on the spot for ever)
+            const x = E.x + s * k * CELL; if (bad(x) || Math.abs(x - E.sx) > rng) continue;
             // a soft wall at its own height — or, round 20, as high up as it can rear
             let wall = false; for (let dy = 0; dy <= (K.worm ? K.h * 1.2 : K.h * 0.5) && !wall; dy += CELL) { const y = E.y - K.h / 2 - dy;
               if (softAt(x, y) && roomy(x, x + s * K.w * 0.5, y - K.h * 0.25, y + K.h * 0.25)) wall = true; }
@@ -20421,7 +20427,16 @@ function enemyStep(room, R, E, o, now, dt) {
   }
   // ⭐ round 19 (user: "make the sandworm's crawl smoother when it's out of the ground"): a sandworm on the surface has its
   // own crawl — no stepping in whole cells, no instant turn-round (see `enemyWormCrawl`)
-  if (K.worm && E.st === 40 && !stunned) { enemyWormCrawl(E, K, now, dt, solid, floorAt, mv, rng); enemyWormTrail(E, K); return; }
+  if (K.worm && E.st === 40 && !stunned) {
+    enemyWormCrawl(E, K, now, dt, solid, floorAt, mv, rng);
+    // (round 21: the body lies ON the ground while it crawls — not while it turns or rears up)
+    const hug = E.turn || E.rear ? null : (x, y0, y1) => {
+      const c = Math.floor(x / CELL); let g = null;
+      for (let r = Math.floor(y0 / CELL); r <= Math.floor(y1 / CELL); r++) if (solid(c, r)) { g = r * CELL; break; }
+      const pf = floorAt(x, y0, y1); return pf !== null && (g === null || pf < g) ? pf : g;
+    };
+    enemyWormTrail(E, K, hug); return;
+  }
   // ⭐ round 18 (user: "options that aren't just moving back and forth, like more random patrolling"): `epat: 'random'` —
   // while it is only wandering (nothing has changed its pace), now and then it stops for a moment or turns round, so it
   // covers its range in uneven stretches instead of pacing wall to wall.
@@ -20471,7 +20486,9 @@ function enemyStep(room, R, E, o, now, dt) {
   // ⭐ Round 14 (user: "enemies will walk up steps, but not down them"): the step USED to shrink with the enemy's height, so
   // a standard walker (32px tall) only managed 2 cells and turned back at the edge of anything taller. Now EVERY walking
   // enemy steps UP 3 cells and walks DOWN off a drop of up to 4 (the player steps 28px) — as long as there is headroom.
-  const stepRows = 3, downRows = 4;
+  // (round 21, user: the raccoon "has trouble walking on uneven terrain" — it is nimbler than the rest: five up, eight down,
+  //  so rough ground is walked over rather than hopped at every few steps)
+  const stepRows = K.thief ? 5 : 3, downRows = K.thief ? 8 : 4;
   let blocked = false, stepTop = -1;
   if (E.vx !== 0) {                                  // ⚠️ standing still is not walking into a wall (a resting hopper would spin)
     blocked = wallAt(lead, E.y - K.h, E.y - 1);
@@ -20781,6 +20798,13 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
     const sy = surfaceAbove(E.x, cy());
     tx = E.x + E.dir * 40; ty = sy != null ? sy + DEPTH + h / 2 : cy(); v = spd;
   }
+  // (round 21: a sandworm whose body is still partly out of the ground does not wait under you — that froze it with its
+  //  tail in the air. Its head keeps going, forward and down, which drags the rest of it in after it; then it comes for you.)
+  if (K.worm && p && E.segs && !E.segs.every(([sx, sy]) => solid(Math.floor(sx / CELL), Math.floor(sy / CELL)))) {
+    const sx = E.x + E.dir * 60, sy = cy() + K.h * 0.6;
+    if (soft(sx, sy)) { tx = sx; ty = sy; } else { tx = E.x - E.dir * 60; ty = cy() + K.h * 0.6; }
+    under = false; side = null;
+  }
   let left = v * dt;
   while (left > 0) {
     const s = Math.min(4, left); left -= s;
@@ -20807,10 +20831,14 @@ function enemyTunnel(room, R, E, o, K, now, dt, solid, spd, vis, rng, grid) {
       if (sy != null) { E.y = sy; E.st = 40; E.vy = 0; E.ground = true; E.badX = E.x; E.badUntil = now + 12000; E.seekAt = 0; E.tunX = null; return; }
     }
   } else E.tunX = null;
+  // ⭐ round 21 (user: "it needs to have its whole body return to the terrain before it can emerge again — otherwise it
+  // starts trying to emerge before its body is back in, freezes in place momentarily and behaves oddly"): a sandworm bursts
+  // out only once every segment's centre is inside the ground. Until then it carries on tunnelling.
+  const allIn = !K.worm || !E.segs || E.segs.every(([sx, sy]) => solid(Math.floor(sx / CELL), Math.floor(sy / CELL)));
   // under you and up to just below the surface: rumble, then burst out
-  if (p && under && Math.abs(p.x - E.x) < 14 && Math.abs(cy() - ty) < CELL) { E.st = 45; E.until = now + 500; }
+  if (allIn && p && under && Math.abs(p.x - E.x) < 14 && Math.abs(cy() - ty) < CELL) { E.st = 45; E.until = now + 500; }
   // …or just inside the wall beside you: rumble there (46), then burst out of its face
-  if (p && side && Math.abs(tx - E.x) < 6 && Math.abs(cy() - ty) < CELL) { E.st = 46; E.until = now + 500; E.wallX = side.x; E.wallY = side.y; E.dir = side.out; }
+  if (allIn && p && side && Math.abs(tx - E.x) < 6 && Math.abs(cy() - ty) < CELL) { E.st = 46; E.until = now + 500; E.wallX = side.x; E.wallY = side.y; E.dir = side.out; }
 }
 // ⭐ THE BOMBER GOES OFF. Every screen draws the bang and throws / kills its own player (`bombBlast` on the client, as a
 // bomb does); the CRATER is dug by exactly one of them — the player it was going for (`dig`). Enemies caught in it are
@@ -20892,7 +20920,7 @@ const WORM_SEG = 12;
 // measured from where the head is NOW and interpolated between recorded points. It used to be the first recorded point
 // past that distance — points 3–4px apart — so every segment jumped by up to a point's spacing from one update to the
 // next, out of step with its neighbours: the body shivered while the head moved smoothly.
-function enemyWormTrail(E, K) {
+function enemyWormTrail(E, K, hug) {
   const hx = E.x, hy = E.y - K.h / 2, T = E.trail || (E.trail = []);
   if (!T.length || Math.hypot(hx - T[0][0], hy - T[0][1]) > 2) T.unshift([hx, hy]);
   const gap = K.w * 0.48, segs = [[Math.round(hx), Math.round(hy)]];
@@ -20908,6 +20936,19 @@ function enemyWormTrail(E, K) {
   if (T.length > used + 8) T.length = used + 8;          // (nothing past the tail is ever read again)
   // (a new one, before it has moved far enough to have a trail, lies behind its head)
   while (segs.length < WORM_SEG) { const L = segs[segs.length - 1]; segs.push([Math.round(L[0] - E.dir * gap), L[1]]); }
+  // ⭐ round 21 (user: "its body doesn't move flush with the ground when it's crawling outside of terrain"): every segment
+  // followed the HEAD's height, and the body tapers, so the thinner segments floated above the ground. Crawling, each
+  // segment near the ground settles onto it (`hug(x, y0, y1)` = the ground's top under x, or null), eased half the way each
+  // tick so it does not jump a cell at a time. One well above the ground (lifted in a turn) is left where its path puts it.
+  const H = hug ? (E.hugY || (E.hugY = [])) : (E.hugY = []);
+  for (let i = 1; hug && i < segs.length; i++) {
+    const r = K.w / 2 * (1 - 0.55 * Math.pow(i / (WORM_SEG - 1), 1.6));
+    const g = hug(segs[i][0], segs[i][1] - r, segs[i][1] + r + K.h * 0.6);
+    if (g == null || g - (segs[i][1] + r) > K.h * 0.6) { H[i] = null; continue; }
+    const t = g - r * 0.95;
+    H[i] = H[i] == null ? t : H[i] + (t - H[i]) * 0.5;
+    segs[i][1] = Math.round(H[i]);
+  }
   E.segs = segs;
 }
 // ⭐⭐ round 19 — THE MIMIC'S OBJECT. What a mimic hides as, by its look (`eskin`): the same stamp the build menu's preset
@@ -21018,12 +21059,12 @@ function enemyThiefParkour(R, E, K, now, solid, floorAt, wallAt, mv) {
   const feetR = Math.floor((E.y - 1) / CELL), lead = E.x + d * (hw + CELL * 0.5), lc = Math.floor(lead / CELL);
   const headR = Math.ceil(K.h / CELL);
   if (solid(lc, -1)) return false;                       // (the world's side edge: `solid` is true there at any height)
-  // 1 · a wall ahead, taller than a step (the walking code steps up three cells by itself)
+  // 1 · a wall ahead, taller than a step (the walking code steps up five cells for a thief by itself — round 21)
   let bot = -1; for (let r = feetR; r >= feetR - 3; r--) if (blk(lc, r)) { bot = r; break; }
   if (bot >= 0) {
     let top = bot; while (top > feetR - 60 && blk(lc, top - 1)) top--;
     const hgt = (feetR - top + 1) * CELL;
-    if (hgt > 3 * CELL) {
+    if (hgt > 5 * CELL) {
       let clear = true; for (let r = top - headR; r < top && clear; r++) if (blk(lc, r) || blk(lc + d, r)) clear = false;
       if (clear && hgt <= 140) return leapTo((lc - Math.floor(E.x / CELL)) * d * CELL + hw + CELL, hgt);
       E.st = carry ? 103 : 102; E.climbT = now; E.vx = E.vy = 0;
@@ -21067,17 +21108,30 @@ function enemyThiefParkour(R, E, K, now, solid, floorAt, wallAt, mv) {
 }
 // Climbing (st 102 / 103): flat against the wall on its `dir` side, straight up, until the wall beside its FEET ends —
 // then over the top and onto it. A ceiling, or 7s on the wall, and it lets go and drops back the way it came.
+// ⭐ round 21 (user: "it rapidly alternates between the jumping animation and the climbing animation", "trouble climbing on
+// uneven walls", "it needs to climb much faster"): it held ONE column (the face where it started), so on a ragged wall the
+// cell beside its feet was air the moment the face stepped back a cell — "over the top" — and it leapt, hit the face again,
+// grabbed, leapt… every tick or two. Now it FOLLOWS THE FACE: each tick it finds the wall within four cells of its side at
+// its feet and at its middle, slides in or out to stay flat against it, and is only over the top when there is no wall
+// beside either. Faster: ~240 px/s empty, ~420 carrying. ⚠️ The client's `enemyClimbPull` draws its pulls at this speed.
 function enemyThiefClimb(E, K, now, dt, solid, wallAt, spd) {
   const CELL = TERRAIN_CELL, hw = K.w / 2, d = E.dir, carry = E.st === 103;
   const blk = (c, r) => solid(c, r) || wallAt(c * CELL + CELL / 2, r * CELL + 1, r * CELL + CELL - 1);
   E.vx = 0; E.vy = 0; E.ground = false;
-  E.y -= Math.max(130, spd * (carry ? 3.4 : 2.4)) * dt;   // ⚠️ the client's `enemyClimbPull` draws its pulls at this speed
-  const wc = Math.floor((E.x + d * (hw + 2)) / CELL), bc = Math.floor(E.x / CELL);
+  E.y -= Math.max(240, spd * (carry ? 7 : 4)) * dt;
+  // the face at a height: the first blocked column from its body's edge outward (up to four cells), or null
+  const faceAt = (y) => { const r = Math.floor(y / CELL), c0 = Math.floor((E.x + d * (hw - 2)) / CELL);
+    for (let k = 0; k <= 4; k++) if (blk(c0 + d * k, r)) return d > 0 ? (c0 + d * k) * CELL : (c0 + d * k + 1) * CELL; return null; };
+  const bc = Math.floor(E.x / CELL);
   if (blk(bc, Math.floor((E.y - K.h - 2) / CELL)) || now - (E.climbT || now) > 7000) {
     E.dir = -d; E.vx = -d * 140; E.st = carry ? 105 : 104; return;
   }
-  // over the top: the wall has ended beside its feet
-  if (!blk(wc, Math.floor((E.y - 2) / CELL))) { E.vy = -260; E.vx = d * 170; E.st = carry ? 105 : 104; E.leapAt = now; }
+  const fFeet = faceAt(E.y - 3), fMid = faceAt(E.y - K.h / 2);
+  if (fFeet == null && fMid == null) { E.vy = -300; E.vx = d * 200; E.st = carry ? 105 : 104; E.leapAt = now; return; }   // over the top
+  // stay flat against whichever part of the face sticks out furthest towards it
+  const face = fFeet == null ? fMid : fMid == null ? fFeet : (d > 0 ? Math.min(fFeet, fMid) : Math.max(fFeet, fMid));
+  const want = face - d * (hw + 0.5);
+  E.x += Math.max(-6, Math.min(6, want - E.x));
 }
 // ⭐ round 19 — A SANDWORM CRAWLING ON THE SURFACE (st 40). It glides along the top of the ground, its feet easing up and
 // down to it (a player-sized step is climbed, not jumped in whole cells), and falls off a drop. It never flips round on
