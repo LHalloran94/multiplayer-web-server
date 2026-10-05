@@ -2011,8 +2011,8 @@ function sanitizeLevelCfg(l) {
   if (l.hp && typeof l.hp === 'object') {
     const h = l.hp, o = {};
     const int = (v, lo, hi) => (Number.isFinite(+v) ? Math.max(lo, Math.min(hi, Math.round(+v))) : null);
-    if (h.sys === 'pct') o.sys = 'pct';
-    const DEF = { max: 5, delay: 5, rate: 3, launch: 9, pLaunch: 10, pDelay: 5, pRate: 0 };
+    if (h.sys === 'pct' || h.sys === 'both') o.sys = h.sys;   // 'both' = hearts AND a percent that drives the launch
+    const DEF = { max: 5, delay: 5, rate: 3, launch: 0, pLaunch: 10, pDelay: 5, pRate: 0 };   // launch 0: hurt no longer means launched further by default (user, 2026-10-05)
     const LIM = { max: [1, 10], delay: [0, 30], rate: [0, 10], launch: [0, 30], pLaunch: [2, 30], pDelay: [0, 30], pRate: [0, 10] };
     for (const k in DEF) { const v = int(h[k], LIM[k][0], LIM[k][1]); if (v !== null && v !== DEF[k]) o[k] = v; }
     if (Array.isArray(h.noHurt)) {
