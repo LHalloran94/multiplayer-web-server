@@ -2012,8 +2012,8 @@ function sanitizeLevelCfg(l) {
     const h = l.hp, o = {};
     const int = (v, lo, hi) => (Number.isFinite(+v) ? Math.max(lo, Math.min(hi, Math.round(+v))) : null);
     if (h.sys === 'pct' || h.sys === 'both') o.sys = h.sys;   // 'both' = hearts AND a percent that drives the launch
-    const DEF = { max: 5, delay: 5, rate: 3, launch: 0, pLaunch: 10, pDelay: 5, pRate: 0 };   // launch 0: hurt no longer means launched further by default (user, 2026-10-05)
-    const LIM = { max: [1, 10], delay: [0, 30], rate: [0, 10], launch: [0, 30], pLaunch: [2, 30], pDelay: [0, 30], pRate: [0, 10] };
+    const DEF = { max: 5, delay: 5, rate: 3, launch: 0, pLaunch: 10, pDelay: 5, pRate: 0, armour: 0 };   // launch 0: hurt no longer means launched further by default (user, 2026-10-05)
+    const LIM = { max: [1, 10], delay: [0, 30], rate: [0, 10], launch: [0, 30], pLaunch: [2, 30], pDelay: [0, 30], pRate: [0, 10], armour: [0, 5] };   // armour: hearts of it you start with
     for (const k in DEF) { const v = int(h[k], LIM[k][0], LIM[k][1]); if (v !== null && v !== DEF[k]) o[k] = v; }
     if (Array.isArray(h.noHurt)) {
       const ok = ['punch', 'stomp', 'slam', 'ball'], n = [];
@@ -17474,9 +17474,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // ⚠️ Two retired kinds are carried over rather than dropped to the default: a star became Stone skin and
       // moon boots became Spring boots (user, 2026-09-30), so a pickup placed before then keeps its meaning.
       const pw = data.pw === 'star' ? 'stone' : data.pw === 'moon' ? 'boots' : data.pw;
-      obj.pw = ['heart', 'wings', 'gloves', 'grapple', 'ball', 'boots', 'xjump', 'stone', 'shield', 'fireproof', 'jetpack', 'power', 'mega', 'mini', 'speed', 'drill'].includes(pw) ? pw : 'wings';
+      obj.pw = ['heart', 'armour', 'wings', 'gloves', 'grapple', 'ball', 'boots', 'xjump', 'stone', 'shield', 'fireproof', 'jetpack', 'power', 'mega', 'mini', 'speed', 'drill'].includes(pw) ? pw : 'wings';
       // list 14 round 9 — a HEALTH pickup heals at once rather than being held: how much, in half-hearts (99 = all of it)
       if (obj.pw === 'heart') obj.pheal = [1, 2, 4, 99].includes(+data.pheal) ? +data.pheal : 2;
+      if (obj.pw === 'armour') obj.pheal = [1, 2, 4, 6].includes(+data.pheal) ? +data.pheal : 2;   // …and ARMOUR: half-hearts of it
       obj.pdur = ['timed', 'death', 'hit', 'ever'].includes(data.pdur) ? data.pdur : 'death';
       // …except where the KIND decides: a shield lasts until it has saved you.
       if (obj.pw === 'shield') obj.pdur = 'death';
