@@ -9082,6 +9082,18 @@ function clearFineRoom(room) {
   // repaired by the `clear` list on the chunk re-send; this one has no chunk to come back to, so it says so.
   if (s.fineFire && s.fineFire.size) { s.fineFire.clear(); wireFanout(room, 'fire-cells', { cells: [], allOut: 1 }); }
 }
+// ⭐ EMPTY A ROOM'S CELLS — terrain, liquid, powder, sources — and tell its players. One function for both callers (the
+// sandbox clear and its sibling above it), which had been two copies of one line.
+// 🟥 …AND EVERY PARKED CHUNK (user, 2026-10-05: old water came back after a clear). A chunk put away to save memory keeps
+//    its content in `blob` and comes back with it the first time anything touches it, so a clear that emptied only the live
+//    cells left whatever had been parked to return.
+function clearRoomCells(room) {
+  const s = cellsOf(room); if (!s.terrain) return;
+  s.terrain.fill(0); if (s.terrainHp) s.terrainHp.fill(0);
+  dropPowderSet(room); clearFineRoom(room); clearLiquidSources(room);
+  if (s.chunks) { for (const rec of s.chunks.rec.values()) { rec.blob = null; rec.gen = 0; rec.fire = null; rec.evHash = 0; } s.chunks.evicted.fill(0); }
+  io.to(room).emit("terrain-cleared");
+}
 function ensureFineArrays(room, SUB) {
   const s = cellsOf(room);
   const cells = (s.cols * SUB) * (s.rows * SUB);                        // Phase 6: this room's shape, not the module constants
@@ -24338,7 +24350,7 @@ io.on('connection', (socket) => {
     for (const id of ids) map.delete(id);
     if (ids.length) io.to(currentAvatarRoom).emit('avatar-objects-removed', { ids });
     // Terrain is unowned (and ephemeral / all player-placed), so "Remove all" wipes the whole grid too.
-    { const _cs = cellsOf(currentAvatarRoom); if (_cs.terrain) { _cs.terrain.fill(0); if (_cs.terrainHp) _cs.terrainHp.fill(0); dropPowderSet(currentAvatarRoom); clearFineRoom(currentAvatarRoom); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); } }
+    clearRoomCells(currentAvatarRoom);
   });
   // Debug: wipe the WHOLE environment for everyone in the room (clears all owners' objects).
   // ⭐ THIS IS WHAT THE "CLEAR SANDBOX" BUTTON CALLS (user, 2026-09-20: *"it would be good if we could add a Clear
@@ -24360,7 +24372,7 @@ io.on('connection', (socket) => {
     { const dm = roomDrops[currentAvatarRoom];
       if (dm && dm.size) { const ids = [...dm.keys()]; for (const d of dm.values()) dropUnindex(currentAvatarRoom, d); dm.clear();
         for (const id of ids) io.to(currentAvatarRoom).emit('drop-removed', { id }); } }
-    { const _cs = cellsOf(currentAvatarRoom); if (_cs.terrain) { _cs.terrain.fill(0); if (_cs.terrainHp) _cs.terrainHp.fill(0); dropPowderSet(currentAvatarRoom); clearFineRoom(currentAvatarRoom); clearLiquidSources(currentAvatarRoom); io.to(currentAvatarRoom).emit("terrain-cleared"); } }
+    clearRoomCells(currentAvatarRoom);
   });
   // Damage a destructible object (client-authoritative hit). Decrement hp; broadcast the new
   // hp, or remove it at 0. Server owns hp so concurrent hits can't double-count past zero.
