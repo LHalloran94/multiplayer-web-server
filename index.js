@@ -25375,16 +25375,26 @@ io.on('connection', (socket) => {
   });
   // `f` (list 14, user 2026-10-05): HOW HARD they are thrown off — 1 for a punch, a slam, liquid; more for rolling or dashing
   // ("it should throw them off with some force"). They also start further out, so they do not land straight back on you.
-  socket.on('enemy-unclung', ({ x, y, f }) => {
+  // `dx, dy` (user, 2026-10-05): WHICH WAY they go — the way you punched, rolled or slammed. Each blob starts exactly where it
+  // was drawn on you (slot j, the same angles as the client's `drawSlimeClingers`: a = j·2.4 + 0.6 round a body of radius 20) and
+  // is launched from there, so it leaves your body in one continuous movement rather than appearing somewhere else.
+  socket.on('enemy-unclung', ({ x, y, f, dx, dy }) => {
     const room = currentAvatarRoom; if (!room) return;
     const R = roomEnemies.get(room); if (!R) return;
     const k = Math.max(1, Math.min(3, +f || 1));
+    let ux = +dx, uy = +dy; const aimed = isFinite(ux) && isFinite(uy) && (ux || uy);
+    if (aimed) { const l = Math.hypot(ux, uy); ux /= l; uy /= l; }
     const p = lastBodyPos(room, socket.id), px = isFinite(x) ? +x : p ? p.x : 0, py = isFinite(y) ? +y : p ? p.y : 0, now = Date.now();
+    let j = 0;                                                  // slot on the body, counted across every slime stuck to me
     for (const E of R.E.values()) {
       if (!E.clung || !E.clung.includes(socket.id)) continue;
       let n = 0;
       E.clung = E.clung.filter(sid => { if (sid !== socket.id) return true; n++; return false; });
-      for (let i = 0; i < n; i++) { const d = i % 2 ? 1 : -1; E.blobs.push({ x: px + d * (26 + i * 6) * k, y: py - 10, vx: d * (240 + i * 30) * k, vy: -300 * Math.min(1.8, k), s: 1, ground: false, next: Infinity, dir: d, hitAt: now }); }
+      for (let i = 0; i < n; i++, j++) {
+        const a = j * 2.4 + 0.6, ox = Math.cos(a), oy = Math.sin(a);
+        const vx = aimed ? ux * 280 * k + ox * 70 : ox * 170, vy = aimed ? uy * 280 * k + oy * 70 - 140 : oy * 120 - 260;
+        E.blobs.push({ x: px + ox * 16, y: py + oy * 14 + 6, vx, vy, s: 1, ground: false, next: Infinity, dir: vx < 0 ? -1 : 1, hitAt: now });
+      }
       io.to(room).emit('enemy-ev', { id: E.id, k: 'unclung', sid: socket.id, n });
     }
   });
