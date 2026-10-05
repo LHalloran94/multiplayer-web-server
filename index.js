@@ -24926,6 +24926,22 @@ io.on('connection', (socket) => {
     // …and a thing that answers to heat without burning goes up or melts the way lava sets it off
     if (obj.boom > 0) armBomb(room, id, socket.id, { x, y });
   });
+  // ⭐ list 14 — A BURNING PLAYER SETS ALIGHT WHAT IT TOUCHES (user, 2026-10-05: "running through a wooden house sets it alight").
+  //   Not the fire tool: it needs no build rights — it is the world's fire spreading, not an edit — so it is kept small (the
+  //   body's own reach), rate-limited per socket, and lights only what is there to burn (`igniteBox` changes no terrain).
+  //   `objs`: moving wooden objects / drums the body is against (one at rest is ground, which the box already covers).
+  socket.on('avt-burn-touch', ({ x, y, r, objs }) => {
+    const room = currentAvatarRoom; if (!room || !isFinite(x) || !isFinite(y)) return;
+    const now = Date.now(); if (now < (socket._burnTouchAt || 0)) return; socket._burnTouchAt = now + 180;
+    const d = roomDims(room), rr = Math.max(TERRAIN_CELL, Math.min(48, +r || 24));
+    igniteBox(room, Math.max(0, Math.min(d.cols * TERRAIN_CELL, x)), Math.max(0, Math.min(d.rows * TERRAIN_CELL, y)), rr);
+    if (!Array.isArray(objs)) return;
+    for (const it of objs.slice(0, 4)) {
+      const obj = it && roomObjects[room] && roomObjects[room].get(it.id); if (!obj) continue;
+      if (bodySpec(obj)) { if (bodyIgnite(room, obj, x, y, rr, +it.px, +it.py, +it.pa)) broadcastObjSt(room); }
+      else if (obj.boom > 0) armBomb(room, it.id, socket.id, { x, y });
+    }
+  });
   socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     const obj = roomObjects[currentAvatarRoom].get(id);
