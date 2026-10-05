@@ -25373,15 +25373,18 @@ io.on('connection', (socket) => {
     E.blobs.splice(blob | 0, 1); (E.clung || (E.clung = [])).push(socket.id);
     io.to(room).emit('enemy-ev', { id, k: 'cling', sid: socket.id });
   });
-  socket.on('enemy-unclung', ({ x, y }) => {
+  // `f` (list 14, user 2026-10-05): HOW HARD they are thrown off — 1 for a punch, a slam, liquid; more for rolling or dashing
+  // ("it should throw them off with some force"). They also start further out, so they do not land straight back on you.
+  socket.on('enemy-unclung', ({ x, y, f }) => {
     const room = currentAvatarRoom; if (!room) return;
     const R = roomEnemies.get(room); if (!R) return;
+    const k = Math.max(1, Math.min(3, +f || 1));
     const p = lastBodyPos(room, socket.id), px = isFinite(x) ? +x : p ? p.x : 0, py = isFinite(y) ? +y : p ? p.y : 0, now = Date.now();
     for (const E of R.E.values()) {
       if (!E.clung || !E.clung.includes(socket.id)) continue;
       let n = 0;
       E.clung = E.clung.filter(sid => { if (sid !== socket.id) return true; n++; return false; });
-      for (let i = 0; i < n; i++) { const d = i % 2 ? 1 : -1; E.blobs.push({ x: px + d * (10 + i * 6), y: py, vx: d * (160 + i * 30), vy: -280, s: 1, ground: false, next: Infinity, dir: d, hitAt: now }); }
+      for (let i = 0; i < n; i++) { const d = i % 2 ? 1 : -1; E.blobs.push({ x: px + d * (26 + i * 6) * k, y: py - 10, vx: d * (240 + i * 30) * k, vy: -300 * Math.min(1.8, k), s: 1, ground: false, next: Infinity, dir: d, hitAt: now }); }
       io.to(room).emit('enemy-ev', { id: E.id, k: 'unclung', sid: socket.id, n });
     }
   });
