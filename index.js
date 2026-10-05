@@ -1974,39 +1974,61 @@ function sanitizeEnvSpec(raw) {
     // Optional saved background mode (0=Page,1=Canvas,2=Canvas-clear,3=Sky): travels in the public spec so
     // NON-host viewers of a saved Level get the right bg too (the host-local blob bg never reaches them).
     if (l && Number.isInteger(l.bg) && l.bg >= 0 && l.bg <= 3) out.bg = l.bg;
-    // #102 — RESET ON RESPAWN. When set, any respawn in this Level restores its authored state for everyone
-    // in it: terrain + hp + materials + objects from the Level's blob, and the liquid re-derived from the
-    // restored fluid cells. A Level with a running hazard (the card's volcano with lava trickling down) is
-    // unplayable on the second attempt without it.
-    // ⚠️ THIS ALLOWLIST IS THE WHOLE PER-LEVEL SCHEMA — a field it does not name is silently dropped on save,
-    // which looks exactly like "the setting won't stick". Add here FIRST when adding a per-Level option.
-    if (l && l.reset) out.reset = 1;
-    // #101a — NO CONTACT. Everyone in this Level can see everyone else and none of them can touch: no hits
-    // dealt or received, and no bodies to collide with. A Level PROPERTY, not a permission — contact is
-    // symmetric, so "the host may touch and others may not" is not a state that means anything, and it
-    // applies to the host too.
-    if (l && l.solo) out.solo = 1;
-    // The backing layer ("what is behind the terrain"). Absent = decided by the Level's kind, which is right
-    // almost always; stored only when the author overrides it. 0 is meaningful, so this tests for undefined.
-    if (l && l.back != null) out.back = l.back ? 1 : 0;
-    // ⭐⭐ DOES THIS LEVEL HAVE AN ECONOMY? OFF unless the author says so — the (A)/(B) split from
-    // `kickoff_what_levels_are.md` §4.3: a Level is a WORK and scarcity is usually wrong for its author,
-    // while a WORLD (the Overworld, a page world) is a PLACE and scarcity is the whole design there.
-    // ⚠️ It is authored per Level and not derived from the Level's TYPE, because "a Level about mining" is a
-    // thing somebody should be able to build. The type only decides the default, and the default is off.
-    if (l && l.econ) out.econ = 1;
-    // ⭐⭐ #176 — THE MOVES THIS LEVEL SWITCHES OFF (a powerup can give one back). Ids only, from a fixed list:
-    // it must agree with `LEVEL_MOVES` in the client's 01_state.js. Written out inline rather than as a shared
-    // constant because the probe rigs slice this file, and a bare reference across a slice throws in a guard.
-    if (l && Array.isArray(l.off)) {
-      const ok = ['glide', 'walls', 'djump', 'dash', 'slam', 'ball', 'grapple', 'punch', 'dig', 'size', 'ghost'];
-      const off = [];
-      for (const v of l.off) if (ok.includes(v) && !off.includes(v)) off.push(v);
-      if (off.length) out.off = off;
-    }
-    return out;
+    // ⭐⭐ …AND EVERY OTHER SETTING OF THE LEVEL, through the ONE function that knows them (`sanitizeLevelCfg`
+    // below), which is also what a Level's saved/published CONTENT carries them through. Health round 9.
+    return Object.assign(out, sanitizeLevelCfg(l));
   });
   return { levels, nav: (raw.nav === 'series') ? 'series' : 'free' };
+}
+// ⭐⭐ A LEVEL'S SETTINGS — what the Level IS, as opposed to who may do what in it (that is the perms hub). Health
+// round 9 (user, 2026-10-05): they belong to the LEVEL, so they travel with it — the room's Level list holds the live
+// copy, and a saved / published / remixed Level carries the same fields as `cfg` in its content.
+// 🟥 Before this they lived ONLY on the room, so publishing a World silently dropped every one of them
+// (`derivePubEnvSpec` rebuilt each Level from name/size/bg) and a saved template never had them at all.
+// ⚠️ THIS IS THE WHOLE PER-LEVEL SCHEMA. A field it does not name is dropped on save, which looks exactly like
+// "the setting won't stick". Add new settings HERE. Only non-default values are stored.
+function sanitizeLevelCfg(l) {
+  const out = {};
+  if (!l || typeof l !== 'object') return out;
+  // #102 — RESET ON RESPAWN: any respawn restores the Level's authored state for everyone in it.
+  if (l.reset) out.reset = 1;
+  // #101a — NO CONTACT: everyone can see everyone and nobody can touch. A Level PROPERTY, applies to the host too.
+  if (l.solo) out.solo = 1;
+  // The backing layer. Absent = decided by the Level's kind; 0 is meaningful, so this tests for undefined.
+  if (l.back != null) out.back = l.back ? 1 : 0;
+  // ⭐⭐ DOES THIS LEVEL HAVE AN ECONOMY? Off unless the author says so (`kickoff_what_levels_are.md` §4.3).
+  if (l.econ) out.econ = 1;
+  // ⭐⭐ #176 — THE MOVES THIS LEVEL SWITCHES OFF. Must agree with `LEVEL_MOVES` in the client's 01_state.js. Inline
+  // rather than a shared constant because the probe rigs slice this file.
+  if (Array.isArray(l.off)) {
+    const ok = ['glide', 'walls', 'djump', 'dash', 'slam', 'ball', 'grapple', 'punch', 'dig', 'size', 'ghost'];
+    const off = [];
+    for (const v of l.off) if (ok.includes(v) && !off.includes(v)) off.push(v);
+    if (off.length) out.off = off;
+  }
+  // ⭐ list 14 — HEALTH. `sys` 'pct' = the percent system (hits only make you fly further). Every number is an integer
+  // dial the client reads; only the ones moved off their default are kept. Must agree with `LEVEL_HP_DEF` (01_state.js).
+  if (l.hp && typeof l.hp === 'object') {
+    const h = l.hp, o = {};
+    const int = (v, lo, hi) => (Number.isFinite(+v) ? Math.max(lo, Math.min(hi, Math.round(+v))) : null);
+    if (h.sys === 'pct') o.sys = 'pct';
+    const DEF = { max: 5, delay: 5, rate: 3, launch: 9, pLaunch: 10, pDelay: 5, pRate: 0 };
+    const LIM = { max: [1, 10], delay: [0, 30], rate: [0, 10], launch: [0, 30], pLaunch: [2, 30], pDelay: [0, 30], pRate: [0, 10] };
+    for (const k in DEF) { const v = int(h[k], LIM[k][0], LIM[k][1]); if (v !== null && v !== DEF[k]) o[k] = v; }
+    if (Array.isArray(h.noHurt)) {
+      const ok = ['punch', 'stomp', 'slam', 'ball'], n = [];
+      for (const v of h.noHurt) if (ok.includes(v) && !n.includes(v)) n.push(v);
+      if (n.length) o.noHurt = n;
+    }
+    if (Object.keys(o).length) out.hp = o;
+  }
+  // ⭐ OUT OF BOUNDS: 1 = touching the sides or top kills, 2 = the floor as well. `look` = how a deadly edge is drawn.
+  if (l.oob && typeof l.oob === 'object') {
+    const e = Math.max(0, Math.min(2, Math.round(+l.oob.edges || 0)));
+    const LOOKS = ['none', 'glow', 'hazard', 'laser', 'abyss', 'electric', 'spikes', 'storm', 'fire'];
+    if (e) out.oob = { edges: e, look: LOOKS.includes(l.oob.look) ? l.oob.look : 'glow' };
+  }
+  return out;
 }
 function parseEnvSpec(s) { try { return s ? JSON.parse(s) : null; } catch { return null; } }
 
@@ -2320,6 +2342,33 @@ app.put('/rooms/:id/levels', (req, res) => {
     // just been renamed, moved or removed out from under them.
     io.to('pg:' + id).emit('world-levels', { roomId: id, env_spec: spec });
     res.json({ id, env_spec: spec, cleared_level_locks: clearedLocks });
+  } catch (e) { res.status(500).json({ error: 'DB error' }); }
+});
+
+// ⭐ health round 9 — ONE LEVEL'S SETTINGS, from the editor's ⚙ Settings job. Its own route rather than the whole-list PUT
+// above, because that one CLEARS every per-Level build lock (it cannot tell a reorder from an edit) — and changing how much
+// health a Level gives is not a reason to unlock its building. The Level's settings are REPLACED by what is sent (so a
+// setting switched back to its default actually goes), everything else about the Level — name, size, content — is kept.
+app.put('/rooms/:id/levels/:li/cfg', (req, res) => {
+  const user = verifyToken(req);
+  if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  const li = parseInt(req.params.li, 10);
+  try {
+    const room = db.prepare('SELECT id, owner_id, kind, env_spec, no_host FROM rooms WHERE id = ?').get(req.params.id);
+    if (!room) return res.status(404).json({ error: 'Not found' });
+    if (room.no_host) return res.status(403).json({ error: 'Nobody runs this room' });
+    if (room.owner_id !== user.sub) return res.status(403).json({ error: 'Not owner' });
+    if (room.kind === 'published') return res.status(409).json({ error: 'A published World\'s Levels come from its published content' });
+    const spec = parseEnvSpec(room.env_spec);
+    if (!spec || !Array.isArray(spec.levels) || !Number.isInteger(li) || li < 0 || li >= spec.levels.length) return res.status(404).json({ error: 'No such Level' });
+    const keep = {};
+    for (const k of ['type', 'name', 'size', 'src', 'bg', 'pub']) if (spec.levels[li][k] !== undefined) keep[k] = spec.levels[li][k];
+    spec.levels[li] = Object.assign(keep, (req.body && req.body.cfg) || {});
+    const clean = sanitizeEnvSpec(spec);
+    if (!clean) return res.status(400).json({ error: 'bad' });
+    db.prepare('UPDATE rooms SET env_spec = ? WHERE id = ?').run(JSON.stringify(clean), room.id);
+    io.to('pg:' + room.id).emit('world-levels', { roomId: room.id, env_spec: clean });
+    res.json({ id: room.id, env_spec: clean });
   } catch (e) { res.status(500).json({ error: 'DB error' }); }
 });
 
@@ -2647,6 +2696,8 @@ function exportLevelBlob(roomId, levelIndex, lvl) {
     rules: (blob.rules && blob.rules.length) ? blob.rules : undefined,   // #98 — see captureRoomBlob
     lobby: blob.lobby || undefined,
     tpl: (typeof blob.tpl === 'string' ? blob.tpl.slice(0, 24) : undefined),
+    // health round 9 — the Level's settings live on the room's Level entry; the published copy carries them in its content
+    cfg: (() => { const c = sanitizeLevelCfg(lvl); return Object.keys(c).length ? c : undefined; })(),
   };
 }
 
@@ -13591,8 +13642,11 @@ function relayPos(room, sid, msg) {
   let n = 0;
   for (const k in msg) {
     if (RELAY_POS_DROP.has(k)) continue;
-    if (++n > 32) break;                      // a bound, so a client cannot inflate the packet without limit
     const v = msg[k];
+    // 🟥 Absent fields are not counted (2026-10-05): the client's packet NAMES ~37 fields, most of them undefined while
+    //    not in use, and counting those let the bound cut off real ones (ghost, username…) whenever the relay was on.
+    if (v === undefined) continue;
+    if (++n > 32) break;                      // a bound, so a client cannot inflate the packet without limit
     const t = typeof v;
     if (t === 'number' || t === 'boolean' || v === null) rec[k] = v;
     else if (t === 'string' && v.length <= 32) rec[k] = v;   // `mode` and friends; long strings are not motion
@@ -14728,6 +14782,8 @@ function validatePublishContent(levels) {
     if (l.rules !== undefined) { const r = sanitizeRules(l.rules); if (r.length) l.rules = r; else delete l.rules; }
     if (l.lobby !== undefined) { const b = sanitizeLobby(l.lobby); if (b && l.rules) l.lobby = b; else delete l.lobby; }
     if (l.tpl !== undefined) { const t = (typeof l.tpl === 'string' ? l.tpl.trim().slice(0, 24) : ''); if (t && l.rules) l.tpl = t; else delete l.tpl; }
+    // health round 9 — the Level's settings ride its content (see `sanitizeLevelCfg`)
+    if (l.cfg !== undefined) { const c = sanitizeLevelCfg(l.cfg); if (Object.keys(c).length) l.cfg = c; else delete l.cfg; }
   }
   return levels;
 }
@@ -14746,6 +14802,9 @@ function derivePubEnvSpec(content, worldId) {
       pub: { world: worldId, lvl: i },
     };
     if (Number.isInteger(l && l.bg) && l.bg >= 0 && l.bg <= 3) o.bg = l.bg;
+    // 🟥 health round 9 — the Level's SETTINGS, which this rebuild used to drop (a published World lost its moves, no
+    // contact, reset… every one). They ride the content as `cfg`.
+    Object.assign(o, sanitizeLevelCfg(l && l.cfg));
     return o;
   });
   return { levels, nav: 'free' };
@@ -17415,7 +17474,9 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // ⚠️ Two retired kinds are carried over rather than dropped to the default: a star became Stone skin and
       // moon boots became Spring boots (user, 2026-09-30), so a pickup placed before then keeps its meaning.
       const pw = data.pw === 'star' ? 'stone' : data.pw === 'moon' ? 'boots' : data.pw;
-      obj.pw = ['wings', 'gloves', 'grapple', 'ball', 'boots', 'xjump', 'stone', 'shield', 'fireproof', 'jetpack', 'power', 'mega', 'mini', 'speed', 'drill'].includes(pw) ? pw : 'wings';
+      obj.pw = ['heart', 'wings', 'gloves', 'grapple', 'ball', 'boots', 'xjump', 'stone', 'shield', 'fireproof', 'jetpack', 'power', 'mega', 'mini', 'speed', 'drill'].includes(pw) ? pw : 'wings';
+      // list 14 round 9 — a HEALTH pickup heals at once rather than being held: how much, in half-hearts (99 = all of it)
+      if (obj.pw === 'heart') obj.pheal = [1, 2, 4, 99].includes(+data.pheal) ? +data.pheal : 2;
       obj.pdur = ['timed', 'death', 'hit', 'ever'].includes(data.pdur) ? data.pdur : 'death';
       // …except where the KIND decides: a shield lasts until it has saved you.
       if (obj.pw === 'shield') obj.pdur = 'death';
