@@ -108,7 +108,26 @@ class Ledger {
         paid       INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (player_key, seq)
       );
+      CREATE TABLE IF NOT EXISTS player_items (
+        player_key TEXT    NOT NULL,
+        item_id    TEXT    NOT NULL,
+        n          INTEGER NOT NULL,
+        PRIMARY KEY (player_key, item_id)
+      );
+      CREATE TABLE IF NOT EXISTS player_hotbar (
+        player_key TEXT PRIMARY KEY,
+        slots      TEXT    NOT NULL,
+        sel        INTEGER NOT NULL DEFAULT -1
+      );
     `);
+    this._selItems = this.db.prepare('SELECT item_id, n FROM player_items WHERE player_key = ?');
+    this._delItems = this.db.prepare('DELETE FROM player_items WHERE player_key = ?');
+    this._insItem = this.db.prepare('INSERT INTO player_items (player_key, item_id, n) VALUES (?, ?, ?)');
+    this._selHot = this.db.prepare('SELECT slots, sel FROM player_hotbar WHERE player_key = ?');
+    // ⚠️ An UPSERT that names BOTH columns. `INSERT OR REPLACE` would also do here (the row has nothing else in
+    // it), but it is the shape that wiped a setting elsewhere in this project, so it is not used.
+    this._upHot = this.db.prepare('INSERT INTO player_hotbar (player_key, slots, sel) VALUES (?, ?, ?) ' +
+                                  'ON CONFLICT(player_key) DO UPDATE SET slots = excluded.slots, sel = excluded.sel');
     this._selMats = this.db.prepare('SELECT mat_id, n FROM player_holdings WHERE player_key = ?');
     this._selPrima = this.db.prepare('SELECT amount FROM player_prima WHERE player_key = ?');
     this._delMats = this.db.prepare('DELETE FROM player_holdings WHERE player_key = ?');
@@ -129,9 +148,16 @@ class Ledger {
   _rec(key) {
     let h = this.holdings.get(key);
     if (h) return h;
-    h = { prima: 0, mats: new Map(), refine: [], paid: 0 };
+    // `items`: itemId → n, the same shape as `mats` (an item is a kind plus a count — see items.js).
+    // `hotbar`: the nine numbers' contents + which one is selected, or null if this player has never sent one.
+    // ⚠️ null is a real answer, not "empty": it is what tells the client to push up the bar it already had in
+    // its browser, so nobody's arrangement is wiped by the move from browser storage to here.
+    h = { prima: 0, mats: new Map(), items: new Map(), refine: [], paid: 0, hotbar: null };
     if (this._persisted(key)) {
       try {
+        for (const row of this._selItems.all(key)) if (row.n > 0) h.items.set(String(row.item_id), row.n | 0);
+        const hb = this._selHot.get(key);
+        if (hb) { try { const s = JSON.parse(hb.slots); if (Array.isArray(s)) h.hotbar = { slots: s, sel: hb.sel | 0 }; } catch (e) {} }
         for (const row of this._selMats.all(key)) if (row.n > 0) h.mats.set(row.mat_id | 0, row.n | 0);
         const p = this._selPrima.get(key);
         h.prima = p ? (p.amount | 0) : 0;
@@ -169,8 +195,11 @@ class Ledger {
     // compute the worth itself: the table is the server's, and a client that disagrees about what a cell is
     // worth draws a bar that never reaches its end.
     const head = h.refine[0];
+    const items = [];
+    for (const [id, n] of h.items) if (n > 0) items.push([id, n]);
     return {
-      prima: h.prima, mats,
+      prima: h.prima, mats, items,
+      hotbar: h.hotbar,
       refine: h.refine.map(e => [e.m, e.n]),
       paid: head ? h.paid : 0,
       headWorth: head ? this.worthOf(head.m) : 0,
@@ -231,6 +260,49 @@ class Ledger {
     this.stats.spends++;
     this._touch(key);
     return take;
+  }
+
+  // ── items: the same three verbs as materials, on their own map ────────────────────────────────────────
+  // ⚠️ The caller validates the ids (`isItem` in items.js). This file stores whatever string it is handed, for
+  // the same reason it has no idea what a mineral is.
+  itemCount(key, id) { return this._rec(key).items.get(String(id)) || 0; }
+  creditItems(key, items) {
+    if (!items || !items.length) return 0;
+    const h = this._rec(key);
+    let total = 0;
+    for (const [id, n] of items) {
+      const k = n | 0;
+      if (typeof id !== 'string' || !id || k <= 0) continue;
+      h.items.set(id, (h.items.get(id) || 0) + k);
+      total += k;
+    }
+    if (total) { this.stats.credits++; this._touch(key); }
+    return total;
+  }
+  spendItem(key, id, n) {
+    const want = n | 0;
+    if (typeof id !== 'string' || want <= 0) return 0;
+    const h = this._rec(key);
+    const have = h.items.get(id) || 0;
+    const take = Math.min(have, want);
+    if (take < want) this.stats.refused++;
+    if (!take) return 0;
+    if (take === have) h.items.delete(id); else h.items.set(id, have - take);
+    this.stats.spends++;
+    this._touch(key);
+    return take;
+  }
+
+  // ── the hotbar: WHICH NUMBER HOLDS WHAT, and which one is in your hand ────────────────────────────────
+  // ⭐ Kept here, beside what you carry, rather than in the browser where it used to live: it follows a logged-in
+  // player between machines, and the server knows what is in your hand (which weapons will need).
+  // ⚠️ It is not matter and nothing here checks you OWN what a slot points at — a number can point at a material
+  // you have run out of, exactly as it could before. The caller validates the shape.
+  hotbar(key) { return this._rec(key).hotbar; }
+  setHotbar(key, slots, sel) {
+    const h = this._rec(key);
+    h.hotbar = { slots, sel: sel | 0 };
+    this._touch(key);
   }
 
   grantPrima(key, amount) {
@@ -303,7 +375,12 @@ class Ledger {
   // keeps conservation checkable — nothing here may destroy matter, only move it.
   takeAll(key) {
     const h = this._rec(key);
-    const out = { prima: h.prima, mats: [] };
+    // ⭐ ITEMS LEAVE TOO — "in the shared world, EVERYTHING drops on death: materials, Prima and gear" (user,
+    // 2026-10-07). The hotbar arrangement does NOT: it is where things go, not a thing, so a number keeps
+    // pointing at the sword you lost and lights up again when you pick it back up.
+    const out = { prima: h.prima, mats: [], items: [] };
+    for (const [id, n] of h.items) if (n > 0) out.items.push([id, n]);
+    h.items.clear();
     const bag = new Map(h.mats);
     // 🟥 THE HOPPER LEAVES TOO. Material in the refine queue is material you are CARRYING — it is out of the
     // pouch but it has not become anything yet — so leaving it behind here would mean dying with a full hopper
@@ -340,6 +417,9 @@ class Ledger {
         if (!h) continue;
         this._delMats.run(key);
         for (const [m, n] of h.mats) if (n > 0) this._insMat.run(key, m, n);
+        this._delItems.run(key);
+        for (const [id, n] of h.items) if (n > 0) this._insItem.run(key, id, n);
+        if (h.hotbar) this._upHot.run(key, JSON.stringify(h.hotbar.slots), h.hotbar.sel | 0);
         this._upPrima.run(key, h.prima);
         // Same delete-then-insert, for the same reason: an UPSERT would leave rows for entries that have
         // finished refining, and a stale row here is ore that comes back from the dead.

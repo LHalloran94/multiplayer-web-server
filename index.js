@@ -20,6 +20,7 @@ const WORLDGEN = require('./worldgen');
 const WORLDGEN2 = require('./worldgen2'); // the PORTED world redesign (port inc 3-6). Ships OFF: worldCfg.gen2 // Phase 6 inc 4: chunk-on-demand world generation (the Overworld's generator)
 const DOMAINS = require('./domains');   // Phase 6 inc 6: which column of the Overworld a site spawns at
 const LEDGER = require('./ledger');     // the Prima economy: what each player carries, held HERE and not in a browser
+const ITEMS = require('./items');       // what an item IS (a kind + a count, like a material) — the only copy of the table
 const MATGEN = require('./materials');  // Phase 6 world-redesign port inc 1: the generator's materials, ids 18..89
                                         // ⚠️ ALSO INLINED INTO THE CLIENT BUNDLE by extension/build.js (as MWMats),
                                         // the same way avatar-sim.js is. One table, two readers — never copy rows out.
@@ -8203,10 +8204,22 @@ function levelIsGated(rinfo, levelIndex, isOver) {
 // ⚠️ The room is PASSED, not looked up: a socket's avatar room lives in the connection closure
 // (`currentAvatarRoom`) and there is no global map of it. Inventing one here would be a second source of truth
 // for which room a socket is in, which is exactly the kind of drift this file keeps getting bitten by.
+// Sockets that have already been sent the item table. ⚠️ A WeakSet keyed on the socket, so a reconnect (a new
+// socket) is sent it again and nothing has to be cleaned up when one goes.
+const _itemDefsSent = new WeakSet();
 function sendInvSync(socket, room) {
   const snap = ledger.snapshot(playerKeyFor(socket.id));
+  let itemDefs;
+  if (!_itemDefsSent.has(socket)) { _itemDefsSent.add(socket); itemDefs = ITEMS.itemDefsWire(); }
   socket.emit('inv-sync', {
     prima: snap.prima, mats: snap.mats, gated: invGatedRoom(room),
+    // ⭐ ITEMS, beside the materials and in the same [[id, n], …] shape. `itemDefs` (what each id IS: its name,
+    // kind and picture) rides along on the first sync of a socket only — the table is the server's, the client
+    // keeps no copy of its own.
+    items: snap.items, itemDefs,
+    // ⭐ WHICH NUMBER HOLDS WHAT. null = this player has never sent one, which tells the client to push up the
+    // bar it already has in its browser rather than starting from nothing.
+    hotbar: snap.hotbar,
     // The hopper and its progress. ⚠️ `headWorth` comes from the SERVER's worth table rather than being looked
     // up client-side: the client has a copy of that table, but a progress bar drawn against a different number
     // from the one the digest is counting to is a bar that never reaches its end.
@@ -19377,6 +19390,7 @@ function dropsTouch(room, ch) {
 function dropRow(d) {
   const o = { id: d.id, x: (d.gx != null ? d.gx : d.x), y: d.gy != null ? d.gy : d.y, t0: d.t0 || 0, n: d.n | 0 };
   if (d.mats && d.mats.length) o.mats = d.mats;
+  if (d.items && d.items.length) o.items = d.items;   // ⚠️ or a dead player's sword is gone after a restart
   if (d.prima > 0) o.prima = d.prima | 0;
   if (d.fl) o.fl = 1;                                  // …or it stops bobbing the first time the server restarts
   return o;
@@ -19396,6 +19410,7 @@ function ensureDropsLoaded(room) {
       if (!p || !p.id) continue;
       const d = { id: p.id, x: +p.x, y: +p.y, gy: +p.y, t0: p.t0 || Date.now(), mats: p.mats || [], n: p.n | 0 };
       if (p.prima > 0) d.prima = p.prima | 0;
+      if (Array.isArray(p.items) && p.items.length) d.items = p.items.filter(e => Array.isArray(e) && ITEMS.isItem(e[0]) && (e[1] | 0) > 0);
       if (!isFinite(d.x) || !isFinite(d.y)) continue;
       // 🟥 THE ID COUNTER MUST BE MOVED PAST WHAT CAME BACK. `dropSeq` restarts at 0 in a fresh process, so
       // without this the first pile anybody drops is called `d1` — the id a restored pile is already using —
@@ -19930,7 +19945,7 @@ function dropMergeTarget(room, x, y, mats, prima) {
     if (!s) continue;
     for (const id of s) {
       const o = map.get(id);
-      if (!o || o.prima > 0 || !o.mats || !o.mats.length) continue;
+      if (!o || o.prima > 0 || !o.mats || !o.mats.length || (o.items && o.items.length)) continue;
       if (o._np > now) continue;                      // still held — not a merge target
       if (Math.abs((o.gx != null ? o.gx : o.x) - x) > DROP_MERGE_R) continue;
       if (Math.abs(o.gy - y) > DROP_MERGE_R) continue;
@@ -19965,9 +19980,14 @@ function spawnDrop(room, x, y, mats, prima, opts) {
   // were holding, but dispersal-on-death needs exactly this shape, and adding the field now means that
   // increment does not have to change the wire, the client decoder and the collect path all over again.
   if (prima > 0) d.prima = prima | 0;
+  // ⭐ …AND ITEMS. A pile is whatever fell out of somebody, and since 2026-10-07 that includes their gear.
+  // ⚠️ A pile holding items is never MERGED (below), for the same reason one holding Prima is not: it is
+  // somebody's dropped belongings, and folding it into a heap of dirt would make it impossible to see.
+  const items = (opts && Array.isArray(opts.items)) ? opts.items.filter(e => ITEMS.isItem(e[0]) && (e[1] | 0) > 0) : [];
+  if (items.length) d.items = items;
   // ⚠️ MERGE ONLY WHAT HAS COME TO REST. A thrown pile is merged at its LANDING place, not its release point,
   // which is why this is here rather than at the top: `land` has to be resolved first.
-  const into = (!(opts && opts.hold > 0))
+  const into = (!(opts && opts.hold > 0) && !items.length)
     ? dropMergeTarget(room, (d.gx != null ? d.gx : d.x), d.gy, mats, prima) : null;
   if (into) {
     for (const [m, k] of mats) {
@@ -20005,10 +20025,10 @@ const DEATH_PILES_MAX = 5;
 function releaseHoldings(room, key, x, y, spread) {
   if (!room || !isFinite(x) || !isFinite(y)) return null;
   const peek = ledger.snapshot(key);
-  if (!peek.mats.length && !peek.prima) return null;
+  if (!peek.mats.length && !peek.prima && !peek.items.length) return null;
   const held = ledger.takeAll(key);
-  const out = scatterMatter(room, x, y, held.mats, held.prima, spread);
-  console.log(`ledger: released ${held.mats.reduce((a, m) => a + m[1], 0)} cell(s) + ${held.prima} prima at ${x | 0},${y | 0} as `
+  const out = scatterMatter(room, x, y, held.mats, held.prima, spread, held.items);
+  console.log(`ledger: released ${held.mats.reduce((a, m) => a + m[1], 0)} cell(s) + ${held.prima} prima + ${held.items.reduce((a, e) => a + e[1], 0)} item(s) at ${x | 0},${y | 0} as `
     + out.map(d => d.id).join('+'));
   return out[0] || null;
 }
@@ -20017,8 +20037,9 @@ function releaseHoldings(room, key, x, y, spread) {
 // to pick up, and they should look the same because they ARE the same.
 // ⚠️ SPLIT BEFORE THE SPAWNS AND EXHAUSTIVELY: `splitHoldings` returns buckets summing EXACTLY to what went in,
 // because anything rounded away would be matter destroyed by the act of dying.
-function scatterMatter(room, x, y, mats, prima, spread) {
-  const parts = spread > 1 ? splitHoldings(mats, prima, spread) : [{ mats, prima }];
+// `items` is optional ([[itemId, n], …]) — only a player's own belongings carry any; a crucible or a refund does not.
+function scatterMatter(room, x, y, mats, prima, spread, items) {
+  const parts = spread > 1 ? splitHoldings(mats, prima, spread, items) : [{ mats, prima, items: items || [] }];
   const out = [];
   for (let i = 0; i < parts.length; i++) {
     // Fan the pieces out with a THROW rather than by teleporting them to scattered coordinates. The throw is
@@ -20030,7 +20051,7 @@ function scatterMatter(room, x, y, mats, prima, spread) {
     // rather than as an event. On a death it is also what makes the scramble a scramble — the killer cannot
     // stand on the corpse and inhale it before anyone else arrives.
     dropWhy = dropWhy === 'putDown' ? 'putDown' : 'scatter';
-    out.push(spawnDrop(room, x, y, parts[i].mats, parts[i].prima, { hold: INV_DROP_HOLD_MS, vx }));
+    out.push(spawnDrop(room, x, y, parts[i].mats, parts[i].prima, { hold: INV_DROP_HOLD_MS, vx, items: parts[i].items }));
   }
   return out;
 }
@@ -20038,8 +20059,8 @@ function scatterMatter(room, x, y, mats, prima, spread) {
 // not leave a five-cairn battlefield, and a player who had an evening's mining should not leave one tidy heap
 // that the killer picks up in a single step. Two is the floor because the whole point of the spread is that
 // there is more than one thing to reach for.
-function deathSpread(mats, prima) {
-  return Math.max(2, Math.min(DEATH_PILES_MAX, (mats ? mats.length : 0) + (prima > 0 ? 1 : 0)));
+function deathSpread(mats, prima, items) {
+  return Math.max(2, Math.min(DEATH_PILES_MAX, (mats ? mats.length : 0) + (prima > 0 ? 1 : 0) + (items ? items.length : 0)));
 }
 // 🟥 CONSERVING BY CONSTRUCTION, WHICH IS THE ONLY PROPERTY THAT MATTERS HERE. Every quantity is split with
 // integer division PLUS ITS REMAINDER handed out one unit at a time, so the buckets sum to exactly what went
@@ -20049,8 +20070,10 @@ function deathSpread(mats, prima) {
 // into three separate cairns holding one grain each, which is clutter rather than drama.
 // ⚠️ Each stack starts at a DIFFERENT bucket. Starting them all at bucket 0 puts a bit of everything in the
 // first pile and leaves the last ones empty, which is a heap plus some crumbs rather than a spread.
-function splitHoldings(mats, prima, n) {
-  const buckets = []; for (let i = 0; i < n; i++) buckets.push({ mats: [], prima: 0 });
+// ⭐ Items split by the SAME rule as materials (a stack of 24 arrows spreads; a single sword lands whole in one
+// pile), continuing the bucket rotation where the materials left off so gear does not all pile into bucket 0.
+function splitHoldings(mats, prima, n, items) {
+  const buckets = []; for (let i = 0; i < n; i++) buckets.push({ mats: [], prima: 0, items: [] });
   (mats || []).forEach((entry, i) => {
     const m = entry[0], k = entry[1] | 0;
     if (k <= 0) return;
@@ -20060,11 +20083,21 @@ function splitHoldings(mats, prima, n) {
       if (q > 0) buckets[(i + j) % n].mats.push([m, q]);
     }
   });
+  const off = (mats || []).length;
+  (items || []).forEach((entry, i) => {
+    const id = entry[0], k = entry[1] | 0;
+    if (k <= 0) return;
+    const spread = Math.min(n, k), base = (k / spread) | 0, rem = k % spread;
+    for (let j = 0; j < spread; j++) {
+      const q = base + (j < rem ? 1 : 0);
+      if (q > 0) buckets[(off + i + j) % n].items.push([id, q]);
+    }
+  });
   if (prima > 0) {
     const base = (prima / n) | 0, rem = prima % n;
     for (let j = 0; j < n; j++) buckets[j].prima = base + (j < rem ? 1 : 0);
   }
-  return buckets.filter(b => b.mats.length || b.prima > 0);
+  return buckets.filter(b => b.mats.length || b.prima > 0 || b.items.length);
 }
 // Where a socket's body was, in pixels, as of its last beacon. ⚠️ Falls back to nothing rather than to the
 // world origin: dropping a haul at (0,0) because the position was unknown is worse than not dropping it, and
@@ -24694,8 +24727,33 @@ io.on('connection', (socket) => {
     if (!p) return;                                       // no idea where they fell ⇒ they keep it (see lastBodyPos)
     const key = playerKeyFor(socket.id);
     const held = ledger.snapshot(key);
-    if (!held.mats.length && !held.prima) return;
-    releaseHoldings(currentAvatarRoom, key, p.x, p.y - 12, deathSpread(held.mats, held.prima));
+    if (!held.mats.length && !held.prima && !held.items.length) return;
+    releaseHoldings(currentAvatarRoom, key, p.x, p.y - 12, deathSpread(held.mats, held.prima, held.items));
+    sendInvSync(socket, currentAvatarRoom);
+  });
+  // ⭐ THE HOTBAR: which number holds what, and which one is in your hand. The client sends the whole bar on any
+  // change (it is nine small entries); the server keeps it with what you carry and hands it back on the next sync.
+  // ⚠️ VALIDATED BY SHAPE, not by ownership — a number may point at something you have run out of (it lights up
+  // again when you get more), exactly as the browser-kept bar always allowed.
+  socket.on('hotbar-set', ({ slots, sel }) => {
+    if (!Array.isArray(slots)) return;
+    const clean = [];
+    for (let i = 0; i < 9; i++) {
+      const s = slots[i];
+      if (s && s.k === 'mat' && (s.id | 0) > 0 && (s.id | 0) < 256) clean.push({ k: 'mat', id: s.id | 0 });
+      else if (s && s.k === 'item' && ITEMS.isItem(s.id)) clean.push({ k: 'item', id: s.id });
+      else if (s && s.k === 'tool' && typeof s.id === 'string' && /^[a-z]{1,16}$/.test(s.id)) clean.push({ k: 'tool', id: s.id });
+      else clean.push(0);
+    }
+    const n = sel | 0;
+    ledger.setHotbar(playerKeyFor(socket.id), clean, n >= 0 && n < 9 ? n : -1);
+  });
+  // ⏭️ A TEST DOOR, for the debug panel: hands you the stand-in items so the bar can be played with before any
+  // real item exists. ⚠️ It MINTS — the one place an item comes from nothing — and is unauthenticated like the
+  // rest of the debug panel's controls. Delete it when real items have a real source (crafting).
+  socket.on('inv-debug-give', () => {
+    if (!currentAvatarRoom) return;
+    ledger.creditItems(playerKeyFor(socket.id), ITEMS.TEST_GIFT.map(e => e.slice()));
     sendInvSync(socket, currentAvatarRoom);
   });
   socket.on('drop-take', ({ id }) => {
@@ -24712,10 +24770,11 @@ io.on('connection', (socket) => {
     // the result; it is never asked.
     const d = map.get(id);
     dropUnindex(currentAvatarRoom, d);
-    if (d && ((d.mats && d.mats.length) || d.prima > 0)) {
+    if (d && ((d.mats && d.mats.length) || d.prima > 0 || (d.items && d.items.length))) {
       const key = playerKeyFor(socket.id);
       if (d.mats && d.mats.length) ledger.credit(key, d.mats);
       if (d.prima > 0) ledger.grantPrima(key, d.prima);
+      if (d.items && d.items.length) ledger.creditItems(key, d.items);
       sendInvSync(socket, currentAvatarRoom);
     }
     // ⚠️ To the chunk's subscribers, plus the taker — who may not be subscribed to the chunk the pile RESTS in
