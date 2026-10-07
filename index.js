@@ -2014,6 +2014,9 @@ function sanitizeLevelCfg(l) {
   if (l.back != null) out.back = l.back ? 1 : 0;
   // ⭐⭐ DOES THIS LEVEL HAVE AN ECONOMY? Off unless the author says so (`kickoff_what_levels_are.md` §4.3).
   if (l.econ) out.econ = 1;
+  // ⭐ DARKER UNDERGROUND (2026-10-07): your own light shrinks the deeper you go, so a torch is worth carrying. Always
+  // on in the Overworld and in page worlds; a Level has it only when its author switches it on (`levelDarkUnder`).
+  if (l.dark) out.dark = 1;
   // ⭐⭐ #176 — THE MOVES THIS LEVEL SWITCHES OFF. Must agree with `LEVEL_MOVES` in the client's 01_state.js. Inline
   // rather than a shared constant because the probe rigs slice this file.
   if (Array.isArray(l.off)) {
@@ -8215,6 +8218,15 @@ function levelIsGated(rinfo, levelIndex, isOver) {
   // No DB row (a per-URL page room) — DELIBERATELY UNCHANGED. The documented default pair is
   // [sandbox = 0, life = 1]: the page's sandbox is a scratch space, and its world is a PLACE.
   return (levelIndex | 0) !== 0;
+}
+// ⭐ DOES THE UNDERGROUND GET DARKER HERE? (user, 2026-10-07) The same (A)/(B) line as the economy above: the
+// Overworld and a page world are PLACES, so yes; a room-backed Level is somebody's WORK, so only if its author
+// switched `dark` on. Sent on `avt-joined`; the client's light pass is what reads it.
+function levelDarkUnder(rinfo, levelIndex, isOver) {
+  if (isOver || !rinfo) return true;
+  const spec = parseEnvSpec(rinfo.env_spec);
+  const lvl = (spec && Array.isArray(spec.levels)) ? spec.levels[levelIndex | 0] : null;
+  return !!(lvl && lvl.dark);
 }
 // ⚠️ The room is PASSED, not looked up: a socket's avatar room lives in the connection closure
 // (`currentAvatarRoom`) and there is no global map of it. Inventing one here would be a second source of truth
@@ -23414,6 +23426,7 @@ io.on('connection', (socket) => {
     // run once per join against a table that will not have the row.
     const _pubLevel = (rinfo && rinfo.kind === 'published') ? pubLevelForRoom(currentAvBuildRoomId) : null;
     socket.emit('avt-joined', { existingPeers, mode: type, levelIndex, relay: _relayed ? 1 : 0, spawn: _spawn,
+      dark: levelDarkUnder(rinfo, levelIndex, _isOver) ? 1 : 0,   // the darker underground (see `levelDarkUnder`)
       dims: { w: _rd.cols * TERRAIN_CELL, h: _rd.rows * TERRAIN_CELL, cell: TERRAIN_CELL },
       // ⭐ WHERE YOU CAME FROM, said by the SERVER rather than re-derived on the client. The routing rule
       // (`isDomainHome` + `normalizeIdentity`) is subtle enough — shell paths, `www.`, ports, two-label public

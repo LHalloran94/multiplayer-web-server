@@ -256,11 +256,10 @@
   // no-op — B-checks in `probe_worldgen` assert the ids resolve.
   // ⚠️ LAVA IS NOT HERE: it is built-in id 11, which lives in the client's hand-written palette (see the header
   // note on ids 1..17), and it carries by far the largest emission in the game.
-  const EMIT = {
-    Crystal: 110,     // 36 — the cave-crystal look; bright enough to light a chamber it grows in
-    Fluorite: 90,     // 86 — fluorescence is the one thing everyone knows about fluorite
-    Uranium: 70,      // 74 — a sickly green glow. Radiation damage is still unbuilt; this is only light.
-  };
+  // ⏹️ EMPTY SINCE 2026-10-07 (the user's call, with the darker underground): Crystal 110, Fluorite 90 and Uranium 70
+  // used to glow. With your own light shrinking as you descend, glowing minerals undercut the reason to carry a
+  // torch. The mechanism stays — lava and acid (client ids 11/12) still emit, and a value here brings one back.
+  const EMIT = {};
   Object.keys(EMIT).forEach((n) => { const id = NAMES[n]; if (id !== undefined) DEFS[id].emit = EMIT[n]; });
 
   // ---- CHARRED — drawn as burnt matter rather than as flat dark rock ---------------------------------------
