@@ -902,6 +902,21 @@ function startCpuProfile(ms, done) {
   }));
   return null;
 }
+// ⭐ WHAT IS QUEUED TO EACH SOCKET, NOT YET WRITTEN. Found 2026-10-07: right after a join a socket's send buffer
+// sat ~90 packets deep behind the world stream, so a personal reply (a sync, "pile removed") arrived SECONDS late.
+// This shows the queue per connected socket: packets waiting, roughly how many bytes, and whether the transport
+// can take more right now. Read-only.
+app.get('/debug/sendq', (req, res) => {
+  const out = [];
+  for (const [id, s] of io.sockets.sockets) {
+    const c = s.conn, wb = (c && c.writeBuffer) || [];
+    let bytes = 0;
+    for (const p of wb) bytes += (p && typeof p.data === 'string') ? p.data.length : (p && p.data && p.data.byteLength) || 0;
+    out.push({ id, user: socketToUsername[id] || '', room: socketToAvatarRoom[id] || '', queued: wb.length, bytes,
+      writable: !!(c && c.transport && c.transport.writable), transport: c && c.transport && c.transport.name });
+  }
+  res.json(out);
+});
 // #73 — how much work the proximity pass is doing. `reset=1` zeroes the counters so a caller can measure one
 // window rather than everything since boot.
 app.get('/debug/voice-prox', (req, res) => {
@@ -24543,7 +24558,7 @@ io.on('connection', (socket) => {
     const c = socket.data.throwCredit || (socket.data.throwCredit = []);
     c.push({ m, t: Date.now() }); if (c.length > 8) c.shift();
   });
-  socket.on('inv-drop', ({ mat, n, vx }) => {
+  socket.on('inv-drop', ({ mat, item, n, vx }) => {
     if (!currentAvatarRoom) return;
     const key = playerKeyFor(socket.id);
     const p = lastBodyPos(currentAvatarRoom, socket.id);
@@ -24551,6 +24566,16 @@ io.on('connection', (socket) => {
     const id = mat | 0, want = Math.max(0, Math.min(1e9, n | 0));
     if (!want) return;
     const opts = { vx: +vx || 0, hold: INV_DROP_HOLD_MS };
+    // ⭐ AN ITEM, put down or thrown out of the inventory window — the same rule as a stack: the server spends what
+    // you actually have and the pile carries exactly that, so nothing is created or lost on the way to the ground.
+    if (item != null) {
+      if (!ITEMS.isItem(item)) return;
+      const took = ledger.spendItem(key, item, want);
+      if (!took) return;
+      spawnDrop(currentAvatarRoom, p.x, p.y - 12, [], 0, Object.assign(opts, { items: [[item, took]] }));
+      sendInvSync(socket, currentAvatarRoom);
+      return;
+    }
     if (id === 0) {
       const have = ledger.prima(key);
       const take = Math.min(have, want);
