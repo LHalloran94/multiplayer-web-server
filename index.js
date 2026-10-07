@@ -3874,6 +3874,13 @@ function travelMs(obj) {
 // drum is a bomb with a short fuse and no "comes back" time. Everything below this line already worked: the
 // refusal to re-light one that is burning is what makes a chain propagate one hop per blast, and `back` being
 // unset is what makes it gone for good.
+// list 14 round 21 — spend one throw credit of material `m` (see 'cell-throw'); a credit lasts 6s, the longest a thrown cell flies.
+function takeThrowCredit(socket, m) {
+  const c = socket.data && socket.data.throwCredit; if (!c) return false;
+  const now = Date.now(); while (c.length && now - c[0].t > 6000) c.shift();
+  const i = c.findIndex(e => e.m === m); if (i < 0) return false;
+  c.splice(i, 1); return true;
+}
 function objExplodes(obj) { return !!obj && (obj.look === 'bomb' || obj.boom > 0); }
 // ⭐⭐ DAMAGE THE WORLD DEALS, RATHER THAN A PLAYER, ARRIVES ONCE PER CLIENT — and that is not a bug in the
 // client, it is what "a turret everyone can see" means. A punch is initiated by one person so one client sends
@@ -24482,6 +24489,27 @@ io.on('connection', (socket) => {
   // ⚠️ `vx` is the throw, taken from the direction the player DRAGGED the stack out of the pouch. Clamped in
   // `spawnDrop`, so a client cannot fling a pile across the world; and it is only a nicety, so an absent or
   // silly value degrades to a pile at your feet rather than a rejection.
+  // ⭐ list 14 round 21 — THROWING A BLOCK FROM YOUR POUCH (client 16i). The server takes ONE of that material when it is thrown
+  // (so a cell that shatters is still paid for), the same split a paint makes — held material first, Prima for the rest — and
+  // leaves a CREDIT the landing paint (`thrown: 1`) spends instead of charging twice. Credits are few and short-lived: a client
+  // cannot bank them into free building.
+  socket.on('cell-throw', ({ mat }) => {
+    if (!currentAvatarRoom) return;
+    const m = liqBaseSrv(roomMats[currentAvatarRoom], Math.min(TERRAIN_MAT_HI, Math.max(1, mat | 0)) || 1);
+    if (isBodyId(m)) return;
+    if (invGatedRoom(currentAvatarRoom) && !isFluidId(m)) {
+      const key = playerKeyFor(socket.id), have = ledger.budget(key, m);
+      if (have > 0) ledger.spend(key, m, 1);
+      else {
+        const w = MATGEN.primaRefinable(m) ? MATGEN.primaWorthOf(m) : 0;
+        if (!w || ledger.prima(key) < w) { sendInvSync(socket, currentAvatarRoom); return; }   // nothing to throw it with
+        ledger.grantPrima(key, -w);
+      }
+      sendInvSync(socket, currentAvatarRoom);
+    }
+    const c = socket.data.throwCredit || (socket.data.throwCredit = []);
+    c.push({ m, t: Date.now() }); if (c.length > 8) c.shift();
+  });
   socket.on('inv-drop', ({ mat, n, vx }) => {
     if (!currentAvatarRoom) return;
     const key = playerKeyFor(socket.id);
@@ -24696,7 +24724,7 @@ io.on('connection', (socket) => {
     emitToChunk(currentAvatarRoom, d.ch, 'drop-removed', { id, by: socket.id });
     socket.emit('drop-removed', { id, by: socket.id });
   });
-  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip }) => {
+  socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip, thrown }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
     // arrived" from "a guard rejected it", and those need completely different fixes — which cost a whole round
     // of wrong theories on 2026-08-27.
@@ -24794,7 +24822,10 @@ io.on('connection', (socket) => {
     // is acceptable while the server is local and they are the only player. The real fix is to gate the build
     // menu to an authorised identity in the Overworld, which is a permission model, not a flag — recorded rather
     // than half-built.
-    const _payMat = (op === 'paint' && invGatedRoom(currentAvatarRoom) && !isFluidId(m) && !editor) ? m : 0;
+    // ⭐ list 14 round 21 — A THROWN CELL WAS PAID FOR WHEN IT WAS THROWN (`cell-throw` below), so its landing spends that credit
+    // instead of being charged again. One cell only, one credit per throw, and only while the credit lasts.
+    const _thrownFree = !!(thrown && op === 'paint' && rr <= TERRAIN_CELL / 2 && takeThrowCredit(socket, m));
+    const _payMat = (op === 'paint' && invGatedRoom(currentAvatarRoom) && !isFluidId(m) && !editor && !_thrownFree) ? m : 0;
     const _payKey = _payMat ? playerKeyFor(socket.id) : null;
     const _conjW = _payMat && MATGEN.primaRefinable(_payMat) ? MATGEN.primaWorthOf(_payMat) : 0;
     let _haveMat = _payMat ? ledger.budget(_payKey, _payMat) : 0;
