@@ -8163,6 +8163,13 @@ const domainsTest = DOMAINS.makeDomains({
 // ReferenceError in every rig and nowhere else — this project has hit that exact shape five times now. The
 // registry above is the precedent; this sits beside it deliberately.
 const ledger = new LEDGER.Ledger(db, { worthOf: (id) => MATGEN.primaWorthOf(id) });
+// ⭐ ADMIN MODE = UNLIMITED PRIMA (user, 2026-10-08, for testing). Admin mode is a client setting; the client says so with
+// `admin-mode` and this remembers which CONNECTIONS are in it. A purse is unlimited while any of them spends from it —
+// asked by connection, not stored by key, because the key changes with the Level (`socketEconScope`).
+// ⚠️ FORGEABLE, KNOWINGLY — the same call as `editor` on a terrain edit: acceptable while the server is local and the
+// user is the only player. The real fix is an authorised identity, which is a permission model, not a flag.
+const adminSockets = new Set();
+ledger.unlimitedOf = (key) => { for (const sid of adminSockets) if (playerKeyFor(sid) === key) return true; return false; };
 // ⭐⭐ REFINING — THE FIRST AND ONLY THING THAT CREATES PRIMA (kickoff_prima.md §3).
 // ⚠️ `rate` IS PRIMA PER SECOND, NOT CELLS PER SECOND, and that is the whole rule rather than a unit choice.
 // Value comes from rarity while digging cost comes from hardness, so a cells-per-second refiner would make the
@@ -8239,7 +8246,7 @@ function sendInvSync(socket, room) {
   let itemDefs;
   if (!_itemDefsSent.has(socket)) { _itemDefsSent.add(socket); itemDefs = ITEMS.itemDefsWire(); }
   socket.emit('inv-sync', {
-    prima: snap.prima, mats: snap.mats, gated: invGatedRoom(room),
+    prima: snap.prima, mats: snap.mats, gated: invGatedRoom(room), unl: adminSockets.has(socket.id) ? 1 : 0,
     // ⭐ ITEMS, beside the materials and in the same [[id, n], …] shape. `itemDefs` (what each id IS: its name,
     // kind and picture) rides along on the first sync of a socket only — the table is the server's, the client
     // keeps no copy of its own.
@@ -24611,10 +24618,11 @@ io.on('connection', (socket) => {
       return;
     }
     if (id === 0) {
-      const have = ledger.prima(key);
+      // ⚠️ the REAL balance: an admin's unlimited purse must not become Prima lying on the ground (`ledger.unlimitedOf`)
+      const have = ledger.realPrima(key);
       const take = Math.min(have, want);
       if (!take) return;
-      ledger.grantPrima(key, -take);
+      ledger.grantPrima(key, -take, { real: true });
       spawnDrop(currentAvatarRoom, p.x, p.y - 12, [], take, opts);
     } else {
       const took = ledger.spend(key, id, want);
@@ -24812,6 +24820,10 @@ io.on('connection', (socket) => {
   });
   // ⭐ MAKE AN ITEM (2026-10-08, the torch: "made from wood with Prima"). The recipe is the server's (`ITEMS[id].make`); the
   // client only names what it wants. All-or-nothing: every cost is checked BEFORE anything is taken.
+  socket.on('admin-mode', (d) => {
+    if (d && d.on) adminSockets.add(socket.id); else adminSockets.delete(socket.id);
+    sendInvSync(socket, currentAvatarRoom);
+  });
   socket.on('inv-make', ({ item }) => {
     if (!currentAvatarRoom || !ITEMS.isItem(item)) return;
     const R = ITEMS.ITEMS[item].make;
@@ -26247,6 +26259,7 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     clearCountWatch(socket.id);
+    adminSockets.delete(socket.id);
     // 🟥 AN EPHEMERAL BALANCE IS PUT BACK INTO THE WORLD, NOT DELETED. Until this existed, a logged-out player
     // leaving with a full pouch simply annihilated it — a conservation leak (kickoff_prima.md §8 row 4) and,
     // much more immediately, the worst possible way to learn that you were not logged in.

@@ -40,6 +40,8 @@
 
 const PERSIST_PREFIX = 'd:';                 // only authenticated keys reach the database
 const FLUSH_MS = 2500;                       // debounce: a dig swing is many credits in a moment
+// What an unlimited purse reads as. Big enough never to run out, small enough to stay an int32 everywhere it is compared.
+const UNLIMITED_PRIMA = 999999999;
 
 // ⭐⭐ THE DIGEST ITSELF, AS ONE FUNCTION, because there are now two things that own a hopper: a player (the
 // slow trickle they carry) and a crucible (the fast one standing in the world). They differ in who is credited
@@ -83,6 +85,12 @@ class Ledger {
     // no business knowing what a mineral is.
     this.worthOf = (opts && opts.worthOf) || (() => 0);
     this.stats = { credits: 0, spends: 0, refused: 0, loads: 0, flushes: 0, refined: 0, primaMade: 0 };
+    // ⭐ UNLIMITED PRIMA (user, 2026-10-08: 'in admin mode in the shared world I should just have unlimited Prima, for testing').
+    // index.js sets this to 'is an admin-mode connection spending from this purse?'. Such a purse READS as UNLIMITED and a
+    // SPEND of Prima is skipped; the real balance underneath is untouched, so switching admin off leaves you where you were,
+    // and what you carry for a killer (`carriedWorth`) and what drops on death (`takeAll`) stay the real numbers.
+    // ⚠️ Earnings and refunds still ADD to the real balance (a refund cannot be told from an earning here) — testing only.
+    this.unlimitedOf = null;
     if (this.db) this._initDb();
   }
 
@@ -183,7 +191,10 @@ class Ledger {
   }
 
   // ── reads ──────────────────────────────────────────────────────────────────────────────────────────────
-  prima(key) { return this._rec(key).prima; }
+  _unl(key) { return !!(this.unlimitedOf && this.unlimitedOf(key)); }
+  prima(key) { return this._unl(key) ? UNLIMITED_PRIMA : this._rec(key).prima; }
+  // The balance that really exists, unlimited or not — for anything that moves Prima OUT of the purse into the world.
+  realPrima(key) { return this._rec(key).prima; }
   countOf(key, matId) { return this._rec(key).mats.get(matId | 0) || 0; }
   // The wire shape: `{ prima, mats: [[matId, n], …] }`. An array of pairs rather than an object because the
   // client's pouch already speaks that shape and a JSON object would stringify every id.
@@ -199,7 +210,7 @@ class Ledger {
     const items = [];
     for (const [id, n] of h.items) if (n > 0) items.push([id, n]);
     return {
-      prima: h.prima, mats, items,
+      prima: this._unl(key) ? UNLIMITED_PRIMA : h.prima, mats, items,
       hotbar: h.hotbar,
       refine: h.refine.map(e => [e.m, e.n]),
       paid: head ? h.paid : 0,
@@ -308,9 +319,10 @@ class Ledger {
     this._touch(key);
   }
 
-  grantPrima(key, amount) {
+  grantPrima(key, amount, opts) {
     const a = amount | 0;
     if (!a) return 0;
+    if (a < 0 && this._unl(key) && !(opts && opts.real)) return UNLIMITED_PRIMA;
     const h = this._rec(key);
     h.prima = Math.max(0, h.prima + a);
     this._touch(key);
@@ -445,4 +457,4 @@ class Ledger {
   }
 }
 
-module.exports = { Ledger, PERSIST_PREFIX, digestQueue };
+module.exports = { Ledger, PERSIST_PREFIX, digestQueue, UNLIMITED_PRIMA };
