@@ -8170,6 +8170,10 @@ const ledger = new LEDGER.Ledger(db, { worthOf: (id) => MATGEN.primaWorthOf(id) 
 // user is the only player. The real fix is an authorised identity, which is a permission model, not a flag.
 const adminSockets = new Set();
 ledger.unlimitedOf = (key) => { for (const sid of adminSockets) if (playerKeyFor(sid) === key) return true; return false; };
+// …every material a pouch can hold: the base ids and the generated ones, never a liquid (liquids are not carried).
+ledger.allMatIds = () => { if (!_allMatIds) { const s = new Set(); for (let i = 1; i < MATGEN.GEN_MAT_MIN; i++) s.add(i); for (const n in MATGEN.NAMES) s.add(MATGEN.NAMES[n] | 0);
+  _allMatIds = [...s].filter(m => m > 0 && m < 254 && !isFluidId(m)).sort((a, b) => a - b); } return _allMatIds; };
+let _allMatIds = null;
 // ⭐⭐ REFINING — THE FIRST AND ONLY THING THAT CREATES PRIMA (kickoff_prima.md §3).
 // ⚠️ `rate` IS PRIMA PER SECOND, NOT CELLS PER SECOND, and that is the whole rule rather than a unit choice.
 // Value comes from rarity while digging cost comes from hardness, so a cells-per-second refiner would make the
@@ -24625,7 +24629,7 @@ io.on('connection', (socket) => {
       ledger.grantPrima(key, -take, { real: true });
       spawnDrop(currentAvatarRoom, p.x, p.y - 12, [], take, opts);
     } else {
-      const took = ledger.spend(key, id, want);
+      const took = ledger.spend(key, id, want, { real: true });   // (the REAL pouch: an admin's unlimited one must not drop)
       if (!took) return;
       spawnDrop(currentAvatarRoom, p.x, p.y - 12, [[id, took]], 0, opts);
     }
@@ -24704,7 +24708,7 @@ io.on('connection', (socket) => {
     const m = mat | 0, want = Math.max(0, Math.min(1e9, n | 0));
     if (!want || !MATGEN.primaRefinable(m)) return;
     const key = playerKeyFor(socket.id);
-    const took = ledger.spend(key, m, want);
+    const took = ledger.spend(key, m, want, { real: true });   // (the REAL pouch: an admin's unlimited one must not fill a crucible)
     if (!took) return;
     const e = b.q.find(x => x.k === key && x.m === m);
     if (e) e.n += took; else b.q.push({ k: key, m, n: took });

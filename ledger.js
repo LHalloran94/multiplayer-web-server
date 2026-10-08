@@ -91,6 +91,9 @@ class Ledger {
     // and what you carry for a killer (`carriedWorth`) and what drops on death (`takeAll`) stay the real numbers.
     // ⚠️ Earnings and refunds still ADD to the real balance (a refund cannot be told from an earning here) — testing only.
     this.unlimitedOf = null;
+    // …and every MATERIAL too (user, 2026-10-08: no wood to make a torch with, in admin mode). index.js sets this to the list
+    // of ids a pouch can hold; an unlimited purse shows each at UNLIMITED and a spend of one is skipped, exactly as Prima.
+    this.allMatIds = () => [];
     if (this.db) this._initDb();
   }
 
@@ -195,13 +198,14 @@ class Ledger {
   prima(key) { return this._unl(key) ? UNLIMITED_PRIMA : this._rec(key).prima; }
   // The balance that really exists, unlimited or not — for anything that moves Prima OUT of the purse into the world.
   realPrima(key) { return this._rec(key).prima; }
-  countOf(key, matId) { return this._rec(key).mats.get(matId | 0) || 0; }
+  countOf(key, matId) { return this._unl(key) ? UNLIMITED_PRIMA : (this._rec(key).mats.get(matId | 0) || 0); }
   // The wire shape: `{ prima, mats: [[matId, n], …] }`. An array of pairs rather than an object because the
   // client's pouch already speaks that shape and a JSON object would stringify every id.
   snapshot(key) {
     const h = this._rec(key);
     const mats = [];
-    for (const [m, n] of h.mats) if (n > 0) mats.push([m, n]);
+    if (this._unl(key)) for (const m of this.allMatIds()) mats.push([m, UNLIMITED_PRIMA]);
+    else for (const [m, n] of h.mats) if (n > 0) mats.push([m, n]);
     mats.sort((a, b) => b[1] - a[1]);
     // ⚠️ `paid` and the head's worth both ride along. The client draws a progress bar out of them and must not
     // compute the worth itself: the table is the server's, and a client that disagrees about what a cell is
@@ -260,9 +264,12 @@ class Ledger {
   // Spend up to `n`; returns how much was actually taken. ⚠️ Never goes negative and never throws — a debit
   // larger than the balance is a bug somewhere upstream, and silently clamping is the behaviour that keeps
   // the invariant (holdings >= 0) true no matter who calls this.
-  spend(key, matId, n) {
+  // `opts.real`: from the REAL pouch even when it is unlimited — for anything that moves material OUT into the world (a drop,
+  // a crucible, the refiner), which would otherwise mint it.
+  spend(key, matId, n, opts) {
     const id = matId | 0, want = n | 0;
     if (id <= 0 || want <= 0) return 0;
+    if (!(opts && opts.real) && this._unl(key)) return want;
     const h = this._rec(key);
     const have = h.mats.get(id) || 0;
     const take = Math.min(have, want);
@@ -342,7 +349,7 @@ class Ledger {
     const id = matId | 0, want = n | 0;
     if (id <= 0 || want <= 0) return 0;
     if (this.worthOf(id) <= 0) { this.stats.refused++; return 0; }
-    const took = this.spend(key, id, want);
+    const took = this.spend(key, id, want, { real: true });
     if (!took) return 0;
     const h = this._rec(key);
     const e = h.refine.find(x => x.m === id);
