@@ -24773,18 +24773,38 @@ io.on('connection', (socket) => {
   // change (it is nine small entries); the server keeps it with what you carry and hands it back on the next sync.
   // ⚠️ VALIDATED BY SHAPE, not by ownership — a number may point at something you have run out of (it lights up
   // again when you get more), exactly as the browser-kept bar always allowed.
-  socket.on('hotbar-set', ({ slots, sel }) => {
+  socket.on('hotbar-set', ({ slots, sel, off }) => {
     if (!Array.isArray(slots)) return;
+    const cleanSlot = (s) => {
+      if (s && s.k === 'mat' && (s.id | 0) > 0 && (s.id | 0) < 256) return { k: 'mat', id: s.id | 0 };
+      if (s && s.k === 'item' && ITEMS.isItem(s.id)) return { k: 'item', id: s.id };
+      if (s && s.k === 'tool' && typeof s.id === 'string' && /^[a-z]{1,16}$/.test(s.id)) return { k: 'tool', id: s.id };
+      return 0;
+    };
     const clean = [];
-    for (let i = 0; i < 9; i++) {
-      const s = slots[i];
-      if (s && s.k === 'mat' && (s.id | 0) > 0 && (s.id | 0) < 256) clean.push({ k: 'mat', id: s.id | 0 });
-      else if (s && s.k === 'item' && ITEMS.isItem(s.id)) clean.push({ k: 'item', id: s.id });
-      else if (s && s.k === 'tool' && typeof s.id === 'string' && /^[a-z]{1,16}$/.test(s.id)) clean.push({ k: 'tool', id: s.id });
-      else clean.push(0);
-    }
+    for (let i = 0; i < 9; i++) clean.push(cleanSlot(slots[i]));
     const n = sel | 0;
-    ledger.setHotbar(playerKeyFor(socket.id), clean, n >= 0 && n < 9 ? n : -1);
+    // ⭐ THE OFF HAND (2026-10-08): one more slot, the same shape and the same checks — but never a TOOL (a tool is a mode
+    // of the build menu, not a thing you hold).
+    const o = cleanSlot(off);
+    ledger.setHotbar(playerKeyFor(socket.id), clean, n >= 0 && n < 9 ? n : -1, o && o.k !== 'tool' ? o : 0);
+  });
+  // ⭐ MAKE AN ITEM (2026-10-08, the torch: "made from wood with Prima"). The recipe is the server's (`ITEMS[id].make`); the
+  // client only names what it wants. All-or-nothing: every cost is checked BEFORE anything is taken.
+  socket.on('inv-make', ({ item }) => {
+    if (!currentAvatarRoom || !ITEMS.isItem(item)) return;
+    const R = ITEMS.ITEMS[item].make;
+    if (!R) return;
+    const key = playerKeyFor(socket.id);
+    // ⚠️ ONLY WHERE THINGS COST SOMETHING. A sandbox already lets you hold every item, and what you carry follows you
+    // between worlds — making one free there would mint real ones for the shared world.
+    if (!invGatedRoom(currentAvatarRoom)) return;
+    for (const [m, n] of R.mats || []) if (ledger.countOf(key, m) < n) { sendInvSync(socket, currentAvatarRoom); return; }
+    if ((R.prima | 0) > ledger.prima(key)) { sendInvSync(socket, currentAvatarRoom); return; }
+    for (const [m, n] of R.mats || []) ledger.spend(key, m, n);
+    if (R.prima) ledger.grantPrima(key, -(R.prima | 0));
+    ledger.creditItems(key, [[item, 1]]);
+    sendInvSync(socket, currentAvatarRoom);
   });
   // ⏭️ A TEST DOOR, for the debug panel: hands you the stand-in items so the bar can be played with before any
   // real item exists. ⚠️ It MINTS — the one place an item comes from nothing — and is unauthenticated like the

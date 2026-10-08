@@ -36,7 +36,12 @@ const SVG = {
 
 // kind: 'weapon' | 'tool' | 'light' | 'throwable' | 'worn' — what it will be once it does something.
 // tier: 0 = ordinary. A better version of an item is another entry with a higher tier.
+// ⭐ `make` (2026-10-08) = what making one costs, in the inventory window's Make tab: `mats` [[materialId, n], …] and
+// `prima`. Checked and taken by the server (`inv-make`); the client only shows it.
+// ⭐ `light`: an item of kind 'light' IS a torch to the client — it is held, burns, lights and sets things alight
+// (`scratchpad/weapons_ideas.md`, the torch decisions). The stand-in torch behaves as one too, for testing.
 const ITEMS = {
+  torch:       { name: 'Torch',           kind: 'light',     tier: 0, svg: SVG.torch, make: { mats: [[28, 1]], prima: 20 } },   // 28 = Wood
   test_sword:  { name: 'Stand-in sword',  kind: 'weapon',    tier: 0, svg: SVG.sword,  test: 1 },
   test_torch:  { name: 'Stand-in torch',  kind: 'light',     tier: 0, svg: SVG.torch,  test: 1 },
   test_arrows: { name: 'Stand-in arrows', kind: 'throwable', tier: 0, svg: SVG.arrows, test: 1 },
@@ -49,7 +54,8 @@ const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty
 
 // The wire shape of the table: [[id, { name, kind, tier, svg }], …]. Sent once per socket.
 function itemDefsWire() {
-  return Object.keys(ITEMS).map(id => [id, { name: ITEMS[id].name, kind: ITEMS[id].kind, tier: ITEMS[id].tier | 0, svg: ITEMS[id].svg }]);
+  return Object.keys(ITEMS).map(id => [id, { name: ITEMS[id].name, kind: ITEMS[id].kind, tier: ITEMS[id].tier | 0, svg: ITEMS[id].svg,
+    make: ITEMS[id].make || null }]);
 }
 
 module.exports = { ITEMS, TEST_GIFT, isItem, itemDefsWire };

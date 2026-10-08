@@ -157,7 +157,8 @@ class Ledger {
       try {
         for (const row of this._selItems.all(key)) if (row.n > 0) h.items.set(String(row.item_id), row.n | 0);
         const hb = this._selHot.get(key);
-        if (hb) { try { const s = JSON.parse(hb.slots); if (Array.isArray(s)) h.hotbar = { slots: s, sel: hb.sel | 0 }; } catch (e) {} }
+        // (a TENTH entry, when present, is the OFF HAND — stored in the same column so no schema change; older rows have nine)
+        if (hb) { try { const s = JSON.parse(hb.slots); if (Array.isArray(s)) h.hotbar = { slots: s.slice(0, 9), sel: hb.sel | 0, off: s[9] || 0 }; } catch (e) {} }
         for (const row of this._selMats.all(key)) if (row.n > 0) h.mats.set(row.mat_id | 0, row.n | 0);
         const p = this._selPrima.get(key);
         h.prima = p ? (p.amount | 0) : 0;
@@ -299,9 +300,11 @@ class Ledger {
   // ⚠️ It is not matter and nothing here checks you OWN what a slot points at — a number can point at a material
   // you have run out of, exactly as it could before. The caller validates the shape.
   hotbar(key) { return this._rec(key).hotbar; }
-  setHotbar(key, slots, sel) {
+  // ⭐ `off` = what is in the OFF HAND (2026-10-08, the torch: underground you hold it in the other hand while you dig):
+  // a slot entry like the nine, or 0. Anything may sit there; what it DOES from the off hand is the item's business.
+  setHotbar(key, slots, sel, off) {
     const h = this._rec(key);
-    h.hotbar = { slots, sel: sel | 0 };
+    h.hotbar = { slots, sel: sel | 0, off: off || 0 };
     this._touch(key);
   }
 
@@ -419,7 +422,7 @@ class Ledger {
         for (const [m, n] of h.mats) if (n > 0) this._insMat.run(key, m, n);
         this._delItems.run(key);
         for (const [id, n] of h.items) if (n > 0) this._insItem.run(key, id, n);
-        if (h.hotbar) this._upHot.run(key, JSON.stringify(h.hotbar.slots), h.hotbar.sel | 0);
+        if (h.hotbar) this._upHot.run(key, JSON.stringify(h.hotbar.slots.slice(0, 9).concat([h.hotbar.off || 0])), h.hotbar.sel | 0);
         this._upPrima.run(key, h.prima);
         // Same delete-then-insert, for the same reason: an UPSERT would leave rows for entries that have
         // finished refining, and a stale row here is ore that comes back from the dead.
