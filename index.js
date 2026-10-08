@@ -24008,6 +24008,8 @@ io.on('connection', (socket) => {
   });
   socket.on('avt-where', (v) => {
     if (!currentAvatarRoom) return;
+    // (the torch, 2026-10-08) where this player's body last said it was — the torch's ignite door checks against it
+    if (v && isFinite(v.ax) && isFinite(v.ay)) socket._avPos = { x: +v.ax, y: +v.ay, t: Date.now() };
     const rect = noteWhere(currentAvatarRoom, socket.id, v);
     if (rect) { updateSubs(currentAvatarRoom, socket.id, rect); try { sendSkyRows(currentAvatarRoom, rect); sendRegions(currentAvatarRoom, rect); sendIsles(currentAvatarRoom); } catch (e) { /* lighting + backdrop hints only — never break the beacon */ } }
     if (!relayCfg.on) updatePeers(currentAvatarRoom, socket.id);   // Phase 4: re-select who is worth being meshed with.
@@ -24342,6 +24344,25 @@ io.on('connection', (socket) => {
     }
     if (objChunked(room)) objsTouch(room, o.ch);
     ropeBurnWire(room, o, now);
+  });
+  // ⭐ THE TORCH LIGHTS WHAT IT BRUSHES (2026-10-08, `scratchpad/weapons_ideas.md` — the torch decisions). The client sees
+  // its own flame touch something that burns and asks; the server checks it could: you hold a torch (where things are
+  // carried at all — a sandbox has every item), the spot is near where your body last said it was, and not too often.
+  // Then the same door the build menu's fire tool and a burning rope use.
+  const _torchIds = Object.keys(ITEMS.ITEMS).filter(id => ITEMS.ITEMS[id].kind === 'light');
+  let _torchIgT = 0, _torchIgN = 0;
+  socket.on('torch-ignite', (d) => {
+    if (!currentAvatarRoom || !d || !isFinite(d.x) || !isFinite(d.y)) return;
+    const now = Date.now();
+    if (now - _torchIgT > 1000) { _torchIgT = now; _torchIgN = 0; }
+    if (++_torchIgN > 12) return;                                  // a flame dragged along a hedge, not a flood
+    if (invGatedRoom(currentAvatarRoom)) {
+      const key = playerKeyFor(socket.id);
+      if (!_torchIds.some(id => ledger.itemCount(key, id) > 0)) return;
+    }
+    const p = socket._avPos;
+    if (p && now - p.t < 4000 && Math.hypot(d.x - p.x, d.y - p.y) > 520) return;   // the body moves between beacons; a torch is within reach of it
+    igniteBox(currentAvatarRoom, +d.x, +d.y, TERRAIN_CELL);
   });
   socket.on('rope-ignite', (d) => {
     const o = ropeFireObj(d); if (!o || (d.end !== 0 && d.end !== 1)) return;
