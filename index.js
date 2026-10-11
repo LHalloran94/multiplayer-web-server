@@ -17425,7 +17425,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // field with three answers rather than a second flag, so there is one thing to validate and one to store.
     if (data.loose) {
       obj.loose = (data.loose | 0) === 2 ? 2 : 1;
-      obj.lwt = clampN(data.lwt, 1, 20, 4);          // how heavy it is next to one player: its mass
+      obj.lwt = clampN(data.lwt, 1, 200, 4);          // how heavy it is next to one player: its mass
       // …a pivoted one never lands on anything, so bounce means nothing to it and is not kept.
       const bnc = obj.loose === 2 ? 0 : clampN(data.lbnc, 0, 5, 0);
       if (bnc) obj.lbnc = bnc;
