@@ -3764,6 +3764,11 @@ function plateHeld(avRoom, id) { const m = roomPlateOn[avRoom]; const s = m && m
 // ⚠️ LAST CLAIM WINS, with no arbitration at all — that IS the rule, stated exactly. The only thing the server
 // adds is that there is exactly ONE answer, which two clients each running their own physics could not agree.
 const roomObjDrv = {};    // room → Map<objId, socketId>
+// ⭐ (2026-10-11) …AND WHEN ITS DRIVER LAST SAID THEY ARE STILL TOUCHING IT. A driver touching a thing re-asks every ~150ms; while that
+//   is fresh, somebody else's claim is REFUSED (`obj-drive-no`) — two people shoving one crate used to hand it back and forth every
+//   400ms, each hand-over a hitch. "The last person to touch it drives it" still holds the moment the driver lets go of it.
+const roomObjDrvAt = {};  // room → Map<objId, ms>
+const DRV_LEASE_MS = 350;
 // ⭐ PICKING UP LOOSE THINGS (client 16m, 2026-10-11) — WHO IS HOLDING WHAT. Like the driver record, a fact about a person who is
 // present: never stored, dies with them. While somebody holds a thing nobody else may take the wheel of it (`obj-drive` refuses),
 // which is the decided "one holder" rule — the holder's machine is the only one working its physics out. Taking it from them is
@@ -3772,7 +3777,7 @@ const roomObjHeld = {};   // room → Map<objId, socketId>
 function forgetDriveSocket(avRoom, sid) {
   const m = roomObjDrv[avRoom];
   let hit = false;
-  if (m) { for (const [id, s] of [...m]) if (s === sid) { m.delete(id); hit = true; } if (!m.size) delete roomObjDrv[avRoom]; }
+  if (m) { const L = roomObjDrvAt[avRoom]; for (const [id, s] of [...m]) if (s === sid) { m.delete(id); if (L) L.delete(id); hit = true; } if (!m.size) { delete roomObjDrv[avRoom]; delete roomObjDrvAt[avRoom]; } }
   const h = roomObjHeld[avRoom];
   if (h) { for (const [id, s] of [...h]) if (s === sid) { h.delete(id); hit = true; } if (!h.size) delete roomObjHeld[avRoom]; }
   return hit;
@@ -13719,6 +13724,10 @@ function relayPos(room, sid, msg) {
     const t = typeof v;
     if (t === 'number' || t === 'boolean' || v === null) rec[k] = v;
     else if (t === 'string' && v.length <= 32) rec[k] = v;   // `mode` and friends; long strings are not motion
+    // ⭐ (2026-10-11) …AND A SHORT FLAT LIST of numbers and short strings: the loose things you are moving (`lbs`, [id, x, y, a, …])
+    //   and your hands on a held one (`cry`). Both were dropped here — over the relay nobody saw anybody's crate move or hands.
+    //   Bounded (64 entries, strings ≤ 40), so a client cannot inflate the packet through it any more than through a field.
+    else if (Array.isArray(v) && v.length <= 64 && v.every(e => (typeof e === 'number' && isFinite(e)) || (typeof e === 'string' && e.length <= 40))) rec[k] = v.slice();
   }
   // Monotonic per-record version, so the fan-out can tell a NEW sample from one it has already delivered.
   // NON-ENUMERABLE on purpose: the record IS the wire object, and an enumerable `_q` would be serialised
@@ -17436,7 +17445,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     // field with three answers rather than a second flag, so there is one thing to validate and one to store.
     if (data.loose) {
       obj.loose = (data.loose | 0) === 2 ? 2 : 1;
-      obj.lwt = clampN(data.lwt, 1, 200, 4);          // how heavy it is next to one player: its mass
+      obj.lwt = clampN(data.lwt, 0.5, 200, 4);        // how heavy it is next to one player: its mass (in halves from 0.5 — a light ball)
       // …a pivoted one never lands on anything, so bounce means nothing to it and is not kept.
       const bnc = obj.loose === 2 ? 0 : clampN(data.lbnc, 0, 5, 0);
       if (bnc) obj.lbnc = bnc;
@@ -25347,9 +25356,11 @@ io.on('connection', (socket) => {
     // that is checked is that the claim names something in THIS room that can be driven at all.
     if (!o || !((o.type === 'platform' && o.free) || (o.type === 'stamp' && o.loose))) return;
     const m = roomObjDrv[room] || (roomObjDrv[room] = new Map());
-    if (m.get(id) === socket.id) return;
-    { const hm = roomObjHeld[room], hs = hm && hm.get(id); if (hs && hs !== socket.id) return; }   // …somebody is HOLDING it (16m)
-    m.set(id, socket.id);
+    const L = roomObjDrvAt[room] || (roomObjDrvAt[room] = new Map()), now = Date.now(), cur = m.get(id);
+    if (cur === socket.id) { L.set(id, now); return; }                // …still touching it: the lease is renewed, nothing to tell anyone
+    { const hm = roomObjHeld[room], hs = hm && hm.get(id); if (hs && hs !== socket.id) { socket.emit('obj-drive-no', { id }); return; } }   // …somebody is HOLDING it (16m)
+    if (cur && now - (L.get(id) || 0) < DRV_LEASE_MS) { socket.emit('obj-drive-no', { id }); return; }   // …its driver is still touching it
+    m.set(id, socket.id); L.set(id, now);
     broadcastObjSt(room);
   });
   // ⭐⭐ A LOOSE THING CAME TO REST (`obj-settle` {id, x, y, a} — box centre and absolute angle), 2026-10-11, the fix for "objects
@@ -25380,7 +25391,7 @@ io.on('connection', (socket) => {
         emitObjToChunks(room, { ch: o.ch, chs: [...new Set(oldChs.concat(o.chs || [o.ch]))] }, 'avatar-object-add', o);
     }
     socket.to(room).emit('obj-lp', { id, x: px, y: py, a: pa });
-    if (d) { dm.delete(id); if (!dm.size) delete roomObjDrv[room]; broadcastObjSt(room); }
+    if (d) { dm.delete(id); if (roomObjDrvAt[room]) roomObjDrvAt[room].delete(id); if (!dm.size) delete roomObjDrv[room]; broadcastObjSt(room); }
   });
   // ⭐ PICKING UP / PUTTING DOWN (client 16m). Holding makes you its driver. A pick-up of something somebody else already holds is
   // REFUSED and the asker is told (`obj-hold-no`) — two people can press E on the same crate in the same instant.
