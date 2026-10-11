@@ -18077,6 +18077,7 @@ function hydrateRoomFromBlob(avRoom, blob, keepGame) {
   // keyed by the old ones is not merely stale, it is aimed at things that no longer exist. A Level going back
   // to how it was authored includes its floors being whole again.
   delete roomObjSt[avRoom];
+  delete roomLoosePose[avRoom];                    // …and where its loose things had been pushed to (`obj-settle`)
   let placed = 0;
   for (const src of blob.objects || []) {
     if (placed >= MAX_OBJECTS_PER_ROOM) break;
@@ -18178,6 +18179,7 @@ function maybeResetShowcase(avRoom) {
   if (!h || h.durability === 'persistent') return;
   if (roomObjects[avRoom]) roomObjects[avRoom].clear();
   delete roomObjSt[avRoom];                        // …and what had happened to those objects goes with them
+  delete roomLoosePose[avRoom];                    // …and where its loose things had been pushed to (`obj-settle`)
   hydratedAvRooms.delete(avRoom);                  // the next joiner rebuilds it from the blob
 }
 function maybeHydratePublished(avRoom, roomId, levelIndex) {
@@ -19765,6 +19767,17 @@ function objIndex(room, o) {
   o.ch = dropChunkOf(room, o);                      // ⭐ rides the wire — the client must not recompute an addressing rule
   o.chs = objChunksOf(room, o);
   const by = roomObjectChunk[room] || (roomObjectChunk[room] = new Map());
+  for (const ch of o.chs) { let s = by.get(ch); if (!s) by.set(ch, s = new Set()); s.add(o.id); }
+  objsTouch(room, o.ch);
+}
+// ⭐ A LOOSE THING CAME TO REST SOMEWHERE NEW (`obj-settle`, Overworld only): moved in the chunk index and saved where it now is.
+// ⚠️ NOT objUnindex + objIndex — the removal seam lets go of its driver/holder and takes a cell body's cells out of the world.
+function objReanchor(room, o, x, y, a) {
+  const by = roomObjectChunk[room] || (roomObjectChunk[room] = new Map());
+  for (const ch of (o.chs || [o.ch])) { const s = by.get(ch); if (s) { s.delete(o.id); if (!s.size) by.delete(ch); } }
+  objsTouch(room, o.ch);
+  o.x = x; o.y = y; o.angle = a;
+  o.ch = dropChunkOf(room, o); o.chs = objChunksOf(room, o);
   for (const ch of o.chs) { let s = by.get(ch); if (!s) by.set(ch, s = new Set()); s.add(o.id); }
   objsTouch(room, o.ch);
 }
@@ -23545,6 +23558,13 @@ io.on('connection', (socket) => {
     // `drops-init` below does), and OUTSIDE the rules branch above, because a reacting object works in a Level
     // with no rules in it at all.
     { const _os = objStWire(avRoom); socket.emit('obj-state', _os || { o: {} }); }
+    // ⭐ …AND WHERE THE LOOSE THINGS HERE HAVE BEEN LEFT (`obj-settle`), flat [id, x, y, a, …] — without it a joiner started every
+    //   crate where it was placed. Not in the Overworld: there the pose is written into the object, which arrives with its chunk.
+    if (!objChunked(avRoom)) {
+      const P = roomLoosePose[avRoom], map = roomObjects[avRoom], b = [];
+      if (P && map) for (const [id, p] of P) if (map.has(id)) b.push(id, p.x, p.y, p.a);
+      socket.emit('obj-lp-all', { b });
+    }
     // 🟥 THE WHOLE-LIST JOIN REPLAY IS GONE. It sent every pile in the room to every joiner — fine while a TTL
     // and a 300 cap kept the list small, and the same shape as the whole-world terrain replay that hung this
     // server once piles stopped expiring. Piles now arrive WITH THEIR CHUNK, in `sendChunkContent`, so a joiner
@@ -25331,6 +25351,36 @@ io.on('connection', (socket) => {
     { const hm = roomObjHeld[room], hs = hm && hm.get(id); if (hs && hs !== socket.id) return; }   // …somebody is HOLDING it (16m)
     m.set(id, socket.id);
     broadcastObjSt(room);
+  });
+  // ⭐⭐ A LOOSE THING CAME TO REST (`obj-settle` {id, x, y, a} — box centre and absolute angle), 2026-10-11, the fix for "objects
+  // sit in different places for each player". The machine that was working it out says where it stopped; this end RECORDS it
+  // (`roomLoosePose`), lets that machine go as its driver, and tells everybody, who put it exactly there — so every machine agrees
+  // about every resting thing, and a joiner is sent the record (`obj-lp-all`). A thing nobody drives may be reported by anyone
+  // (two machines can each finish settling it; the last report is what everyone ends up with).
+  // ⭐ IN THE OVERWORLD the pose is written INTO THE OBJECT and saved with its chunk (user, 2026-10-11: "the Overworld keeps it;
+  //   Levels reset") — so it survives a restart, and a Level's own objects are never touched (an exporter reads them).
+  let _settleAt = 0, _settleN = 0;
+  socket.on('obj-settle', ({ id, x, y, a } = {}) => {
+    const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
+    if (!isFinite(x) || !isFinite(y) || !isFinite(a)) return;
+    const now = Date.now(); if (now - _settleAt > 1000) { _settleAt = now; _settleN = 0; } if (++_settleN > 40) return;
+    const map = roomObjects[room], o = map && map.get(id);
+    if (!o || o.type !== 'stamp' || !o.loose) return;
+    const dm = roomObjDrv[room], d = dm && dm.get(id);
+    if (d && d !== socket.id) return;
+    { const hm = roomObjHeld[room]; if (hm && hm.get(id)) return; }      // …held: still in somebody's hands, not at rest
+    const st = cellsOf(room), W = (st.cols || 1) * TERRAIN_CELL, H = (st.rows || 1) * TERRAIN_CELL;
+    const px = Math.max(0, Math.min(W, +x)), py = Math.max(0, Math.min(H, +y)), pa = Math.atan2(Math.sin(+a), Math.cos(+a));
+    (roomLoosePose[room] || (roomLoosePose[room] = new Map())).set(id, { x: px, y: py, a: pa });
+    if (coverTakes(o)) coverUpdate(room, o);
+    if (objChunked(room)) {
+      const oldChs = (o.chs || [o.ch]).slice(), oldCh = o.ch;
+      objReanchor(room, o, px, py, pa);
+      if (o.ch !== oldCh || (o.chs || []).some(c => !oldChs.includes(c)))
+        emitObjToChunks(room, { ch: o.ch, chs: [...new Set(oldChs.concat(o.chs || [o.ch]))] }, 'avatar-object-add', o);
+    }
+    socket.to(room).emit('obj-lp', { id, x: px, y: py, a: pa });
+    if (d) { dm.delete(id); if (!dm.size) delete roomObjDrv[room]; broadcastObjSt(room); }
   });
   // ⭐ PICKING UP / PUTTING DOWN (client 16m). Holding makes you its driver. A pick-up of something somebody else already holds is
   // REFUSED and the asker is told (`obj-hold-no`) — two people can press E on the same crate in the same instant.
