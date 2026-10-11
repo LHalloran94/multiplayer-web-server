@@ -3764,11 +3764,17 @@ function plateHeld(avRoom, id) { const m = roomPlateOn[avRoom]; const s = m && m
 // ⚠️ LAST CLAIM WINS, with no arbitration at all — that IS the rule, stated exactly. The only thing the server
 // adds is that there is exactly ONE answer, which two clients each running their own physics could not agree.
 const roomObjDrv = {};    // room → Map<objId, socketId>
+// ⭐ PICKING UP LOOSE THINGS (client 16m, 2026-10-11) — WHO IS HOLDING WHAT. Like the driver record, a fact about a person who is
+// present: never stored, dies with them. While somebody holds a thing nobody else may take the wheel of it (`obj-drive` refuses),
+// which is the decided "one holder" rule — the holder's machine is the only one working its physics out. Taking it from them is
+// a TUG (`obj-tug`), which the HOLDER's machine decides and this end only carries and records.
+const roomObjHeld = {};   // room → Map<objId, socketId>
 function forgetDriveSocket(avRoom, sid) {
-  const m = roomObjDrv[avRoom]; if (!m) return false;
+  const m = roomObjDrv[avRoom];
   let hit = false;
-  for (const [id, s] of [...m]) if (s === sid) { m.delete(id); hit = true; }
-  if (!m.size) delete roomObjDrv[avRoom];
+  if (m) { for (const [id, s] of [...m]) if (s === sid) { m.delete(id); hit = true; } if (!m.size) delete roomObjDrv[avRoom]; }
+  const h = roomObjHeld[avRoom];
+  if (h) { for (const [id, s] of [...h]) if (s === sid) { h.delete(id); hit = true; } if (!h.size) delete roomObjHeld[avRoom]; }
   return hit;
 }
 // 🟥 A SOCKET THAT LEAVES MUST LET GO OF EVERY PLATE, and this is the same hazard `forgetRuleSocket` exists
@@ -3798,8 +3804,9 @@ function objLinkDrop(room, o) {
   // …and a swinging thing that is erased stops being driven (#351/#182). Same seam, same reason: a stale entry
   // here would name a driver for something that no longer exists.
   const dm = roomObjDrv[room];
-  const drv = dm && dm.delete(o.id);
+  let drv = dm && dm.delete(o.id);
   if (dm && !dm.size) delete roomObjDrv[room];
+  { const hm = roomObjHeld[room]; if (hm && hm.delete(o.id)) drv = true; if (hm && !hm.size) delete roomObjHeld[room]; }
   // …and a CELL BODY takes its cells out of the world with it (erased, smashed or burnt) — same seam, same reason.
   const body = bodyDrop(room, o);
   if (o.link || held || drv || body || (o.part === 'switch')) broadcastObjSt(room);
@@ -3846,12 +3853,16 @@ function objStWire(avRoom) {
   // happens when somebody ARRIVES on one, so a plank being ridden costs nothing while they stand on it.
   let d = null;
   { const dm = roomObjDrv[avRoom]; if (dm) for (const [id, s] of dm) (d || (d = {}))[id] = s; }
-  if ((!m || !m.size) && !k && !p && !d) return null;
+  // …and who is HOLDING what (client 16m) — the hands are drawn from it, and nobody else may claim a held thing
+  let h = null;
+  { const hm = roomObjHeld[avRoom]; if (hm) for (const [id, s] of hm) (h || (h = {}))[id] = s; }
+  if ((!m || !m.size) && !k && !p && !d && !h) return null;
   const o = {}; if (m) for (const [id, s] of m) o[id] = s;
   const w = { o };
   if (k) w.k = k;
   if (p) w.p = p;
   if (d) w.d = d;
+  if (h) w.h = h;
   return w;
 }
 function broadcastObjSt(avRoom) { const w = objStWire(avRoom); io.to(avRoom).emit('obj-state', w || { o: {} }); }
@@ -25317,8 +25328,49 @@ io.on('connection', (socket) => {
     if (!o || !((o.type === 'platform' && o.free) || (o.type === 'stamp' && o.loose))) return;
     const m = roomObjDrv[room] || (roomObjDrv[room] = new Map());
     if (m.get(id) === socket.id) return;
+    { const hm = roomObjHeld[room], hs = hm && hm.get(id); if (hs && hs !== socket.id) return; }   // …somebody is HOLDING it (16m)
     m.set(id, socket.id);
     broadcastObjSt(room);
+  });
+  // ⭐ PICKING UP / PUTTING DOWN (client 16m). Holding makes you its driver. A pick-up of something somebody else already holds is
+  // REFUSED and the asker is told (`obj-hold-no`) — two people can press E on the same crate in the same instant.
+  const holdable = (o) => !!(o && o.type === 'stamp' && o.loose && o.loose !== 2 && !o.mnt);
+  socket.on('obj-hold', ({ id, on }) => {
+    const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
+    const map = roomObjects[room]; const o = map && map.get(id);
+    const hm = roomObjHeld[room] || (roomObjHeld[room] = new Map()), hs = hm.get(id);
+    if (on) {
+      if (!holdable(o) || (hs && hs !== socket.id)) { socket.emit('obj-hold-no', { id }); if (!hm.size) delete roomObjHeld[room]; return; }
+      if (hs === socket.id) return;
+      hm.set(id, socket.id); (roomObjDrv[room] || (roomObjDrv[room] = new Map())).set(id, socket.id);
+    } else {
+      if (hs !== socket.id) { if (!hm.size) delete roomObjHeld[room]; return; }
+      hm.delete(id); if (!hm.size) delete roomObjHeld[room];
+    }
+    broadcastObjSt(room);
+  });
+  // ⭐ A TUG — somebody grabbed what somebody else holds. Carried to the holder, whose machine decides it (it has both bodies and
+  // the object in front of it); `obj-tug-res` comes back from the holder, and a win moves the holding (and the driving) across.
+  socket.on('obj-tug', ({ id }) => {
+    const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
+    const hm = roomObjHeld[room], hs = hm && hm.get(id);
+    if (!hs || hs === socket.id) return;
+    io.to(hs).emit('obj-tug', { id, from: socket.id });
+  });
+  socket.on('obj-tug-res', ({ id, to, win }) => {
+    const room = currentAvatarRoom; if (!room || typeof id !== 'string' || typeof to !== 'string') return;
+    const hm = roomObjHeld[room]; if (!hm || hm.get(id) !== socket.id) return;       // …only the holder decides
+    if (win) { hm.set(id, to); (roomObjDrv[room] || (roomObjDrv[room] = new Map())).set(id, to); broadcastObjSt(room); }
+    io.to(to).emit('obj-tug-res', { id, win: win ? 1 : 0 });
+  });
+  // ⭐ A HIT ON A HELD THING knocks it out of the holder's hands (decided 2026-10-11). The hitter's punch only moves it on THEIR
+  // screen — the holder's machine is the one working it out — so the hit is carried to the holder.
+  socket.on('obj-knock', ({ id, ix, iy, px, py }) => {
+    const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
+    const hm = roomObjHeld[room], hs = hm && hm.get(id);
+    if (!hs || hs === socket.id) return;
+    const n = (v) => (typeof v === 'number' && isFinite(v)) ? Math.max(-5000, Math.min(5000, v)) : 0;
+    io.to(hs).emit('obj-knock', { id, ix: n(ix), iy: n(iy), px: n(px), py: n(py) });
   });
   // ⭐⭐ CELL BODIES — A LOOSE WOODEN THING CAME TO REST HERE (`obj-rest`), OR STARTED MOVING (`obj-move`). Nothing on this
   // end knows where a loose object is (its motion rides its driver's position stream), so the machine that worked the
