@@ -6858,7 +6858,8 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'cog', 'wheel', 'motor', 'crank', 'arm', 'windmill', 'turnstile', 'balance',
                      'slide', 'rack', 'rod', 'ratchet', 'cam', 'ring',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net',
-                     'box'];                              // …the plain rectangle you drag out (2026-09-14)
+                     'box',                               // …the plain rectangle you drag out (2026-09-14)
+                     'sword'];                            // …the held-item TEST SWORD (list 14, 2026-10-11: the wielding test bed, client 16n)
 // ⭐⭐ ONE CEILING FOR EVERY STAMP, AND IT IS 1200. There used to be three — 160 for an ordinary stamp, 420
 // for the things that turn on a pin, 1200 for the bars — and each exception was argued separately on the day
 // somebody found 160 binding on something it had no business binding on: a rod that came back at 160 whatever
@@ -17377,7 +17378,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-            content: data.content, w: clampN(data.w, 24, stampMax(data.look), 64), h: clampN(data.h, 24, stampMax(data.look), 64),
+            content: data.content, w: clampN(data.w, 24, stampMax(data.look), 64), h: clampN(data.h, data.look === 'sword' ? 6 : 24, stampMax(data.look), 64),   // (a test sword is a blade, not a plank: thin)
             // ⚠️ `cam` IS A SHAPE, and it has to be named here or a cam comes back a RECTANGLE — the by-name
             // rebuild trap again, and the one this file has been bitten by most.
             shape: (data.shape === 'ellipse' || data.shape === 'tri' || data.shape === 'cyl'
