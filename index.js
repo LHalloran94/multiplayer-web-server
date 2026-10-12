@@ -25394,6 +25394,40 @@ io.on('connection', (socket) => {
     socket.to(room).emit('obj-lp', { id, x: px, y: py, a: pa });
     if (d) { dm.delete(id); if (roomObjDrvAt[room]) roomObjDrvAt[room].delete(id); if (!dm.size) delete roomObjDrv[room]; broadcastObjSt(room); }
   });
+  // ⭐ A THROWN SWORD STUCK IN SOMETHING (client 16n, wielding round 8). `on`: where it stopped (recorded exactly as a settle is) and a
+  // `stk` field on the object's own state record — { d: how deep, oid/hx/hy/ha: the object it is in and where that was } — which rides
+  // `obj-state` to everybody, so every machine holds it still and a late joiner finds it stuck. Off: the field goes (anybody may say
+  // so — the thing it was in moved, or the ground round it was dug away). Picking it up clears it too (`obj-hold`).
+  // ⚠️ Only for a sword, and only from whoever is driving it (the thrower) or when nobody is.
+  socket.on('obj-stick', ({ id, on, x, y, a, d, oid, hx, hy, ha } = {}) => {
+    const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
+    const now = Date.now(); if (now - _settleAt > 1000) { _settleAt = now; _settleN = 0; } if (++_settleN > 40) return;
+    const map = roomObjects[room], o = map && map.get(id);
+    if (!o || o.type !== 'stamp' || !o.loose || o.look !== 'sword') return;
+    const st = objStOf(room), rec = st.get(id) || {};
+    if (!on) { if (!rec.stk) return; delete rec.stk; if (Object.keys(rec).length) st.set(id, rec); else st.delete(id); broadcastObjSt(room); return; }
+    if (!isFinite(x) || !isFinite(y) || !isFinite(a)) return;
+    { const hm = roomObjHeld[room]; if (hm && hm.get(id)) return; }
+    const dm = roomObjDrv[room], dr = dm && dm.get(id);
+    if (dr && dr !== socket.id) return;
+    const cs = cellsOf(room), W = (cs.cols || 1) * TERRAIN_CELL, H = (cs.rows || 1) * TERRAIN_CELL;
+    const px = Math.max(0, Math.min(W, +x)), py = Math.max(0, Math.min(H, +y)), pa = Math.atan2(Math.sin(+a), Math.cos(+a));
+    (roomLoosePose[room] || (roomLoosePose[room] = new Map())).set(id, { x: px, y: py, a: pa });
+    if (objChunked(room)) {
+      const oldChs = (o.chs || [o.ch]).slice(), oldCh = o.ch;
+      objReanchor(room, o, px, py, pa);
+      if (o.ch !== oldCh || (o.chs || []).some(c => !oldChs.includes(c)))
+        emitObjToChunks(room, { ch: o.ch, chs: [...new Set(oldChs.concat(o.chs || [o.ch]))] }, 'avatar-object-add', o);
+    }
+    // …and WHERE, in the record itself: a machine still drawing the thrower's slightly older flight when this arrives froze it short
+    //    of the place (two-browser guard, 45px) — every machine puts it exactly here instead
+    const stk = { d: Math.max(0, Math.min(64, Math.round(+d || 0))), x: +px.toFixed(1), y: +py.toFixed(1), a: +pa.toFixed(3) };
+    if (typeof oid === 'string' && oid.length < 120 && map.has(oid) && isFinite(hx) && isFinite(hy) && isFinite(ha)) { stk.oid = oid; stk.hx = +hx; stk.hy = +hy; stk.ha = +ha; }
+    rec.stk = stk; st.set(id, rec);
+    socket.to(room).emit('obj-lp', { id, x: px, y: py, a: pa });
+    if (dr) { dm.delete(id); if (roomObjDrvAt[room]) roomObjDrvAt[room].delete(id); if (!dm.size) delete roomObjDrv[room]; }
+    broadcastObjSt(room);
+  });
   // ⭐ PICKING UP / PUTTING DOWN (client 16m). Holding makes you its driver. A pick-up of something somebody else already holds is
   // REFUSED and the asker is told (`obj-hold-no`) — two people can press E on the same crate in the same instant.
   const holdable = (o) => !!(o && o.type === 'stamp' && o.loose && o.loose !== 2 && !o.mnt);
@@ -25405,6 +25439,7 @@ io.on('connection', (socket) => {
       if (!holdable(o) || (hs && hs !== socket.id)) { socket.emit('obj-hold-no', { id }); if (!hm.size) delete roomObjHeld[room]; return; }
       if (hs === socket.id) return;
       hm.set(id, socket.id); (roomObjDrv[room] || (roomObjDrv[room] = new Map())).set(id, socket.id);
+      { const sm = roomObjSt[room], r = sm && sm.get(id); if (r && r.stk) delete r.stk; }   // …a sword pulled out of what it was stuck in (`obj-stick`)
     } else {
       if (hs !== socket.id) { if (!hm.size) delete roomObjHeld[room]; return; }
       hm.delete(id); if (!hm.size) delete roomObjHeld[room];
