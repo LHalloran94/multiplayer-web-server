@@ -3780,6 +3780,8 @@ function forgetDriveSocket(avRoom, sid) {
   if (m) { const L = roomObjDrvAt[avRoom]; for (const [id, s] of [...m]) if (s === sid) { m.delete(id); if (L) L.delete(id); hit = true; } if (!m.size) { delete roomObjDrv[avRoom]; delete roomObjDrvAt[avRoom]; } }
   const h = roomObjHeld[avRoom];
   if (h) { for (const [id, s] of [...h]) if (s === sid) { h.delete(id); hit = true; } if (!h.size) delete roomObjHeld[avRoom]; }
+  // …and what was in their hands out of their pouch goes with them (typeof: the rigs slice this file)
+  if (typeof eqDropSocket === 'function' && eqDropSocket(avRoom, sid)) hit = true;
   return hit;
 }
 // 🟥 A SOCKET THAT LEAVES MUST LET GO OF EVERY PLATE, and this is the same hazard `forgetRuleSocket` exists
@@ -3812,6 +3814,7 @@ function objLinkDrop(room, o) {
   let drv = dm && dm.delete(o.id);
   if (dm && !dm.size) delete roomObjDrv[room];
   { const hm = roomObjHeld[room]; if (hm && hm.delete(o.id)) drv = true; if (hm && !hm.size) delete roomObjHeld[room]; }
+  if (o.eq && typeof eqNote === 'function') eqNote(o.eq, o.id, 0);   // …and it is in nobody's hand any more (hand items, 2026-10-14)
   // …and a CELL BODY takes its cells out of the world with it (erased, smashed or burnt) — same seam, same reason.
   const body = bodyDrop(room, o);
   if (o.link || held || drv || body || (o.part === 'switch')) broadcastObjSt(room);
@@ -17474,6 +17477,10 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // round. Both named here or dropped in silence, like every other dial on this object.
       if (data.hub) obj.hub = clampN(data.hub, 22, 200, 48);
       if (data.mrev) obj.mrev = clampN(data.mrev, 0, 30, 0);
+      // ⭐ (2026-10-14, held items plan §3) …and WHICH ITEM IT IS, for a sword or a torch that came out of somebody's pouch: one of
+      //   that item, as a real thing in the world. Named here or a sword left lying comes back from storage as nobody's stick.
+      //   ⚠️ `eq` (whose hand it is in) is deliberately NOT kept by this rebuild — it is a fact about a person who is present.
+      if (obj.loose === 1 && (obj.look === 'sword' || obj.look === 'torch') && ITEMS.isItem(data.item)) obj.item = data.item;
     }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
@@ -19808,6 +19815,57 @@ function objUnindex(room, o) {
 }
 // How many props are ANCHORED in a chunk. The overlap index would count a neighbour's long stroke against you,
 // which would let somebody fill your build site from a chunk away.
+// ══ ⭐⭐ HAND ITEMS — AN ITEM FROM YOUR POUCH AS A REAL OBJECT (2026-10-14, `scratchpad/kickoff_held_items_plan.md` §3) ══
+// A sword or a torch in your hand is a loose object like any other (client 16m/16n), tagged with the item it is (`item`) and whose
+// hand it is in (`eq`, a socket id). The rule that keeps the count honest, in one function (`itemObjMove`):
+//   · in your hand it is STILL CARRIED — nothing is taken from the pouch to bring it out, nothing given back to put it away
+//     (putting away is an ordinary removal of your own object);
+//   · the moment it LEAVES your hand into the world (let go, thrown, knocked out, taken off you) one is spent from your pouch
+//     and the object stays, as nobody's, saved with the world like any prop;
+//   · whoever takes hold of one lying there is credited one and it becomes theirs.
+// ⚠️ An object in a hand is never written to storage (`objectFlush` skips `eq`) and goes when its holder does (`eqDropSocket`),
+//    or a reload would leave a second copy of something still in the pouch.
+// ⚠️ Only where things are carried at all (a gated room). In a sandbox every item is free and the tags are just tags.
+const eqObjs = new Map();   // socket id → Set<object id> in its hands
+function eqNote(sid, id, on) {
+  let s = eqObjs.get(sid);
+  if (on) { if (!s) eqObjs.set(sid, s = new Set()); s.add(id); }
+  else if (s) { s.delete(id); if (!s.size) eqObjs.delete(sid); }
+}
+function eqRemoveObj(room, o) {
+  if (o.eq) { eqNote(o.eq, o.id, 0); delete o.eq; }
+  objUnindex(room, o);
+  emitObjToChunks(room, o, 'avatar-object-removed', { id: o.id });
+}
+// `toSid` = whose hand it is going into, or null = into the world. False when the thing had to be removed instead: its holder
+// no longer carries one (their pouch was emptied under it), and leaving it lying would make a second one out of nothing.
+function itemObjMove(room, o, toSid) {
+  if (!o || !o.item) return true;
+  const from = o.eq || null, to = toSid || null;
+  if (from === to) return true;
+  const gated = invGatedRoom(room);
+  if (from) {
+    eqNote(from, o.id, 0); delete o.eq;
+    if (gated) {
+      const took = ledger.spendItem(playerKeyFor(from), o.item, 1);
+      const fs = io.sockets.sockets.get(from); if (fs) sendInvSync(fs, room);
+      if (!took) { eqRemoveObj(room, o); return false; }
+    }
+  }
+  if (to) {
+    o.eq = to; eqNote(to, o.id, 1);
+    if (gated) { ledger.creditItems(playerKeyFor(to), [[o.item, 1]]); const ts = io.sockets.sockets.get(to); if (ts) sendInvSync(ts, room); }
+  }
+  if (objChunked(room)) objsTouch(room, o.ch);          // …saved from now on (or no longer)
+  return true;
+}
+// Everything in a socket's hands goes with it (it is still in the pouch): leaving the Level, disconnecting, dying.
+function eqDropSocket(room, sid) {
+  const s = eqObjs.get(sid); if (!s) return false;
+  const map = roomObjects[room];
+  for (const id of [...s]) { const o = map && map.get(id); if (o && o.eq === sid) eqRemoveObj(room, o); else eqNote(sid, id, 0); }
+  return true;
+}
 function objCountInChunk(room, ch) {
   const by = roomObjectChunk[room], map = roomObjects[room];
   const s = by && by.get(ch); if (!s || !map) return 0;
@@ -19863,7 +19921,7 @@ function objectFlush(max) {
       // class of bug the whole economy track exists to stop.
       if (ids && map) for (const id of ids) {
         const o = map.get(id);
-        if (o && o.ch === ch) { const c = Object.assign({}, o); delete c.chs; list.push(c); }
+        if (o && o.ch === ch && !o.eq) { const c = Object.assign({}, o); delete c.chs; list.push(c); }   // (`eq`: in somebody's hand — still in their pouch, never stored)
       }
       try {
         if (list.length) { _putObjRow.run(room, ch, JSON.stringify(list)); objsSaved++; }
@@ -24464,7 +24522,9 @@ io.on('connection', (socket) => {
   // socket.io; physics response is applied locally on each client. Persist till restart.
   socket.on('avatar-object-spawn', (data) => {
     if (!currentAvatarRoom || !data || !OBJ_TYPES.has(data.type)) return;
-    if (!canBuild()) return;                                // Phase 3: L2 build permission
+    // (hand items, 2026-10-14) bringing a sword or torch out of your own pouch is not building: it needs no build permission
+    const eqAsk = !!(data.eq && data.type === 'stamp' && ITEMS.isItem(data.item));
+    if (!canBuild() && !eqAsk) return;                      // Phase 3: L2 build permission
     const type = data.type;
     // Client supplies the id (for optimistic local placement). Require it to be namespaced to
     // this socket (anti-spoof); otherwise mint a fallback. Echoing the same id back means the
@@ -24477,6 +24537,15 @@ io.on('connection', (socket) => {
     if (map.has(id)) return;                                // ignore duplicate spawn for an existing id
     const obj = buildWorldObject(type, data, id, socket.id, currentUsername || socket.id, currentAvatarRoom);   // shared with 7b hydration
     if (!obj) return;
+    // ⭐ A HAND ITEM (see `itemObjMove`): allowed only as something in the asker's own hand, only while they carry one more of it
+    //   than is already out, and never more than two at once (two hands). Anything else naming an item is refused and the asker's
+    //   own copy is taken back — an item must not come into the world from nothing.
+    if (obj.item) {
+      const mine = eqObjs.get(socket.id); let same = 0;
+      if (mine) for (const oid of mine) { const q = map.get(oid); if (q && q.item === obj.item) same++; }
+      if (!eqAsk || (mine && mine.size >= 2) || (invGatedRoom(currentAvatarRoom) && ledger.itemCount(playerKeyFor(socket.id), obj.item) <= same)) { socket.emit('avatar-object-removed', { id }); return; }
+      obj.eq = socket.id;
+    }
     // Phase 6: clamp placement into the playable band (no-op at 'large'). Anti-cheat belt+suspenders — the
     // client is already confined by camera/walls; this keeps a crafted packet from landing objects in the
     // washed-out region outside the band. Clamps the anchor + any point lists (strokes, platform paths).
@@ -24486,7 +24555,7 @@ io.on('connection', (socket) => {
       if (Array.isArray(obj.pts)) for (const p of obj.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
       if (obj.path && Array.isArray(obj.path.pts)) for (const p of obj.path.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
     }
-    if (type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal' && type !== 'region' && type !== 'sign' && type !== 'painting') {  // no building solids on the spawn (world mode); the non-solid ones — flags, regions, signs, paintings — are allowed
+    if (!obj.eq && type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal' && type !== 'region' && type !== 'sign' && type !== 'painting') {  // no building solids on the spawn (world mode); the non-solid ones — flags, regions, signs, paintings — are allowed
       const clear = spawnClearRect(currentAvatarRoom);
       if (clear) {
         let bx0, by0, bx1, by1;
@@ -24506,7 +24575,7 @@ io.on('connection', (socket) => {
     // built would be told the world was full. Per chunk it is a local clutter bound instead, and it is enforced
     // where the props are, so one player cannot exhaust another's build site from the far side of the map.
     if (objChunked(currentAvatarRoom)) {
-      if (objCountInChunk(currentAvatarRoom, dropChunkOf(currentAvatarRoom, obj)) >= MAX_OBJECTS_PER_CHUNK) {
+      if (!obj.eq && objCountInChunk(currentAvatarRoom, dropChunkOf(currentAvatarRoom, obj)) >= MAX_OBJECTS_PER_CHUNK) {
         socket.emit('build-refused', { why: 'Too much built here already — spread out a little.' });
         return;
       }
@@ -24519,7 +24588,7 @@ io.on('connection', (socket) => {
       // ⚠️ …unless it came from the BUILD MENU, which is the editor and is outside the economy (see the same
       // flag on `terrain-edit`). A prop placed there costs nothing and therefore refunds nothing — `cost` is
       // simply absent, and every refund path already keys on it being present.
-      if (invGatedRoom(currentAvatarRoom) && !data.editor) {
+      if (invGatedRoom(currentAvatarRoom) && !data.editor && !obj.eq) {
         const _k = playerKeyFor(socket.id), _cost = objPriceOf(obj);
         if (ledger.prima(_k) < _cost) {
           socket.emit('build-refused', { why: `That costs ✦${_cost.toLocaleString()} — refine some more first.` });
@@ -24530,6 +24599,7 @@ io.on('connection', (socket) => {
         sendInvSync(socket, currentAvatarRoom);
       }
       objIndex(currentAvatarRoom, obj);
+      if (obj.eq) eqNote(socket.id, id, 1);
       // ⚠️ AND TO THE PLACER EXPLICITLY. `emitObjToChunks` reaches subscribers, and the socket that placed it may
       // not be subscribed to the chunk it landed in (a prop dropped at the edge of the view). Without this the
       // placer's own optimistic copy is never confirmed, and never corrected either. Same seam `build-add` needed.
@@ -24539,16 +24609,17 @@ io.on('connection', (socket) => {
     }
     let userObjs = 0;
     for (const k of map.keys()) if (!(typeof k === 'string' && k.startsWith('world-'))) userObjs++;
-    if (userObjs >= MAX_OBJECTS_PER_ROOM) return;
+    if (userObjs >= MAX_OBJECTS_PER_ROOM && !obj.eq) return;
     map.set(id, obj);
+    if (obj.eq) eqNote(socket.id, id, 1);
     io.to(currentAvatarRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
   });
   // Mouse-eraser removal: only the OWNER may delete their own object this way. (Physically
   // destroying anyone's object goes through avatar-object-hit, which is unrestricted.)
   socket.on('avatar-object-remove', ({ id }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
-    if (!canBuild()) return;                                // Phase 3: L2 build permission (erase is a build op)
     const obj = roomObjects[currentAvatarRoom].get(id);
+    if (!canBuild() && !(obj && obj.eq === socket.id)) return;   // Phase 3: L2 build permission (erase is a build op) — putting away what is in your own hand is not
     // Owner by stable username (survives reconnect/new socket.id) OR the live socket.id.
     // ⚠️ THE USERNAME IS THE ONE THAT MATTERS AFTER A RESTART: a restored prop's `ownerId` is a socket id from a
     // process that no longer exists, so ownership of anything persisted is carried entirely by the name.
@@ -24556,7 +24627,9 @@ io.on('connection', (socket) => {
     //   rig left in the Overworld under its own name could not be removed by anybody). The same per-connection flag that makes a
     //   purse unlimited (`adminSockets`). Somebody else's deposit is NOT handed to the admin: only an owner gets a refund.
     const mine = !!obj && (obj.ownerId === socket.id || (obj.owner && obj.owner === currentUsername));
-    if (!obj || !(mine || adminSockets.has(socket.id))) return;
+    // (hand items) …and what is in your own HAND is yours to put away whoever first brought it into the world — a sword somebody
+    //   else dropped and you picked up. Without this it stayed in the world, held by you for ever, the moment you chose another number.
+    if (!obj || !(mine || obj.eq === socket.id || adminSockets.has(socket.id))) return;
     objUnindex(currentAvatarRoom, obj);
     // ⭐ ERASING YOUR OWN PROP HANDS THE DEPOSIT STRAIGHT BACK, because this path is owner-only — it is
     // un-building, not a raid, and making you chase your own Prima across the floor for changing your mind
@@ -24876,6 +24949,7 @@ io.on('connection', (socket) => {
     const key = playerKeyFor(socket.id);
     const held = ledger.snapshot(key);
     if (!held.mats.length && !held.prima && !held.items.length) return;
+    if (eqDropSocket(currentAvatarRoom, socket.id)) broadcastObjSt(currentAvatarRoom);   // (hand items) what is in their hands scatters with the rest, as piles — the objects go
     releaseHoldings(currentAvatarRoom, key, p.x, p.y - 12, deathSpread(held.mats, held.prima, held.items));
     sendInvSync(socket, currentAvatarRoom);
   });
@@ -25479,10 +25553,12 @@ io.on('connection', (socket) => {
       if (!holdable(o) || (hs && hs !== socket.id)) { socket.emit('obj-hold-no', { id }); if (!hm.size) delete roomObjHeld[room]; return; }
       if (hs === socket.id) return;
       hm.set(id, socket.id); (roomObjDrv[room] || (roomObjDrv[room] = new Map())).set(id, socket.id);
+      if (o.item) itemObjMove(room, o, socket.id);       // …an item lying in the world: it is the taker's now, one more in their pouch
       { const sm = roomObjSt[room], r = sm && sm.get(id); if (r && r.stk) delete r.stk; }   // …a sword pulled out of what it was stuck in (`obj-stick`)
     } else {
       if (hs !== socket.id) { if (!hm.size) delete roomObjHeld[room]; return; }
       hm.delete(id); if (!hm.size) delete roomObjHeld[room];
+      if (o && o.item && o.eq === socket.id) itemObjMove(room, o, null);   // …out of their hand into the world: one fewer in their pouch
     }
     broadcastObjSt(room);
   });
@@ -25497,7 +25573,9 @@ io.on('connection', (socket) => {
   socket.on('obj-tug-res', ({ id, to, win }) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string' || typeof to !== 'string') return;
     const hm = roomObjHeld[room]; if (!hm || hm.get(id) !== socket.id) return;       // …only the holder decides
-    if (win) { hm.set(id, to); (roomObjDrv[room] || (roomObjDrv[room] = new Map())).set(id, to); broadcastObjSt(room); }
+    if (win) { hm.set(id, to); (roomObjDrv[room] || (roomObjDrv[room] = new Map())).set(id, to);
+      { const o = roomObjects[room] && roomObjects[room].get(id); if (o && o.item) itemObjMove(room, o, to); }   // …taken off them: out of one pouch, into the other
+      broadcastObjSt(room); }
     io.to(to).emit('obj-tug-res', { id, win: win ? 1 : 0 });
   });
   // ⭐ A HIT ON A HELD THING knocks it out of the holder's hands (decided 2026-10-11). The hitter's punch only moves it on THEIR
