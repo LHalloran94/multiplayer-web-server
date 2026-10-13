@@ -25399,7 +25399,7 @@ io.on('connection', (socket) => {
   // `obj-state` to everybody, so every machine holds it still and a late joiner finds it stuck. Off: the field goes (anybody may say
   // so — the thing it was in moved, or the ground round it was dug away). Picking it up clears it too (`obj-hold`).
   // ⚠️ Only for a sword, and only from whoever is driving it (the thrower) or when nobody is.
-  socket.on('obj-stick', ({ id, on, x, y, a, d, oid, hx, hy, ha, vic, ox, oy } = {}) => {
+  socket.on('obj-stick', ({ id, on, x, y, a, d, oid, hx, hy, ha, vic, ox, oy, wx, wy } = {}) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
     const now = Date.now(); if (now - _settleAt > 1000) { _settleAt = now; _settleN = 0; } if (++_settleN > 40) return;
     const map = roomObjects[room], o = map && map.get(id);
@@ -25424,7 +25424,9 @@ io.on('connection', (socket) => {
     const stk = { d: Math.max(0, Math.min(64, Math.round(+d || 0))), x: +px.toFixed(1), y: +py.toFixed(1), a: +pa.toFixed(3) };
     if (typeof oid === 'string' && oid.length < 120 && map.has(oid) && isFinite(hx) && isFinite(hy) && isFinite(ha)) { stk.oid = oid; stk.hx = +hx; stk.hy = +hy; stk.ha = +ha; }
     // (round 9) …or the PLAYER it is in, and where on them: every machine carries it on that player's body until it drops out
-    else if (typeof vic === 'string' && vic.length < 80 && isFinite(ox) && isFinite(oy)) { stk.vic = vic; stk.ox = Math.max(-200, Math.min(200, +ox)); stk.oy = Math.max(-200, Math.min(200, +oy)); }
+    else if (typeof vic === 'string' && vic.length < 80 && isFinite(ox) && isFinite(oy)) { stk.vic = vic; stk.ox = Math.max(-200, Math.min(200, +ox)); stk.oy = Math.max(-200, Math.min(200, +oy));
+      // (after wielding round 26) …and where the WOUND it made is on them, from their middle: every machine draws the split there and keeps the sword in it
+      if (isFinite(wx) && isFinite(wy)) { stk.wx = Math.max(-100, Math.min(100, +wx)); stk.wy = Math.max(-100, Math.min(100, +wy)); } }
     rec.stk = stk; st.set(id, rec);
     socket.to(room).emit('obj-lp', { id, x: px, y: py, a: pa });
     if (dr) { dm.delete(id); if (roomObjDrvAt[room]) roomObjDrvAt[room].delete(id); if (!dm.size) delete roomObjDrv[room]; }
