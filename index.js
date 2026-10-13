@@ -3774,6 +3774,9 @@ const DRV_LEASE_MS = 350;
 // which is the decided "one holder" rule — the holder's machine is the only one working its physics out. Taking it from them is
 // a TUG (`obj-tug`), which the HOLDER's machine decides and this end only carries and records.
 const roomObjHeld = {};   // room → Map<objId, socketId>
+// …and WHICH HAND (client 16p, 2026-10-14): the ids held in an OFF hand. A player may hold two things; everybody else has to be told
+// which is which to draw the right hand on each. Never trusted further than that: an id here that is not in the map above means nothing.
+const roomObjHeldOff = {};   // room → Set<objId>
 function forgetDriveSocket(avRoom, sid) {
   const m = roomObjDrv[avRoom];
   let hit = false;
@@ -3863,7 +3866,9 @@ function objStWire(avRoom) {
   { const dm = roomObjDrv[avRoom]; if (dm) for (const [id, s] of dm) (d || (d = {}))[id] = s; }
   // …and who is HOLDING what (client 16m) — the hands are drawn from it, and nobody else may claim a held thing
   let h = null;
-  { const hm = roomObjHeld[avRoom]; if (hm) for (const [id, s] of hm) (h || (h = {}))[id] = s; }
+  let h2 = null;
+  { const hm = roomObjHeld[avRoom]; if (hm) for (const [id, s] of hm) (h || (h = {}))[id] = s;
+    const os = roomObjHeldOff[avRoom]; if (os) { for (const id of [...os]) { if (hm && hm.has(id)) (h2 || (h2 = [])).push(id); else os.delete(id); } if (!os.size) delete roomObjHeldOff[avRoom]; } }
   if ((!m || !m.size) && !k && !p && !d && !h) return null;
   const o = {}; if (m) for (const [id, s] of m) o[id] = s;
   const w = { o };
@@ -3871,6 +3876,7 @@ function objStWire(avRoom) {
   if (p) w.p = p;
   if (d) w.d = d;
   if (h) w.h = h;
+  if (h2) w.h2 = h2;
   return w;
 }
 function broadcastObjSt(avRoom) { const w = objStWire(avRoom); io.to(avRoom).emit('obj-state', w || { o: {} }); }
@@ -25545,13 +25551,15 @@ io.on('connection', (socket) => {
   // ⭐ PICKING UP / PUTTING DOWN (client 16m). Holding makes you its driver. A pick-up of something somebody else already holds is
   // REFUSED and the asker is told (`obj-hold-no`) — two people can press E on the same crate in the same instant.
   const holdable = (o) => !!(o && o.type === 'stamp' && o.loose && o.loose !== 2 && !o.mnt);
-  socket.on('obj-hold', ({ id, on }) => {
+  socket.on('obj-hold', ({ id, on, off }) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
+    const setHand = () => { const os = roomObjHeldOff[room] || (roomObjHeldOff[room] = new Set()); const was = os.has(id); if (off) os.add(id); else os.delete(id); if (!os.size) delete roomObjHeldOff[room]; return was !== !!off; };
     const map = roomObjects[room]; const o = map && map.get(id);
     const hm = roomObjHeld[room] || (roomObjHeld[room] = new Map()), hs = hm.get(id);
     if (on) {
       if (!holdable(o) || (hs && hs !== socket.id)) { socket.emit('obj-hold-no', { id }); if (!hm.size) delete roomObjHeld[room]; return; }
-      if (hs === socket.id) return;
+      if (hs === socket.id) { if (setHand()) broadcastObjSt(room); return; }   // …already theirs: it may have changed HANDS
+      setHand();
       hm.set(id, socket.id); (roomObjDrv[room] || (roomObjDrv[room] = new Map())).set(id, socket.id);
       if (o.item) itemObjMove(room, o, socket.id);       // …an item lying in the world: it is the taker's now, one more in their pouch
       { const sm = roomObjSt[room], r = sm && sm.get(id); if (r && r.stk) delete r.stk; }   // …a sword pulled out of what it was stuck in (`obj-stick`)
