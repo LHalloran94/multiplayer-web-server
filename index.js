@@ -24552,13 +24552,17 @@ io.on('connection', (socket) => {
     // Owner by stable username (survives reconnect/new socket.id) OR the live socket.id.
     // ⚠️ THE USERNAME IS THE ONE THAT MATTERS AFTER A RESTART: a restored prop's `ownerId` is a socket id from a
     // process that no longer exists, so ownership of anything persisted is carried entirely by the name.
-    if (!obj || !(obj.ownerId === socket.id || (obj.owner && obj.owner === currentUsername))) return;
+    // ⭐ ADMIN MODE ERASES ANYTHING (user, 2026-10-13: "with admin mode on I should be able to delete anything" — nine crates a test
+    //   rig left in the Overworld under its own name could not be removed by anybody). The same per-connection flag that makes a
+    //   purse unlimited (`adminSockets`). Somebody else's deposit is NOT handed to the admin: only an owner gets a refund.
+    const mine = !!obj && (obj.ownerId === socket.id || (obj.owner && obj.owner === currentUsername));
+    if (!obj || !(mine || adminSockets.has(socket.id))) return;
     objUnindex(currentAvatarRoom, obj);
     // ⭐ ERASING YOUR OWN PROP HANDS THE DEPOSIT STRAIGHT BACK, because this path is owner-only — it is
     // un-building, not a raid, and making you chase your own Prima across the floor for changing your mind
     // would be a penalty on tidying up. SMASHING one scatters instead (see `avatar-object-hit`): the difference
     // between the two is exactly the difference between demolishing your own wall and somebody else's.
-    if (obj.cost > 0 && invGatedRoom(currentAvatarRoom)) {
+    if (mine && obj.cost > 0 && invGatedRoom(currentAvatarRoom)) {
       ledger.grantPrima(playerKeyFor(socket.id), obj.cost | 0);
       sendInvSync(socket, currentAvatarRoom);
     }
