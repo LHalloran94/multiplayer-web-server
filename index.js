@@ -6859,7 +6859,8 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'slide', 'rack', 'rod', 'ratchet', 'cam', 'ring',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net',
                      'box',                               // …the plain rectangle you drag out (2026-09-14)
-                     'sword'];                            // …the held-item TEST SWORD (list 14, 2026-10-11: the wielding test bed, client 16n)
+                     'sword',                             // …the held-item TEST SWORD (list 14, 2026-10-11: the wielding test bed, client 16n)
+                     'torch'];                            // …and the TEST TORCH (2026-10-13: a torch that is out is a real object, on the sword's controls — client 16k/16n)
 // ⭐⭐ ONE CEILING FOR EVERY STAMP, AND IT IS 1200. There used to be three — 160 for an ordinary stamp, 420
 // for the things that turn on a pin, 1200 for the bars — and each exception was argued separately on the day
 // somebody found 160 binding on something it had no business binding on: a rod that came back at 160 whatever
@@ -17378,7 +17379,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-            content: data.content, w: clampN(data.w, 24, stampMax(data.look), 64), h: clampN(data.h, data.look === 'sword' ? 6 : 24, stampMax(data.look), 64),   // (a test sword is a blade, not a plank: thin)
+            content: data.content, w: clampN(data.w, 24, stampMax(data.look), 64), h: clampN(data.h, (data.look === 'sword' || data.look === 'torch') ? 6 : 24, stampMax(data.look), 64),   // (a test sword is a blade, not a plank: thin — and so is a torch's stick)
             // ⚠️ `cam` IS A SHAPE, and it has to be named here or a cam comes back a RECTANGLE — the by-name
             // rebuild trap again, and the one this file has been bitten by most.
             shape: (data.shape === 'ellipse' || data.shape === 'tri' || data.shape === 'cyl'
@@ -24403,18 +24404,49 @@ io.on('connection', (socket) => {
   // Then the same door the build menu's fire tool and a burning rope use.
   const _torchIds = Object.keys(ITEMS.ITEMS).filter(id => ITEMS.ITEMS[id].kind === 'light');
   let _torchIgT = 0, _torchIgN = 0;
+  // ⭐ (2026-10-13) A TORCH THAT IS A REAL OBJECT (look 'torch' — held on the sword's controls, thrown, lying on the ground; client 16k).
+  //   `tid` names it: the ask is then the OBJECT's, so it needs no torch in the asker's inventory and may be far from their body (a
+  //   thrown torch lands where it lands) — but the object must exist, be a torch, and not have gone out. `objs`: the wooden things
+  //   its flame is against, lit where it touches them, exactly as a burning player lights what it runs into (`avt-burn-touch`).
   socket.on('torch-ignite', (d) => {
     if (!currentAvatarRoom || !d || !isFinite(d.x) || !isFinite(d.y)) return;
-    const now = Date.now();
+    const now = Date.now(), room = currentAvatarRoom;
     if (now - _torchIgT > 1000) { _torchIgT = now; _torchIgN = 0; }
     if (++_torchIgN > 12) return;                                  // a flame dragged along a hedge, not a flood
-    if (invGatedRoom(currentAvatarRoom)) {
-      const key = playerKeyFor(socket.id);
-      if (!_torchIds.some(id => ledger.itemCount(key, id) > 0)) return;
+    const tObj = typeof d.tid === 'string' && roomObjects[room] ? roomObjects[room].get(d.tid) : null;
+    if (tObj) {
+      if (tObj.type !== 'stamp' || tObj.look !== 'torch') return;
+      const rec = roomObjSt[room] && roomObjSt[room].get(d.tid); if (rec && rec.out) return;
+    } else {
+      if (invGatedRoom(room)) {
+        const key = playerKeyFor(socket.id);
+        if (!_torchIds.some(id => ledger.itemCount(key, id) > 0)) return;
+      }
+      const p = socket._avPos;
+      if (p && now - p.t < 4000 && Math.hypot(d.x - p.x, d.y - p.y) > 520) return;   // the body moves between beacons; a torch is within reach of it
     }
-    const p = socket._avPos;
-    if (p && now - p.t < 4000 && Math.hypot(d.x - p.x, d.y - p.y) > 520) return;   // the body moves between beacons; a torch is within reach of it
-    igniteBox(currentAvatarRoom, +d.x, +d.y, TERRAIN_CELL);
+    if (!d.objOnly) igniteBox(room, +d.x, +d.y, TERRAIN_CELL);
+    if (!Array.isArray(d.objs)) return;
+    let lit = false;
+    for (const it of d.objs.slice(0, 3)) {
+      const obj = it && typeof it.id === 'string' && roomObjects[room] && roomObjects[room].get(it.id); if (!obj || obj === tObj) continue;
+      if (bodySpec(obj)) { if (bodyIgnite(room, obj, +d.x, +d.y, TERRAIN_CELL, +it.px, +it.py, +it.pa)) lit = true; }
+      else if (obj.boom > 0) armBomb(room, it.id, socket.id, { x: +d.x, y: +d.y });
+    }
+    if (lit) broadcastObjSt(room);
+  });
+  // ⭐ A TORCH OBJECT GOES OUT / IS LIT AGAIN (client 16k: left lying on the ground too long, dropped in water; touching fire or lava).
+  //   One field, `out`, on the object's own state record — it rides `obj-state` to everybody and a late joiner finds it as it is.
+  //   Anybody may say so (whoever is holding it or simulating it does); it is one bit about a stick.
+  socket.on('torch-out', ({ id, out } = {}) => {
+    const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
+    const now = Date.now(); if (now - _settleAt > 1000) { _settleAt = now; _settleN = 0; } if (++_settleN > 40) return;
+    const o = roomObjects[room] && roomObjects[room].get(id);
+    if (!o || o.type !== 'stamp' || o.look !== 'torch') return;
+    const st = objStOf(room), rec = st.get(id) || {};
+    if (out) { if (rec.out) return; rec.out = 1; st.set(id, rec); }
+    else { if (!rec.out) return; delete rec.out; if (Object.keys(rec).length) st.set(id, rec); else st.delete(id); }
+    broadcastObjSt(room);
   });
   socket.on('rope-ignite', (d) => {
     const o = ropeFireObj(d); if (!o || (d.end !== 0 && d.end !== 1)) return;
