@@ -136,12 +136,21 @@
   //    Every one is a type with its own character, not a rarity (the user: rarity comes later with crafting and enchanting). Its model (how
   //    it looks) is client art, 16r; this is what it IS: L long, box h thick, weight, where the hand(s) go, what hurts and how.
   //    edge = carves + pierces + sticks (swords, daggers, spears, axes) · blunt = none of those, and dazes (clubs, maces, hammers).
-  const weapon = (L, h, wt, grip, hurtFrom, kind, tag, extra) => Object.assign({
-    w: L, h, wt, content: '🗡️', tag, lenDial: false, model3d: true,
-    grip, rest: 'belt', aimsAtRest: true, scheme: null, offTilt: { beside: -0.35, back: 0.5, raised: 0.25 },
-    hurtFrom, hurtPad: 0, carves: kind === 'edge', pierces: kind === 'edge', sticks: kind === 'edge', fire: false,
-    daze: kind === 'blunt', icon: 1.24,
-  }, extra || {});
+  //  ⭐ THEIR SIZE (2026-10-15, plan file §5m/§5t — the user, after trying the test dial in play: "we'll definitely change the weapon size down
+  //    to 0.6x"): every number below is written at the size the models were designed at, and made at `MELEE_K` of it — length, thickness,
+  //    and the two settings measured in px (`hitHalf`, `stabBack`). Grips and `hurtFrom` are fractions, and the weight is unchanged.
+  const MELEE_K = 0.6;
+  const weapon = (L, h, wt, grip, hurtFrom, kind, tag, extra) => {
+    const S = Object.assign({
+      w: Math.round(L * MELEE_K), h: +(h * MELEE_K).toFixed(2), wt, content: '🗡️', tag, lenDial: false, model3d: true,
+      grip, rest: 'belt', aimsAtRest: true, scheme: null, offTilt: { beside: -0.35, back: 0.5, raised: 0.25 },
+      hurtFrom, hurtPad: 0, carves: kind === 'edge', pierces: kind === 'edge', sticks: kind === 'edge', fire: false,
+      daze: kind === 'blunt', icon: 1.24,
+    }, extra || {});
+    if (S.hitHalf) S.hitHalf = +(S.hitHalf * MELEE_K).toFixed(2);
+    if (S.stabBack) S.stabBack = +(S.stabBack * MELEE_K).toFixed(2);
+    return S;
+  };
   const two = (g2) => ({ hands: 2, grip2: g2 });
   Object.assign(LOOKS, {
     // swords
@@ -192,5 +201,9 @@
   // an item's object shape, as server/items.js and the wire carry it
   const objOf = (look) => { const L = LOOKS[look]; return { look, w: L.w, h: L.h, lwt: L.wt, content: L.content }; };
 
-  return { LOOKS, is, of, objOf };
+  // ⭐ YOUR HANDS' SIZE (2026-10-15, plan file §5t — the user: "the hand size down to 0.65x"), as a fraction of what they were drawn at, holding
+  //   anything — here so every screen draws everybody's hands the same. The Weapons tab's "Hand size (×)" is a test dial on top of it.
+  const HAND_K = 0.65;
+
+  return { LOOKS, is, of, objOf, HAND_K, MELEE_K };
 });
