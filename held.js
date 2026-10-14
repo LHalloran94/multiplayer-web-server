@@ -155,10 +155,10 @@
     dagger:        weapon(30, 6, 0.5, 0.18, 0.35, 'edge', 'dg'),
     stiletto:      weapon(31, 6, 0.4, 0.18, 0.34, 'edge', 'st'),
     kris:          weapon(36, 6, 0.5, 0.16, 0.35, 'edge', 'kr'),
-    // spears (one hand — the user's pick)
-    spear:         weapon(120, 6, 1.4, 0.40, 0.89, 'edge', 'sp'),
-    wingedspear:   weapon(124, 6, 1.6, 0.40, 0.85, 'edge', 'ws'),
-    trident:       weapon(122, 6, 1.7, 0.40, 0.85, 'edge', 'tr', { hitHalf: 6 }),
+    // spears (one hand — the user's pick; held low on the shaft, 0.2 — the user: held "quite high up and it makes their range actually quite lacklustre")
+    spear:         weapon(120, 6, 1.4, 0.20, 0.89, 'edge', 'sp'),
+    wingedspear:   weapon(124, 6, 1.6, 0.20, 0.85, 'edge', 'ws'),
+    trident:       weapon(122, 6, 1.7, 0.20, 0.85, 'edge', 'tr', { hitHalf: 6 }),
     // axes (they carve — the user's pick)
     handaxe:       weapon(44, 6, 1.0, 0.12, 0.76, 'edge', 'ha', { hitHalf: 7 }),
     beardedaxe:    weapon(60, 6, 1.4, 0.10, 0.70, 'edge', 'ba', { hitHalf: 8 }),
