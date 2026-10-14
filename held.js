@@ -55,6 +55,13 @@
   //    raise       'face' = while held to the pointer it sits between you and the pointer, `raiseAt` px clear of your body, its face
   //                turned to the pointer (a shield) — absent = its TIP goes on the pointer (a sword, a torch)
   //    shield, model   a shield, and the curved board it is drawn from (see the shields below)
+  //    hands, grip2    hands 2 = it takes BOTH hands (the off hand is put away while it is out, and it cannot go in the off hand);
+  //                grip2 = where the second hand closes on it (a fraction of its length, like `grip`)
+  //    daze        a hard blow from it leaves them dazed for a moment (a blunt weapon)
+  //    cracks      a strike that meets the ground breaks the cells it hits (a hammer)
+  //    nicks       its blunt blow also wounds a little — a few drops of blood (a mace's flanges, a spiked head, a hammer's beak)
+  //    hitHalf     how far either side of its long axis it can hit somebody (its head's reach across: an axe, a hammer) — absent = half its box
+  //    model3d     it is drawn from a 3D MODEL (client 16r, keyed by its look) rather than a flat drawing
   //  Its pictures:
   //    icon        how big its drawing is in an inventory tile (1 = the tile's width)
   //    pieces(w,h) what it collides with when it meets another held item, in its own frame (middle at 0,0, the point
@@ -121,6 +128,60 @@
   LOOKS.buckler      = shield({ U: 11, V: 11, dome: true,  t: 1.4, curve: 0.38 }, 0.7, 'bk');
   LOOKS.towershield  = shield({ U: 13, V: 26, dome: false, t: 2.6, curve: 0.38 }, 2.4, 'ts');
   LOOKS.kiteshield   = shield({ U: 13, V: 27, dome: false, t: 2,   curve: 0.38 }, 1.6, 'ks');
+
+  // ── THE MELEE FAMILY (2026-10-14, plan file §5e — "build all of them at once"; looks from `scratchpad/look/items/melee/v2.html`, refined).
+  //    Every one is a type with its own character, not a rarity (the user: rarity comes later with crafting and enchanting). Its model (how
+  //    it looks) is client art, 16r; this is what it IS: L long, box h thick, weight, where the hand(s) go, what hurts and how.
+  //    edge = carves + pierces + sticks (swords, daggers, spears, axes) · blunt = none of those, and dazes (clubs, maces, hammers).
+  const weapon = (L, h, wt, grip, hurtFrom, kind, tag, extra) => Object.assign({
+    w: L, h, wt, content: '🗡️', tag, lenDial: false, model3d: true,
+    grip, rest: 'belt', aimsAtRest: true, scheme: null, offTilt: { beside: -0.35, back: 0.5, raised: 0.25 },
+    hurtFrom, hurtPad: 0, carves: kind === 'edge', pierces: kind === 'edge', sticks: kind === 'edge', fire: false,
+    daze: kind === 'blunt', icon: 1.24,
+  }, extra || {});
+  const two = (g2) => ({ hands: 2, grip2: g2 });
+  Object.assign(LOOKS, {
+    // swords
+    armingsword:   weapon(66, 7, 1.0, 0.13, 0.225, 'edge', 'as'),
+    longsword:     weapon(84, 7, 1.2, 0.12, 0.255, 'edge', 'ls'),
+    falchion:      weapon(62, 8, 1.1, 0.12, 0.23, 'edge', 'fa', { hitHalf: 4 }),
+    sabre:         weapon(70, 7, 0.9, 0.11, 0.21, 'edge', 'sa'),
+    rapier:        weapon(84, 6, 0.8, 0.10, 0.17, 'edge', 'ra'),
+    // greatswords (two hands)
+    greatsword:    weapon(100, 8, 2.2, 0.06, 0.285, 'edge', 'gs', two(0.2)),
+    claymore:      weapon(108, 8, 2.4, 0.06, 0.275, 'edge', 'cl', two(0.2)),
+    flamberge:     weapon(118, 8, 2.6, 0.05, 0.26, 'edge', 'fl', two(0.2)),
+    // daggers
+    dagger:        weapon(30, 6, 0.5, 0.18, 0.35, 'edge', 'dg'),
+    stiletto:      weapon(31, 6, 0.4, 0.18, 0.34, 'edge', 'st'),
+    kris:          weapon(36, 6, 0.5, 0.16, 0.35, 'edge', 'kr'),
+    // spears (one hand — the user's pick)
+    spear:         weapon(120, 6, 1.4, 0.40, 0.89, 'edge', 'sp'),
+    wingedspear:   weapon(124, 6, 1.6, 0.40, 0.85, 'edge', 'ws'),
+    trident:       weapon(122, 6, 1.7, 0.40, 0.85, 'edge', 'tr', { hitHalf: 6 }),
+    // axes (they carve — the user's pick)
+    handaxe:       weapon(44, 6, 1.0, 0.12, 0.76, 'edge', 'ha', { hitHalf: 7 }),
+    beardedaxe:    weapon(60, 6, 1.4, 0.10, 0.70, 'edge', 'ba', { hitHalf: 8 }),
+    steelaxe:      weapon(52, 6, 1.5, 0.11, 0.72, 'edge', 'sx', { hitHalf: 7 }),
+    crescentaxe:   weapon(58, 6, 1.6, 0.10, 0.70, 'edge', 'cx', { hitHalf: 9 }),
+    battleaxe:     weapon(64, 6, 1.8, 0.10, 0.68, 'edge', 'bx', { hitHalf: 9 }),
+    greataxe:      weapon(104, 7, 2.6, 0.05, 0.80, 'edge', 'ga', Object.assign({ hitHalf: 11 }, two(0.22))),
+    greatbattleaxe: weapon(110, 7, 3.0, 0.05, 0.78, 'edge', 'gb', Object.assign({ hitHalf: 12 }, two(0.2))),
+    daneaxe:       weapon(118, 6, 2.2, 0.05, 0.82, 'edge', 'da', Object.assign({ hitHalf: 10 }, two(0.25))),
+    executioner:   weapon(100, 7, 3.2, 0.05, 0.74, 'edge', 'ex', Object.assign({ hitHalf: 12 }, two(0.2))),
+    // clubs
+    club:          weapon(50, 8, 1.4, 0.12, 0.55, 'blunt', 'cb', { hitHalf: 4 }),
+    spikedclub:    weapon(52, 8, 1.6, 0.12, 0.60, 'blunt', 'sc', { hitHalf: 6, nicks: true }),
+    greatclub:     weapon(96, 10, 2.8, 0.05, 0.55, 'blunt', 'gc', Object.assign({ hitHalf: 6 }, two(0.2))),
+    // maces and flails
+    mace:          weapon(52, 7, 1.6, 0.12, 0.76, 'blunt', 'mc', { hitHalf: 6, nicks: true }),
+    morningstar:   weapon(56, 7, 1.8, 0.12, 0.78, 'blunt', 'ms', { hitHalf: 7, nicks: true }),
+    flail:         weapon(62, 6, 1.7, 0.12, 0.82, 'blunt', 'fs', { hitHalf: 6, nicks: true }),
+    // hammers (they crack ground — the user's pick)
+    warhammer:     weapon(60, 7, 1.5, 0.11, 0.82, 'blunt', 'wh', { hitHalf: 9, nicks: true, cracks: true }),
+    maul:          weapon(100, 10, 3.0, 0.05, 0.85, 'blunt', 'ml', Object.assign({ hitHalf: 12, cracks: true }, two(0.2))),
+    runedhammer:   weapon(106, 10, 3.2, 0.05, 0.80, 'blunt', 'rh', Object.assign({ hitHalf: 13, cracks: true }, two(0.21))),
+  });
 
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;

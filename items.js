@@ -48,6 +48,8 @@ const SVG = {
 const HELD = require('./held');
 const OBJ = { sword: HELD.objOf('sword'), torch: HELD.objOf('torch') };
 for (const k of ['roundshield', 'heatershield', 'buckler', 'towershield', 'kiteshield']) OBJ[k] = HELD.objOf(k);
+// the melee family (server/held.js): every look with a 3D model is an object shape here
+for (const k of Object.keys(HELD.LOOKS)) if (HELD.LOOKS[k].model3d) OBJ[k] = HELD.objOf(k);
 // a shield's picture in a list (the window draws the real thing from its model — 16q; this is the plain fallback)
 const shieldSvg = (fill, d) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="' + d + '" fill="' + fill + '" stroke="#8f98a5" stroke-width="1.4"/></svg>';
 SVG.roundshield = shieldSvg('#8a5c32', 'M12 3a9 9 0 1 0 .01 0z');
@@ -58,7 +60,9 @@ SVG.kiteshield = shieldSvg('#962826', 'M12 2c4 0 6.5 2.5 6.5 6 0 5-3 10-6.5 14C8
 const ITEMS = {
   torch:       { name: 'Torch',           kind: 'light',     tier: 0, svg: SVG.torch, obj: OBJ.torch, make: { mats: [[28, 1]], prima: 20 } },   // 28 = Wood
   // (2026-10-14, the user: "Prima only" — no materials until crafting is designed; the price is mine, change it here)
-  sword:       { name: 'Sword',           kind: 'weapon',    tier: 0, svg: SVG.sword, obj: OBJ.sword, make: { mats: [], prima: 60 } },
+  // (later the same day) the real Sword IS the Arming sword of the melee family — its 3D model, not the stand-in's flat drawing. The id
+  //   stays 'sword' (ids are what is stored).
+  sword:       { name: 'Arming sword',    kind: 'weapon',    tier: 0, svg: SVG.sword, obj: OBJ.armingsword, make: { mats: [], prima: 60 } },
   // (2026-10-14) THE FIVE SHIELDS (all five designs, the user's pick; Prima only; the prices are mine). Kind 'weapon' for now, so they sit
   //   under the window's Weapons filter — a filter of their own is one line in 16j when wanted.
   shield_round:  { name: 'Round shield',  kind: 'weapon', tier: 0, svg: SVG.roundshield,  obj: OBJ.roundshield,  make: { mats: [], prima: 50 } },
@@ -72,6 +76,21 @@ const ITEMS = {
 };
 
 // What the debug panel's "give me stand-in items" hands out. Counts chosen so one is single and two are stacks.
+// ⭐ THE MELEE FAMILY (2026-10-14, plan file §5e): one item per weapon type, Prima only (prices mine). [id, name, look, prima]. The
+//   Arming sword is the item `sword` above. Kind 'weapon' — they sit under the window's Weapons filter.
+for (const [id, name, look, prima] of [
+  ['longsword', 'Longsword', 'longsword', 80], ['falchion', 'Falchion', 'falchion', 60], ['sabre', 'Sabre', 'sabre', 75], ['rapier', 'Rapier', 'rapier', 90],
+  ['greatsword', 'Greatsword', 'greatsword', 120], ['claymore', 'Claymore', 'claymore', 140], ['flamberge', 'Flamberge', 'flamberge', 170],
+  ['dagger', 'Dagger', 'dagger', 25], ['stiletto', 'Stiletto', 'stiletto', 35], ['kris', 'Kris', 'kris', 50],
+  ['spear', 'Spear', 'spear', 50], ['winged_spear', 'Winged spear', 'wingedspear', 70], ['trident', 'Trident', 'trident', 90],
+  ['hand_axe', 'Hand axe', 'handaxe', 35], ['bearded_axe', 'Bearded axe', 'beardedaxe', 55], ['steel_axe', 'Steel axe', 'steelaxe', 80],
+  ['crescent_axe', 'Crescent axe', 'crescentaxe', 100], ['battle_axe', 'Battle axe', 'battleaxe', 90], ['greataxe', 'Greataxe', 'greataxe', 120],
+  ['great_battle_axe', 'Great battle axe', 'greatbattleaxe', 160], ['dane_axe', 'Dane axe', 'daneaxe', 110], ['executioner_axe', 'Executioner\'s axe', 'executioner', 150],
+  ['club', 'Club', 'club', 15], ['spiked_club', 'Spiked club', 'spikedclub', 35], ['greatclub', 'Greatclub', 'greatclub', 45],
+  ['mace', 'Flanged mace', 'mace', 60], ['morning_star', 'Morning star', 'morningstar', 75], ['flail', 'Flail', 'flail', 90],
+  ['war_hammer', 'War hammer', 'warhammer', 70], ['maul', 'Maul', 'maul', 90], ['runed_hammer', 'Runed greathammer', 'runedhammer', 180],
+]) ITEMS[id] = { name, kind: 'weapon', tier: 0, svg: SVG.sword, obj: OBJ[look], make: { mats: [], prima } };
+
 const TEST_GIFT = [['test_sword', 1], ['test_torch', 3], ['test_arrows', 24]];
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
