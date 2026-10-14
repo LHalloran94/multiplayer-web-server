@@ -19872,6 +19872,28 @@ function eqDropSocket(room, sid) {
   for (const id of [...s]) { const o = map && map.get(id); if (o && o.eq === sid) eqRemoveObj(room, o); else eqNote(sid, id, 0); }
   return true;
 }
+// ⭐ AN ITEM PUT INTO THE WORLD AS ITSELF (2026-10-14, the user: a torch or a sword "should only ever exist as an object in the world,
+// not as a stack"): its own shape from the item table (`ITEMS[id].obj`), lying where it is put, nobody's, saved with the world like a
+// prop. For an item leaving a pouch with no hand to leave from — dragged out of the inventory window, and a death's scatter. Null when
+// it could not be built, and then the caller keeps the item (nothing may be destroyed on the way to the ground).
+// ⚠️ Not on the spawn's keep-clear box nor the per-chunk cap: like a hand item it is a belonging put down, not building.
+let itemObjSeq = 0;
+function itemObjPlace(room, item, x, y, angle, ownerSid, ownerName) {
+  const S = ITEMS.isObjItem(item) && ITEMS.ITEMS[item].obj; if (!S || !isFinite(x) || !isFinite(y)) return null;
+  const id = (ownerSid || 'drop') + '-it' + Date.now().toString(36) + (++itemObjSeq).toString(36);
+  const o = buildWorldObject('stamp', { type: 'stamp', content: S.content, shape: 'rect', x, y, w: S.w, h: S.h, angle: angle || 0,
+    breakable: false, loose: 1, look: S.look, lwt: S.lwt, lbnc: 0, item }, id, ownerSid || '', ownerName || '', room);
+  if (!o || o.item !== item) return null;
+  objIndex(room, o);
+  if (objChunked(room)) emitObjToChunks(room, o, 'avatar-object-add', o); else io.to(room).emit('avatar-object-add', o);
+  return o;
+}
+// how many of an item a socket has OUT in its hands right now (they are still in its pouch)
+function eqOutCount(room, sid, item) {
+  const mine = eqObjs.get(sid), map = roomObjects[room]; let n = 0;
+  if (mine && map) for (const oid of mine) { const q = map.get(oid); if (q && q.item === item) n++; }
+  return n;
+}
 function objCountInChunk(room, ch) {
   const by = roomObjectChunk[room], map = roomObjects[room];
   const s = by && by.get(ch); if (!s || !map) return 0;
@@ -20157,6 +20179,7 @@ function spawnDrop(room, x, y, mats, prima, opts) {
 // kind of true-until-someone-moves-a-call this project has already shipped three times.
 const DEATH_SCATTER_VX = 0.45;
 const DEATH_PILES_MAX = 5;
+const ITEM_OBJ_DROP_MAX = 24;   // …how many items that are objects one death or one departure puts down as themselves (the rest: piles)
 // ⭐ `spread` is the ONLY thing dispersal-on-death adds. Leaving quietly puts your things down in one heap;
 // dying throws them about. Same take, same guard, same conservation — a different number of landing sites.
 function releaseHoldings(room, key, x, y, spread) {
@@ -20164,7 +20187,23 @@ function releaseHoldings(room, key, x, y, spread) {
   const peek = ledger.snapshot(key);
   if (!peek.mats.length && !peek.prima && !peek.items.length) return null;
   const held = ledger.takeAll(key);
-  const out = scatterMatter(room, x, y, held.mats, held.prima, spread, held.items);
+  // ⭐ (2026-10-14) A TORCH OR A SWORD GOES DOWN AS ITSELF, one object each, fanned out over the spot (`itemObjPlace`) — never in a pile.
+  //   ⚠️ Conserving: one that cannot be built goes into the piles instead; past ITEM_OBJ_DROP_MAX (a stand-in stack minted by the debug
+  //   panel) the rest do too, rather than throwing dozens of bodies into the physics at one point.
+  const rest = []; let placed = 0;
+  const nObj = held.items.reduce((a, e) => a + (ITEMS.isObjItem(e[0]) ? e[1] : 0), 0);
+  for (const [id, n] of held.items) {
+    if (!ITEMS.isObjItem(id)) { rest.push([id, n]); continue; }
+    let left = n;
+    while (left > 0 && placed < ITEM_OBJ_DROP_MAX) {
+      const t = nObj > 1 ? placed / (Math.min(nObj, ITEM_OBJ_DROP_MAX) - 1) * 2 - 1 : 0;
+      if (!itemObjPlace(room, id, x + t * 40, y - 18 - (placed % 3) * 9, (placed % 2 ? 0.3 : -0.3), '', '')) break;
+      placed++; left--;
+    }
+    if (left > 0) rest.push([id, left]);
+  }
+  held.items = rest;
+  const out = (held.mats.length || held.prima || rest.length) ? scatterMatter(room, x, y, held.mats, held.prima, spread, rest) : [];
   console.log(`ledger: released ${held.mats.reduce((a, m) => a + m[1], 0)} cell(s) + ${held.prima} prima + ${held.items.reduce((a, e) => a + e[1], 0)} item(s) at ${x | 0},${y | 0} as `
     + out.map(d => d.id).join('+'));
   return out[0] || null;
@@ -24771,6 +24810,16 @@ io.on('connection', (socket) => {
     // you actually have and the pile carries exactly that, so nothing is created or lost on the way to the ground.
     if (item != null) {
       if (!ITEMS.isItem(item)) return;
+      // ⭐ (2026-10-14) A TORCH OR A SWORD IS PUT DOWN AS ITSELF, ONE AT A TIME — never a pile (`itemObjPlace`). Never the one in your
+      //   hand: only what you carry beyond what you have out.
+      if (ITEMS.isObjItem(item)) {
+        const gated = invGatedRoom(currentAvatarRoom);
+        if (gated && ledger.itemCount(key, item) - eqOutCount(currentAvatarRoom, socket.id, item) < 1) return;
+        const s = (+vx || 0) < 0 ? -1 : 1;
+        if (!itemObjPlace(currentAvatarRoom, item, p.x + s * 22, p.y - 26, s * 0.25, socket.id, currentUsername || socket.id)) return;
+        if (gated) { ledger.spendItem(key, item, 1); sendInvSync(socket, currentAvatarRoom); }
+        return;
+      }
       const took = ledger.spendItem(key, item, want);
       if (!took) return;
       spawnDrop(currentAvatarRoom, p.x, p.y - 12, [], 0, Object.assign(opts, { items: [[item, took]] }));
@@ -24955,7 +25004,7 @@ io.on('connection', (socket) => {
     const key = playerKeyFor(socket.id);
     const held = ledger.snapshot(key);
     if (!held.mats.length && !held.prima && !held.items.length) return;
-    if (eqDropSocket(currentAvatarRoom, socket.id)) broadcastObjSt(currentAvatarRoom);   // (hand items) what is in their hands scatters with the rest, as piles — the objects go
+    if (eqDropSocket(currentAvatarRoom, socket.id)) broadcastObjSt(currentAvatarRoom);   // (hand items) what is in their hands scatters with the rest — put down again as itself by `releaseHoldings`
     releaseHoldings(currentAvatarRoom, key, p.x, p.y - 12, deathSpread(held.mats, held.prima, held.items));
     sendInvSync(socket, currentAvatarRoom);
   });
@@ -25568,6 +25617,21 @@ io.on('connection', (socket) => {
       hm.delete(id); if (!hm.size) delete roomObjHeld[room];
       if (o && o.item && o.eq === socket.id) itemObjMove(room, o, null);   // …out of their hand into the world: one fewer in their pouch
     }
+    broadcastObjSt(room);
+  });
+  // ⭐ HOLDING E ON AN ITEM LYING IN THE WORLD (2026-10-14, the user: "Holding E should pick an item up and put it straight into the
+  // pouch, rather than unequipping or dropping anything"): one more in the pouch, and the object goes. Nobody's hand may be on it.
+  socket.on('obj-pocket', ({ id }) => {
+    const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
+    const map = roomObjects[room], o = map && map.get(id);
+    const hm = roomObjHeld[room], hs = hm && hm.get(id);
+    if (!o || !o.item || !ITEMS.isObjItem(o.item) || o.eq || (hs && hs !== socket.id) || !(o.type === 'stamp' && o.loose && o.loose !== 2 && !o.mnt)) { socket.emit('obj-hold-no', { id }); return; }
+    if (hm) { hm.delete(id); if (!hm.size) delete roomObjHeld[room]; }
+    { const dm = roomObjDrv[room]; if (dm) { dm.delete(id); if (!dm.size) delete roomObjDrv[room]; } }
+    { const sm = roomObjSt[room]; if (sm) sm.delete(id); }
+    if (invGatedRoom(room)) { ledger.creditItems(playerKeyFor(socket.id), [[o.item, 1]]); sendInvSync(socket, room); }
+    eqRemoveObj(room, o);
+    if (objChunked(room)) socket.emit('avatar-object-removed', { id });   // …the taker may not be subscribed there
     broadcastObjSt(room);
   });
   // ⭐ A TUG — somebody grabbed what somebody else holds. Carried to the holder, whose machine decides it (it has both bodies and
