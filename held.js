@@ -57,6 +57,8 @@
   //    shield, model   a shield, and the curved board it is drawn from (see the shields below)
   //    hands, grip2    hands 2 = it takes BOTH hands (the off hand is put away while it is out, and it cannot go in the off hand);
   //                grip2 = where the second hand closes on it (a fraction of its length, like `grip`)
+  //    twoFree     held in BOTH hands (at `grip2`) while the other hand is empty, in one otherwise — it can go in the off hand (a spear)
+  //    stabBack    how far a QUICK stab draws back before it drives in (px) — absent = the Weapons tab's dial (a spear's is longer)
   //    daze        a hard blow from it leaves them dazed for a moment (a blunt weapon)
   //    cracks      a strike that meets the ground breaks the cells it hits (a hammer)
   //    nicks       its blunt blow also wounds a little — a few drops of blood (a mace's flanges, a spiked head, a hammer's beak)
@@ -156,9 +158,10 @@
     stiletto:      weapon(31, 6, 0.4, 0.18, 0.34, 'edge', 'st'),
     kris:          weapon(36, 6, 0.5, 0.16, 0.35, 'edge', 'kr'),
     // spears (one hand — the user's pick; held low on the shaft, 0.2 — the user: held "quite high up and it makes their range actually quite lacklustre")
-    spear:         weapon(120, 6, 1.4, 0.20, 0.89, 'edge', 'sp'),
-    wingedspear:   weapon(124, 6, 1.6, 0.20, 0.85, 'edge', 'ws'),
-    trident:       weapon(122, 6, 1.7, 0.20, 0.85, 'edge', 'tr', { hitHalf: 6 }),
+    //   …and both hands on it while the other hand is free (the user, 2026-10-14), the second further up the shaft; a quick stab draws back further
+    spear:         weapon(120, 6, 1.4, 0.20, 0.89, 'edge', 'sp', { twoFree: true, grip2: 0.42, stabBack: 26 }),
+    wingedspear:   weapon(124, 6, 1.6, 0.20, 0.85, 'edge', 'ws', { twoFree: true, grip2: 0.42, stabBack: 26 }),
+    trident:       weapon(122, 6, 1.7, 0.20, 0.85, 'edge', 'tr', { hitHalf: 6, twoFree: true, grip2: 0.42, stabBack: 26 }),
     // axes (they carve — the user's pick)
     handaxe:       weapon(44, 6, 1.0, 0.12, 0.76, 'edge', 'ha', { hitHalf: 7 }),
     beardedaxe:    weapon(60, 6, 1.4, 0.10, 0.70, 'edge', 'ba', { hitHalf: 8 }),
