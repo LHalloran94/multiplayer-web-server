@@ -21,6 +21,7 @@ const WORLDGEN2 = require('./worldgen2'); // the PORTED world redesign (port inc
 const DOMAINS = require('./domains');   // Phase 6 inc 6: which column of the Overworld a site spawns at
 const LEDGER = require('./ledger');     // the Prima economy: what each player carries, held HERE and not in a browser
 const ITEMS = require('./items');       // what an item IS (a kind + a count, like a material) — the only copy of the table
+const HELD = require('./held');         // what each thing you can hold in your hand is and does, by its look (shared with the client as MWHeld)
 const MATGEN = require('./materials');  // Phase 6 world-redesign port inc 1: the generator's materials, ids 18..89
                                         // ⚠️ ALSO INLINED INTO THE CLIENT BUNDLE by extension/build.js (as MWMats),
                                         // the same way avatar-sim.js is. One table, two readers — never copy rows out.
@@ -6868,8 +6869,7 @@ const STAMP_LOOKS = ['football', 'basketball', 'tennis', 'baseball', 'beachball'
                      'slide', 'rack', 'rod', 'ratchet', 'cam', 'ring',
                      'pin', 'cone', 'pot', 'anvil', 'log', 'net',
                      'box',                               // …the plain rectangle you drag out (2026-09-14)
-                     'sword',                             // …the held-item TEST SWORD (list 14, 2026-10-11: the wielding test bed, client 16n)
-                     'torch'];                            // …and the TEST TORCH (2026-10-13: a torch that is out is a real object, on the sword's controls — client 16k/16n)
+                     ...Object.keys(HELD.LOOKS)];         // …and every thing you can hold in your hand — the sword, the torch (server/held.js)
 // ⭐⭐ ONE CEILING FOR EVERY STAMP, AND IT IS 1200. There used to be three — 160 for an ordinary stamp, 420
 // for the things that turn on a pin, 1200 for the bars — and each exception was argued separately on the day
 // somebody found 160 binding on something it had no business binding on: a rod that came back at 160 whatever
@@ -17388,7 +17388,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-            content: data.content, w: clampN(data.w, 24, stampMax(data.look), 64), h: clampN(data.h, (data.look === 'sword' || data.look === 'torch') ? 6 : 24, stampMax(data.look), 64),   // (a test sword is a blade, not a plank: thin — and so is a torch's stick)
+            content: data.content, w: clampN(data.w, 24, stampMax(data.look), 64), h: clampN(data.h, HELD.is(data.look) ? 6 : 24, stampMax(data.look), 64),   // (a held thing is a blade or a stick, not a plank: thin)
             // ⚠️ `cam` IS A SHAPE, and it has to be named here or a cam comes back a RECTANGLE — the by-name
             // rebuild trap again, and the one this file has been bitten by most.
             shape: (data.shape === 'ellipse' || data.shape === 'tri' || data.shape === 'cyl'
@@ -17486,7 +17486,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // ⭐ (2026-10-14, held items plan §3) …and WHICH ITEM IT IS, for a sword or a torch that came out of somebody's pouch: one of
       //   that item, as a real thing in the world. Named here or a sword left lying comes back from storage as nobody's stick.
       //   ⚠️ `eq` (whose hand it is in) is deliberately NOT kept by this rebuild — it is a fact about a person who is present.
-      if (obj.loose === 1 && (obj.look === 'sword' || obj.look === 'torch') && ITEMS.isItem(data.item)) obj.item = data.item;
+      if (obj.loose === 1 && HELD.is(obj.look) && ITEMS.isItem(data.item)) obj.item = data.item;
     }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
@@ -24518,7 +24518,7 @@ io.on('connection', (socket) => {
     if (++_torchIgN > 12) return;                                  // a flame dragged along a hedge, not a flood
     const tObj = typeof d.tid === 'string' && roomObjects[room] ? roomObjects[room].get(d.tid) : null;
     if (tObj) {
-      if (tObj.type !== 'stamp' || tObj.look !== 'torch') return;
+      if (tObj.type !== 'stamp' || !HELD.is(tObj.look) || !HELD.LOOKS[tObj.look].fire) return;
       const rec = roomObjSt[room] && roomObjSt[room].get(d.tid); if (rec && rec.out) return;
     } else {
       if (invGatedRoom(room)) {
@@ -24545,7 +24545,7 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
     const now = Date.now(); if (now - _settleAt > 1000) { _settleAt = now; _settleN = 0; } if (++_settleN > 40) return;
     const o = roomObjects[room] && roomObjects[room].get(id);
-    if (!o || o.type !== 'stamp' || o.look !== 'torch') return;
+    if (!o || o.type !== 'stamp' || !HELD.is(o.look) || !HELD.LOOKS[o.look].fire) return;   // (a held thing with a flame — server/held.js)
     const st = objStOf(room), rec = st.get(id) || {};
     if (out) { if (rec.out) return; rec.out = 1; st.set(id, rec); }
     else { if (!rec.out) return; delete rec.out; if (Object.keys(rec).length) st.set(id, rec); else st.delete(id); }
@@ -25568,7 +25568,7 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
     const now = Date.now(); if (now - _settleAt > 1000) { _settleAt = now; _settleN = 0; } if (++_settleN > 40) return;
     const map = roomObjects[room], o = map && map.get(id);
-    if (!o || o.type !== 'stamp' || !o.loose || o.look !== 'sword') return;
+    if (!o || o.type !== 'stamp' || !o.loose || !HELD.is(o.look) || !HELD.LOOKS[o.look].sticks) return;   // (a held thing that sticks where it lands — server/held.js)
     const st = objStOf(room), rec = st.get(id) || {};
     if (!on) { if (!rec.stk) return; delete rec.stk; if (Object.keys(rec).length) st.set(id, rec); else st.delete(id); broadcastObjSt(room); return; }
     if (!isFinite(x) || !isFinite(y) || !isFinite(a)) return;

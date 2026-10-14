@@ -43,11 +43,10 @@ const SVG = {
 // stack, and they shouldn't stack in the inventory. Things like ammo/arrows would be different") = the item IS a real object when it is
 // out of the pouch — in a hand, lying on the ground, scattered on a death — never a pile, and one tile each in the inventory. This is
 // that object's shape, the one copy of it: the client builds a hand item from it (16n `wieldGive`) and the server builds one lying on
-// the ground from it (`itemObjPlace`). Only `look` 'sword' / 'torch' have a drawing, collision pieces and controls so far.
-const OBJ = {
-  sword: { look: 'sword', w: 64, h: 8, lwt: 1, content: '🗡️' },
-  torch: { look: 'torch', w: 31, h: 6, lwt: 0.6, content: '🔥' },
-};
+// the ground from it (`itemObjPlace`). The shape itself lives with how the thing behaves in the hand: server/held.js (one entry per
+// held look — a new held item is an entry there and a drawing in 16b).
+const HELD = require('./held');
+const OBJ = { sword: HELD.objOf('sword'), torch: HELD.objOf('torch') };
 const ITEMS = {
   torch:       { name: 'Torch',           kind: 'light',     tier: 0, svg: SVG.torch, obj: OBJ.torch, make: { mats: [[28, 1]], prima: 20 } },   // 28 = Wood
   test_sword:  { name: 'Stand-in sword',  kind: 'weapon',    tier: 0, svg: SVG.sword, obj: OBJ.sword, test: 1 },
