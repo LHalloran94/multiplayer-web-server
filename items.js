@@ -49,6 +49,8 @@ const HELD = require('./held');
 const OBJ = { sword: HELD.objOf('sword'), torch: HELD.objOf('torch') };
 const ITEMS = {
   torch:       { name: 'Torch',           kind: 'light',     tier: 0, svg: SVG.torch, obj: OBJ.torch, make: { mats: [[28, 1]], prima: 20 } },   // 28 = Wood
+  // (2026-10-14, the user: "Prima only" — no materials until crafting is designed; the price is mine, change it here)
+  sword:       { name: 'Sword',           kind: 'weapon',    tier: 0, svg: SVG.sword, obj: OBJ.sword, make: { mats: [], prima: 60 } },
   test_sword:  { name: 'Stand-in sword',  kind: 'weapon',    tier: 0, svg: SVG.sword, obj: OBJ.sword, test: 1 },
   test_torch:  { name: 'Stand-in torch',  kind: 'light',     tier: 0, svg: SVG.torch, obj: OBJ.torch, test: 1 },
   test_arrows: { name: 'Stand-in arrows', kind: 'throwable', tier: 0, svg: SVG.arrows, test: 1 },
