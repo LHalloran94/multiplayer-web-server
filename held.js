@@ -59,6 +59,7 @@
   //                grip2 = where the second hand closes on it (a fraction of its length, like `grip`)
   //    twoFree     held in BOTH hands (at `grip2`) while the other hand is empty, in one otherwise — it can go in the off hand (a spear)
   //    stabBack    how far a QUICK stab draws back before it drives in (px) — absent = the Weapons tab's dial (a spear's is longer)
+  //    spin        right SPINS it round your hand instead of stabbing (the flail — its head on its chain does the hitting)
   //    daze        a hard blow from it leaves them dazed for a moment (a blunt weapon)
   //    cracks      a strike that meets the ground breaks the cells it hits (a hammer)
   //    nicks       its blunt blow also wounds a little — a few drops of blood (a mace's flanges, a spiked head, a hammer's beak)
@@ -179,7 +180,7 @@
     // maces and flails
     mace:          weapon(52, 7, 1.6, 0.12, 0.76, 'blunt', 'mc', { hitHalf: 6, nicks: true }),
     morningstar:   weapon(56, 7, 1.8, 0.12, 0.78, 'blunt', 'ms', { hitHalf: 7, nicks: true }),
-    flail:         weapon(62, 6, 1.7, 0.12, 0.82, 'blunt', 'fs', { hitHalf: 6, nicks: true }),
+    flail:         weapon(62, 6, 1.7, 0.12, 0.82, 'blunt', 'fs', { hitHalf: 6, nicks: true, spin: true }),   // (spin: right whirls it — no stab; 2026-10-15)
     // hammers (they crack ground — the user's pick)
     warhammer:     weapon(60, 7, 1.5, 0.11, 0.82, 'blunt', 'wh', { hitHalf: 9, nicks: true, cracks: true }),
     maul:          weapon(100, 10, 3.0, 0.05, 0.85, 'blunt', 'ml', Object.assign({ hitHalf: 12, cracks: true }, two(0.2))),
