@@ -25084,6 +25084,15 @@ io.on('connection', (socket) => {
     emitToChunk(currentAvatarRoom, d.ch, 'drop-removed', { id, by: socket.id });
     socket.emit('drop-removed', { id, by: socket.id });
   });
+  // ⭐ (2026-10-14, held items plan §5i) WEAR — a weapon striking soft ground cracks it a little (the client's `terrainWear`). It is a mark,
+  //   not an edit: nothing is stored and nothing breaks here (a cell worn through is broken by an ordinary `terrain-edit` carve from the
+  //   striker). Relayed to the rest of the room as sent, after the same room / permission checks, at most 8 cells a message.
+  socket.on('terrain-wear', (m) => {
+    if (!currentAvatarRoom || !canBuild() || !m || !Array.isArray(m.c)) return;
+    const c = m.c.slice(0, 16).filter(v => Number.isInteger(v) && v >= 0);
+    if (!c.length || c.length % 2) return;
+    socket.to(currentAvatarRoom).emit('terrain-wear', { c });
+  });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip, thrown }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
     // arrived" from "a guard rejected it", and those need completely different fixes — which cost a whole round
