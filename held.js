@@ -51,6 +51,10 @@
   //                ground (and glances off hard), and it can plunge downward. Without it a hit is a club's: knocked back in full
   //    sticks      thrown, it sticks in ground / objects / people, and bounces off what it cannot stick in
   //    fire        it carries a flame: lit, it burns what it touches, gives light, goes out, sets a hit player alight
+  //    strikes     false = no stab and no swing on its buttons (a shield) — absent = it strikes
+  //    raise       'face' = while held to the pointer it sits between you and the pointer, `raiseAt` px clear of your body, its face
+  //                turned to the pointer (a shield) — absent = its TIP goes on the pointer (a sword, a torch)
+  //    shield, model   a shield, and the curved board it is drawn from (see the shields below)
   //  Its pictures:
   //    icon        how big its drawing is in an inventory tile (1 = the tile's width)
   //    pieces(w,h) what it collides with when it meets another held item, in its own frame (middle at 0,0, the point
@@ -93,6 +97,31 @@
 
   // (no prototype, so `LOOKS[look]` is a plain read that cannot find 'constructor' and friends — the client asks it per object per frame)
   Object.setPrototypeOf(LOOKS, null);
+  // ── SHIELDS (2026-10-14, `scratchpad/kickoff_held_items_plan.md` §5b — the user picked the "well curved, seen side-on (0°)" version of
+  //    all five designs from `scratchpad/look/items/shield/side.html`). A shield is a curved board seen from the side: `model` is that
+  //    board (U = half its width across the face, V = half its height, `dome` = curved both ways rather than side to side, t = its
+  //    thickness, curve = how far its middle stands forward as a fraction of its larger half-size) — the client draws it from this
+  //    model (16q) and the object's box is worked out from it here, so the two cannot disagree.
+  //    Its LONG AXIS is its height: at rest it is upright (rest 'upright', angle −90°), its FACE towards the way its holder faces
+  //    (the drawing flips with them). Held in its middle (grip 0.5).
+  //    raise 'face' = while the button that works it is held (right on its own in the off hand, left in the main hand) it goes between
+  //    you and the pointer, `raiseAt` px clear of your body, its FACE turned to the pointer. strikes false = no stab and no swing.
+  //    It blocks by being a solid thing in the way: held items stop dead against it, and things thrown at you hit it.
+  const shield = (model, wt, tag, extra) => {
+    const depth = model.curve * Math.max(model.U, model.V), h = Math.max(6, +(depth + model.t).toFixed(2));
+    return Object.assign({
+      w: 2 * model.V, h, wt, content: '🛡️', tag, lenDial: false, model, shield: true,
+      grip: 0.5, rest: 'upright', aimsAtRest: false, scheme: 'P', offTilt: { beside: 0, back: 0, raised: 0 },
+      hurtFrom: 0, hurtPad: 0, carves: false, pierces: false, sticks: false, fire: false, strikes: false,
+      raise: 'face', raiseAt: 5, icon: 1,
+    }, extra || {});
+  };
+  LOOKS.roundshield  = shield({ U: 17, V: 17, dome: true,  t: 2.2, curve: 0.38 }, 1.2, 'rs');
+  LOOKS.heatershield = shield({ U: 14, V: 20, dome: false, t: 2,   curve: 0.38 }, 1.4, 'hs');
+  LOOKS.buckler      = shield({ U: 11, V: 11, dome: true,  t: 1.4, curve: 0.38 }, 0.7, 'bk');
+  LOOKS.towershield  = shield({ U: 13, V: 26, dome: false, t: 2.6, curve: 0.38 }, 2.4, 'ts');
+  LOOKS.kiteshield   = shield({ U: 13, V: 27, dome: false, t: 2,   curve: 0.38 }, 1.6, 'ks');
+
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it

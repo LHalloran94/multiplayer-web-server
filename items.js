@@ -47,10 +47,25 @@ const SVG = {
 // held look — a new held item is an entry there and a drawing in 16b).
 const HELD = require('./held');
 const OBJ = { sword: HELD.objOf('sword'), torch: HELD.objOf('torch') };
+for (const k of ['roundshield', 'heatershield', 'buckler', 'towershield', 'kiteshield']) OBJ[k] = HELD.objOf(k);
+// a shield's picture in a list (the window draws the real thing from its model — 16q; this is the plain fallback)
+const shieldSvg = (fill, d) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="' + d + '" fill="' + fill + '" stroke="#8f98a5" stroke-width="1.4"/></svg>';
+SVG.roundshield = shieldSvg('#8a5c32', 'M12 3a9 9 0 1 0 .01 0z');
+SVG.heatershield = shieldSvg('#2f5ea8', 'M5 3h14v7c0 5-3.5 8.5-7 11-3.5-2.5-7-6-7-11z');
+SVG.buckler = shieldSvg('#b2bac6', 'M12 6a6 6 0 1 0 .01 0z');
+SVG.towershield = shieldSvg('#8a5c32', 'M6.5 2h11a1.5 1.5 0 0 1 1.5 1.5v17a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 20.5v-17A1.5 1.5 0 0 1 6.5 2z');
+SVG.kiteshield = shieldSvg('#962826', 'M12 2c4 0 6.5 2.5 6.5 6 0 5-3 10-6.5 14C8.5 18 5.5 13 5.5 8 5.5 4.5 8 2 12 2z');
 const ITEMS = {
   torch:       { name: 'Torch',           kind: 'light',     tier: 0, svg: SVG.torch, obj: OBJ.torch, make: { mats: [[28, 1]], prima: 20 } },   // 28 = Wood
   // (2026-10-14, the user: "Prima only" — no materials until crafting is designed; the price is mine, change it here)
   sword:       { name: 'Sword',           kind: 'weapon',    tier: 0, svg: SVG.sword, obj: OBJ.sword, make: { mats: [], prima: 60 } },
+  // (2026-10-14) THE FIVE SHIELDS (all five designs, the user's pick; Prima only; the prices are mine). Kind 'weapon' for now, so they sit
+  //   under the window's Weapons filter — a filter of their own is one line in 16j when wanted.
+  shield_round:  { name: 'Round shield',  kind: 'weapon', tier: 0, svg: SVG.roundshield,  obj: OBJ.roundshield,  make: { mats: [], prima: 50 } },
+  shield_heater: { name: 'Heater shield', kind: 'weapon', tier: 0, svg: SVG.heatershield, obj: OBJ.heatershield, make: { mats: [], prima: 60 } },
+  shield_buckler:{ name: 'Buckler',       kind: 'weapon', tier: 0, svg: SVG.buckler,      obj: OBJ.buckler,      make: { mats: [], prima: 30 } },
+  shield_tower:  { name: 'Tower shield',  kind: 'weapon', tier: 0, svg: SVG.towershield,  obj: OBJ.towershield,  make: { mats: [], prima: 90 } },
+  shield_kite:   { name: 'Kite shield',   kind: 'weapon', tier: 0, svg: SVG.kiteshield,   obj: OBJ.kiteshield,   make: { mats: [], prima: 70 } },
   test_sword:  { name: 'Stand-in sword',  kind: 'weapon',    tier: 0, svg: SVG.sword, obj: OBJ.sword, test: 1 },
   test_torch:  { name: 'Stand-in torch',  kind: 'light',     tier: 0, svg: SVG.torch, obj: OBJ.torch, test: 1 },
   test_arrows: { name: 'Stand-in arrows', kind: 'throwable', tier: 0, svg: SVG.arrows, test: 1 },
