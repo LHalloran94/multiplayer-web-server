@@ -146,6 +146,9 @@
       grip, rest: 'belt', aimsAtRest: true, scheme: null, offTilt: { beside: -0.35, back: 0.5, raised: 0.25 },
       hurtFrom, hurtPad: 0, carves: kind === 'edge', pierces: kind === 'edge', sticks: kind === 'edge', fire: false,
       daze: kind === 'blunt', icon: 1.24,
+      // (2026-10-15) what RIGHT does with the off hand free: 'stab' (a blade with a point) or 'chop' (axes and every blunt weapon — the swing,
+      //   never a stab; the user: "axes … hammers, and clubs, and any other weapons which are more blunt force than stabbing"). 16n `wieldPButton`.
+      right: kind === 'blunt' ? 'chop' : 'stab',
     }, extra || {});
     if (S.hitHalf) S.hitHalf = +(S.hitHalf * MELEE_K).toFixed(2);
     if (S.stabBack) S.stabBack = +(S.stabBack * MELEE_K).toFixed(2);
@@ -173,15 +176,15 @@
     wingedspear:   weapon(124, 6, 1.6, 0.20, 0.85, 'edge', 'ws', { twoFree: true, grip2: 0.42, stabBack: 26 }),
     trident:       weapon(122, 6, 1.7, 0.20, 0.85, 'edge', 'tr', { hitHalf: 6, twoFree: true, grip2: 0.42, stabBack: 26 }),
     // axes (they carve — the user's pick)
-    handaxe:       weapon(44, 6, 1.0, 0.12, 0.76, 'edge', 'ha', { hitHalf: 7 }),
-    beardedaxe:    weapon(60, 6, 1.4, 0.10, 0.70, 'edge', 'ba', { hitHalf: 8 }),
-    steelaxe:      weapon(52, 6, 1.5, 0.11, 0.72, 'edge', 'sx', { hitHalf: 7 }),
-    crescentaxe:   weapon(58, 6, 1.6, 0.10, 0.70, 'edge', 'cx', { hitHalf: 9 }),
-    battleaxe:     weapon(64, 6, 1.8, 0.10, 0.68, 'edge', 'bx', { hitHalf: 9 }),
-    greataxe:      weapon(104, 7, 2.6, 0.05, 0.80, 'edge', 'ga', Object.assign({ hitHalf: 11 }, two(0.22))),
-    greatbattleaxe: weapon(110, 7, 3.0, 0.05, 0.78, 'edge', 'gb', Object.assign({ hitHalf: 12 }, two(0.2))),
-    daneaxe:       weapon(118, 6, 2.2, 0.05, 0.82, 'edge', 'da', Object.assign({ hitHalf: 10 }, two(0.25))),
-    executioner:   weapon(100, 7, 3.2, 0.05, 0.74, 'edge', 'ex', Object.assign({ hitHalf: 12 }, two(0.2))),
+    handaxe:       weapon(44, 6, 1.0, 0.12, 0.76, 'edge', 'ha', { right: 'chop', hitHalf: 7 }),
+    beardedaxe:    weapon(60, 6, 1.4, 0.10, 0.70, 'edge', 'ba', { right: 'chop', hitHalf: 8 }),
+    steelaxe:      weapon(52, 6, 1.5, 0.11, 0.72, 'edge', 'sx', { right: 'chop', hitHalf: 7 }),
+    crescentaxe:   weapon(58, 6, 1.6, 0.10, 0.70, 'edge', 'cx', { right: 'chop', hitHalf: 9 }),
+    battleaxe:     weapon(64, 6, 1.8, 0.10, 0.68, 'edge', 'bx', { right: 'chop', hitHalf: 9 }),
+    greataxe:      weapon(104, 7, 2.6, 0.05, 0.80, 'edge', 'ga', Object.assign({ right: 'chop', hitHalf: 11 }, two(0.22))),
+    greatbattleaxe: weapon(110, 7, 3.0, 0.05, 0.78, 'edge', 'gb', Object.assign({ right: 'chop', hitHalf: 12 }, two(0.2))),
+    daneaxe:       weapon(118, 6, 2.2, 0.05, 0.82, 'edge', 'da', Object.assign({ right: 'chop', hitHalf: 10 }, two(0.25))),
+    executioner:   weapon(100, 7, 3.2, 0.05, 0.74, 'edge', 'ex', Object.assign({ right: 'chop', hitHalf: 12 }, two(0.2))),
     // clubs
     club:          weapon(50, 8, 1.4, 0.12, 0.55, 'blunt', 'cb', { hitHalf: 4 }),
     spikedclub:    weapon(52, 8, 1.6, 0.12, 0.60, 'blunt', 'sc', { hitHalf: 6, nicks: true }),
