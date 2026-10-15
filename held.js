@@ -152,6 +152,9 @@
       // (2026-10-15) the MARK a blunt blow leaves on skin (16o `woundBruiseDraw`): 'rod' two bands with a pale strip between · 'face' the
       //   hammer face's square · 'flange' a row of short bars · 'spikes' punctures · none = a plain bruise
       mark: null,
+      // (2026-10-15) a CHARGED swing that cuts somebody goes INTO them for a moment before it carries on, and leaves an open wound (16n
+      //   `wieldHits` → `stopUntil`; 16o `cleave`) — axes and the greatswords (the user: "axes and similar bladed weapons should … cleave")
+      cleaves: false,
     }, extra || {});
     if (S.hitHalf) S.hitHalf = +(S.hitHalf * MELEE_K).toFixed(2);
     if (S.stabBack) S.stabBack = +(S.stabBack * MELEE_K).toFixed(2);
@@ -166,9 +169,9 @@
     sabre:         weapon(70, 7, 0.9, 0.11, 0.21, 'edge', 'sa'),
     rapier:        weapon(84, 6, 0.8, 0.10, 0.17, 'edge', 'ra'),
     // greatswords (two hands)
-    greatsword:    weapon(100, 8, 2.2, 0.06, 0.285, 'edge', 'gs', two(0.2)),
-    claymore:      weapon(108, 8, 2.4, 0.06, 0.275, 'edge', 'cl', two(0.2)),
-    flamberge:     weapon(118, 8, 2.6, 0.05, 0.26, 'edge', 'fl', two(0.2)),
+    greatsword:    weapon(100, 8, 2.2, 0.06, 0.285, 'edge', 'gs', Object.assign({ cleaves: true }, two(0.2))),
+    claymore:      weapon(108, 8, 2.4, 0.06, 0.275, 'edge', 'cl', Object.assign({ cleaves: true }, two(0.2))),
+    flamberge:     weapon(118, 8, 2.6, 0.05, 0.26, 'edge', 'fl', Object.assign({ cleaves: true }, two(0.2))),
     // daggers
     dagger:        weapon(30, 6, 0.5, 0.18, 0.35, 'edge', 'dg'),
     stiletto:      weapon(31, 6, 0.4, 0.18, 0.34, 'edge', 'st'),
@@ -179,15 +182,15 @@
     wingedspear:   weapon(124, 6, 1.6, 0.20, 0.85, 'edge', 'ws', { twoFree: true, grip2: 0.42, stabBack: 26 }),
     trident:       weapon(122, 6, 1.7, 0.20, 0.85, 'edge', 'tr', { hitHalf: 6, twoFree: true, grip2: 0.42, stabBack: 26 }),
     // axes (they carve — the user's pick)
-    handaxe:       weapon(44, 6, 1.0, 0.12, 0.76, 'edge', 'ha', { right: 'chop', hitHalf: 7 }),
-    beardedaxe:    weapon(60, 6, 1.4, 0.10, 0.70, 'edge', 'ba', { right: 'chop', hitHalf: 8 }),
-    steelaxe:      weapon(52, 6, 1.5, 0.11, 0.72, 'edge', 'sx', { right: 'chop', hitHalf: 7 }),
-    crescentaxe:   weapon(58, 6, 1.6, 0.10, 0.70, 'edge', 'cx', { right: 'chop', hitHalf: 9 }),
-    battleaxe:     weapon(64, 6, 1.8, 0.10, 0.68, 'edge', 'bx', { right: 'chop', hitHalf: 9 }),
-    greataxe:      weapon(104, 7, 2.6, 0.05, 0.80, 'edge', 'ga', Object.assign({ right: 'chop', hitHalf: 11 }, two(0.22))),
-    greatbattleaxe: weapon(110, 7, 3.0, 0.05, 0.78, 'edge', 'gb', Object.assign({ right: 'chop', hitHalf: 12 }, two(0.2))),
-    daneaxe:       weapon(118, 6, 2.2, 0.05, 0.82, 'edge', 'da', Object.assign({ right: 'chop', hitHalf: 10 }, two(0.25))),
-    executioner:   weapon(100, 7, 3.2, 0.05, 0.74, 'edge', 'ex', Object.assign({ right: 'chop', hitHalf: 12 }, two(0.2))),
+    handaxe:       weapon(44, 6, 1.0, 0.12, 0.76, 'edge', 'ha', { right: 'chop', cleaves: true, hitHalf: 7 }),
+    beardedaxe:    weapon(60, 6, 1.4, 0.10, 0.70, 'edge', 'ba', { right: 'chop', cleaves: true, hitHalf: 8 }),
+    steelaxe:      weapon(52, 6, 1.5, 0.11, 0.72, 'edge', 'sx', { right: 'chop', cleaves: true, hitHalf: 7 }),
+    crescentaxe:   weapon(58, 6, 1.6, 0.10, 0.70, 'edge', 'cx', { right: 'chop', cleaves: true, hitHalf: 9 }),
+    battleaxe:     weapon(64, 6, 1.8, 0.10, 0.68, 'edge', 'bx', { right: 'chop', cleaves: true, hitHalf: 9 }),
+    greataxe:      weapon(104, 7, 2.6, 0.05, 0.80, 'edge', 'ga', Object.assign({ right: 'chop', cleaves: true, hitHalf: 11 }, two(0.22))),
+    greatbattleaxe: weapon(110, 7, 3.0, 0.05, 0.78, 'edge', 'gb', Object.assign({ right: 'chop', cleaves: true, hitHalf: 12 }, two(0.2))),
+    daneaxe:       weapon(118, 6, 2.2, 0.05, 0.82, 'edge', 'da', Object.assign({ right: 'chop', cleaves: true, hitHalf: 10 }, two(0.25))),
+    executioner:   weapon(100, 7, 3.2, 0.05, 0.74, 'edge', 'ex', Object.assign({ right: 'chop', cleaves: true, hitHalf: 12 }, two(0.2))),
     // clubs
     club:          weapon(50, 8, 1.4, 0.12, 0.55, 'blunt', 'cb', { hitHalf: 4, mark: 'rod' }),
     spikedclub:    weapon(52, 8, 1.6, 0.12, 0.60, 'blunt', 'sc', { hitHalf: 6, nicks: true, mark: 'spikes' }),
