@@ -149,6 +149,9 @@
       // (2026-10-15) what RIGHT does with the off hand free: 'stab' (a blade with a point) or 'chop' (axes and every blunt weapon — the swing,
       //   never a stab; the user: "axes … hammers, and clubs, and any other weapons which are more blunt force than stabbing"). 16n `wieldPButton`.
       right: kind === 'blunt' ? 'chop' : 'stab',
+      // (2026-10-15) the MARK a blunt blow leaves on skin (16o `woundBruiseDraw`): 'rod' two bands with a pale strip between · 'face' the
+      //   hammer face's square · 'flange' a row of short bars · 'spikes' punctures · none = a plain bruise
+      mark: null,
     }, extra || {});
     if (S.hitHalf) S.hitHalf = +(S.hitHalf * MELEE_K).toFixed(2);
     if (S.stabBack) S.stabBack = +(S.stabBack * MELEE_K).toFixed(2);
@@ -186,17 +189,17 @@
     daneaxe:       weapon(118, 6, 2.2, 0.05, 0.82, 'edge', 'da', Object.assign({ right: 'chop', hitHalf: 10 }, two(0.25))),
     executioner:   weapon(100, 7, 3.2, 0.05, 0.74, 'edge', 'ex', Object.assign({ right: 'chop', hitHalf: 12 }, two(0.2))),
     // clubs
-    club:          weapon(50, 8, 1.4, 0.12, 0.55, 'blunt', 'cb', { hitHalf: 4 }),
-    spikedclub:    weapon(52, 8, 1.6, 0.12, 0.60, 'blunt', 'sc', { hitHalf: 6, nicks: true }),
-    greatclub:     weapon(96, 10, 2.8, 0.05, 0.55, 'blunt', 'gc', Object.assign({ hitHalf: 6 }, two(0.2))),
+    club:          weapon(50, 8, 1.4, 0.12, 0.55, 'blunt', 'cb', { hitHalf: 4, mark: 'rod' }),
+    spikedclub:    weapon(52, 8, 1.6, 0.12, 0.60, 'blunt', 'sc', { hitHalf: 6, nicks: true, mark: 'spikes' }),
+    greatclub:     weapon(96, 10, 2.8, 0.05, 0.55, 'blunt', 'gc', Object.assign({ hitHalf: 6, mark: 'rod' }, two(0.2))),
     // maces and flails
-    mace:          weapon(52, 7, 1.6, 0.12, 0.76, 'blunt', 'mc', { hitHalf: 6, nicks: true }),
-    morningstar:   weapon(56, 7, 1.8, 0.12, 0.78, 'blunt', 'ms', { hitHalf: 7, nicks: true }),
-    flail:         weapon(62, 6, 1.7, 0.12, 0.82, 'blunt', 'fs', { hitHalf: 6, nicks: true, spin: true }),   // (spin: right whirls it — no stab; 2026-10-15)
+    mace:          weapon(52, 7, 1.6, 0.12, 0.76, 'blunt', 'mc', { hitHalf: 6, nicks: true, mark: 'flange' }),
+    morningstar:   weapon(56, 7, 1.8, 0.12, 0.78, 'blunt', 'ms', { hitHalf: 7, nicks: true, mark: 'spikes' }),
+    flail:         weapon(62, 6, 1.7, 0.12, 0.82, 'blunt', 'fs', { hitHalf: 6, nicks: true, spin: true, mark: 'spikes' }),   // (spin: right whirls it — no stab; 2026-10-15)
     // hammers (they crack ground — the user's pick)
-    warhammer:     weapon(60, 7, 1.5, 0.11, 0.82, 'blunt', 'wh', { hitHalf: 9, nicks: true, cracks: true }),
-    maul:          weapon(100, 10, 3.0, 0.05, 0.85, 'blunt', 'ml', Object.assign({ hitHalf: 12, cracks: true }, two(0.2))),
-    runedhammer:   weapon(106, 10, 3.2, 0.05, 0.80, 'blunt', 'rh', Object.assign({ hitHalf: 13, cracks: true }, two(0.21))),
+    warhammer:     weapon(60, 7, 1.5, 0.11, 0.82, 'blunt', 'wh', { hitHalf: 9, nicks: true, cracks: true, mark: 'face' }),
+    maul:          weapon(100, 10, 3.0, 0.05, 0.85, 'blunt', 'ml', Object.assign({ hitHalf: 12, cracks: true, mark: 'face' }, two(0.2))),
+    runedhammer:   weapon(106, 10, 3.2, 0.05, 0.80, 'blunt', 'rh', Object.assign({ hitHalf: 13, cracks: true, mark: 'face' }, two(0.21))),
   });
 
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
