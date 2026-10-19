@@ -131,11 +131,11 @@
       raise: 'face', raiseAt: 5, icon: 1,
     }, extra || {});
   };
-  LOOKS.roundshield  = shield({ U: 17, V: 17, dome: true,  t: 2.2, curve: 0.38 }, 1.2, 'rs');
-  LOOKS.heatershield = shield({ U: 14, V: 20, dome: false, t: 2,   curve: 0.38 }, 1.4, 'hs');
-  LOOKS.buckler      = shield({ U: 11, V: 11, dome: true,  t: 1.4, curve: 0.38 }, 0.7, 'bk');
-  LOOKS.towershield  = shield({ U: 13, V: 26, dome: false, t: 2.6, curve: 0.38 }, 2.4, 'ts');
-  LOOKS.kiteshield   = shield({ U: 13, V: 27, dome: false, t: 2,   curve: 0.38 }, 1.6, 'ks');
+  LOOKS.roundshield  = shield({ U: 17, V: 17, dome: true,  t: 2.2, curve: 0.24 }, 1.2, 'rs');
+  LOOKS.heatershield = shield({ U: 14, V: 20, dome: false, t: 2,   curve: 0.24 }, 1.4, 'hs');
+  LOOKS.buckler      = shield({ U: 11, V: 11, dome: true,  t: 1.4, curve: 0.24 }, 0.7, 'bk');
+  LOOKS.towershield  = shield({ U: 13, V: 26, dome: false, t: 2.6, curve: 0.24 }, 2.4, 'ts');
+  LOOKS.kiteshield   = shield({ U: 13, V: 27, dome: false, t: 2,   curve: 0.24 }, 1.6, 'ks');
 
   // ── THE MELEE FAMILY (2026-10-14, plan file §5e — "build all of them at once"; looks from `scratchpad/look/items/melee/v2.html`, refined).
   //    Every one is a type with its own character, not a rarity (the user: rarity comes later with crafting and enchanting). Its model (how
