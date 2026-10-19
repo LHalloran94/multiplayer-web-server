@@ -24610,7 +24610,10 @@ io.on('connection', (socket) => {
       if (Array.isArray(obj.pts)) for (const p of obj.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
       if (obj.path && Array.isArray(obj.path.pts)) for (const p of obj.path.pts) { const c = clampToBand(b, p.x, p.y); p.x = c.x; p.y = c.y; }
     }
-    if (!obj.eq && type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal' && type !== 'region' && type !== 'sign' && type !== 'painting') {  // no building solids on the spawn (world mode); the non-solid ones — flags, regions, signs, paintings — are allowed
+    // (2026-10-20, arrows round 3) …nor is a loosed ARROW building: it was refused here when shot from near the spawn — AFTER it had been
+    //   spent and its driver set — so nobody else saw it and it was lost from the pouch; it was also charged a Prima price and counted
+    //   against the caps below. An arrow is exempt from all four, as a thing in your hand is.
+    if (!obj.eq && !ammoAsk && type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal' && type !== 'region' && type !== 'sign' && type !== 'painting') {  // no building solids on the spawn (world mode); the non-solid ones — flags, regions, signs, paintings — are allowed
       const clear = spawnClearRect(currentAvatarRoom);
       if (clear) {
         let bx0, by0, bx1, by1;
@@ -24630,7 +24633,7 @@ io.on('connection', (socket) => {
     // built would be told the world was full. Per chunk it is a local clutter bound instead, and it is enforced
     // where the props are, so one player cannot exhaust another's build site from the far side of the map.
     if (objChunked(currentAvatarRoom)) {
-      if (!obj.eq && objCountInChunk(currentAvatarRoom, dropChunkOf(currentAvatarRoom, obj)) >= MAX_OBJECTS_PER_CHUNK) {
+      if (!obj.eq && !ammoAsk && objCountInChunk(currentAvatarRoom, dropChunkOf(currentAvatarRoom, obj)) >= MAX_OBJECTS_PER_CHUNK) {
         socket.emit('build-refused', { why: 'Too much built here already — spread out a little.' });
         return;
       }
@@ -24643,7 +24646,7 @@ io.on('connection', (socket) => {
       // ⚠️ …unless it came from the BUILD MENU, which is the editor and is outside the economy (see the same
       // flag on `terrain-edit`). A prop placed there costs nothing and therefore refunds nothing — `cost` is
       // simply absent, and every refund path already keys on it being present.
-      if (invGatedRoom(currentAvatarRoom) && !data.editor && !obj.eq) {
+      if (invGatedRoom(currentAvatarRoom) && !data.editor && !obj.eq && !ammoAsk) {
         const _k = playerKeyFor(socket.id), _cost = objPriceOf(obj);
         if (ledger.prima(_k) < _cost) {
           socket.emit('build-refused', { why: `That costs ✦${_cost.toLocaleString()} — refine some more first.` });
@@ -24664,7 +24667,7 @@ io.on('connection', (socket) => {
     }
     let userObjs = 0;
     for (const k of map.keys()) if (!(typeof k === 'string' && k.startsWith('world-'))) userObjs++;
-    if (userObjs >= MAX_OBJECTS_PER_ROOM && !obj.eq) return;
+    if (userObjs >= MAX_OBJECTS_PER_ROOM && !obj.eq && !ammoAsk) return;
     map.set(id, obj);
     if (obj.eq) eqNote(socket.id, id, 1);
     io.to(currentAvatarRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
