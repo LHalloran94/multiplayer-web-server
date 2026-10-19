@@ -13733,7 +13733,8 @@ function relayPos(room, sid, msg) {
     // 🟥 Absent fields are not counted (2026-10-05): the client's packet NAMES ~37 fields, most of them undefined while
     //    not in use, and counting those let the bound cut off real ones (ghost, username…) whenever the relay was on.
     if (v === undefined) continue;
-    if (++n > 40) break;                      // a bound, so a client cannot inflate the packet without limit (32 → 40 on 2026-10-20 with `yw`, the face's turn: a busy player's packet was near 32 and the fields past it are dropped silently)
+    if (++n > 44) break;                      // (→ 44 on 2026-10-20 with `bw`, a held bow's state — 16w)
+                         // a bound, so a client cannot inflate the packet without limit (32 → 40 on 2026-10-20 with `yw`, the face's turn: a busy player's packet was near 32 and the fields past it are dropped silently)
     const t = typeof v;
     if (t === 'number' || t === 'boolean' || v === null) rec[k] = v;
     else if (t === 'string' && v.length <= 32) rec[k] = v;   // `mode` and friends; long strings are not motion

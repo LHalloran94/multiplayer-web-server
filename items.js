@@ -33,7 +33,7 @@ const SVG = {
     + '<path d="M4 18 l-.6-3.4 M4 18 l3.4.6 M7 21 l-.6-3.4 M7 21 l3.4.6" stroke="#f1f5f9" stroke-width="1.2"/></svg>',
 };
 
-// kind: 'weapon' | 'tool' | 'light' | 'throwable' | 'worn' — what it will be once it does something.
+// kind: 'weapon' | 'ammo' | 'tool' | 'light' | 'throwable' | 'worn' — what it will be once it does something.
 // tier: 0 = ordinary. A better version of an item is another entry with a higher tier.
 // ⭐ `make` (2026-10-08) = what making one costs, in the inventory window's Make tab: `mats` [[materialId, n], …] and
 // `prima`. Checked and taken by the server (`inv-make`); the client only shows it.
@@ -86,6 +86,16 @@ for (const [id, name, look, prima] of [
   ['mace', 'Flanged mace', 'mace', 60], ['morning_star', 'Morning star', 'morningstar', 75], ['flail', 'Flail', 'flail', 90],
   ['war_hammer', 'War hammer', 'warhammer', 70], ['maul', 'Maul', 'maul', 90], ['runed_hammer', 'Runed greathammer', 'runedhammer', 180],
 ]) ITEMS[id] = { name, kind: 'weapon', tier: 0, svg: SVG.sword, obj: OBJ[look], make: { mats: [], prima } };
+// ⭐ BOWS (2026-10-20, plan file §5z38 piece 2) — real objects in the hands, like the melee family (server/held.js); Prima only (prices mine)
+SVG.bow = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 2.5c8 3 8 16 0 19" fill="none" stroke="#8a5a32" stroke-width="2.2" stroke-linecap="round"/><path d="M6 2.5v19" stroke="#ece4cc" stroke-width=".8"/></svg>';
+for (const [id, name, prima] of [['shortbow', 'Shortbow', 40], ['longbow', 'Longbow', 70], ['recurve', 'Recurve bow', 80], ['horsebow', 'Horse bow', 85],
+  ['elvenbow', 'Elven bow', 160], ['ebonbow', 'Ebon bow', 170], ['bonebow', 'Bone bow', 120]]) ITEMS[id] = { name, kind: 'weapon', tier: 0, svg: SVG.bow, obj: HELD.objOf(id), make: { mats: [], prima } };
+// ⭐ ARROWS — the first things that STACK in the pouch since the stand-ins went (no `obj`): a count, like a material. Their fletching is
+//   their colour, as drawn on the bow and in the quiver (client 16r). Piece 3 makes one a real object once it is loosed. Kind 'ammo'.
+const arrowSvg = (fl, head) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 20 L19 5" stroke="#b08a58" stroke-width="1.6" stroke-linecap="round"/>'
+  + '<path d="M19 5 l-4.6.6 4 4z" fill="' + head + '"/><path d="M4 20 l.2-4.6 M4 20 l4.6-.2 M6.2 17.8 l.2-4.2 M6.2 17.8 l4.2-.2" stroke="' + fl + '" stroke-width="1.6" stroke-linecap="round"/></svg>';
+for (const [id, name, fl, head, prima] of [['arrow_bodkin', 'Bodkin arrow', '#4c4844', '#8a8e96', 2], ['arrow_broad', 'Broadhead arrow', '#b6342a', '#d6dce4', 3],
+  ['arrow_field', 'Field-point arrow', '#eeeae0', '#cbd5e1', 1], ['arrow_elven', 'Elven arrow', '#d6e6de', '#e2e8f0', 6]]) ITEMS[id] = { name, kind: 'ammo', tier: 0, svg: arrowSvg(fl, head), make: { mats: [], prima } };
 
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);

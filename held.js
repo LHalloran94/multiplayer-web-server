@@ -215,6 +215,24 @@
     runedhammer:   weapon(106, 10, 3.2, 0.05, 0.80, 'blunt', 'rh', Object.assign({ hitHalf: 13, cracks: true, mark: 'face' }, two(0.21))),
   });
 
+  // ── BOWS (2026-10-20, plan file §5z38 piece 2 — looks agreed in four rounds of renders, `scratchpad/look/items/bow/index.html`; the models
+  //    are client art, 16r `WM`, ported from `scratchpad/make_bow_renders.js`). Its LONG AXIS is the stave, tip to tip; held in its middle.
+  //    The bow is in the OFF hand and the MAIN hand works the string (the user's words): both hands while it is out (`hands: 2`). Its own
+  //    buttons (client 16w): left held draws, let go looses, right nocks an arrow / lets the string down, the wheel picks the arrow.
+  //    Out, it is held up turned to the pointer; H = low by your side (`rest: 'low'`). It strikes nothing and cuts nothing.
+  //    `bow` = its model's name in 16r. Made at BOW_K of the melee family's size (the user: "a little too big") — the Weapons tab's
+  //    "Bows — …" → "Bow size (×)" is a test dial on top, and the arrows scale with the bow.
+  const BOW_K = 0.8;
+  const bowE = (L, wt, tag) => ({ w: Math.round(L * MELEE_K * BOW_K), h: 3, wt, content: '🏹', tag, lenDial: false, model3d: true, bow: true,
+    grip: 0.5, rest: 'low', aimsAtRest: true, scheme: 'P', offTilt: { beside: 0, back: 0, raised: 0 }, hands: 2,
+    hurtFrom: 1, hurtPad: 0, carves: false, pierces: false, sticks: false, fire: false, strikes: false, mat: 'wood', icon: 1.15 });
+  Object.assign(LOOKS, {
+    shortbow: bowE(84, 0.6, 'sb'), longbow: bowE(118, 0.8, 'lb'), recurve: bowE(96, 0.7, 'rc'), horsebow: bowE(82, 0.6, 'hb'),
+    elvenbow: bowE(104, 0.6, 'eb'), ebonbow: bowE(94, 0.8, 'ob'), bonebow: bowE(90, 0.8, 'nb'),
+  });
+  // (…and the size of an ARROW at the bow's own scale — client 16w draws them nocked and in the quiver; piece 3 flies them)
+  const ARROW_W = Math.round(60 * MELEE_K * BOW_K);
+
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it
@@ -224,5 +242,5 @@
   //   anything — here so every screen draws everybody's hands the same. The Weapons tab's "Hand size (×)" is a test dial on top of it.
   const HAND_K = 0.65;
 
-  return { LOOKS, is, of, objOf, HAND_K, MELEE_K };
+  return { LOOKS, is, of, objOf, HAND_K, MELEE_K, BOW_K, ARROW_W };
 });
