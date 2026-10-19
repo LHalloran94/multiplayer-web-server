@@ -95,7 +95,7 @@ for (const [id, name, prima] of [['shortbow', 'Shortbow', 40], ['longbow', 'Long
 const arrowSvg = (fl, head) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 20 L19 5" stroke="#b08a58" stroke-width="1.6" stroke-linecap="round"/>'
   + '<path d="M19 5 l-4.6.6 4 4z" fill="' + head + '"/><path d="M4 20 l.2-4.6 M4 20 l4.6-.2 M6.2 17.8 l.2-4.2 M6.2 17.8 l4.2-.2" stroke="' + fl + '" stroke-width="1.6" stroke-linecap="round"/></svg>';
 for (const [id, name, fl, head, prima] of [['arrow_bodkin', 'Bodkin arrow', '#4c4844', '#8a8e96', 2], ['arrow_broad', 'Broadhead arrow', '#b6342a', '#d6dce4', 3],
-  ['arrow_field', 'Field-point arrow', '#eeeae0', '#cbd5e1', 1], ['arrow_elven', 'Elven arrow', '#d6e6de', '#e2e8f0', 6]]) ITEMS[id] = { name, kind: 'ammo', tier: 0, svg: arrowSvg(fl, head), make: { mats: [], prima } };
+  ['arrow_field', 'Field-point arrow', '#3e60a8', '#cbd5e1', 1], ['arrow_elven', 'Elven arrow', '#d6e6de', '#e2e8f0', 6]]) ITEMS[id] = { name, kind: 'ammo', tier: 0, svg: arrowSvg(fl, head), make: { mats: [], prima } };
 
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
