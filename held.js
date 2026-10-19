@@ -90,8 +90,9 @@
     },
     // the torch is the hotbar torch's size (the user: "the same size as the other torch"): 16k's drawn torch is 0.36 of a
     //   body radius of handle below the hand, a radius of stick above it, and 0.2 more of wrapped head = 1.56 radii = 31px
+    //   (2026-10-19, the user: "we scaled down weapons but I'm not sure if we ever scaled down shields or torches") — 0.6 of that, as the melee family
     torch: {
-      w: 31, h: 6, wt: 0.6, content: '🔥', tag: 'tc', lenDial: false,
+      w: 19, h: 3.6, wt: 0.6, content: '🔥', tag: 'tc', lenDial: false,
       grip: 0.23, rest: 'upright', aimsAtRest: false, scheme: 'P',
       offTilt: { beside: 0.04, back: 0.06, raised: 0.3 },
       hurtFrom: 0.5, hurtPad: 0,                                // its upper half
@@ -117,10 +118,14 @@
   //    raise 'face' = while the button that works it is held (right on its own in the off hand, left in the main hand) it goes between
   //    you and the pointer, `raiseAt` px clear of your body, its FACE turned to the pointer. strikes false = no stab and no swing.
   //    It blocks by being a solid thing in the way: held items stop dead against it, and things thrown at you hit it.
+  //    (2026-10-19, the user: "perhaps the issue is that shields are too big, since we scaled down weapons but I'm not sure if we ever scaled
+  //    down shields or torches") — made at `SHIELD_K` of the model's size, as the melee family is at `MELEE_K` (the model and its paint stay
+  //    in board px; the client draws it at w / 2V of them).
+  const SHIELD_K = 0.6;
   const shield = (model, wt, tag, extra) => {
-    const depth = model.curve * Math.max(model.U, model.V), h = Math.max(6, +(depth + model.t).toFixed(2));
+    const depth = model.curve * Math.max(model.U, model.V), h = Math.max(3.6, +((depth + model.t) * SHIELD_K).toFixed(2));
     return Object.assign({
-      w: 2 * model.V, h, wt, content: '🛡️', tag, lenDial: false, model, shield: true,
+      w: +(2 * model.V * SHIELD_K).toFixed(2), h, wt, content: '🛡️', tag, lenDial: false, model, shield: true,
       grip: 0.5, rest: 'upright', aimsAtRest: false, scheme: 'P', offTilt: { beside: 0, back: 0, raised: 0 },
       hurtFrom: 0, hurtPad: 0, carves: false, pierces: false, sticks: false, fire: false, strikes: false,
       raise: 'face', raiseAt: 5, icon: 1,
