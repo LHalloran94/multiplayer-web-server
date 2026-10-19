@@ -223,22 +223,30 @@
   //    `bow` = its model's name in 16r. Made at BOW_K of the melee family's size (the user: "a little too big") — the Weapons tab's
   //    "Bows — …" → "Bow size (×)" is a test dial on top, and the arrows scale with the bow.
   const BOW_K = 0.8;
-  const bowE = (L, wt, tag) => ({ w: Math.round(L * MELEE_K * BOW_K), h: 3, wt, content: '🏹', tag, lenDial: false, model3d: true, bow: true,
+  // (2026-10-20, piece 3 played — the user: "Different bows could have different draw times and different reach, as well as the force the arrow is
+  //   shot at … some tradeoff between the force/reach and the draw time, so a lighter bow draws faster but shoots less far and is less powerful.
+  //   However, some of the rarer bows could be good in both areas") — `drawMs` (to full draw) and `power` (× the arrow's speed and its hurt)
+  const bowE = (L, wt, tag, drawMs, power) => ({ drawMs, power, w: Math.round(L * MELEE_K * BOW_K), h: 3, wt, content: '🏹', tag, lenDial: false, model3d: true, bow: true,
     grip: 0.5, rest: 'low', aimsAtRest: true, scheme: 'P', offTilt: { beside: 0, back: 0, raised: 0 }, hands: 2,
     hurtFrom: 1, hurtPad: 0, carves: false, pierces: false, sticks: false, fire: false, strikes: false, mat: 'wood', icon: 1.15 });
   Object.assign(LOOKS, {
-    shortbow: bowE(84, 0.6, 'sb'), longbow: bowE(118, 0.8, 'lb'), recurve: bowE(96, 0.7, 'rc'), horsebow: bowE(82, 0.6, 'hb'),
-    elvenbow: bowE(104, 0.6, 'eb'), ebonbow: bowE(94, 0.8, 'ob'), bonebow: bowE(90, 0.8, 'nb'),
+    // (light and quick → heavy and slow; the two rare ones, elven and ebon, are quick AND strong)
+    shortbow: bowE(84, 0.6, 'sb', 600, 0.75), horsebow: bowE(82, 0.6, 'hb', 650, 0.85), recurve: bowE(96, 0.7, 'rc', 800, 0.95),
+    bonebow: bowE(90, 0.8, 'nb', 900, 1.05), longbow: bowE(118, 0.8, 'lb', 1150, 1.15),
+    elvenbow: bowE(104, 0.6, 'eb', 650, 1.12), ebonbow: bowE(94, 0.8, 'ob', 750, 1.18),
   });
   // (…and the size of an ARROW at the bow's own scale — client 16w draws them nocked and in the quiver)
   const ARROW_W = Math.round(60 * MELEE_K * BOW_K);
   // ⭐ ARROWS (2026-10-20, plan file §5z38 piece 3): in the pouch a stack (server/items.js, kind 'ammo'); LOOSED, a real object with one of these
   //   looks — it flies point first, sticks where a thrown blade would, wounds, is stopped by a shield, and E puts it back in your pouch. It is
   //   never taken into a hand (`arrow`). Its model is 16r's, keyed by the same id.
-  const arrowE = (tag) => ({ w: ARROW_W, h: 2, wt: 0.3, content: '➵', tag, lenDial: false, model3d: true, arrow: true,
+  //   (the user: "The different arrow types could also have an effect on damage/reach/fly speed") — `speedK` × its speed, `gravK` × how hard it
+  //   falls, `dmgK` × its hurt: a field point is the plain one, a bodkin flies a little truer, a broadhead hurts most but drops, an elven one flies
+  //   fast and flat
+  const arrowE = (tag, speedK, gravK, dmgK) => ({ speedK, gravK, dmgK, w: ARROW_W, h: 2, wt: 0.3, content: '➵', tag, lenDial: false, model3d: true, arrow: true,
     grip: 0.08, rest: 'belt', aimsAtRest: false, scheme: 'P', offTilt: { beside: 0, back: 0, raised: 0 },
     hurtFrom: 0.85, hurtPad: 0, carves: false, pierces: true, sticks: true, fire: false, strikes: false, mat: 'wood', icon: 1.1 });
-  Object.assign(LOOKS, { arrow_bodkin: arrowE('ab'), arrow_broad: arrowE('ar'), arrow_field: arrowE('af'), arrow_elven: arrowE('ae') });
+  Object.assign(LOOKS, { arrow_bodkin: arrowE('ab', 1.06, 0.9, 1), arrow_broad: arrowE('ar', 0.93, 1.2, 1.35), arrow_field: arrowE('af', 1, 1, 0.8), arrow_elven: arrowE('ae', 1.12, 0.75, 1.15) });
 
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
