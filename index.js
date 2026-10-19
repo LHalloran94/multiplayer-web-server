@@ -24574,7 +24574,9 @@ io.on('connection', (socket) => {
     if (!currentAvatarRoom || !data || !OBJ_TYPES.has(data.type)) return;
     // (hand items, 2026-10-14) bringing a sword or torch out of your own pouch is not building: it needs no build permission
     const eqAsk = !!(data.eq && data.type === 'stamp' && ITEMS.isItem(data.item));
-    if (!canBuild() && !eqAsk) return;                      // Phase 3: L2 build permission
+    // (2026-10-20, plan file §5z38 piece 3) an ARROW LOOSED from a bow: one comes out of the shooter's pouch as the object (16w `bowShoot`)
+    const ammoAsk = !!(data.ammo && data.type === 'stamp' && ITEMS.isItem(data.item) && ITEMS.ITEMS[data.item].kind === 'ammo');
+    if (!canBuild() && !eqAsk && !ammoAsk) return;                      // Phase 3: L2 build permission
     const type = data.type;
     // Client supplies the id (for optimistic local placement). Require it to be namespaced to
     // this socket (anti-spoof); otherwise mint a fallback. Echoing the same id back means the
@@ -24590,7 +24592,10 @@ io.on('connection', (socket) => {
     // ⭐ A HAND ITEM (see `itemObjMove`): allowed only as something in the asker's own hand, only while they carry one more of it
     //   than is already out, and never more than two at once (two hands). Anything else naming an item is refused and the asker's
     //   own copy is taken back — an item must not come into the world from nothing.
-    if (obj.item) {
+    if (obj.item && ammoAsk) {
+      if (invGatedRoom(currentAvatarRoom)) { if (!ledger.spendItem(playerKeyFor(socket.id), obj.item, 1)) { socket.emit('avatar-object-removed', { id }); return; } sendInvSync(socket, currentAvatarRoom); }
+      { const m = roomObjDrv[currentAvatarRoom] || (roomObjDrv[currentAvatarRoom] = new Map()), L = roomObjDrvAt[currentAvatarRoom] || (roomObjDrvAt[currentAvatarRoom] = new Map()); m.set(id, socket.id); L.set(id, Date.now()); }   // …the shooter flies it
+    } else if (obj.item) {
       const mine = eqObjs.get(socket.id); let same = 0;
       if (mine) for (const oid of mine) { const q = map.get(oid); if (q && q.item === obj.item) same++; }
       if (!eqAsk || (mine && mine.size >= 2) || (invGatedRoom(currentAvatarRoom) && ledger.itemCount(playerKeyFor(socket.id), obj.item) <= same)) { socket.emit('avatar-object-removed', { id }); return; }
@@ -25640,13 +25645,29 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
     const map = roomObjects[room], o = map && map.get(id);
     const hm = roomObjHeld[room], hs = hm && hm.get(id);
-    if (!o || !o.item || !ITEMS.isObjItem(o.item) || o.eq || (hs && hs !== socket.id) || !(o.type === 'stamp' && o.loose && o.loose !== 2 && !o.mnt)) { socket.emit('obj-hold-no', { id }); return; }
+    const ammo = o && ITEMS.isItem(o.item) && ITEMS.ITEMS[o.item].kind === 'ammo';   // (2026-10-20) …an arrow lying or stuck anywhere: back into the pouch
+    if (!o || !o.item || !(ITEMS.isObjItem(o.item) || ammo) || o.eq || (hs && hs !== socket.id) || !(o.type === 'stamp' && o.loose && o.loose !== 2 && !o.mnt)) { socket.emit('obj-hold-no', { id }); return; }
     if (hm) { hm.delete(id); if (!hm.size) delete roomObjHeld[room]; }
     { const dm = roomObjDrv[room]; if (dm) { dm.delete(id); if (!dm.size) delete roomObjDrv[room]; } }
     { const sm = roomObjSt[room]; if (sm) sm.delete(id); }
     if (invGatedRoom(room)) { ledger.creditItems(playerKeyFor(socket.id), [[o.item, 1]]); sendInvSync(socket, room); }
     eqRemoveObj(room, o);
     if (objChunked(room)) socket.emit('avatar-object-removed', { id });   // …the taker may not be subscribed there
+    broadcastObjSt(room);
+  });
+  // ⭐ (2026-10-20, plan file §5z38 piece 3) AN ARROW CAUGHT — the user: "blocking arrows unarmed, it should be like the weapons where you can block the
+  //   arrow if you parry it, and we could have this as the player catching the arrow". The SHOOTER's machine judges it (it flies the arrow and has the
+  //   catcher's parry off their packet, as a melee striker judges a parry — 16n `wieldParried`): the arrow goes, one more in the catcher's pouch.
+  socket.on('arrow-catch', ({ id, to }) => {
+    const room = currentAvatarRoom; if (!room || typeof id !== 'string' || typeof to !== 'string') return;
+    const map = roomObjects[room], o = map && map.get(id);
+    if (!o || !ITEMS.isItem(o.item) || ITEMS.ITEMS[o.item].kind !== 'ammo') return;
+    { const dm = roomObjDrv[room]; if (!dm || dm.get(id) !== socket.id) return; }                // …only whoever is flying it
+    const ts = io.sockets.sockets.get(to); if (!ts) return;
+    if (invGatedRoom(room)) { ledger.creditItems(playerKeyFor(to), [[o.item, 1]]); sendInvSync(ts, room); }
+    { const dm = roomObjDrv[room]; if (dm) { dm.delete(id); if (!dm.size) delete roomObjDrv[room]; } }
+    { const sm = roomObjSt[room]; if (sm) sm.delete(id); }
+    eqRemoveObj(room, o);
     broadcastObjSt(room);
   });
   // ⭐ A TUG — somebody grabbed what somebody else holds. Carried to the holder, whose machine decides it (it has both bodies and

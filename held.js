@@ -230,8 +230,15 @@
     shortbow: bowE(84, 0.6, 'sb'), longbow: bowE(118, 0.8, 'lb'), recurve: bowE(96, 0.7, 'rc'), horsebow: bowE(82, 0.6, 'hb'),
     elvenbow: bowE(104, 0.6, 'eb'), ebonbow: bowE(94, 0.8, 'ob'), bonebow: bowE(90, 0.8, 'nb'),
   });
-  // (…and the size of an ARROW at the bow's own scale — client 16w draws them nocked and in the quiver; piece 3 flies them)
+  // (…and the size of an ARROW at the bow's own scale — client 16w draws them nocked and in the quiver)
   const ARROW_W = Math.round(60 * MELEE_K * BOW_K);
+  // ⭐ ARROWS (2026-10-20, plan file §5z38 piece 3): in the pouch a stack (server/items.js, kind 'ammo'); LOOSED, a real object with one of these
+  //   looks — it flies point first, sticks where a thrown blade would, wounds, is stopped by a shield, and E puts it back in your pouch. It is
+  //   never taken into a hand (`arrow`). Its model is 16r's, keyed by the same id.
+  const arrowE = (tag) => ({ w: ARROW_W, h: 2, wt: 0.3, content: '➵', tag, lenDial: false, model3d: true, arrow: true,
+    grip: 0.08, rest: 'belt', aimsAtRest: false, scheme: 'P', offTilt: { beside: 0, back: 0, raised: 0 },
+    hurtFrom: 0.85, hurtPad: 0, carves: false, pierces: true, sticks: true, fire: false, strikes: false, mat: 'wood', icon: 1.1 });
+  Object.assign(LOOKS, { arrow_bodkin: arrowE('ab'), arrow_broad: arrowE('ar'), arrow_field: arrowE('af'), arrow_elven: arrowE('ae') });
 
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
