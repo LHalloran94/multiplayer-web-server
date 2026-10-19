@@ -17,7 +17,7 @@
 //  it. Add new ids; do not rename old ones.
 //
 //  A torch or a sword (an item with `obj`) is the REAL object in your hand in dig mode (client 16p; the server's count rules are
-//  `itemObjMove` in index.js). The `test` items are stand-ins that come from the debug panel and nowhere else.
+//  `itemObjMove` in index.js). (The stand-in sword / torch / arrows were removed 2026-10-20; the debug panel gives real items.)
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 
 // The pictures, as 24×24 SVG. Drawn by the client both in the window (as markup) and on the canvas (as an image).
@@ -70,12 +70,8 @@ const ITEMS = {
   shield_buckler:{ name: 'Buckler',       kind: 'weapon', tier: 0, svg: SVG.buckler,      obj: OBJ.buckler,      make: { mats: [], prima: 30 } },
   shield_tower:  { name: 'Tower shield',  kind: 'weapon', tier: 0, svg: SVG.towershield,  obj: OBJ.towershield,  make: { mats: [], prima: 90 } },
   shield_kite:   { name: 'Kite shield',   kind: 'weapon', tier: 0, svg: SVG.kiteshield,   obj: OBJ.kiteshield,   make: { mats: [], prima: 70 } },
-  test_sword:  { name: 'Stand-in sword',  kind: 'weapon',    tier: 0, svg: SVG.sword, obj: OBJ.sword, test: 1 },
-  test_torch:  { name: 'Stand-in torch',  kind: 'light',     tier: 0, svg: SVG.torch, obj: OBJ.torch, test: 1 },
-  test_arrows: { name: 'Stand-in arrows', kind: 'throwable', tier: 0, svg: SVG.arrows, test: 1 },
 };
 
-// What the debug panel's "give me stand-in items" hands out. Counts chosen so one is single and two are stacks.
 // ⭐ THE MELEE FAMILY (2026-10-14, plan file §5e): one item per weapon type, Prima only (prices mine). [id, name, look, prima]. The
 //   Arming sword is the item `sword` above. Kind 'weapon' — they sit under the window's Weapons filter.
 for (const [id, name, look, prima] of [
@@ -91,7 +87,6 @@ for (const [id, name, look, prima] of [
   ['war_hammer', 'War hammer', 'warhammer', 70], ['maul', 'Maul', 'maul', 90], ['runed_hammer', 'Runed greathammer', 'runedhammer', 180],
 ]) ITEMS[id] = { name, kind: 'weapon', tier: 0, svg: SVG.sword, obj: OBJ[look], make: { mats: [], prima } };
 
-const TEST_GIFT = [['test_sword', 1], ['test_torch', 3], ['test_arrows', 24]];
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
@@ -103,4 +98,4 @@ function itemDefsWire() {
 // is this item a real object out of the pouch (never a pile, never a stack)?
 const isObjItem = (id) => isItem(id) && !!ITEMS[id].obj;
 
-module.exports = { ITEMS, TEST_GIFT, isItem, isObjItem, itemDefsWire };
+module.exports = { ITEMS, isItem, isObjItem, itemDefsWire };

@@ -65,6 +65,9 @@
   //    nicks       its blunt blow also wounds a little — a few drops of blood (a mace's flanges, a spiked head, a hammer's beak)
   //    hitHalf     how far either side of its long axis it can hit somebody (its head's reach across: an axe, a hammer) — absent = half its box
   //    model3d     it is drawn from a 3D MODEL (client 16r, keyed by its look) rather than a flat drawing
+  //    mat         what the part that meets things is MADE of: 'steel' · 'iron' · 'wood' (2026-10-20, plan file §5z38). A clash sounds
+  //                and throws sparks or chips by it — wood in it = a thud and chips, metal on metal = a ring and sparks (16n
+  //                `wieldClashMat`). Nothing burns by it yet.
   //  Its pictures:
   //    icon        how big its drawing is in an inventory tile (1 = the tile's width)
   //    pieces(w,h) what it collides with when it meets another held item, in its own frame (middle at 0,0, the point
@@ -76,7 +79,7 @@
       grip: 0.1, rest: 'belt', aimsAtRest: true, scheme: null,
       offTilt: { beside: -0.35, back: 0.5, raised: 0.25 },
       hurtFrom: 0.2, hurtPad: 0.3,
-      carves: true, pierces: true, sticks: true, fire: false,
+      carves: true, pierces: true, sticks: true, fire: false, mat: 'steel',
       icon: 1.24,
       pieces(w, h) {                                            // (16b `drawStampLook`'s own numbers)
         const x0 = -w / 2, x1 = w / 2, gx = x0 + w * 0.2, bh = Math.max(1.5, h * 0.62), r = bh / 2;
@@ -96,7 +99,7 @@
       grip: 0.23, rest: 'upright', aimsAtRest: false, scheme: 'P',
       offTilt: { beside: 0.04, back: 0.06, raised: 0.3 },
       hurtFrom: 0.5, hurtPad: 0,                                // its upper half
-      carves: false, pierces: false, sticks: false, fire: true,
+      carves: false, pierces: false, sticks: false, fire: true, mat: 'wood',
       icon: 0.92,
       pieces(w, h) {
         const x0 = -w / 2, x1 = w / 2, st = h * 0.667, hl = h * 1.067, hw = h * 1.133;
@@ -128,12 +131,12 @@
       w: +(2 * model.V * SHIELD_K).toFixed(2), h, wt, content: '🛡️', tag, lenDial: false, model, shield: true,
       grip: 0.5, rest: 'upright', aimsAtRest: false, scheme: 'P', offTilt: { beside: 0, back: 0, raised: 0 },
       hurtFrom: 0, hurtPad: 0, carves: false, pierces: false, sticks: false, fire: false, strikes: false,
-      raise: 'face', raiseAt: 5, icon: 1,
+      raise: 'face', raiseAt: 5, icon: 1, mat: 'wood',
     }, extra || {});
   };
   LOOKS.roundshield  = shield({ U: 17, V: 17, dome: true,  t: 2.2, curve: 0.24 }, 1.2, 'rs');
   LOOKS.heatershield = shield({ U: 14, V: 20, dome: false, t: 2,   curve: 0.24 }, 1.4, 'hs');
-  LOOKS.buckler      = shield({ U: 11, V: 11, dome: true,  t: 1.4, curve: 0.24 }, 0.7, 'bk');
+  LOOKS.buckler      = shield({ U: 11, V: 11, dome: true,  t: 1.4, curve: 0.24 }, 0.7, 'bk', { mat: 'steel' });
   LOOKS.towershield  = shield({ U: 13, V: 26, dome: false, t: 2.6, curve: 0.24 }, 2.4, 'ts');
   LOOKS.kiteshield   = shield({ U: 13, V: 27, dome: false, t: 2,   curve: 0.24 }, 1.6, 'ks');
 
@@ -151,6 +154,8 @@
       grip, rest: 'belt', aimsAtRest: true, scheme: null, offTilt: { beside: -0.35, back: 0.5, raised: 0.25 },
       hurtFrom, hurtPad: 0, carves: kind === 'edge', pierces: kind === 'edge', sticks: kind === 'edge', fire: false,
       daze: kind === 'blunt', icon: 1.24,
+      // (2026-10-20) what it is made of where it strikes: blades steel, the blunt heads iron (clubs say wood)
+      mat: kind === 'edge' ? 'steel' : 'iron',
       // (2026-10-15) what RIGHT does with the off hand free: 'stab' (a blade with a point) or 'chop' (axes and every blunt weapon — the swing,
       //   never a stab; the user: "axes … hammers, and clubs, and any other weapons which are more blunt force than stabbing"). 16n `wieldPButton`.
       right: kind === 'blunt' ? 'chop' : 'stab',
@@ -197,9 +202,9 @@
     daneaxe:       weapon(118, 6, 2.2, 0.05, 0.82, 'edge', 'da', Object.assign({ right: 'chop', cleaves: true, hitHalf: 10 }, two(0.25))),
     executioner:   weapon(100, 7, 3.2, 0.05, 0.74, 'edge', 'ex', Object.assign({ right: 'chop', cleaves: true, hitHalf: 12 }, two(0.2))),
     // clubs
-    club:          weapon(50, 8, 1.4, 0.12, 0.55, 'blunt', 'cb', { hitHalf: 4, mark: 'rod' }),
-    spikedclub:    weapon(52, 8, 1.6, 0.12, 0.60, 'blunt', 'sc', { hitHalf: 6, nicks: true, mark: 'spikes' }),
-    greatclub:     weapon(96, 10, 2.8, 0.05, 0.55, 'blunt', 'gc', Object.assign({ hitHalf: 6, mark: 'rod' }, two(0.2))),
+    club:          weapon(50, 8, 1.4, 0.12, 0.55, 'blunt', 'cb', { hitHalf: 4, mark: 'rod', mat: 'wood' }),
+    spikedclub:    weapon(52, 8, 1.6, 0.12, 0.60, 'blunt', 'sc', { hitHalf: 6, nicks: true, mark: 'spikes', mat: 'wood' }),
+    greatclub:     weapon(96, 10, 2.8, 0.05, 0.55, 'blunt', 'gc', Object.assign({ hitHalf: 6, mark: 'rod', mat: 'wood' }, two(0.2))),
     // maces and flails
     mace:          weapon(52, 7, 1.6, 0.12, 0.76, 'blunt', 'mc', { hitHalf: 6, nicks: true, mark: 'flange' }),
     morningstar:   weapon(56, 7, 1.8, 0.12, 0.78, 'blunt', 'ms', { hitHalf: 7, nicks: true, mark: 'spikes' }),

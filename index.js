@@ -8190,6 +8190,8 @@ const domainsTest = DOMAINS.makeDomains({
 // ReferenceError in every rig and nowhere else — this project has hit that exact shape five times now. The
 // registry above is the precedent; this sits beside it deliberately.
 const ledger = new LEDGER.Ledger(db, { worthOf: (id) => MATGEN.primaWorthOf(id) });
+// (2026-10-20, plan file §5z38) the STAND-IN items left the item table — anybody's stored copies go with them, once, here
+try { db.prepare("DELETE FROM player_items WHERE item_id IN ('test_sword', 'test_torch', 'test_arrows')").run(); } catch (e) { console.warn('[items] stand-in cleanup:', e.message); }
 // ⭐ ADMIN MODE = UNLIMITED PRIMA (user, 2026-10-08, for testing). Admin mode is a client setting; the client says so with
 // `admin-mode` and this remembers which CONNECTIONS are in it. A purse is unlimited while any of them spends from it —
 // asked by connection, not stored by key, because the key changes with the Level (`socketEconScope`).
@@ -8281,7 +8283,7 @@ function sendInvSync(socket, room) {
     // ⭐ ITEMS, beside the materials and in the same [[id, n], …] shape. `itemDefs` (what each id IS: its name,
     // kind and picture) rides along on the first sync of a socket only — the table is the server's, the client
     // keeps no copy of its own.
-    items: snap.items, itemDefs,
+    items: snap.items.filter(e => ITEMS.isItem(e[0])), itemDefs,
     // ⭐ WHICH NUMBER HOLDS WHAT. null = this player has never sent one, which tells the client to push up the
     // bar it already has in its browser rather than starting from nothing.
     hotbar: snap.hotbar,
@@ -19847,6 +19849,8 @@ function eqRemoveObj(room, o) {
 // no longer carries one (their pouch was emptied under it), and leaving it lying would make a second one out of nothing.
 function itemObjMove(room, o, toSid) {
   if (!o || !o.item) return true;
+  // (2026-10-20) an object saved before its item was taken out of the table (the stand-ins) is a plain object now — no count moves
+  if (!ITEMS.isItem(o.item)) return true;
   const from = o.eq || null, to = toSid || null;
   if (from === to) return true;
   const gated = invGatedRoom(room);
@@ -25049,12 +25053,13 @@ io.on('connection', (socket) => {
     ledger.creditItems(key, [[item, 1]]);
     sendInvSync(socket, currentAvatarRoom);
   });
-  // ⏭️ A TEST DOOR, for the debug panel: hands you the stand-in items so the bar can be played with before any
-  // real item exists. ⚠️ It MINTS — the one place an item comes from nothing — and is unauthenticated like the
-  // rest of the debug panel's controls. Delete it when real items have a real source (crafting).
-  socket.on('inv-debug-give', () => {
+  // ⏭️ A TEST DOOR, for the debug panel's Items tab → "Give yourself items": hands you n of ANY real item (2026-10-20, plan file §5z38 —
+  // it handed out the stand-ins, which are gone). ⚠️ It MINTS — the one place an item comes from nothing — and is unauthenticated like
+  // the rest of the debug panel's controls. Delete it when real items have a real source (crafting).
+  socket.on('inv-debug-give', (p) => {
+    const id = p && p.id, n = Math.max(1, Math.min(99, (p && p.n) | 0 || 1));
     if (!currentAvatarRoom) return;
-    ledger.creditItems(playerKeyFor(socket.id), ITEMS.TEST_GIFT.map(e => e.slice()));
+    if (ITEMS.isItem(id)) ledger.creditItems(playerKeyFor(socket.id), [[id, n]]);   // (no id: nothing given, only a sync back — rigs use it to read the bar)
     sendInvSync(socket, currentAvatarRoom);
   });
   socket.on('drop-take', ({ id }) => {
