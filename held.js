@@ -64,6 +64,13 @@
   //    cracks      a strike that meets the ground breaks the cells it hits (a hammer)
   //    nicks       its blunt blow also wounds a little — a few drops of blood (a mace's flanges, a spiked head, a hammer's beak)
   //    hitHalf     how far either side of its long axis it can hit somebody (its head's reach across: an axe, a hammer) — absent = half its box
+  //    pole        a POLEARM (2026-10-20, plan file §5z41): rests upright, butt on the ground (`rest: 'pole'`); its swing turns about the
+  //                point between its hands (16s `armAt`)
+  //    both        what BOTH BUTTONS do instead of the carve / heavy blow (16n `wieldPButtonNew`, 16s): 'hook' = a swing with the hook that
+  //                pulls a shield or held weapon it catches aside · 'butt' = a swing with the OTHER end · 'hammer' = a swing with the
+  //                hammer face on its back. All three strike blunt. `hookBack` = the hook is on its BACK (the swing turns it round its shaft)
+  //    pullCut     its edge faces YOU (the scythe): a swing goes on past them and cuts as it is PULLED back along its shaft (16s 'pull')
+  //    brace       crouched with it, you are planted and anybody who runs onto its point is hurt by their own speed (the pike, 16n)
   //    model3d     it is drawn from a 3D MODEL (client 16r, keyed by its look) rather than a flat drawing
   //    mat         what the part that meets things is MADE of: 'steel' · 'iron' · 'wood' (2026-10-20, plan file §5z38). A clash sounds
   //                and throws sparks or chips by it — wood in it = a thud and chips, metal on metal = a ring and sparks (16n
@@ -217,23 +224,23 @@
   // ── POLEARMS (2026-10-20, plan file §5z41 — the user picked all eleven; looks `scratchpad/look/items/polearms/index.html`). ALWAYS BOTH
   //    HANDS (the user's pick). `pole` = a long two-handed weapon: it rests upright with its butt on the ground (`rest: 'pole'`, 16n
   //    `wieldRestPose`) and its swing turns about a point between the hands (16s `armAt`, Weapons → "Polearms swing about a point between
-  //    the hands"). Grips are where the model's wraps are. Round 2 (not built): the hook on both buttons (halberd, bill, Lucerne hammer), the
-  //    staff's other end, the poleaxe's hammer face, bracing the pike, the scythe's pull-cut.
+  //    the hands"). Grips are where the model's wraps are. Round 2 (§5z43): `both` (the hook on halberd, bill, Lucerne hammer · the
+  //    staff's other end · the poleaxe's hammer face), `brace` (the pike), `pullCut` (the scythe).
   const pole = (g2, extra) => Object.assign({ pole: true, rest: 'pole' }, two(g2), extra || {});
   Object.assign(LOOKS, {
-    quarterstaff:  weapon(150, 5, 1.6, 0.30, 0.82, 'blunt', 'qs', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood' })),
-    pike:          weapon(230, 4, 2.2, 0.12, 0.95, 'edge', 'pk', pole(0.34, { hitHalf: 2, stabBack: 30 })),
+    quarterstaff:  weapon(150, 5, 1.6, 0.30, 0.82, 'blunt', 'qs', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', both: 'butt' })),
+    pike:          weapon(230, 4, 2.2, 0.12, 0.95, 'edge', 'pk', pole(0.34, { hitHalf: 2, stabBack: 30, brace: true })),
     glaive:        weapon(136, 6, 2.2, 0.10, 0.80, 'edge', 'gv', pole(0.38, { hitHalf: 5, cleaves: true })),
     naginata:      weapon(132, 6, 1.8, 0.10, 0.74, 'edge', 'ng', pole(0.40, { hitHalf: 4 })),
     guandao:       weapon(128, 7, 2.8, 0.12, 0.78, 'edge', 'gd', pole(0.42, { hitHalf: 10, cleaves: true })),
-    halberd:       weapon(136, 7, 2.6, 0.10, 0.79, 'edge', 'hd', pole(0.38, { hitHalf: 15, cleaves: true })),
+    halberd:       weapon(136, 7, 2.6, 0.10, 0.79, 'edge', 'hd', pole(0.38, { hitHalf: 15, cleaves: true, both: 'hook', hookBack: true })),
     bardiche:      weapon(128, 7, 2.8, 0.08, 0.57, 'edge', 'bd', pole(0.36, { hitHalf: 16, cleaves: true })),
-    poleaxe:       weapon(112, 7, 2.4, 0.10, 0.82, 'edge', 'px', pole(0.40, { hitHalf: 12, cleaves: true })),
+    poleaxe:       weapon(112, 7, 2.4, 0.10, 0.82, 'edge', 'px', pole(0.40, { hitHalf: 12, cleaves: true, both: 'hammer' })),
     // (blunt, but its long top spike stabs and pierces — a puncture, not a cut)
-    lucerne:       weapon(130, 7, 2.6, 0.10, 0.80, 'blunt', 'lh', pole(0.38, { hitHalf: 12, right: 'stab', pierces: true, nicks: true, cracks: true, mark: 'spikes' })),
-    bill:          weapon(136, 7, 2.4, 0.10, 0.72, 'edge', 'bi', pole(0.38, { hitHalf: 16, cleaves: true })),
+    lucerne:       weapon(130, 7, 2.6, 0.10, 0.80, 'blunt', 'lh', pole(0.38, { hitHalf: 12, right: 'stab', pierces: true, nicks: true, cracks: true, mark: 'spikes', both: 'hook', hookBack: true })),
+    bill:          weapon(136, 7, 2.4, 0.10, 0.72, 'edge', 'bi', pole(0.38, { hitHalf: 16, cleaves: true, both: 'hook' })),
     // (no point to stab with: right swings it, both buttons are the heavy blow)
-    scythe:        weapon(130, 6, 2.0, 0.08, 0.92, 'edge', 'sy', pole(0.46, { hitHalf: 30, right: 'chop' })),
+    scythe:        weapon(130, 6, 2.0, 0.08, 0.92, 'edge', 'sy', pole(0.46, { hitHalf: 30, right: 'chop', pullCut: true })),
   });
 
   // ── BOWS (2026-10-20, plan file §5z38 piece 2 — looks agreed in four rounds of renders, `scratchpad/look/items/bow/index.html`; the models
