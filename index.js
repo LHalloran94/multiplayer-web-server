@@ -24562,7 +24562,8 @@ io.on('connection', (socket) => {
     for (const it of d.objs.slice(0, 3)) {
       const obj = it && typeof it.id === 'string' && roomObjects[room] && roomObjects[room].get(it.id); if (!obj || obj === tObj) continue;
       if (bodySpec(obj)) { if (bodyIgnite(room, obj, +d.x, +d.y, TERRAIN_CELL, +it.px, +it.py, +it.pa)) lit = true; }
-      else if (obj.boom > 0) armBomb(room, it.id, socket.id, { x: +d.x, y: +d.y });
+      // (§5z60) …nothing in somebody's HAND (`eq`) is lit by heat — a burning player lit the bomb they held, and every one after it
+      else if (obj.boom > 0 && !obj.eq) armBomb(room, it.id, socket.id, { x: +d.x, y: +d.y });
     }
     if (lit) broadcastObjSt(room);
   });
@@ -25435,7 +25436,7 @@ io.on('connection', (socket) => {
     if (!obj || !isFinite(x) || !isFinite(y)) return;
     if (bodySpec(obj)) { if (bodyIgnite(room, obj, x, y, r, px, py, pa)) broadcastObjSt(room); return; }
     // …and a thing that answers to heat without burning goes up or melts the way lava sets it off
-    if (obj.boom > 0) armBomb(room, id, socket.id, { x, y });
+    if (obj.boom > 0 && !obj.eq) armBomb(room, id, socket.id, { x, y });
   });
   // ⭐ list 14 — A BURNING PLAYER SETS ALIGHT WHAT IT TOUCHES (user, 2026-10-05: "running through a wooden house sets it alight").
   //   Not the fire tool: it needs no build rights — it is the world's fire spreading, not an edit — so it is kept small (the
@@ -25450,7 +25451,7 @@ io.on('connection', (socket) => {
     for (const it of objs.slice(0, 4)) {
       const obj = it && roomObjects[room] && roomObjects[room].get(it.id); if (!obj) continue;
       if (bodySpec(obj)) { if (bodyIgnite(room, obj, x, y, rr, +it.px, +it.py, +it.pa)) broadcastObjSt(room); }
-      else if (obj.boom > 0) armBomb(room, it.id, socket.id, { x, y });
+      else if (obj.boom > 0 && !obj.eq) armBomb(room, it.id, socket.id, { x, y });
     }
   });
   socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa, det }) => {

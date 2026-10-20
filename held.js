@@ -318,9 +318,9 @@
   // (§5z59 — the user: "the explosion size doesn't change enough across the different explosives") — spread wide: dynamite a small bang that digs deep, the
   //   bundle more than twice the bomb. `blastD` = × the blast's hurt.
   Object.assign(LOOKS, {
-    thbomb:    boomE(22, 14, 0.9, 0.3, 'bm', 3.0, 110, 20, 0.5, { thrK: 0.8, thrGk: 0.9, blastD: 1 }),
-    dynamite:  boomE(26, 5, 0.6, 0.35, 'dy', 2.5, 55, 9, 1.0, { thrK: 0.9, thrGk: 0.75, mat: 'wood', blastD: 0.6 }),
-    dynbundle: boomE(27, 9, 1.4, 0.35, 'db', 3.5, 240, 40, 0.55, { thrK: 0.65, thrGk: 1.0, mat: 'wood', blastD: 1.6 }),
+    thbomb:    boomE(22, 14, 0.9, 0.3, 'bm', 3.0, 110, 20, 0.4, { thrK: 0.8, thrGk: 0.9, blastD: 1 }),
+    dynamite:  boomE(26, 5, 0.6, 0.35, 'dy', 2.5, 55, 9, 1.5, { thrK: 0.9, thrGk: 0.75, mat: 'wood', blastD: 0.6 }),
+    dynbundle: boomE(27, 9, 1.4, 0.35, 'db', 3.5, 240, 40, 0.5, { thrK: 0.65, thrGk: 1.0, mat: 'wood', blastD: 1.6 }),
     tarball:   boomE(21, 13, 0.8, 0.3, 'tb', 2.5, 85, 14, 0.45, { thrK: 0.8, thrGk: 0.9, sticky: true, sticks: true, stickAny: true, mat: 'wood', blastD: 0.85 }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
