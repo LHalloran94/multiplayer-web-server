@@ -68,8 +68,11 @@
   //                point between its hands (16s `armAt`)
   //    both        what BOTH BUTTONS do instead of the carve / heavy blow (16n `wieldPButtonNew`, 16s): 'hook' = a swing with the hook that
   //                pulls a shield or held weapon it catches aside · 'butt' = a swing with the OTHER end · 'hammer' = a swing with the
-  //                hammer face on its back. All three strike blunt. `hookBack` = the hook is on its BACK (the swing turns it round its shaft)
-  //    pullCut     its edge faces YOU (the scythe): a swing goes on past them and cuts as it is PULLED back along its shaft (16s 'pull')
+  //                hammer face on its back. They strike blunt (the hammer face, the hook). `hookBack` = the hook is on its BACK
+  //    ends        2 = both ENDS strike (the quarterstaff): a swing asked for just as the last one lands is swung with the other end, and
+  //                the next such with the first again (16s `sw3ChainGo`) (2026-10-20, plan file §5z44)
+  //    back        a DIFFERENT HEAD ON ITS BACK (a hook, a hammer face, a beak, a spike): the mouse wheel turns it round to lead with that
+  //                head, and its swings then strike with it, blunt (16n `wieldWheel`, 16q `shieldFacing`). Others: the wheel spins it in the hand
   //    brace       crouched with it, you are planted and anybody who runs onto its point is hurt by their own speed (the pike, 16n)
   //    model3d     it is drawn from a 3D MODEL (client 16r, keyed by its look) rather than a flat drawing
   //    mat         what the part that meets things is MADE of: 'steel' · 'iron' · 'wood' (2026-10-20, plan file §5z38). A clash sounds
@@ -201,10 +204,10 @@
     // axes (they carve — the user's pick)
     handaxe:       weapon(44, 6, 1.0, 0.12, 0.76, 'edge', 'ha', { right: 'chop', cleaves: true, hitHalf: 7 }),
     beardedaxe:    weapon(60, 6, 1.4, 0.10, 0.70, 'edge', 'ba', { right: 'chop', cleaves: true, hitHalf: 8 }),
-    steelaxe:      weapon(52, 6, 1.5, 0.11, 0.72, 'edge', 'sx', { right: 'chop', cleaves: true, hitHalf: 7 }),
+    steelaxe:      weapon(52, 6, 1.5, 0.11, 0.72, 'edge', 'sx', { right: 'chop', cleaves: true, hitHalf: 7, back: true }),
     crescentaxe:   weapon(58, 6, 1.6, 0.10, 0.70, 'edge', 'cx', { right: 'chop', cleaves: true, hitHalf: 9 }),
     battleaxe:     weapon(64, 6, 1.8, 0.10, 0.68, 'edge', 'bx', { right: 'chop', cleaves: true, hitHalf: 9 }),
-    greataxe:      weapon(104, 7, 2.6, 0.05, 0.80, 'edge', 'ga', Object.assign({ right: 'chop', cleaves: true, hitHalf: 11 }, two(0.22))),
+    greataxe:      weapon(104, 7, 2.6, 0.05, 0.80, 'edge', 'ga', Object.assign({ right: 'chop', cleaves: true, hitHalf: 11, back: true }, two(0.22))),
     greatbattleaxe: weapon(110, 7, 3.0, 0.05, 0.78, 'edge', 'gb', Object.assign({ right: 'chop', cleaves: true, hitHalf: 12 }, two(0.2))),
     daneaxe:       weapon(118, 6, 2.2, 0.05, 0.82, 'edge', 'da', Object.assign({ right: 'chop', cleaves: true, hitHalf: 10 }, two(0.25))),
     executioner:   weapon(100, 7, 3.2, 0.05, 0.74, 'edge', 'ex', Object.assign({ right: 'chop', cleaves: true, hitHalf: 12 }, two(0.2))),
@@ -217,7 +220,7 @@
     morningstar:   weapon(56, 7, 1.8, 0.12, 0.78, 'blunt', 'ms', { hitHalf: 7, nicks: true, mark: 'spikes' }),
     flail:         weapon(62, 6, 1.7, 0.12, 0.82, 'blunt', 'fs', { hitHalf: 6, nicks: true, spin: true, mark: 'spikes' }),   // (spin: right whirls it — no stab; 2026-10-15)
     // hammers (they crack ground — the user's pick)
-    warhammer:     weapon(60, 7, 1.5, 0.11, 0.82, 'blunt', 'wh', { hitHalf: 9, nicks: true, cracks: true, mark: 'face' }),
+    warhammer:     weapon(60, 7, 1.5, 0.11, 0.82, 'blunt', 'wh', { hitHalf: 9, nicks: true, cracks: true, mark: 'face', back: true }),
     maul:          weapon(100, 10, 3.0, 0.05, 0.85, 'blunt', 'ml', Object.assign({ hitHalf: 12, cracks: true, mark: 'face' }, two(0.2))),
     runedhammer:   weapon(106, 10, 3.2, 0.05, 0.80, 'blunt', 'rh', Object.assign({ hitHalf: 13, cracks: true, mark: 'face' }, two(0.21))),
   });
@@ -228,19 +231,19 @@
   //    staff's other end · the poleaxe's hammer face), `brace` (the pike), `pullCut` (the scythe).
   const pole = (g2, extra) => Object.assign({ pole: true, rest: 'pole' }, two(g2), extra || {});
   Object.assign(LOOKS, {
-    quarterstaff:  weapon(150, 5, 1.6, 0.30, 0.82, 'blunt', 'qs', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', both: 'butt' })),
+    quarterstaff:  weapon(150, 5, 1.6, 0.30, 0.82, 'blunt', 'qs', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', right: 'stab', ends: 2 })),
     pike:          weapon(230, 4, 2.2, 0.12, 0.95, 'edge', 'pk', pole(0.34, { hitHalf: 2, stabBack: 30, brace: true })),
     glaive:        weapon(136, 6, 2.2, 0.10, 0.80, 'edge', 'gv', pole(0.38, { hitHalf: 5, cleaves: true })),
     naginata:      weapon(132, 6, 1.8, 0.10, 0.74, 'edge', 'ng', pole(0.40, { hitHalf: 4 })),
     guandao:       weapon(128, 7, 2.8, 0.12, 0.78, 'edge', 'gd', pole(0.42, { hitHalf: 10, cleaves: true })),
-    halberd:       weapon(136, 7, 2.6, 0.10, 0.79, 'edge', 'hd', pole(0.38, { hitHalf: 15, cleaves: true, both: 'hook', hookBack: true })),
+    halberd:       weapon(136, 7, 2.6, 0.10, 0.79, 'edge', 'hd', pole(0.38, { hitHalf: 15, cleaves: true, both: 'hook', hookBack: true, back: true })),
     bardiche:      weapon(128, 7, 2.8, 0.08, 0.57, 'edge', 'bd', pole(0.36, { hitHalf: 16, cleaves: true })),
-    poleaxe:       weapon(112, 7, 2.4, 0.10, 0.82, 'edge', 'px', pole(0.40, { hitHalf: 12, cleaves: true, both: 'hammer' })),
+    poleaxe:       weapon(112, 7, 2.4, 0.10, 0.82, 'edge', 'px', pole(0.40, { hitHalf: 12, cleaves: true, both: 'hammer', back: true })),
     // (blunt, but its long top spike stabs and pierces — a puncture, not a cut)
-    lucerne:       weapon(130, 7, 2.6, 0.10, 0.80, 'blunt', 'lh', pole(0.38, { hitHalf: 12, right: 'stab', pierces: true, nicks: true, cracks: true, mark: 'spikes', both: 'hook', hookBack: true })),
-    bill:          weapon(136, 7, 2.4, 0.10, 0.72, 'edge', 'bi', pole(0.38, { hitHalf: 16, cleaves: true, both: 'hook' })),
+    lucerne:       weapon(130, 7, 2.6, 0.10, 0.80, 'blunt', 'lh', pole(0.38, { hitHalf: 12, right: 'stab', pierces: true, nicks: true, cracks: true, mark: 'spikes', both: 'hook', hookBack: true, back: true })),
+    bill:          weapon(136, 7, 2.4, 0.10, 0.72, 'edge', 'bi', pole(0.38, { hitHalf: 16, cleaves: true, both: 'hook', back: true })),
     // (no point to stab with: right swings it, both buttons are the heavy blow)
-    scythe:        weapon(130, 6, 2.0, 0.08, 0.92, 'edge', 'sy', pole(0.46, { hitHalf: 30, right: 'chop', pullCut: true })),
+    scythe:        weapon(130, 6, 2.0, 0.08, 0.92, 'edge', 'sy', pole(0.46, { hitHalf: 30, right: 'chop' })),
   });
 
   // ── BOWS (2026-10-20, plan file §5z38 piece 2 — looks agreed in four rounds of renders, `scratchpad/look/items/bow/index.html`; the models
