@@ -6704,10 +6704,15 @@ function bakeSweep(room, map) {
   return done;
 }
 function bombFuseMs(obj) { return Math.max(200, (obj.fuse == null ? (obj.boom > 0 ? obj.boom : 2.5) : obj.fuse) * 1000); }
+const eqBoomUntil = new Map();   // (§5z61) socket id → until when nothing arms an explosive in that player's hand (one has just gone off there)
 function armBomb(avRoom, id, sid, data) {
   const map = roomObjects[avRoom]; if (!map) return false;
   const obj = map.get(id);
   if (!objExplodes(obj)) return false;
+  // ⭐ (2026-10-21, plan file §5z61 — the user: a bomb in your hand set off by an explosion "replaces the bomb in your hand and explodes it as well, so it keeps
+  //   exploding … I think the fix … would just be to limit the ability for a held explosive to explode if one you are holding has just exploded in your hand")
+  //   — for 2s after one went off in a player's hand (`bombItemSweep`), nothing arms the next one in that hand: no blast, no fire, not their own right click.
+  if (obj.eq && (eqBoomUntil.get(obj.eq) || 0) > Date.now()) return true;
   const st = objStOf(avRoom);
   const rec = st.get(id) || {};
   const now = Date.now();
@@ -6717,7 +6722,7 @@ function armBomb(avRoom, id, sid, data) {
   if (rec.lit) {
     const fuseMs = bombFuseMs(obj);
     // (not a Level bomb: its place follows its arc from `at`, and moving `at` would jump it along it)
-    if (data && data.det && obj.look !== 'bomb' && now < rec.lit.at + fuseMs - DET_MS) { rec.lit.at = now + DET_MS - fuseMs; st.set(id, rec); broadcastObjSt(avRoom); bombItemSweep(avRoom, id, obj, rec.lit.at); return true; }
+    if (data && data.det && obj.look !== 'bomb' && now < rec.lit.at + fuseMs - DET_MS) { rec.lit.at = now + DET_MS - fuseMs; st.set(id, rec); broadcastObjSt(avRoom); bombHeldGuard(obj, data, rec.lit.at); bombItemSweep(avRoom, id, obj, rec.lit.at); return true; }
     // `back` 0 means it never comes back, so it is busy for ever — which is correct: the record IS the fact
     // that it is gone.
     if (!(obj.back > 0) || now < rec.lit.at + fuseMs + obj.back * 1000) return true;
@@ -6736,9 +6741,14 @@ function armBomb(avRoom, id, sid, data) {
   // ⭐ (2026-10-21, plan file §5z58) A THROWN EXPLOSIVE (an ITEM with a fuse — the bomb, dynamite, the tar ball) is SPENT: a moment after its fuse is
   //   done (every screen has blasted it by then) it is taken away, wherever it is — flying, stuck to somebody, or still in a hand (one out of that
   //   pouch first: it left their hand by going off). Nobody needs build rights for that: it is the server tidying up, not an erase.
+  bombHeldGuard(obj, data, rec.lit.at);
   bombItemSweep(avRoom, id, obj, rec.lit.at);
   return true;
 }
+// (§5z61) 🟥 the guard was first started when the server took a spent one out of a hand — but its holder's own client lets go of it the moment it goes off,
+//   so by then it was in nobody's hand and the guard never started (measured: a fresh bomb set off every 0.2s while burning). It starts HERE now: one IN A
+//   HAND set off by a blast or fire (not lit by its holder — that one is meant to be thrown) keeps its holder's next one safe until 2s after it goes off.
+function bombHeldGuard(obj, data, at) { if (obj.eq && obj.item && !(data && data.light)) eqBoomUntil.set(obj.eq, at + bombFuseMs(obj) + 2000); }
 function bombItemSweep(avRoom, id, obj, at) {
   if (!(obj.item && ITEMS.isItem(obj.item))) return;
   setTimeout(() => {
@@ -24562,8 +24572,8 @@ io.on('connection', (socket) => {
     for (const it of d.objs.slice(0, 3)) {
       const obj = it && typeof it.id === 'string' && roomObjects[room] && roomObjects[room].get(it.id); if (!obj || obj === tObj) continue;
       if (bodySpec(obj)) { if (bodyIgnite(room, obj, +d.x, +d.y, TERRAIN_CELL, +it.px, +it.py, +it.pa)) lit = true; }
-      // (§5z60) …nothing in somebody's HAND (`eq`) is lit by heat — a burning player lit the bomb they held, and every one after it
-      else if (obj.boom > 0 && !obj.eq) armBomb(room, it.id, socket.id, { x: +d.x, y: +d.y });
+      // (§5z61 — the user: "an explosive touching fire directly should explode, not just light its fuse") — fire SETS IT OFF (`det`), held or not
+      else if (obj.boom > 0) armBomb(room, it.id, socket.id, { x: +d.x, y: +d.y, det: true });
     }
     if (lit) broadcastObjSt(room);
   });
@@ -25436,7 +25446,7 @@ io.on('connection', (socket) => {
     if (!obj || !isFinite(x) || !isFinite(y)) return;
     if (bodySpec(obj)) { if (bodyIgnite(room, obj, x, y, r, px, py, pa)) broadcastObjSt(room); return; }
     // …and a thing that answers to heat without burning goes up or melts the way lava sets it off
-    if (obj.boom > 0 && !obj.eq) armBomb(room, id, socket.id, { x, y });
+    if (obj.boom > 0) armBomb(room, id, socket.id, { x, y, det: true });   // (§5z61: fire sets it off)
   });
   // ⭐ list 14 — A BURNING PLAYER SETS ALIGHT WHAT IT TOUCHES (user, 2026-10-05: "running through a wooden house sets it alight").
   //   Not the fire tool: it needs no build rights — it is the world's fire spreading, not an edit — so it is kept small (the
@@ -25451,10 +25461,10 @@ io.on('connection', (socket) => {
     for (const it of objs.slice(0, 4)) {
       const obj = it && roomObjects[room] && roomObjects[room].get(it.id); if (!obj) continue;
       if (bodySpec(obj)) { if (bodyIgnite(room, obj, x, y, rr, +it.px, +it.py, +it.pa)) broadcastObjSt(room); }
-      else if (obj.boom > 0 && !obj.eq) armBomb(room, it.id, socket.id, { x, y });
+      else if (obj.boom > 0) armBomb(room, it.id, socket.id, { x, y, det: true });   // (§5z61: fire sets it off)
     }
   });
-  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa, det }) => {
+  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa, det, light }) => {   // (§5z61: `light` = LIGHT ITS FUSE — a throwable's own right click; any other fire hit sets it off)
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     const obj = roomObjects[currentAvatarRoom].get(id);
     // ⭐⭐ #183 — HITTING A BOMB SETS IT OFF; it does not damage it. This is deliberately the SAME message a
@@ -25474,7 +25484,7 @@ io.on('connection', (socket) => {
     // it"), so a bomb answers to any hit and a drum answers only to fire.
     // ⚠️ A drum that is punched to bits is therefore simply destroyed, not detonated. That is the rule as asked
     // for; if smashing one should spill burning oil, that is a different thing and wants saying out loud.
-    if (obj && (obj.look === 'bomb' || (fire && obj.boom > 0))) { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy, det: !!det }); return; }   // (§5z59 `det`: a blast SETS IT OFF)
+    if (obj && (obj.look === 'bomb' || (fire && obj.boom > 0))) { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy, det: !!det || (!!fire && !light), light: !!light }); return; }   // (§5z59 `det`: a blast SETS IT OFF)
     // ⭐⭐ A WOODEN THING IS NOT CHIPPED AWAY BY HEAT OR WATER — it is a CELL BODY, and the terrain fire burns it where
     // it is touched (see `bodyStamp`). A hot SHOT names the point it hit (`hx`,`hy`) and lights the cells there — a
     // flame jet is a match, like the Fire tool. Anything else (water, an older client's heat report) is dropped. A punch
