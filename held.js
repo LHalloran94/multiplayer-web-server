@@ -312,12 +312,16 @@
   //    to whatever it hits — rock, a crate, a person (on them, not in them) — and goes off there.
   //    They are blunt to hold (right is the fuse, not a strike) and heavier than the blades, so they fly in a rounder arc.
   const boomE = (L, h, wt, grip, tag, boom, blastR, blastF, dig, extra) => weapon(L, h, wt, grip, 1, 'blunt', tag, Object.assign({ throwable: true, boom, blastR, blastF, dig,
-    daze: false, right: 'light', icon: 1.1, mat: 'iron' }, extra || {}));
+    daze: false, right: 'light', icon: 1.1, mat: 'iron',
+    // (§5z59 — the user: "they are held sideways in the player's hand, rather than upright") — held UPRIGHT at your side, fuse up, as a torch rests
+    rest: 'upright', aimsAtRest: false }, extra || {}));
+  // (§5z59 — the user: "the explosion size doesn't change enough across the different explosives") — spread wide: dynamite a small bang that digs deep, the
+  //   bundle more than twice the bomb. `blastD` = × the blast's hurt.
   Object.assign(LOOKS, {
-    thbomb:    boomE(22, 14, 0.9, 0.3, 'bm', 3.0, 95, 18, 0.5, { thrK: 0.8, thrGk: 0.9 }),
-    dynamite:  boomE(26, 5, 0.6, 0.35, 'dy', 2.5, 70, 11, 0.8, { thrK: 0.9, thrGk: 0.75, mat: 'wood' }),
-    dynbundle: boomE(27, 9, 1.4, 0.35, 'db', 3.5, 140, 28, 0.6, { thrK: 0.65, thrGk: 1.0, mat: 'wood' }),
-    tarball:   boomE(21, 13, 0.8, 0.3, 'tb', 2.5, 80, 15, 0.45, { thrK: 0.8, thrGk: 0.9, sticky: true, sticks: true, stickAny: true, mat: 'wood' }),
+    thbomb:    boomE(22, 14, 0.9, 0.3, 'bm', 3.0, 110, 20, 0.5, { thrK: 0.8, thrGk: 0.9, blastD: 1 }),
+    dynamite:  boomE(26, 5, 0.6, 0.35, 'dy', 2.5, 55, 9, 1.0, { thrK: 0.9, thrGk: 0.75, mat: 'wood', blastD: 0.6 }),
+    dynbundle: boomE(27, 9, 1.4, 0.35, 'db', 3.5, 240, 40, 0.55, { thrK: 0.65, thrGk: 1.0, mat: 'wood', blastD: 1.6 }),
+    tarball:   boomE(21, 13, 0.8, 0.3, 'tb', 2.5, 85, 14, 0.45, { thrK: 0.8, thrGk: 0.9, sticky: true, sticks: true, stickAny: true, mat: 'wood', blastD: 0.85 }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;

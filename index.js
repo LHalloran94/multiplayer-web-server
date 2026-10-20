@@ -6711,8 +6711,13 @@ function armBomb(avRoom, id, sid, data) {
   const st = objStOf(avRoom);
   const rec = st.get(id) || {};
   const now = Date.now();
+  // ⭐ (2026-10-21, plan file §5z59 — the user: "Explosives should trigger other explosives as well, not just light their fuse, but set them off") — `det`
+  //   (sent by a blast that caught it): its fuse ENDS 150ms from now, lit or not — so a row of them ripples. The record's `at` is moved back to say so.
+  const DET_MS = 150;
   if (rec.lit) {
     const fuseMs = bombFuseMs(obj);
+    // (not a Level bomb: its place follows its arc from `at`, and moving `at` would jump it along it)
+    if (data && data.det && obj.look !== 'bomb' && now < rec.lit.at + fuseMs - DET_MS) { rec.lit.at = now + DET_MS - fuseMs; st.set(id, rec); broadcastObjSt(avRoom); bombItemSweep(avRoom, id, obj, rec.lit.at); return true; }
     // `back` 0 means it never comes back, so it is busy for ever — which is correct: the record IS the fact
     // that it is gone.
     if (!(obj.back > 0) || now < rec.lit.at + fuseMs + obj.back * 1000) return true;
@@ -6722,29 +6727,30 @@ function armBomb(avRoom, id, sid, data) {
   const near = (v, home) => Math.max(home - 2000, Math.min(home + 2000, v));
   const px = isFinite(data && data.x) ? near(Math.max(0, Math.min(WW, data.x)), obj.x) : obj.x;
   const py = isFinite(data && data.y) ? near(Math.max(0, Math.min(WH, data.y)), obj.y) : obj.y;
-  rec.lit = { at: now, x: px, y: py,
-              vx: clampN(data && data.vx, -900, 900, 0),      // px/s, the shove the fist gave it
-              vy: clampN(data && data.vy, -900, 900, 0),
+  rec.lit = { at: data && data.det ? now + DET_MS - bombFuseMs(obj) : now, x: px, y: py,
+              vx: data && data.det ? 0 : clampN(data && data.vx, -900, 900, 0),      // px/s, the shove the fist gave it (set off by a blast: where it is)
+              vy: data && data.det ? 0 : clampN(data && data.vy, -900, 900, 0),
               by: sid };                                       // …and who therefore digs the hole
   st.set(id, rec);
   broadcastObjSt(avRoom);
   // ⭐ (2026-10-21, plan file §5z58) A THROWN EXPLOSIVE (an ITEM with a fuse — the bomb, dynamite, the tar ball) is SPENT: a moment after its fuse is
   //   done (every screen has blasted it by then) it is taken away, wherever it is — flying, stuck to somebody, or still in a hand (one out of that
   //   pouch first: it left their hand by going off). Nobody needs build rights for that: it is the server tidying up, not an erase.
-  if (obj.item && ITEMS.isItem(obj.item)) {
-    const at = rec.lit.at;
-    setTimeout(() => {
-      const m = roomObjects[avRoom], o = m && m.get(id), r = objStOf(avRoom).get(id);
-      if (!o || !r || !r.lit || r.lit.at !== at) return;
-      { const hm = roomObjHeld[avRoom]; if (hm) { hm.delete(id); if (!hm.size) delete roomObjHeld[avRoom]; } }
-      { const dm = roomObjDrv[avRoom]; if (dm) { dm.delete(id); if (!dm.size) delete roomObjDrv[avRoom]; } }
-      if (o.eq) itemObjMove(avRoom, o, null);
-      objStOf(avRoom).delete(id);
-      if (m.get(id)) eqRemoveObj(avRoom, o);
-      broadcastObjSt(avRoom);
-    }, bombFuseMs(obj) + 700);
-  }
+  bombItemSweep(avRoom, id, obj, rec.lit.at);
   return true;
+}
+function bombItemSweep(avRoom, id, obj, at) {
+  if (!(obj.item && ITEMS.isItem(obj.item))) return;
+  setTimeout(() => {
+    const m = roomObjects[avRoom], o = m && m.get(id), r = objStOf(avRoom).get(id);
+    if (!o || !r || !r.lit || r.lit.at !== at) return;                 // (re-armed since — set off by a blast: that one's own sweep takes it)
+    { const hm = roomObjHeld[avRoom]; if (hm) { hm.delete(id); if (!hm.size) delete roomObjHeld[avRoom]; } }
+    { const dm = roomObjDrv[avRoom]; if (dm) { dm.delete(id); if (!dm.size) delete roomObjDrv[avRoom]; } }
+    if (o.eq) itemObjMove(avRoom, o, null);
+    objStOf(avRoom).delete(id);
+    if (m.get(id)) eqRemoveObj(avRoom, o);
+    broadcastObjSt(avRoom);
+  }, Math.max(50, at + bombFuseMs(obj) + 700 - Date.now()));
 }
 function armObjReact(avRoom, id, on) {
   const map = roomObjects[avRoom]; if (!map) return;
@@ -25447,7 +25453,7 @@ io.on('connection', (socket) => {
       else if (obj.boom > 0) armBomb(room, it.id, socket.id, { x, y });
     }
   });
-  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa }) => {
+  socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa, det }) => {
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     const obj = roomObjects[currentAvatarRoom].get(id);
     // ⭐⭐ #183 — HITTING A BOMB SETS IT OFF; it does not damage it. This is deliberately the SAME message a
@@ -25467,7 +25473,7 @@ io.on('connection', (socket) => {
     // it"), so a bomb answers to any hit and a drum answers only to fire.
     // ⚠️ A drum that is punched to bits is therefore simply destroyed, not detonated. That is the rule as asked
     // for; if smashing one should spill burning oil, that is a different thing and wants saying out loud.
-    if (obj && (obj.look === 'bomb' || (fire && obj.boom > 0))) { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy }); return; }
+    if (obj && (obj.look === 'bomb' || (fire && obj.boom > 0))) { armBomb(currentAvatarRoom, id, socket.id, { x, y, vx, vy, det: !!det }); return; }   // (§5z59 `det`: a blast SETS IT OFF)
     // ⭐⭐ A WOODEN THING IS NOT CHIPPED AWAY BY HEAT OR WATER — it is a CELL BODY, and the terrain fire burns it where
     // it is touched (see `bodyStamp`). A hot SHOT names the point it hit (`hx`,`hy`) and lights the cells there — a
     // flame jet is a match, like the Fire tool. Anything else (water, an older client's heat report) is dropped. A punch
