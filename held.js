@@ -284,6 +284,23 @@
     hurtFrom: 0.85, hurtPad: 0, carves: false, pierces: true, sticks: true, fire: false, strikes: false, mat: 'wood', icon: 1.1 });
   Object.assign(LOOKS, { arrow_bodkin: arrowE('ab', 1.06, 0.9, 1, [1.8, 1]), arrow_broad: arrowE('ar', 0.93, 1.2, 1.35, [5.2, 0]), arrow_field: arrowE('af', 1, 1, 0.8, [1.56, 1]), arrow_elven: arrowE('ae', 1.12, 0.75, 1.15, [3.4, 0]) });
 
+  // ⭐ THROWABLES (2026-10-21, plan file §5z54 — the user's pick after polearms; looks agreed over two rounds, `scratchpad/look/items/throwables/`).
+  //    A STACK in the pouch (server/items.js `stack`) with ONE in your main hand as the real object: throwing it spends it, and the next one comes
+  //    to hand. Their buttons (client 16x): LEFT held winds up an overarm throw (longer = harder and flatter), let go throws · MIDDLE = an underarm
+  //    lob · RIGHT = the thing's own move (a blade stabs or chops, as a dagger does), or cancels a wind-up.
+  //    `throwable` = one of these · `thrDmg` = what it does when it goes IN somebody (light things hurt little by weight × speed) ·
+  //    `spinFly` = it turns end over end in flight (rad a step) instead of flying point first — it sticks when its head end leads ·
+  //    `stickAny` = any point of it sticks (a star: it spins flat, every point is a point).
+  //    Piece 1 = the thrown blades: they fly, stick, wound and bleed as a thrown sword does, and E puts one lying or stuck back in the pouch.
+  const thrown = (L, h, wt, grip, hurtFrom, tag, extra) => weapon(L, h, wt, grip, hurtFrom, 'edge', tag, Object.assign({ throwable: true, carves: false, icon: 1.1 }, extra || {}));
+  Object.assign(LOOKS, {
+    throwknife: thrown(24, 4, 0.35, 0.2, 0.36, 'tk', { thrDmg: 3 }),
+    kunai:      thrown(27, 5, 0.45, 0.25, 0.41, 'ku', { thrDmg: 4 }),
+    dart:       thrown(19, 3, 0.15, 0.48, 0.62, 'dr', { thrDmg: 2 }),
+    throwstar:  thrown(15, 15, 0.25, 0.5, 0, 'xs', { thrDmg: 2, stickAny: true, right: 'chop', hitHalf: 7 }),
+    javelin:    thrown(100, 4, 1.1, 0.45, 0.88, 'jv', { thrDmg: 6 }),
+    tomahawk:   thrown(38, 6, 0.7, 0.16, 0.76, 'tm', { thrDmg: 5, spinFly: 0.42, right: 'chop', hitHalf: 6, cleaves: true }),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it

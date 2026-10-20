@@ -20196,9 +20196,10 @@ function releaseHoldings(room, key, x, y, spread) {
   //   ⚠️ Conserving: one that cannot be built goes into the piles instead; past ITEM_OBJ_DROP_MAX (a stand-in stack minted by the debug
   //   panel) the rest do too, rather than throwing dozens of bodies into the physics at one point.
   const rest = []; let placed = 0;
-  const nObj = held.items.reduce((a, e) => a + (ITEMS.isObjItem(e[0]) ? e[1] : 0), 0);
+  // (2026-10-21) …a THROWABLE is a stack: it goes into the pile (`isLoneItem`)
+  const nObj = held.items.reduce((a, e) => a + (ITEMS.isLoneItem(e[0]) ? e[1] : 0), 0);
   for (const [id, n] of held.items) {
-    if (!ITEMS.isObjItem(id)) { rest.push([id, n]); continue; }
+    if (!ITEMS.isLoneItem(id)) { rest.push([id, n]); continue; }
     let left = n;
     while (left > 0 && placed < ITEM_OBJ_DROP_MAX) {
       const t = nObj > 1 ? placed / (Math.min(nObj, ITEM_OBJ_DROP_MAX) - 1) * 2 - 1 : 0;
@@ -24825,7 +24826,7 @@ io.on('connection', (socket) => {
       if (!ITEMS.isItem(item)) return;
       // ⭐ (2026-10-14) A TORCH OR A SWORD IS PUT DOWN AS ITSELF, ONE AT A TIME — never a pile (`itemObjPlace`). Never the one in your
       //   hand: only what you carry beyond what you have out.
-      if (ITEMS.isObjItem(item)) {
+      if (ITEMS.isLoneItem(item)) {                      // (a throwable is a stack: a pile, below — 2026-10-21)
         const gated = invGatedRoom(currentAvatarRoom);
         if (gated && ledger.itemCount(key, item) - eqOutCount(currentAvatarRoom, socket.id, item) < 1) return;
         const s = (+vx || 0) < 0 ? -1 : 1;

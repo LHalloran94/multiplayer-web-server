@@ -103,15 +103,25 @@ const arrowSvg = (fl, head) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox=
 for (const [id, name, fl, head, prima] of [['arrow_bodkin', 'Bodkin arrow', '#4c4844', '#8a8e96', 2], ['arrow_broad', 'Broadhead arrow', '#b6342a', '#d6dce4', 3],
   ['arrow_field', 'Field-point arrow', '#3e60a8', '#cbd5e1', 1], ['arrow_elven', 'Elven arrow', '#d6e6de', '#e2e8f0', 6]]) ITEMS[id] = { name, kind: 'ammo', tier: 0, svg: arrowSvg(fl, head), make: { mats: [], prima } };
 
+// ⭐ THROWABLES (2026-10-21, plan file §5z54): a STACK in the pouch (a count, a pile when dropped or scattered — `stack`) that is ALSO a real object
+//   once it is out (`obj`): one in your main hand at a time, and in the hand it is still counted; throwing it spends it (`itemObjMove`) and the
+//   next one comes to hand (client 16p). One lying or stuck in the world: E puts it back in the pouch. Kind 'throwable'. Prima only (prices mine).
+//   Piece 1: the thrown blades.
+SVG.thrown = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 4 L10.6 13.4 L9.2 12 Z" fill="#dfe5ec" stroke="#5b6472" stroke-width=".6"/><path d="M9.6 12.6 L4.4 17.8" stroke="#8a6a44" stroke-width="2.2" stroke-linecap="round"/></svg>';
+for (const [id, name, look, prima] of [['throwing_knife', 'Throwing knife', 'throwknife', 4], ['kunai', 'Kunai', 'kunai', 5], ['dart', 'Dart', 'dart', 2],
+  ['throwing_star', 'Throwing star', 'throwstar', 3], ['javelin', 'Javelin', 'javelin', 12], ['tomahawk', 'Tomahawk', 'tomahawk', 10]])
+  ITEMS[id] = { name, kind: 'throwable', tier: 0, svg: SVG.thrown, obj: HELD.objOf(look), stack: true, make: { mats: [], prima } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
 // The wire shape of the table: [[id, { name, kind, tier, svg }], …]. Sent once per socket.
 function itemDefsWire() {
   return Object.keys(ITEMS).map(id => [id, { name: ITEMS[id].name, kind: ITEMS[id].kind, tier: ITEMS[id].tier | 0, svg: ITEMS[id].svg,
-    make: ITEMS[id].make || null, obj: ITEMS[id].obj || null }]);
+    make: ITEMS[id].make || null, obj: ITEMS[id].obj || null, stack: ITEMS[id].stack ? 1 : 0 }]);
 }
 // is this item a real object out of the pouch (never a pile, never a stack)?
 const isObjItem = (id) => isItem(id) && !!ITEMS[id].obj;
+// …and one that never stacks: a torch, a sword — dropped or scattered it lies as ITSELF, one object each. A throwable (`stack`) goes into a pile.
+const isLoneItem = (id) => isObjItem(id) && !ITEMS[id].stack;
 
-module.exports = { ITEMS, isItem, isObjItem, itemDefsWire };
+module.exports = { ITEMS, isItem, isObjItem, isLoneItem, itemDefsWire };
