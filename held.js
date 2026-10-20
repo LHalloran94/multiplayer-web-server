@@ -304,6 +304,21 @@
     javelin:    thrown(100, 4, 1.1, 0.45, 0.88, 'jv', { thrDmg: 6, thrK: 0.9, thrGk: 0.6 }),
     tomahawk:   thrown(38, 6, 0.7, 0.16, 0.76, 'tm', { thrDmg: 5, thrK: 0.8, thrGk: 0.75, spinFly: 0.42, right: 'chop', hitHalf: 6, cleaves: true }),
   });
+  // ⭐ THROWABLES, PIECE 2: EXPLOSIVES (2026-10-21, plan file §5z58 — the user's picks: the bomb, the PLAIN dynamite, the normal bundle, the TAR BALL).
+  //    The Level bomb's own machinery (client 16b `bombBlast`, server `armBomb`): the object carries a FUSE (`boom`, seconds — what makes anything go
+  //    up), RIGHT lights it in your hand (held too long it goes off there), and one thrown unlit is lit as it leaves your hand. When the fuse is done
+  //    everybody's screen blasts it where it is; the one who lit it digs the hole; the server takes the spent object away.
+  //    `blastR` = how far the blast reaches (px) · `blastF` = how hard it throws you · `dig` = the hole, × the blast's reach · `sticky` = it sticks
+  //    to whatever it hits — rock, a crate, a person (on them, not in them) — and goes off there.
+  //    They are blunt to hold (right is the fuse, not a strike) and heavier than the blades, so they fly in a rounder arc.
+  const boomE = (L, h, wt, grip, tag, boom, blastR, blastF, dig, extra) => weapon(L, h, wt, grip, 1, 'blunt', tag, Object.assign({ throwable: true, boom, blastR, blastF, dig,
+    daze: false, right: 'light', icon: 1.1, mat: 'iron' }, extra || {}));
+  Object.assign(LOOKS, {
+    thbomb:    boomE(22, 14, 0.9, 0.3, 'bm', 3.0, 95, 18, 0.5, { thrK: 0.8, thrGk: 0.9 }),
+    dynamite:  boomE(26, 5, 0.6, 0.35, 'dy', 2.5, 70, 11, 0.8, { thrK: 0.9, thrGk: 0.75, mat: 'wood' }),
+    dynbundle: boomE(27, 9, 1.4, 0.35, 'db', 3.5, 140, 28, 0.6, { thrK: 0.65, thrGk: 1.0, mat: 'wood' }),
+    tarball:   boomE(21, 13, 0.8, 0.3, 'tb', 2.5, 80, 15, 0.45, { thrK: 0.8, thrGk: 0.9, sticky: true, sticks: true, stickAny: true, mat: 'wood' }),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it

@@ -111,6 +111,11 @@ SVG.thrown = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path 
 for (const [id, name, look, prima] of [['throwing_knife', 'Throwing knife', 'throwknife', 4], ['kunai', 'Kunai', 'kunai', 5], ['dart', 'Dart', 'dart', 2],
   ['throwing_star', 'Throwing star', 'throwstar', 3], ['javelin', 'Javelin', 'javelin', 12], ['tomahawk', 'Tomahawk', 'tomahawk', 10]])
   ITEMS[id] = { name, kind: 'throwable', tier: 0, svg: SVG.thrown, obj: HELD.objOf(look), stack: true, make: { mats: [], prima } };
+// Piece 2 (2026-10-21, plan file §5z58): THE EXPLOSIVES — a fuse (`boom`) on the object, lit by right or by the throw (server/held.js `boomE`)
+SVG.bomb = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="10" cy="14" r="7" fill="#34363c"/><path d="M14.5 8.5 l2-2" stroke="#34363c" stroke-width="2.6"/><path d="M16.5 6.5 q2-2 3.5-.5" fill="none" stroke="#c4ac78" stroke-width="1.2"/></svg>';
+for (const [id, name, look, prima] of [['bomb', 'Bomb', 'thbomb', 15], ['dynamite', 'Dynamite', 'dynamite', 12], ['dynamite_bundle', 'Bundle of dynamite', 'dynbundle', 30],
+  ['tar_ball', 'Tar ball', 'tarball', 18]])
+  ITEMS[id] = { name, kind: 'throwable', tier: 0, svg: SVG.bomb, obj: Object.assign(HELD.objOf(look), { boom: HELD.LOOKS[look].boom }), stack: true, make: { mats: [], prima } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 

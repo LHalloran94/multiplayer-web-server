@@ -6728,6 +6728,22 @@ function armBomb(avRoom, id, sid, data) {
               by: sid };                                       // …and who therefore digs the hole
   st.set(id, rec);
   broadcastObjSt(avRoom);
+  // ⭐ (2026-10-21, plan file §5z58) A THROWN EXPLOSIVE (an ITEM with a fuse — the bomb, dynamite, the tar ball) is SPENT: a moment after its fuse is
+  //   done (every screen has blasted it by then) it is taken away, wherever it is — flying, stuck to somebody, or still in a hand (one out of that
+  //   pouch first: it left their hand by going off). Nobody needs build rights for that: it is the server tidying up, not an erase.
+  if (obj.item && ITEMS.isItem(obj.item)) {
+    const at = rec.lit.at;
+    setTimeout(() => {
+      const m = roomObjects[avRoom], o = m && m.get(id), r = objStOf(avRoom).get(id);
+      if (!o || !r || !r.lit || r.lit.at !== at) return;
+      { const hm = roomObjHeld[avRoom]; if (hm) { hm.delete(id); if (!hm.size) delete roomObjHeld[avRoom]; } }
+      { const dm = roomObjDrv[avRoom]; if (dm) { dm.delete(id); if (!dm.size) delete roomObjDrv[avRoom]; } }
+      if (o.eq) itemObjMove(avRoom, o, null);
+      objStOf(avRoom).delete(id);
+      if (m.get(id)) eqRemoveObj(avRoom, o);
+      broadcastObjSt(avRoom);
+    }, bombFuseMs(obj) + 700);
+  }
   return true;
 }
 function armObjReact(avRoom, id, on) {
