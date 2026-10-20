@@ -73,6 +73,8 @@
   //                the next such with the first again (16s `sw3ChainGo`) (2026-10-20, plan file §5z44)
   //    back        a DIFFERENT HEAD ON ITS BACK (a hook, a hammer face, a beak, a spike): the mouse wheel turns it round to lead with that
   //                head, and its swings then strike with it, blunt (16n `wieldWheel`, 16q `shieldFacing`). Others: the wheel spins it in the hand
+  //    inFrom      how much of it can be IN somebody, from this fraction of its length to its point — absent = its blade (`hurtFrom`). The
+  //                pike: its shaft too, ahead of the front hand — run onto it, it goes right through them (16o `woundChord`, §5z46)
   //    brace       crouched with it, you are planted and anybody who runs onto its point is hurt by their own speed (the pike, 16n)
   //    model3d     it is drawn from a 3D MODEL (client 16r, keyed by its look) rather than a flat drawing
   //    mat         what the part that meets things is MADE of: 'steel' · 'iron' · 'wood' (2026-10-20, plan file §5z38). A clash sounds
@@ -232,7 +234,7 @@
   const pole = (g2, extra) => Object.assign({ pole: true, rest: 'pole' }, two(g2), extra || {});
   Object.assign(LOOKS, {
     quarterstaff:  weapon(150, 5, 1.6, 0.30, 0.82, 'blunt', 'qs', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', right: 'stab', ends: 2 })),
-    pike:          weapon(230, 4, 2.2, 0.12, 0.95, 'edge', 'pk', pole(0.34, { hitHalf: 2, stabBack: 30, brace: true })),
+    pike:          weapon(230, 4, 2.2, 0.12, 0.95, 'edge', 'pk', pole(0.34, { hitHalf: 2, stabBack: 30, brace: true, inFrom: 0.42 })),
     glaive:        weapon(136, 6, 2.2, 0.10, 0.80, 'edge', 'gv', pole(0.38, { hitHalf: 5, cleaves: true })),
     naginata:      weapon(132, 6, 1.8, 0.10, 0.74, 'edge', 'ng', pole(0.40, { hitHalf: 4 })),
     guandao:       weapon(128, 7, 2.8, 0.12, 0.78, 'edge', 'gd', pole(0.42, { hitHalf: 10, cleaves: true })),
