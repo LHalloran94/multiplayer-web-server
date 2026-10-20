@@ -86,6 +86,12 @@ for (const [id, name, look, prima] of [
   ['mace', 'Flanged mace', 'mace', 60], ['morning_star', 'Morning star', 'morningstar', 75], ['flail', 'Flail', 'flail', 90],
   ['war_hammer', 'War hammer', 'warhammer', 70], ['maul', 'Maul', 'maul', 90], ['runed_hammer', 'Runed greathammer', 'runedhammer', 180],
 ]) ITEMS[id] = { name, kind: 'weapon', tier: 0, svg: SVG.sword, obj: OBJ[look], make: { mats: [], prima } };
+// ⭐ POLEARMS (2026-10-20, plan file §5z41) — all two-handed; Prima only (prices mine)
+for (const [id, name, look, prima] of [
+  ['quarterstaff', 'Quarterstaff', 'quarterstaff', 30], ['pike', 'Pike', 'pike', 70], ['glaive', 'Glaive', 'glaive', 100], ['naginata', 'Naginata', 'naginata', 110],
+  ['guandao', 'Guandao', 'guandao', 140], ['halberd', 'Halberd', 'halberd', 130], ['bardiche', 'Bardiche', 'bardiche', 120], ['poleaxe', 'Poleaxe', 'poleaxe', 120],
+  ['lucerne_hammer', 'Lucerne hammer', 'lucerne', 130], ['bill', 'Bill', 'bill', 100], ['scythe', 'Scythe', 'scythe', 90],
+]) ITEMS[id] = { name, kind: 'weapon', tier: 0, svg: SVG.sword, obj: OBJ[look], make: { mats: [], prima } };
 // ⭐ BOWS (2026-10-20, plan file §5z38 piece 2) — real objects in the hands, like the melee family (server/held.js); Prima only (prices mine)
 SVG.bow = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 2.5c8 3 8 16 0 19" fill="none" stroke="#8a5a32" stroke-width="2.2" stroke-linecap="round"/><path d="M6 2.5v19" stroke="#ece4cc" stroke-width=".8"/></svg>';
 for (const [id, name, prima] of [['shortbow', 'Shortbow', 40], ['longbow', 'Longbow', 70], ['recurve', 'Recurve bow', 80], ['horsebow', 'Horse bow', 85],

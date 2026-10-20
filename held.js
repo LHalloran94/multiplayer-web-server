@@ -214,6 +214,27 @@
     maul:          weapon(100, 10, 3.0, 0.05, 0.85, 'blunt', 'ml', Object.assign({ hitHalf: 12, cracks: true, mark: 'face' }, two(0.2))),
     runedhammer:   weapon(106, 10, 3.2, 0.05, 0.80, 'blunt', 'rh', Object.assign({ hitHalf: 13, cracks: true, mark: 'face' }, two(0.21))),
   });
+  // ── POLEARMS (2026-10-20, plan file §5z41 — the user picked all eleven; looks `scratchpad/look/items/polearms/index.html`). ALWAYS BOTH
+  //    HANDS (the user's pick). `pole` = a long two-handed weapon: it rests upright with its butt on the ground (`rest: 'pole'`, 16n
+  //    `wieldRestPose`) and its swing turns about a point between the hands (16s `armAt`, Weapons → "Polearms swing about a point between
+  //    the hands"). Grips are where the model's wraps are. Round 2 (not built): the hook on both buttons (halberd, bill, Lucerne hammer), the
+  //    staff's other end, the poleaxe's hammer face, bracing the pike, the scythe's pull-cut.
+  const pole = (g2, extra) => Object.assign({ pole: true, rest: 'pole' }, two(g2), extra || {});
+  Object.assign(LOOKS, {
+    quarterstaff:  weapon(150, 5, 1.6, 0.30, 0.82, 'blunt', 'qs', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood' })),
+    pike:          weapon(230, 4, 2.2, 0.12, 0.95, 'edge', 'pk', pole(0.34, { hitHalf: 2, stabBack: 30 })),
+    glaive:        weapon(136, 6, 2.2, 0.10, 0.80, 'edge', 'gv', pole(0.38, { hitHalf: 5, cleaves: true })),
+    naginata:      weapon(132, 6, 1.8, 0.10, 0.74, 'edge', 'ng', pole(0.40, { hitHalf: 4 })),
+    guandao:       weapon(128, 7, 2.8, 0.12, 0.78, 'edge', 'gd', pole(0.42, { hitHalf: 10, cleaves: true })),
+    halberd:       weapon(136, 7, 2.6, 0.10, 0.79, 'edge', 'hd', pole(0.38, { hitHalf: 15, cleaves: true })),
+    bardiche:      weapon(128, 7, 2.8, 0.08, 0.57, 'edge', 'bd', pole(0.36, { hitHalf: 16, cleaves: true })),
+    poleaxe:       weapon(112, 7, 2.4, 0.10, 0.82, 'edge', 'px', pole(0.40, { hitHalf: 12, cleaves: true })),
+    // (blunt, but its long top spike stabs and pierces — a puncture, not a cut)
+    lucerne:       weapon(130, 7, 2.6, 0.10, 0.80, 'blunt', 'lh', pole(0.38, { hitHalf: 12, right: 'stab', pierces: true, nicks: true, cracks: true, mark: 'spikes' })),
+    bill:          weapon(136, 7, 2.4, 0.10, 0.72, 'edge', 'bi', pole(0.38, { hitHalf: 16, cleaves: true })),
+    // (no point to stab with: right swings it, both buttons are the heavy blow)
+    scythe:        weapon(130, 6, 2.0, 0.08, 0.92, 'edge', 'sy', pole(0.46, { hitHalf: 30, right: 'chop' })),
+  });
 
   // ── BOWS (2026-10-20, plan file §5z38 piece 2 — looks agreed in four rounds of renders, `scratchpad/look/items/bow/index.html`; the models
   //    are client art, 16r `WM`, ported from `scratchpad/make_bow_renders.js`). Its LONG AXIS is the stave, tip to tip; held in its middle.
