@@ -294,12 +294,15 @@
   //    Piece 1 = the thrown blades: they fly, stick, wound and bleed as a thrown sword does, and E puts one lying or stuck back in the pouch.
   const thrown = (L, h, wt, grip, hurtFrom, tag, extra) => weapon(L, h, wt, grip, hurtFrom, 'edge', tag, Object.assign({ throwable: true, carves: false, icon: 1.1 }, extra || {}));
   Object.assign(LOOKS, {
-    throwknife: thrown(24, 4, 0.35, 0.2, 0.36, 'tk', { thrDmg: 3 }),
-    kunai:      thrown(27, 5, 0.45, 0.25, 0.41, 'ku', { thrDmg: 4 }),
-    dart:       thrown(19, 3, 0.15, 0.48, 0.62, 'dr', { thrDmg: 2 }),
-    throwstar:  thrown(15, 15, 0.25, 0.5, 0, 'xs', { thrDmg: 2, stickAny: true, right: 'chop', hitHalf: 7 }),
-    javelin:    thrown(100, 4, 1.1, 0.45, 0.88, 'jv', { thrDmg: 6 }),
-    tomahawk:   thrown(38, 6, 0.7, 0.16, 0.76, 'tm', { thrDmg: 5, spinFly: 0.42, right: 'chop', hitHalf: 6, cleaves: true }),
+    //    `thrK` = how fast and far it is thrown, 1 = as fast as anything can be (another weapon's comes from its weight — client 16m `carryThrowWf`) ·
+    //    `thrGk` = how much it drops in flight, × the throw's gravity (light throwing things nearly flat — 16m `carryThrowG`) (§5z55).
+    //    `right: 'chop'` on a throwable = right SWINGS it as an axe swings (the tomahawk — the user: "swinging them like an axe, not a poke").
+    throwknife: thrown(24, 4, 0.35, 0.2, 0.36, 'tk', { thrDmg: 3, thrK: 1, thrGk: 0.4 }),
+    kunai:      thrown(27, 5, 0.45, 0.25, 0.41, 'ku', { thrDmg: 4, thrK: 0.95, thrGk: 0.5 }),
+    dart:       thrown(19, 3, 0.15, 0.48, 0.62, 'dr', { thrDmg: 2, thrK: 1, thrGk: 0.35 }),
+    throwstar:  thrown(15, 15, 0.25, 0.5, 0, 'xs', { thrDmg: 2, thrK: 1, thrGk: 0.35, stickAny: true, hitHalf: 7 }),
+    javelin:    thrown(100, 4, 1.1, 0.45, 0.88, 'jv', { thrDmg: 6, thrK: 0.9, thrGk: 0.6 }),
+    tomahawk:   thrown(38, 6, 0.7, 0.16, 0.76, 'tm', { thrDmg: 5, thrK: 0.8, thrGk: 0.75, spinFly: 0.42, right: 'chop', hitHalf: 6, cleaves: true }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
