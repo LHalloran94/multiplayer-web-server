@@ -243,10 +243,13 @@
   //   (the user: "The different arrow types could also have an effect on damage/reach/fly speed") — `speedK` × its speed, `gravK` × how hard it
   //   falls, `dmgK` × its hurt: a field point is the plain one, a bodkin flies a little truer, a broadhead hurts most but drops, an elven one flies
   //   fast and flat
-  const arrowE = (tag, speedK, gravK, dmgK) => ({ speedK, gravK, dmgK, w: ARROW_W, h: 2, wt: 0.3, content: '➵', tag, lenDial: false, model3d: true, arrow: true,
+  //   (arrows round 3, the user: "the arrow wounds are larger than the actual arrow … the different arrows should create different wounds based on
+  //   their tips … no larger than the tip and should match the shape") — `cut` = [how wide its head is, in the model's units of a 60-long arrow
+  //   (16r `arrowParts`), 1 = a round point that PUNCTURES · 0 = a flat blade that leaves a SLIT as wide as it] — 16o sizes the wound from it
+  const arrowE = (tag, speedK, gravK, dmgK, cut) => ({ speedK, gravK, dmgK, cut, w: ARROW_W, h: 2, wt: 0.3, content: '➵', tag, lenDial: false, model3d: true, arrow: true,
     grip: 0.08, rest: 'belt', aimsAtRest: false, scheme: 'P', offTilt: { beside: 0, back: 0, raised: 0 },
     hurtFrom: 0.85, hurtPad: 0, carves: false, pierces: true, sticks: true, fire: false, strikes: false, mat: 'wood', icon: 1.1 });
-  Object.assign(LOOKS, { arrow_bodkin: arrowE('ab', 1.06, 0.9, 1), arrow_broad: arrowE('ar', 0.93, 1.2, 1.35), arrow_field: arrowE('af', 1, 1, 0.8), arrow_elven: arrowE('ae', 1.12, 0.75, 1.15) });
+  Object.assign(LOOKS, { arrow_bodkin: arrowE('ab', 1.06, 0.9, 1, [1.8, 1]), arrow_broad: arrowE('ar', 0.93, 1.2, 1.35, [5.2, 0]), arrow_field: arrowE('af', 1, 1, 0.8, [1.56, 1]), arrow_elven: arrowE('ae', 1.12, 0.75, 1.15, [3.4, 0]) });
 
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
