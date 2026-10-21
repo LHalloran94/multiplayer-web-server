@@ -344,6 +344,12 @@
   Object.assign(LOOKS, {
     molotov: weapon(27, 9, 0.7, 0.3, 1, 'blunt', 'mo', { throwable: true, breaks: 'fire', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
       thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true, fuse: 15 }),   // (§5z67) follows the pointer (H rests it) · lit, its rag burns 15s, then it bursts where it is
+    // ⭐ PIECE 3 PART B2 (2026-10-21, plan file §5z69): THE GREASE FLASK — a corked flask of dark grease that BREAKS as the Molotov does (`breaks: 'grease'`):
+    //    whoever it strikes is SOAKED (the coat sweeps across them from the hit, runs down, drips into a puddle — round 5 of the renders), the spray lands
+    //    round about as grease on the ground's cells. Greased = slippery, and what is greased BURNS much harder. Nothing to light: right does nothing.
+    //    (held by its NECK — `grip` 0.7: at 0.3, as the Molotov, the hand covered its whole belly)
+    greaseflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'gf', { throwable: true, breaks: 'grease', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
+      thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;

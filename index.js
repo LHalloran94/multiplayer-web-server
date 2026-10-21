@@ -6753,6 +6753,7 @@ function bombHeldGuard(obj, data, at) { if (obj.eq && obj.item && !(data && data
 //   seed), for a LIT one the server lights what can burn where it broke and where its fuel landed (`pts`, near the break — the ground's own fire then does
 //   the rest), and the bottle is taken out of the world (out of a hand first: it burst there). `sock` = whoever saw it break (they play it already), or
 //   null = the server itself (its rag burnt down and nobody broke it) — then everybody is told. No build rights: it is the throw, not an edit.
+const thrRecent = {}, THR_RECENT_MS = 300000;   // room → [{ x, y, at }] — where things broke lately (grease lies for minutes before it may burn)
 function thrBreakDo(room, o, m, sock) {
   const S = HELD.of(o.look); if (!S || !S.breaks) return;
   const map = roomObjects[room];
@@ -6760,10 +6761,16 @@ function thrBreakDo(room, o, m, sock) {
   const _d = roomDims(room), WW = _d.cols * TERRAIN_CELL, WH = _d.rows * TERRAIN_CELL;
   const lit = !!(o.lit || m.lit);                       // (a blast or a fire that broke it lights it — the client says so)
   const x = fin(m.x, 0, WW), y = fin(m.y, 0, WH), out = { id: o.id, look: o.look, x, y, vx: fin(m.vx, -60, 60), vy: fin(m.vy, -60, 60), seed: (m.seed >>> 0) || 1, by: sock ? sock.id : 'server', lit: lit ? 1 : 0 };
+  // (§5z69) `on` = the body it broke ON (a player's socket id) — the grease flask soaks them, on every screen
+  if (typeof m.on === 'string' && m.on.length <= 40) out.on = m.on;
   if (sock) sock.to(room).emit('thr-break', out); else io.to(room).emit('thr-break', out);
+  // (§5z69) kept for a while, so its fuel or grease catching later may light the burnable ground it lies on (`thr-burn`)
+  { const L = thrRecent[room] || (thrRecent[room] = []), now = Date.now(); L.push({ x, y, at: now }); while (L.length && (L.length > 64 || now - L[0].at > THR_RECENT_MS)) L.shift(); }
+  // …and one the SERVER broke (its rag burnt down, nobody holding it) lights the burnable ground right where it is: no machine will say so
+  if (!sock && lit) igniteBox(room, x, y + 4, 4);
   // (§5z68 — the user: "whether the terrain is flammable or not doesn't really matter since the fuel is the catalyst and the thing being burned") — the
   //   server NO LONGER lights the ground's own cells where it broke (that was the fire "inside the cells" of dirt): the fuel burns, on every screen, from the
-  //   seed. `pts` (where its fuel landed) is still sent and ignored.
+  //   seed. `pts` (where its fuel landed) is still sent and ignored. (§5z69) Burnable ground under fuel that has caught is lit by `thr-burn`.
   o.lit = 0; o.litAt = 0;
   { const hm = roomObjHeld[room]; if (hm) { hm.delete(o.id); if (!hm.size) delete roomObjHeld[room]; } }
   { const dm = roomObjDrv[room]; if (dm) { dm.delete(o.id); if (!dm.size) delete roomObjDrv[room]; } }
@@ -25507,6 +25514,20 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string') return;
     const map = roomObjects[room], o = map && map.get(m.id); if (!o || !o.item) return;
     thrBreakDo(room, o, m, socket);
+  });
+  // ⭐ (§5z69 — the user, asked "should wood still catch?": "Yes, burnable ground only") — where spilt fuel or grease CATCHES on the screen of whoever
+  //   threw it (16x `thrBurnFlush`: a landing that has just caught, the point just inside the surface it lies on), the server lights that cell if it
+  //   can burn — wood, coal, plants, oil (`igniteBox`, burnable only); dirt, stone, sand never. Only near something that broke here lately, at most
+  //   24 points a message, 8 messages a second.
+  socket.on('thr-burn', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || !Array.isArray(m.pts) || m.pts.length > 48) return;
+    const now = Date.now(); if (now < (socket._thrBurnT || 0)) return; socket._thrBurnT = now + 120;
+    const L = thrRecent[room]; if (!L || !L.length) return;
+    for (let i = 0; i + 1 < m.pts.length; i += 2) {
+      const x = +m.pts[i], y = +m.pts[i + 1]; if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      if (!L.some(b => now - b.at < THR_RECENT_MS && Math.abs(b.x - x) < 420 && Math.abs(b.y - y) < 420)) continue;
+      igniteBox(room, x, y, 1, 1);
+    }
   });
   socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa, det, light }) => {   // (§5z61: `light` = LIGHT ITS FUSE — a throwable's own right click; any other fire hit sets it off)
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
