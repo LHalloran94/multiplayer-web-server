@@ -6753,7 +6753,7 @@ function bombHeldGuard(obj, data, at) { if (obj.eq && obj.item && !(data && data
 //   seed), for a LIT one the server lights what can burn where it broke and where its fuel landed (`pts`, near the break — the ground's own fire then does
 //   the rest), and the bottle is taken out of the world (out of a hand first: it burst there). `sock` = whoever saw it break (they play it already), or
 //   null = the server itself (its rag burnt down and nobody broke it) — then everybody is told. No build rights: it is the throw, not an edit.
-const thrRecent = {}, THR_RECENT_MS = 300000;   // room → [{ x, y, at }] — where things broke lately (grease lies for minutes before it may burn)
+const thrRecent = {}, THR_RECENT_MS = 300000, THR_FUEL_MS = 14000;   // room → [{ x, y, at }] — where things broke lately (grease lies for minutes before it may burn)
 function thrBreakDo(room, o, m, sock) {
   const S = HELD.of(o.look); if (!S || !S.breaks) return;
   const map = roomObjects[room];
@@ -8888,6 +8888,8 @@ const liquidCfg = {
   // ⭐ FIRE LAYER (c): solids burn by `FIRE_RATE` (see there). 0 = oil is the only fuel, exactly as before.
   fireSolids: 1,
   fireSolidBurn: 80,     // passes a rate-1 solid stays alight (wood, rate 0.5, is 160 ≈ 6.4s at 25Hz)
+  fireFuelCatch: 3,      // (§5z71) fuel on a cell (spilt Molotov fuel, grease — `st.fireFuel`): it and its neighbours catch from each other this × faster…
+  fireFuelBurn: 2,       // …and it burns this × longer
   fireSolidCatch: 10,    // passes a cell must have burned before a rate-1 solid NEIGHBOUR catches (wood: 20 ≈ 0.8s)
   fireQuench: 1,         // a NEGATIVE-rate liquid (water, brine) puts fire out. 0 = water does nothing to fire
   fireVary: 0.7,         // how different one cell of a material is from the next (see `fireVar`). 0 = identical
@@ -11184,6 +11186,13 @@ function fineReactTickRoom(room, SUB, phase) {
     // susceptibility: how soon this cell catches (×), and how long it burns (×). Centred on 1 so the dials keep meaning.
     const catchMul = (j) => { const v = varyAt(j); return v ? Math.max(0.25, 1 + v * 0.9 * (2 * fireVar(j, salt, 1) - 1)) : 1; };
     const burnMul = (j) => { const v = varyAt(j); return v ? 1 + v * 0.5 * (2 * fireVar(j, salt, 2) - 1) : 1; };
+    // ⭐⭐ FUEL ON A CELL (§5z71 — the user: "fix the fire more generally in regards to fuel and such making things burn more intensely"). Spilt Molotov
+    //   fuel or grease burning on a cell (`thr-burn`, kept in `st.fireFuel`: cell → when it runs out) makes that cell burn `fireFuelBurn`× LONGER, its
+    //   neighbours catch from it — and it from them — `fireFuelCatch`× FASTER, and its flame REACH as if the fire round it were bigger.
+    //   ⚠️ Read through `st` only: this block is sliced out and run alone by the rigs.
+    const fuelM = st.fireFuel, fuelNow = Date.now(), fuelOn = !!(fuelM && fuelM.size);
+    const fueled = (j) => fuelOn && (fuelM.get(j) || 0) > fuelNow;
+    const fuelCatch = Math.max(1, +liquidCfg.fireFuelCatch || 3), fuelBurn = Math.max(1, +liquidCfg.fireFuelBurn || 2);
     // ⭐⭐ A FEW CELLS BURN RIGHT AWAY TO NOTHING — the user, once wood stopped leaving a hole at all: *"it would be
     // good to have a small amount of cells that burn away much faster than the others so that this produces gaps as
     // it burns through the interior of the tree and thus leaves spaces for the flames to appear."* Everything else
@@ -11270,7 +11279,7 @@ function fineReactTickRoom(room, SUB, phase) {
           if (h0 * (0.5 + 0.5 * fireVar(j, salt, 21)) < (+liquidCfg.cinderHeatMin || 0)) continue;
           _hN = h0 * (+liquidCfg.cinderHeatDecay || 1);
         }
-        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1) * catchMul(j)))) {
+        if (age >= Math.max(1, Math.round(liquidCfg.fireSolidCatch / sr / (j === j0 - 1 ? 2 : 1) * catchMul(j) / (fuelOn && (fueled(j0) || fueled(j)) ? fuelCatch : 1)))) {
           lightCell(fire, j); ages.set(j, 0);
           if (_hN < 1) heat.set(j, _hN); else heat.delete(j);
         }
@@ -11384,7 +11393,7 @@ function fineReactTickRoom(room, SUB, phase) {
       // can leave by any of them.
       const faces = (rI > 0 && airCell(i - 1) ? 1 : 0) | (airCell(i - ROWS) ? 2 : 0) | (airCell(i + ROWS) ? 4 : 0);
       if (!faces) return;
-      const m = massAt(i);
+      const m = Math.min(1, massAt(i) + (fuelOn && fueled(i) ? 0.5 : 0));   // (§5z71 fuel: a bigger flame)
       if (reachMax > 1 && (faces & 1)) reachUp(i, rI, age, m);
       if (emberK > 0) throwEmber(i, rI, m, mat, faces);
     };
@@ -11444,7 +11453,7 @@ function fineReactTickRoom(room, SUB, phase) {
         const leafJit = Math.max(0, liquidCfg.fireLeafAshJitter | 0);
         const ashJit = (j) => { const n = isFol(j) ? leafJit : Math.max(0, liquidCfg.fireAshJitter | 0);
           return n ? Math.round(fireVar(j, salt, 4) * n) : 0; };
-        const need = Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i) * (flash ? FLASH_MUL : 1))) + (flash ? 0 : ashJit(i));
+        const need = Math.max(1, Math.round(liquidCfg.fireSolidBurn / sRate * burnMul(i) * (flash ? FLASH_MUL : 1) * (fuelOn && fueled(i) ? fuelBurn : 1))) + (flash ? 0 : ashJit(i));
         if (age >= need) {
           // ⭐⭐ WHAT A BURNT SOLID LEAVES, AND WHETHER IT IS STILL ALIGHT. Wood leaves CHARCOAL, which is itself a
           // fuel, so the cell does not go out: it changes material where it stands and goes on smouldering, which
@@ -25531,6 +25540,11 @@ io.on('connection', (socket) => {
       const x = +m.pts[i], y = +m.pts[i + 1]; if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
       if (!L.some(b => now - b.at < THR_RECENT_MS && Math.abs(b.x - x) < 420 && Math.abs(b.y - y) < 420)) continue;
       igniteBox(room, x, y, 1, 1);
+      // (§5z71) …and the cells there carry FUEL for a while (`st.fireFuel`, read by the fire pass): burning harder, longer, spreading faster
+      const st = cellsOf(room), ROWS = st.rows, COLS = st.cols, c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL);
+      if (ROWS && COLS) { const F = st.fireFuel || (st.fireFuel = new Map()), until = now + THR_FUEL_MS;
+        for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) { const cc = c + dc, rr = r + dr; if (cc >= 0 && cc < COLS && rr >= 0 && rr < ROWS) F.set(cc * ROWS + rr, until); }
+        if (F.size > 20000) for (const [k, t] of F) if (t <= now) F.delete(k); }
     }
   });
   socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa, det, light }) => {   // (§5z61: `light` = LIGHT ITS FUSE — a throwable's own right click; any other fire hit sets it off)
