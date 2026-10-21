@@ -6761,13 +6761,9 @@ function thrBreakDo(room, o, m, sock) {
   const lit = !!(o.lit || m.lit);                       // (a blast or a fire that broke it lights it — the client says so)
   const x = fin(m.x, 0, WW), y = fin(m.y, 0, WH), out = { id: o.id, look: o.look, x, y, vx: fin(m.vx, -60, 60), vy: fin(m.vy, -60, 60), seed: (m.seed >>> 0) || 1, by: sock ? sock.id : 'server', lit: lit ? 1 : 0 };
   if (sock) sock.to(room).emit('thr-break', out); else io.to(room).emit('thr-break', out);
-  if (S.breaks === 'fire' && lit) {                    // (§5z66: only a LIT one sets anything alight; an unlit one spills its fuel)
-    igniteBox(room, x, y, 16);
-    if (Array.isArray(m.pts)) for (let i = 0; i + 1 < Math.min(32, m.pts.length); i += 2) {
-      const px = +m.pts[i], py = +m.pts[i + 1]; if (!Number.isFinite(px) || !Number.isFinite(py) || Math.hypot(px - x, py - y) > 260) continue;
-      igniteBox(room, Math.max(0, Math.min(WW, px)), Math.max(0, Math.min(WH, py)), 8);
-    }
-  }
+  // (§5z68 — the user: "whether the terrain is flammable or not doesn't really matter since the fuel is the catalyst and the thing being burned") — the
+  //   server NO LONGER lights the ground's own cells where it broke (that was the fire "inside the cells" of dirt): the fuel burns, on every screen, from the
+  //   seed. `pts` (where its fuel landed) is still sent and ignored.
   o.lit = 0; o.litAt = 0;
   { const hm = roomObjHeld[room]; if (hm) { hm.delete(o.id); if (!hm.size) delete roomObjHeld[room]; } }
   { const dm = roomObjDrv[room]; if (dm) { dm.delete(o.id); if (!dm.size) delete roomObjDrv[room]; } }

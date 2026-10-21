@@ -316,7 +316,8 @@
     // (§5z59 — the user: "they are held sideways in the player's hand, rather than upright") — held UPRIGHT at your side, fuse up, as a torch rests
     // (§5z67 — the user: "thrown items like bombs and so on should follow your pointer in your hand, but you could press H to set them to a more neutral
     //   mode like with weapons") — they follow the pointer now (`aimsAtRest`), and H rests them upright at your side
-    rest: 'upright', aimsAtRest: true }, extra || {}));
+    //   (§5z68 — "they should still stay upright, just the hand should move") — `holdUpright`: the hand follows the pointer, the thing stays upright
+    rest: 'upright', aimsAtRest: true, holdUpright: true }, extra || {}));
   // (§5z59 — the user: "the explosion size doesn't change enough across the different explosives") — spread wide: dynamite a small bang that digs deep, the
   //   bundle more than twice the bomb. `blastD` = × the blast's hurt.
   Object.assign(LOOKS, {
@@ -342,7 +343,7 @@
   //    `sticks` + `stickAny` = it flies along its path and is looked for at its leading end, as a thrown star is — it breaks there instead of sticking.
   Object.assign(LOOKS, {
     molotov: weapon(27, 9, 0.7, 0.3, 1, 'blunt', 'mo', { throwable: true, breaks: 'fire', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
-      thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, fuse: 15 }),   // (§5z67) follows the pointer (H rests it) · lit, its rag burns 15s, then it bursts where it is
+      thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true, fuse: 15 }),   // (§5z67) follows the pointer (H rests it) · lit, its rag burns 15s, then it bursts where it is
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
