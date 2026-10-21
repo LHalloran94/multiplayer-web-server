@@ -25508,7 +25508,11 @@ io.on('connection', (socket) => {
     if (o.lit) return;
     const at = Date.now(); o.lit = 1; o.litAt = at; io.to(room).emit('thr-lit', { id: o.id, fuse: S.fuse || 15 });
     setTimeout(() => { const map = roomObjects[room], q = map && map.get(o.id); if (!q || !q.lit || q.litAt !== at) return;
-      thrBreakDo(room, q, { x: q.x, y: q.y, vx: 0, vy: 0, seed: (Math.random() * 4294967295) >>> 0, lit: 1 }, null); }, (S.fuse || 15) * 1000 + 900);
+      // 🟥 (§5z70 — the user: one left lying "seemed to explode not where the molotov actually was, but somewhere nearby") — `q.x/q.y` is where it was
+      //   PUT (dropped, placed); where a loose thing came to REST is `roomLoosePose` (`obj-settle`, which also stops anybody driving it — so no machine
+      //   broke it, and this did, at the old spot)
+      const lp = roomLoosePose[room] && roomLoosePose[room].get(q.id), px = lp ? lp.x : q.x, py = lp ? lp.y : q.y;
+      thrBreakDo(room, q, { x: px, y: py, vx: 0, vy: 0, seed: (Math.random() * 4294967295) >>> 0, lit: 1 }, null); }, (S.fuse || 15) * 1000 + 900);
   });
   socket.on('thr-break', (m) => {
     const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string') return;
