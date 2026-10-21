@@ -25464,6 +25464,31 @@ io.on('connection', (socket) => {
       else if (obj.boom > 0) armBomb(room, it.id, socket.id, { x, y, det: true });   // (§5z61: fire sets it off)
     }
   });
+  // ⭐ (2026-10-21, plan file §5z65) A THROWN THING THAT BREAKS — the Molotov (server/held.js `breaks`). The machine flying it saw it meet something and
+  //   says where, how fast it was going, and a seed: everybody else is told the same (each screen plays the splash and the fire from the seed), the
+  //   bottle is gone (spent when it was thrown; taken out of the world here), and for FIRE the server lights what can burn where it broke and where its
+  //   fuel landed (`pts`, at most 16, near the break) — the ground's own fire then does the rest. No build rights: it is the throw, not an edit.
+  socket.on('thr-break', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string') return;
+    const map = roomObjects[room], o = map && map.get(m.id); if (!o || !o.item) return;
+    const S = HELD.of(o.look); if (!S || !S.breaks) return;
+    const fin = (v, lo, hi) => Number.isFinite(+v) ? Math.max(lo, Math.min(hi, +v)) : 0;
+    const _d = roomDims(room), WW = _d.cols * TERRAIN_CELL, WH = _d.rows * TERRAIN_CELL;
+    const x = fin(m.x, 0, WW), y = fin(m.y, 0, WH), out = { id: o.id, look: o.look, x, y, vx: fin(m.vx, -60, 60), vy: fin(m.vy, -60, 60), seed: (m.seed >>> 0) || 1, by: socket.id };
+    socket.to(room).emit('thr-break', out);
+    if (S.breaks === 'fire') {
+      igniteBox(room, x, y, 16);
+      if (Array.isArray(m.pts)) for (const q of m.pts.slice(0, 32).reduce((a, v, i, A) => (i % 2 ? a : a.concat([[A[i], A[i + 1]]])), [])) {
+        const px = +q[0], py = +q[1]; if (!Number.isFinite(px) || !Number.isFinite(py) || Math.hypot(px - x, py - y) > 260) continue;
+        igniteBox(room, Math.max(0, Math.min(WW, px)), Math.max(0, Math.min(WH, py)), 8);
+      }
+    }
+    { const hm = roomObjHeld[room]; if (hm) { hm.delete(o.id); if (!hm.size) delete roomObjHeld[room]; } }
+    { const dm = roomObjDrv[room]; if (dm) { dm.delete(o.id); if (!dm.size) delete roomObjDrv[room]; } }
+    if (o.eq) itemObjMove(room, o, null);
+    objStOf(room).delete(o.id);
+    if (map.get(o.id)) eqRemoveObj(room, o);
+  });
   socket.on('avatar-object-hit', ({ id, dmg, x, y, vx, vy, fire, douse, src, hx, hy, pa, det, light }) => {   // (§5z61: `light` = LIGHT ITS FUSE — a throwable's own right click; any other fire hit sets it off)
     if (!currentAvatarRoom || !roomObjects[currentAvatarRoom]) return;
     const obj = roomObjects[currentAvatarRoom].get(id);

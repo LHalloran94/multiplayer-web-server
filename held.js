@@ -334,6 +334,14 @@
     canister:  boomE(21, 9, 0.8, 0.3, 'pc', 1.6, 130, 16, 0, { burst: 'push', thrK: 0.8, thrGk: 0.9, blastD: 0, mat: 'iron' }),
     flashbang: boomE(20, 8, 0.5, 0.3, 'fx', 1.8, 300, 0, 0, { burst: 'flash', thrK: 0.9, thrGk: 0.8, blastD: 0, mat: 'iron' }),
   });
+  // ⭐ PIECE 3 PART B1 (2026-10-21, plan file §5z65): THE MOLOTOV — a bottle with a burning rag that BREAKS on whatever it meets (`breaks: 'fire'`,
+  //    client 16x `thrBreak`; server `thr-break`): a whoomp of burning fuel thrown on with the bottle's momentum, burning drops flung out that light the
+  //    ground / a wall / a person where they land, the fire creeping outward from each, the edges dying first (round 4 of the renders). Not liquid.
+  //    `sticks` + `stickAny` = it flies along its path and is looked for at its leading end, as a thrown star is — it breaks there instead of sticking.
+  Object.assign(LOOKS, {
+    molotov: weapon(27, 9, 0.7, 0.3, 1, 'blunt', 'mo', { throwable: true, breaks: 'fire', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
+      thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: false }),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it
