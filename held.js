@@ -323,6 +323,17 @@
     dynbundle: boomE(27, 9, 1.4, 0.35, 'db', 3.5, 240, 40, 0.5, { thrK: 0.65, thrGk: 1.0, mat: 'wood', blastD: 1.6 }),
     tarball:   boomE(21, 13, 0.8, 0.3, 'tb', 2.5, 85, 14, 0.45, { thrK: 0.8, thrGk: 0.9, sticky: true, sticks: true, stickAny: true, mat: 'wood', blastD: 0.85 }),
   });
+  // ⭐ THROWABLES, PIECE 3 PART A (2026-10-21, plan file §5z62 — looks agreed over five rounds of renders, `scratchpad/look/items/throwables/effects/`):
+  //    two more on the explosives' FUSE, each its own kind of BURST (`burst`, client 16x): no hurt, no hole, nothing set alight or off.
+  //    PRESSURE BOMB (the user: the gust flask "less magic … some sort of pressure bomb … that pushes outward"; P1, the brass canister; V1, the vapour
+  //    burst) — `burst: 'push'`: it hisses from its valve while the fuse runs, then bursts in white vapour and dust, throwing people and loose things
+  //    outward (`blastR`, `blastF`) and hurting nobody.
+  //    FLASH-BANG (C, the painted stripe) — `burst: 'flash'`: a bang and a white flash that lights everything; whoever can SEE it within `blastR` and
+  //    was facing it is whited out (the afterimage) and dazed (eyes screwed shut, then blinking it off — D2); facing away, only a glare.
+  Object.assign(LOOKS, {
+    canister:  boomE(21, 9, 0.8, 0.3, 'pc', 1.6, 130, 16, 0, { burst: 'push', thrK: 0.8, thrGk: 0.9, blastD: 0, mat: 'iron' }),
+    flashbang: boomE(20, 8, 0.5, 0.3, 'fx', 1.8, 300, 0, 0, { burst: 'flash', thrK: 0.9, thrGk: 0.8, blastD: 0, mat: 'iron' }),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it

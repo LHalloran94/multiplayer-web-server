@@ -116,6 +116,11 @@ SVG.bomb = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle 
 for (const [id, name, look, prima] of [['bomb', 'Bomb', 'thbomb', 15], ['dynamite', 'Dynamite', 'dynamite', 12], ['dynamite_bundle', 'Bundle of dynamite', 'dynbundle', 30],
   ['tar_ball', 'Tar ball', 'tarball', 18]])
   ITEMS[id] = { name, kind: 'throwable', tier: 0, svg: SVG.bomb, obj: Object.assign(HELD.objOf(look), { boom: HELD.LOOKS[look].boom }), stack: true, make: { mats: [], prima } };
+// Piece 3 part A (2026-10-21, plan file §5z62): the PRESSURE BOMB and the FLASH-BANG — on the same fuse, each its own burst (server/held.js `burst`)
+SVG.pressure = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="5" y="7" width="12" height="13" rx="3" fill="#c4a04a"/><circle cx="11" cy="13.5" r="2.4" fill="#ece8d6" stroke="#8a6a2c" stroke-width=".8"/><path d="M11 7V4M8 4h6" stroke="#6a6e76" stroke-width="1.6" stroke-linecap="round"/></svg>';
+SVG.flash = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="7" y="7" width="9" height="14" rx="1.5" fill="#56623e"/><rect x="7" y="12" width="9" height="2.2" fill="#dec046"/><path d="M8.5 7V5h6v2" fill="#a8b0aa"/><circle cx="18" cy="4.5" r="1.8" fill="none" stroke="#c8ccd0" stroke-width="1"/></svg>';
+for (const [id, name, look, svg, prima] of [['pressure_bomb', 'Pressure bomb', 'canister', SVG.pressure, 14], ['flash_bang', 'Flash-bang', 'flashbang', SVG.flash, 10]])
+  ITEMS[id] = { name, kind: 'throwable', tier: 0, svg, obj: Object.assign(HELD.objOf(look), { boom: HELD.LOOKS[look].boom }), stack: true, make: { mats: [], prima } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
