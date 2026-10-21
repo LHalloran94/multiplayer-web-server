@@ -311,6 +311,9 @@
   //    `blastR` = how far the blast reaches (px) · `blastF` = how hard it throws you · `dig` = the hole, × the blast's reach · `sticky` = it sticks
   //    to whatever it hits — rock, a crate, a person (on them, not in them) — and goes off there.
   //    They are blunt to hold (right is the fuse, not a strike) and heavier than the blades, so they fly in a rounder arc.
+  // (§5z77 — the user: "flashbang fuses are too short. I think most things should have the same fuse time, except molotovs, so that players can learn the
+  //   timing more easily") — ONE fuse for every explosive (the Molotov's rag is its own, `fuse` 15s)
+  const THR_FUSE = 3;
   const boomE = (L, h, wt, grip, tag, boom, blastR, blastF, dig, extra) => weapon(L, h, wt, grip, 1, 'blunt', tag, Object.assign({ throwable: true, boom, blastR, blastF, dig,
     daze: false, right: 'light', icon: 1.1, mat: 'iron',
     // (§5z59 — the user: "they are held sideways in the player's hand, rather than upright") — held UPRIGHT at your side, fuse up, as a torch rests
@@ -321,10 +324,10 @@
   // (§5z59 — the user: "the explosion size doesn't change enough across the different explosives") — spread wide: dynamite a small bang that digs deep, the
   //   bundle more than twice the bomb. `blastD` = × the blast's hurt.
   Object.assign(LOOKS, {
-    thbomb:    boomE(22, 14, 0.9, 0.3, 'bm', 3.0, 110, 20, 0.4, { thrK: 0.8, thrGk: 0.9, blastD: 1 }),
-    dynamite:  boomE(26, 5, 0.6, 0.35, 'dy', 2.5, 55, 9, 1.5, { thrK: 0.9, thrGk: 0.75, mat: 'wood', blastD: 0.6 }),
-    dynbundle: boomE(27, 9, 1.4, 0.35, 'db', 3.5, 240, 40, 0.5, { thrK: 0.65, thrGk: 1.0, mat: 'wood', blastD: 1.6 }),
-    tarball:   boomE(21, 13, 0.8, 0.3, 'tb', 2.5, 85, 14, 0.45, { thrK: 0.8, thrGk: 0.9, sticky: true, sticks: true, stickAny: true, mat: 'wood', blastD: 0.85 }),
+    thbomb:    boomE(22, 14, 0.9, 0.3, 'bm', THR_FUSE, 110, 20, 0.4, { thrK: 0.8, thrGk: 0.9, blastD: 1 }),
+    dynamite:  boomE(26, 5, 0.6, 0.35, 'dy', THR_FUSE, 55, 9, 1.5, { thrK: 0.9, thrGk: 0.75, mat: 'wood', blastD: 0.6 }),
+    dynbundle: boomE(27, 9, 1.4, 0.35, 'db', THR_FUSE, 240, 40, 0.5, { thrK: 0.65, thrGk: 1.0, mat: 'wood', blastD: 1.6 }),
+    tarball:   boomE(21, 13, 0.8, 0.3, 'tb', THR_FUSE, 85, 14, 0.45, { thrK: 0.8, thrGk: 0.9, sticky: true, sticks: true, stickAny: true, mat: 'wood', blastD: 0.85 }),
   });
   // ⭐ THROWABLES, PIECE 3 PART A (2026-10-21, plan file §5z62 — looks agreed over five rounds of renders, `scratchpad/look/items/throwables/effects/`):
   //    two more on the explosives' FUSE, each its own kind of BURST (`burst`, client 16x): no hurt, no hole, nothing set alight or off.
@@ -334,8 +337,8 @@
   //    FLASH-BANG (C, the painted stripe) — `burst: 'flash'`: a bang and a white flash that lights everything; whoever can SEE it within `blastR` and
   //    was facing it is whited out (the afterimage) and dazed (eyes screwed shut, then blinking it off — D2); facing away, only a glare.
   Object.assign(LOOKS, {
-    canister:  boomE(21, 9, 0.8, 0.3, 'pc', 1.6, 130, 16, 0, { burst: 'push', thrK: 0.8, thrGk: 0.9, blastD: 0, mat: 'iron' }),
-    flashbang: boomE(20, 8, 0.5, 0.3, 'fx', 1.8, 300, 0, 0, { burst: 'flash', thrK: 0.9, thrGk: 0.8, blastD: 0, mat: 'iron' }),
+    canister:  boomE(21, 9, 0.8, 0.3, 'pc', THR_FUSE, 130, 16, 0, { burst: 'push', thrK: 0.8, thrGk: 0.9, blastD: 0, mat: 'iron' }),
+    flashbang: boomE(20, 8, 0.5, 0.3, 'fx', THR_FUSE, 300, 0, 0, { burst: 'flash', thrK: 0.9, thrGk: 0.8, blastD: 0, mat: 'iron' }),
   });
   // ⭐ PIECE 3 PART B1 (2026-10-21, plan file §5z65): THE MOLOTOV — a bottle with a burning rag that BREAKS on whatever it meets (`breaks: 'fire'`,
   //    client 16x `thrBreak`; server `thr-break`): a whoomp of burning fuel thrown on with the bottle's momentum, burning drops flung out that light the
@@ -360,7 +363,20 @@
   //    (§5z74 — "it should actually come out of the grenade, and it shouldn't just disappear") the can STAYS for `vent` s after its fuse (server
   //    `bombItemSweep`; client `bombGone`), lying and rollable, the cloud pouring out of wherever it is; then it is taken away
   Object.assign(LOOKS, {
-    smokebomb: boomE(21, 9, 0.6, 0.3, 'sk', 1.5, 0, 0, 0, { burst: 'smoke', vent: 14, thrK: 0.9, thrGk: 0.8, blastD: 0, mat: 'iron' }),
+    smokebomb: boomE(21, 9, 0.6, 0.3, 'sk', THR_FUSE, 0, 0, 0, { burst: 'smoke', vent: 14, thrK: 0.9, thrGk: 0.8, blastD: 0, mat: 'iron' }),
+  });
+  // ⭐ PIECE 4 (2026-10-22, plan file §5z76 — the user's answers): THE FUN ONES.
+  //    THE DODGEBALL — a rubber ball that BOUNCES (its object's `lbnc`, server/items.js), hurts nobody: a hit is a BUMP (H1 — a small shove and a
+  //    rubbery wobble, client 16x `thrBallHit`), and a bare-handed PARRY facing it CATCHES it as an arrow is caught (`catches`: into the catcher's
+  //    hand). Right does nothing. Held cupped at its edge (round 1's hand).
+  //    THE EGG — it BREAKS on whatever it meets (`breaks: 'egg'`, the flasks' way): E2, a realistic splat — clear glossy white, a soft yolk — and
+  //    EGG-SIZED (the user: "it's also way too big. It should be appropriate to the size of the egg"); on a body it runs down and the yolk slides off
+  //    (client 16x `thrEggStart`). Nothing on your screen when it hits your face (F0).
+  Object.assign(LOOKS, {
+    dodgeball: weapon(22, 22, 0.45, 0.12, 1, 'blunt', 'zb', { throwable: true, ball: true, catches: true, carves: false, daze: false, icon: 1.1,
+      thrK: 0.85, thrGk: 0.85, rest: 'upright', aimsAtRest: true, holdUpright: true, mat: 'wood' }),
+    egg: weapon(9, 7, 0.12, 0.35, 1, 'blunt', 'ze', { throwable: true, breaks: 'egg', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
+      thrK: 0.85, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;

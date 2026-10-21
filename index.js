@@ -19984,8 +19984,8 @@ let itemObjSeq = 0;
 function itemObjPlace(room, item, x, y, angle, ownerSid, ownerName) {
   const S = ITEMS.isObjItem(item) && ITEMS.ITEMS[item].obj; if (!S || !isFinite(x) || !isFinite(y)) return null;
   const id = (ownerSid || 'drop') + '-it' + Date.now().toString(36) + (++itemObjSeq).toString(36);
-  const o = buildWorldObject('stamp', { type: 'stamp', content: S.content, shape: 'rect', x, y, w: S.w, h: S.h, angle: angle || 0,
-    breakable: false, loose: 1, look: S.look, lwt: S.lwt, lbnc: 0, item }, id, ownerSid || '', ownerName || '', room);
+  const o = buildWorldObject('stamp', { type: 'stamp', content: S.content, shape: S.shape || 'rect', x, y, w: S.w, h: S.h, angle: angle || 0,
+    breakable: false, loose: 1, look: S.look, lwt: S.lwt, lbnc: S.lbnc || 0, item }, id, ownerSid || '', ownerName || '', room);
   if (!o || o.item !== item) return null;
   objIndex(room, o);
   if (objChunked(room)) emitObjToChunks(room, o, 'avatar-object-add', o); else io.to(room).emit('avatar-object-add', o);
@@ -25814,7 +25814,9 @@ io.on('connection', (socket) => {
   socket.on('arrow-catch', ({ id, to }) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string' || typeof to !== 'string') return;
     const map = roomObjects[room], o = map && map.get(id);
-    if (!o || !ITEMS.isItem(o.item) || ITEMS.ITEMS[o.item].kind !== 'ammo') return;
+    // (§5z76) …or a DODGEBALL (`catches`): caught the same way, and the catcher is told so their bar takes it into the hand (`ball-caught`)
+    const ballC = !!(o && o.look && HELD.of(o.look) && HELD.of(o.look).catches);
+    if (!o || !ITEMS.isItem(o.item) || (ITEMS.ITEMS[o.item].kind !== 'ammo' && !ballC)) return;
     { const dm = roomObjDrv[room]; if (!dm || dm.get(id) !== socket.id) return; }                // …only whoever is flying it
     const ts = io.sockets.sockets.get(to); if (!ts) return;
     if (invGatedRoom(room)) { ledger.creditItems(playerKeyFor(to), [[o.item, 1]]); sendInvSync(ts, room); }
@@ -25822,6 +25824,7 @@ io.on('connection', (socket) => {
     { const sm = roomObjSt[room]; if (sm) sm.delete(id); }
     eqRemoveObj(room, o);
     broadcastObjSt(room);
+    if (ballC) ts.emit('ball-caught', { item: o.item });
   });
   // ⭐ A TUG — somebody grabbed what somebody else holds. Carried to the holder, whose machine decides it (it has both bodies and
   // the object in front of it); `obj-tug-res` comes back from the holder, and a win moves the holding (and the driving) across.

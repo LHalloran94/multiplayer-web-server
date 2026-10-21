@@ -134,6 +134,12 @@ SVG.smokebomb = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><re
 for (const [id, name, look, svg, prima] of [['pressure_bomb', 'Pressure bomb', 'canister', SVG.pressure, 14], ['flash_bang', 'Flash-bang', 'flashbang', SVG.flash, 10], ['smoke_bomb', 'Smoke bomb', 'smokebomb', SVG.smokebomb, 8]])
   ITEMS[id] = { name, kind: 'throwable', tier: 0, svg, obj: Object.assign(HELD.objOf(look), { boom: HELD.LOOKS[look].boom }), stack: true, make: { mats: [], prima } };
 
+// Piece 4 (2026-10-22, plan file §5z76): the DODGEBALL (bounces — `lbnc` 4 of 5, a basketball's is 5) and the EGG (breaks: a splat)
+SVG.dodgeball = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="#cc3830"/><path d="M3.5 12h17M12 3.5c-3 2.4-3 14.6 0 17" fill="none" stroke="#7a1c18" stroke-width="1"/><circle cx="9" cy="8.6" r="2.2" fill="#ffffff" opacity=".35"/></svg>';
+SVG.egg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 3.2c3.6 0 6.2 5.6 6.2 10.2 0 4-2.8 6.6-6.2 6.6s-6.2-2.6-6.2-6.6C5.8 8.8 8.4 3.2 12 3.2z" fill="#eee2c8" stroke="#b8a684" stroke-width=".8"/><ellipse cx="10.2" cy="9" rx="1.6" ry="2.4" fill="#ffffff" opacity=".6"/></svg>';
+ITEMS.dodgeball = { name: 'Dodgeball', kind: 'throwable', tier: 0, svg: SVG.dodgeball, obj: Object.assign(HELD.objOf('dodgeball'), { lbnc: 4, shape: 'ellipse' }), stack: true, make: { mats: [], prima: 4 } };
+ITEMS.egg = { name: 'Egg', kind: 'throwable', tier: 0, svg: SVG.egg, obj: Object.assign(HELD.objOf('egg'), { shape: 'ellipse' }), stack: true, make: { mats: [], prima: 1 } };
+
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
 // The wire shape of the table: [[id, { name, kind, tier, svg }], …]. Sent once per socket.
