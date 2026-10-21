@@ -6753,7 +6753,31 @@ function bombHeldGuard(obj, data, at) { if (obj.eq && obj.item && !(data && data
 //   seed), for a LIT one the server lights what can burn where it broke and where its fuel landed (`pts`, near the break — the ground's own fire then does
 //   the rest), and the bottle is taken out of the world (out of a hand first: it burst there). `sock` = whoever saw it break (they play it already), or
 //   null = the server itself (its rag burnt down and nobody broke it) — then everybody is told. No build rights: it is the throw, not an edit.
-const thrRecent = {}, THR_RECENT_MS = 300000, THR_FUEL_MS = 14000;   // room → [{ x, y, at }] — where things broke lately (grease lies for minutes before it may burn)
+const thrRecent = {}, THR_RECENT_MS = 300000, THR_FUEL_MS = 14000;
+// ⭐ (§5z72, piece 3 part C — the user's F1: "water within reach turns to ice — server cells") THE FROST FLASK breaking at (x, y): every cell within `R`
+//   that is not solid and holds mostly WATER becomes ICE (4), its liquid gone, everybody told (`terrain-set` + the fine cells); and every cell burning
+//   there goes OUT. Called by `thrBreakDo` itself — the server decides, no client says which cells.
+function thrFreeze(room, x, y, R) {
+  const st = cellsOf(room), grid = ensureTerrain(room), hp = ensureTerrainHp(room), mats = roomMats[room] || {}, amt = st.fineAmt, tot = st.fineTotal;
+  const ROWS = grid.geom.rows, COLS = grid.geom.cols, C = TERRAIN_CELL, ICE = 4, WR = LIQ_RANK[9];
+  const c0 = Math.max(0, Math.floor((x - R) / C)), c1 = Math.min(COLS - 1, Math.floor((x + R) / C)), r0 = Math.max(0, Math.floor((y - R) / C)), r1 = Math.min(ROWS - 1, Math.floor((y + R) / C));
+  const cells = [], changedFine = [], fireOut = [], fs = st.fineFire;
+  if (amt && tot) ensureFineArrays(room, 1);
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) {
+    const dx = (c + 0.5) * C - x, dy = (r + 0.5) * C - y; if (dx * dx + dy * dy > R * R) continue;
+    const i = c * ROWS + r;
+    if (fs && fs.delete(i)) { fireOut.push(i, 0); if (st.fireAge) st.fireAge.delete(i); }
+    if (!amt || !tot || isSolidCell(grid.g(i))) continue;
+    const t = tot.g(i); if (!(t > 0)) continue;
+    const w = amt.rp(i)[amt.o(i) + WR]; if (!(w > t * 0.5)) continue;
+    grid.s(i, ICE); hp.s(i, matStrengthSrv(mats, ICE)); dropSource(room, i); cells.push(i, ICE);
+    for (const q of fineClearBlock(room, 1, c, r)) changedFine.push(q);
+  }
+  if (changedFine.length) emitFineCells(room, changedFine);
+  if (cells.length) { wireFanout(room, 'terrain-set', { cells }); fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); }
+  if (fireOut.length) wireFanout(room, 'fire-cells', { cells: fireOut, lift: 1 });
+  return cells.length / 2;
+}   // room → [{ x, y, at }] — where things broke lately (grease lies for minutes before it may burn)
 function thrBreakDo(room, o, m, sock) {
   const S = HELD.of(o.look); if (!S || !S.breaks) return;
   const map = roomObjects[room];
@@ -6767,7 +6791,9 @@ function thrBreakDo(room, o, m, sock) {
   // (§5z69) kept for a while, so its fuel or grease catching later may light the burnable ground it lies on (`thr-burn`)
   { const L = thrRecent[room] || (thrRecent[room] = []), now = Date.now(); L.push({ x, y, at: now }); while (L.length && (L.length > 64 || now - L[0].at > THR_RECENT_MS)) L.shift(); }
   // …and one the SERVER broke (its rag burnt down, nobody holding it) lights the burnable ground right where it is: no machine will say so
-  if (!sock && lit) igniteBox(room, x, y + 4, 4);
+  if (!sock && lit && S.breaks === 'fire') igniteBox(room, x, y + 4, 4);
+  // (§5z72) a FROST flask freezes the water in its reach and puts out what burns there
+  if (S.breaks === 'frost') { try { thrFreeze(room, x, y, S.reach || 56); } catch (e) { console.warn('[thrFreeze]', e && e.message); } }
   // (§5z68 — the user: "whether the terrain is flammable or not doesn't really matter since the fuel is the catalyst and the thing being burned") — the
   //   server NO LONGER lights the ground's own cells where it broke (that was the fire "inside the cells" of dirt): the fuel burns, on every screen, from the
   //   seed. `pts` (where its fuel landed) is still sent and ignored. (§5z69) Burnable ground under fuel that has caught is lit by `thr-burn`.

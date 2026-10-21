@@ -350,6 +350,12 @@
     //    (held by its NECK — `grip` 0.7: at 0.3, as the Molotov, the hand covered its whole belly)
     greaseflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'gf', { throwable: true, breaks: 'grease', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
       thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
+    // ⭐ PIECE 3 PART C (2026-10-21, plan file §5z72): THE FROST FLASK (the user's F1 — "frosted and held still; water within reach turns to ice") and
+    //    THE SMOKE FLASK (B — "part of sight"). Both break the same way; `reach` = how far the frost goes (px), `hold` = how long somebody is frozen (s).
+    frostflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'ff', { throwable: true, breaks: 'frost', reach: 56, hold: 2.5, sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
+      thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
+    smokeflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'sf', { throwable: true, breaks: 'smoke', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
+      thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
