@@ -357,8 +357,10 @@
   });
   // (§5z73 — the user: "It should also look more like a real smoke bomb, rather than a flask, in the same vein as the flash-bang") THE SMOKE BOMB: a can on
   //    the explosives' fuse (right lights it), whose burst is a cloud VENTED where it goes off (`burst: 'smoke'`, client 16x `thrSmokeFx`) — no blast
+  //    (§5z74 — "it should actually come out of the grenade, and it shouldn't just disappear") the can STAYS for `vent` s after its fuse (server
+  //    `bombItemSweep`; client `bombGone`), lying and rollable, the cloud pouring out of wherever it is; then it is taken away
   Object.assign(LOOKS, {
-    smokebomb: boomE(21, 9, 0.6, 0.3, 'sk', 1.5, 0, 0, 0, { burst: 'smoke', thrK: 0.9, thrGk: 0.8, blastD: 0, mat: 'iron' }),
+    smokebomb: boomE(21, 9, 0.6, 0.3, 'sk', 1.5, 0, 0, 0, { burst: 'smoke', vent: 14, thrK: 0.9, thrGk: 0.8, blastD: 0, mat: 'iron' }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;

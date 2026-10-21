@@ -6815,8 +6815,10 @@ function bombItemSweep(avRoom, id, obj, at) {
     objStOf(avRoom).delete(id);
     if (m.get(id)) eqRemoveObj(avRoom, o);
     broadcastObjSt(avRoom);
-  }, Math.max(50, at + bombFuseMs(obj) + 700 - Date.now()));
+  }, Math.max(50, at + bombFuseMs(obj) + 700 + bombVentMs(obj) - Date.now()));
 }
+// (§5z74) a SMOKE BOMB is not gone when its fuse ends: the can lies there VENTING its cloud for `vent` s (server/held.js), then it is taken away
+function bombVentMs(obj) { const S = obj && obj.look && HELD.of(obj.look); return S && S.burst === 'smoke' ? (S.vent || 0) * 1000 : 0; }
 function armObjReact(avRoom, id, on) {
   const map = roomObjects[avRoom]; if (!map) return;
   const obj = map.get(id); const list = obj && obj.reacts;
@@ -25796,6 +25798,8 @@ io.on('connection', (socket) => {
     const hm = roomObjHeld[room], hs = hm && hm.get(id);
     const ammo = o && ITEMS.isItem(o.item) && ITEMS.ITEMS[o.item].kind === 'ammo';   // (2026-10-20) …an arrow lying or stuck anywhere: back into the pouch
     if (!o || !o.item || !(ITEMS.isObjItem(o.item) || ammo) || o.eq || (hs && hs !== socket.id) || !(o.type === 'stamp' && o.loose && o.loose !== 2 && !o.mnt)) { socket.emit('obj-hold-no', { id }); return; }
+    // (§5z74) …but not a SPENT explosive (a smoke can still venting, or anything whose fuse has run): it would go back on its stack as a new one
+    { const sm = roomObjSt[room], r = sm && sm.get(id); if (r && r.lit && Date.now() >= r.lit.at + bombFuseMs(o)) { socket.emit('obj-hold-no', { id }); return; } }
     if (hm) { hm.delete(id); if (!hm.size) delete roomObjHeld[room]; }
     { const dm = roomObjDrv[room]; if (dm) { dm.delete(id); if (!dm.size) delete roomObjDrv[room]; } }
     { const sm = roomObjSt[room]; if (sm) sm.delete(id); }
