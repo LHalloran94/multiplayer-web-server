@@ -126,11 +126,12 @@ SVG.grease = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path 
 // Piece 3 part C (2026-10-21, plan file §5z72): the FROST FLASK (freezes who is near, water to ice) and the SMOKE FLASK (a cloud nobody sees through)
 const flaskSvg = (glass, inside, extra) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10.2 3.6h3.6v4.2c2.9 1 4.9 3.6 4.9 6.7 0 3.9-3 6.9-6.7 6.9s-6.7-3-6.7-6.9c0-3.1 2-5.7 4.9-6.7z" fill="' + glass + '"/><path d="M6.6 14.6c1.6-.8 3.6-.5 5.4.2s3.8.9 5.4.1c-.1 3.4-2.6 6.1-5.4 6.1s-5.4-2.6-5.4-6.4z" fill="' + inside + '"/><rect x="9.7" y="2" width="4.6" height="2.6" rx=".8" fill="#b08a5a"/>' + (extra || '') + '</svg>';
 SVG.frost = flaskSvg('#bfe2f6', '#e8f6ff', '<path d="M12 11.5v6M9.4 13l5.2 3M9.4 16l5.2-3" stroke="#6fb2dc" stroke-width="1" stroke-linecap="round"/>');
-SVG.smokef = flaskSvg('#8a8c92', '#c9cbd0', '<circle cx="10.5" cy="11.5" r="1.6" fill="#e2e3e6" opacity=".8"/><circle cx="13.4" cy="10.6" r="1.2" fill="#e2e3e6" opacity=".7"/>');
 for (const [id, name, look, svg, prima] of [['molotov', 'Molotov', 'molotov', SVG.molotov, 12], ['grease_flask', 'Grease flask', 'greaseflask', SVG.grease, 8],
-  ['frost_flask', 'Frost flask', 'frostflask', SVG.frost, 10], ['smoke_flask', 'Smoke flask', 'smokeflask', SVG.smokef, 8]])
+  ['frost_flask', 'Frost flask', 'frostflask', SVG.frost, 10]])
   ITEMS[id] = { name, kind: 'throwable', tier: 0, svg, obj: HELD.objOf(look), stack: true, make: { mats: [], prima } };
-for (const [id, name, look, svg, prima] of [['pressure_bomb', 'Pressure bomb', 'canister', SVG.pressure, 14], ['flash_bang', 'Flash-bang', 'flashbang', SVG.flash, 10]])
+// (§5z73) the SMOKE BOMB — a can, on the fuse like the flash-bang (it replaced the smoke flask)
+SVG.smokebomb = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="7" y="7" width="9" height="14" rx="1.5" fill="#6e7468"/><rect x="7" y="9" width="9" height="1.6" fill="#e6e4dc"/><circle cx="9.5" cy="15" r="1.1" fill="#4a4e46"/><circle cx="13.5" cy="15" r="1.1" fill="#4a4e46"/><path d="M8.5 7V5h6v2" fill="#a8b0aa"/><circle cx="18" cy="4.5" r="1.8" fill="none" stroke="#c8ccd0" stroke-width="1"/><path d="M15 4c1.5-1.8 3.5-1.4 4-3" stroke="#d6d8dc" stroke-width="1.4" fill="none" stroke-linecap="round" opacity=".8"/></svg>';
+for (const [id, name, look, svg, prima] of [['pressure_bomb', 'Pressure bomb', 'canister', SVG.pressure, 14], ['flash_bang', 'Flash-bang', 'flashbang', SVG.flash, 10], ['smoke_bomb', 'Smoke bomb', 'smokebomb', SVG.smokebomb, 8]])
   ITEMS[id] = { name, kind: 'throwable', tier: 0, svg, obj: Object.assign(HELD.objOf(look), { boom: HELD.LOOKS[look].boom }), stack: true, make: { mats: [], prima } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);

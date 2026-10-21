@@ -354,8 +354,11 @@
     //    THE SMOKE FLASK (B — "part of sight"). Both break the same way; `reach` = how far the frost goes (px), `hold` = how long somebody is frozen (s).
     frostflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'ff', { throwable: true, breaks: 'frost', reach: 56, hold: 2.5, sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
       thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
-    smokeflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'sf', { throwable: true, breaks: 'smoke', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
-      thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
+  });
+  // (§5z73 — the user: "It should also look more like a real smoke bomb, rather than a flask, in the same vein as the flash-bang") THE SMOKE BOMB: a can on
+  //    the explosives' fuse (right lights it), whose burst is a cloud VENTED where it goes off (`burst: 'smoke'`, client 16x `thrSmokeFx`) — no blast
+  Object.assign(LOOKS, {
+    smokebomb: boomE(21, 9, 0.6, 0.3, 'sk', 1.5, 0, 0, 0, { burst: 'smoke', thrK: 0.9, thrGk: 0.8, blastD: 0, mat: 'iron' }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;

@@ -25568,8 +25568,11 @@ io.on('connection', (socket) => {
       igniteBox(room, x, y, 1, 1);
       // (§5z71) …and the cells there carry FUEL for a while (`st.fireFuel`, read by the fire pass): burning harder, longer, spreading faster
       const st = cellsOf(room), ROWS = st.rows, COLS = st.cols, c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL);
-      if (ROWS && COLS) { const F = st.fireFuel || (st.fireFuel = new Map()), until = now + THR_FUEL_MS;
-        for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) { const cc = c + dc, rr = r + dr; if (cc >= 0 && cc < COLS && rr >= 0 && rr < ROWS) F.set(cc * ROWS + rr, until); }
+      // (§5z73 — "throwing grease flasks into fire didn't seem to make them any bigger … not at all after the first time") more fuel on a cell that has some
+      //   ADDS to it (to 45s at most) rather than setting the same 14s again
+      if (ROWS && COLS) { const F = st.fireFuel || (st.fireFuel = new Map());
+        for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) { const cc = c + dc, rr = r + dr; if (cc >= 0 && cc < COLS && rr >= 0 && rr < ROWS) { const k = cc * ROWS + rr, was = F.get(k) || 0;
+          F.set(k, Math.min(now + 45000, Math.max(was, now) + (was > now ? THR_FUEL_MS * 0.6 : THR_FUEL_MS))); } }
         if (F.size > 20000) for (const [k, t] of F) if (t <= now) F.delete(k); }
     }
   });
