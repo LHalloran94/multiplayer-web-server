@@ -24609,7 +24609,8 @@ io.on('connection', (socket) => {
   // its own flame touch something that burns and asks; the server checks it could: you hold a torch (where things are
   // carried at all — a sandbox has every item), the spot is near where your body last said it was, and not too often.
   // Then the same door the build menu's fire tool and a burning rope use.
-  const _torchIds = Object.keys(ITEMS.ITEMS).filter(id => ITEMS.ITEMS[id].kind === 'light');
+  // (2026-10-22) …a light WITH A FLAME: a flashlight is kind 'light' too, and sets nothing alight
+  const _torchIds = Object.keys(ITEMS.ITEMS).filter(id => ITEMS.ITEMS[id].kind === 'light' && !(ITEMS.ITEMS[id].obj && HELD.is(ITEMS.ITEMS[id].obj.look) && !HELD.LOOKS[ITEMS.ITEMS[id].obj.look].fire));
   let _torchIgT = 0, _torchIgN = 0;
   // ⭐ (2026-10-13) A TORCH THAT IS A REAL OBJECT (look 'torch' — held on the sword's controls, thrown, lying on the ground; client 16k).
   //   `tid` names it: the ask is then the OBJECT's, so it needs no torch in the asker's inventory and may be far from their body (a
@@ -24650,7 +24651,7 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
     const now = Date.now(); if (now - _settleAt > 1000) { _settleAt = now; _settleN = 0; } if (++_settleN > 40) return;
     const o = roomObjects[room] && roomObjects[room].get(id);
-    if (!o || o.type !== 'stamp' || !HELD.is(o.look) || !HELD.LOOKS[o.look].fire) return;   // (a held thing with a flame — server/held.js)
+    if (!o || o.type !== 'stamp' || !HELD.is(o.look) || !(HELD.LOOKS[o.look].fire || HELD.LOOKS[o.look].lamp)) return;   // (a held thing with a flame, or a lamp switched off — server/held.js)
     const st = objStOf(room), rec = st.get(id) || {};
     if (out) { if (rec.out) return; rec.out = 1; st.set(id, rec); }
     else { if (!rec.out) return; delete rec.out; if (Object.keys(rec).length) st.set(id, rec); else st.delete(id); }

@@ -140,6 +140,11 @@ SVG.egg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="
 ITEMS.dodgeball = { name: 'Dodgeball', kind: 'throwable', tier: 0, svg: SVG.dodgeball, obj: Object.assign(HELD.objOf('dodgeball'), { lbnc: 4, shape: 'ellipse' }), stack: true, make: { mats: [], prima: 4 } };
 ITEMS.egg = { name: 'Egg', kind: 'throwable', tier: 0, svg: SVG.egg, obj: Object.assign(HELD.objOf('egg'), { shape: 'ellipse' }), stack: true, make: { mats: [], prima: 1 } };
 
+// ⭐ LIGHTS, PIECE 1 (2026-10-22, plan file §5z96): the FLASHLIGHT — a real object in either hand (server/held.js `flashlight`), never runs out.
+//   Kind 'light' (the window's Light filter); ⚠️ only a light WITH A FLAME is a torch (`fire` in server/held.js — `torch-ignite`, client 16k).
+SVG.flashlight = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M14 10 L21 6.5 L22.6 11.5 L15.2 12.6 Z" fill="#fff8d0" opacity=".55"/><rect x="3" y="9.6" width="9" height="4.4" rx="1.2" fill="#4a4e58"/><path d="M12 9.2 L15.2 8.4 L15.2 15.2 L12 14.4 Z" fill="#7e8490"/><rect x="15.2" y="8.4" width=".8" height="6.8" fill="#fffce8"/><circle cx="8" cy="11.8" r=".9" fill="#24242a"/></svg>';
+ITEMS.flashlight = { name: 'Flashlight', kind: 'light', tier: 0, svg: SVG.flashlight, obj: HELD.objOf('flashlight'), make: { mats: [], prima: 30 } };
+
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
 // The wire shape of the table: [[id, { name, kind, tier, svg }], …]. Sent once per socket.

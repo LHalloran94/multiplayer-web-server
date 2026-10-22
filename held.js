@@ -378,6 +378,16 @@
     egg: weapon(9, 7, 0.12, 0.35, 1, 'blunt', 'ze', { throwable: true, breaks: 'egg', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
       thrK: 0.85, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
   });
+  // ⭐ LIGHTS, PIECE 1 (2026-10-22, plan file §5z96 — the user's F1, the aluminium flashlight). One-handed, in either hand. `lamp` = it carries
+  //    a LAMP (client 16y): `at` = where its light comes out, as a fraction of its length from the butt (the lens), `col` = its light's colour
+  //    (0..1, brightest channel 1 — a cold white), `cone` = it shines in a cone along its length (the width, power, reach, glow, bounce and
+  //    beam in the air are Items → "The flashlight" dials). Its beam follows the pointer in either hand (`aimsAtRest`; the off hand too —
+  //    16p), RIGHT switches it on and off (`right: 'switch'` — on and off is the object's server record, `torch-out`'s `out`, so every
+  //    screen agrees), BOTH buttons are a light club hit, MIDDLE throws it; lying, it stays on and shines the way it points. It never runs out.
+  Object.assign(LOOKS, {
+    flashlight: weapon(21, 5.6, 0.5, 0.36, 0.6, 'blunt', 'fz', { content: '🔦', lamp: { at: 20.1 / 21, col: [0.88, 0.93, 1], cone: true },
+      right: 'switch', daze: false, hitHalf: 3, icon: 1.1, mat: 'steel', offTilt: { beside: -0.6, back: 0.5, raised: 0.25 } }),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it
