@@ -385,11 +385,13 @@
   //    16p), RIGHT switches it on and off (`right: 'switch'` — on and off is the object's server record, `torch-out`'s `out`, so every
   //    screen agrees), BOTH buttons are a light club hit, MIDDLE throws it; lying, it stays on and shines the way it points. It never runs out.
   Object.assign(LOOKS, {
-    flashlight: weapon(21, 5.6, 0.5, 0.36, 0.6, 'blunt', 'fz', { content: '🔦', lamp: { at: 20.1 / 21, col: [0.88, 0.93, 1], cone: true },
+    flashlight: weapon(21, 5.6, 0.5, 0.36, 0.6, 'blunt', 'fz', { content: '🔦', lamp: { at: 20.1 / 21, r: 2.8 / 21, col: [0.88, 0.93, 1], cone: true },   /* (r: its head's half-width, a fraction of its length — the lens glow's size) */
       right: 'switch', daze: false, hitHalf: 3, icon: 1.1, mat: 'steel',
       // (§5z98, the user) H rests it pointing the way you face (`rest: 'level'`); in the OTHER hand it is held up as the torch is (its tilts), raised to the pointer
       //   while right is held, switched by a double click (client 16p `handOffRight`)
-      rest: 'level', offTilt: { beside: 0.04, back: 0.06, raised: 0.3 } }),
+      // (§5z99, the user: "it should point in the direction you are facing, not straight up") — its off-hand tilts are a quarter turn from upright: level, the
+      //   way you face, at every rest (a hair short of a quarter, so crossing in front it turns over the top, not under)
+      rest: 'level', offTilt: { beside: 1.55, back: -1.55, raised: 1.55 } }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
