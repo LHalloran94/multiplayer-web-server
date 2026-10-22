@@ -21893,9 +21893,9 @@ function enemyWormTrail(E, K, hug) {
 // makes (look, shape, weight, bounce), at the mimic's own size. Only these four — the user dropped the bomb, powerup and
 // present looks once mimics became real objects ("only crate, metal crate, barrel, ball").
 const MIMIC_FAKE = {
-  crate:  { look: 'crate', shape: 'rect', content: '📦', lwt: 4, lbnc: 1 },
+  crate:  { look: 'crate', shape: 'rect', content: '📦', lwt: 4, lbnc: 0 },   // (§5z95: crates are not bouncy — client preset 16a)
   metal:  { look: 'metal', shape: 'rect', content: '🗄️', lwt: 15, lbnc: 0 },
-  barrel: { look: 'barrel', shape: 'cyl', content: '🛢️', lwt: 8, lbnc: 1 },
+  barrel: { look: 'barrel', shape: 'cyl', content: '🛢️', lwt: 8, lbnc: 0 },
   ball:   { look: 'basketball', shape: 'ellipse', content: '🏀', lwt: 3, lbnc: 5 },
 };
 let mimicSeq = 0;
