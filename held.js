@@ -386,7 +386,10 @@
   //    screen agrees), BOTH buttons are a light club hit, MIDDLE throws it; lying, it stays on and shines the way it points. It never runs out.
   Object.assign(LOOKS, {
     flashlight: weapon(21, 5.6, 0.5, 0.36, 0.6, 'blunt', 'fz', { content: '🔦', lamp: { at: 20.1 / 21, col: [0.88, 0.93, 1], cone: true },
-      right: 'switch', daze: false, hitHalf: 3, icon: 1.1, mat: 'steel', offTilt: { beside: -0.6, back: 0.5, raised: 0.25 } }),
+      right: 'switch', daze: false, hitHalf: 3, icon: 1.1, mat: 'steel',
+      // (§5z98, the user) H rests it pointing the way you face (`rest: 'level'`); in the OTHER hand it is held up as the torch is (its tilts), raised to the pointer
+      //   while right is held, switched by a double click (client 16p `handOffRight`)
+      rest: 'level', offTilt: { beside: 0.04, back: 0.06, raised: 0.3 } }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
