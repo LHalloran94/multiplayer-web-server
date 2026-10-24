@@ -435,14 +435,28 @@
   //        (the user: "a vertical swing would … pierce and pry off more terrain … the horizontal swing might only get a few in a horizontal line"):
   //        an overhead swing takes `face` cells down the face and `behind` in the layer behind it; a level swing a row of `row` going in.
   //        LEFT while it is in pulls it out.
-  const tool = (px, h, wt, grip, hurtFrom, tag, extra) => {
-    const S = weapon(px / MELEE_K, h / MELEE_K, wt, grip, hurtFrom, 'edge', tag, Object.assign({ carves: false, cleaves: false, icon: 1.2, mat: 'iron', tool: true }, extra || {}));
+  const tool = (px, h, wt, grip, hurtFrom, tag, extra, kind) => {
+    const S = weapon(px / MELEE_K, h / MELEE_K, wt, grip, hurtFrom, kind || 'edge', tag, Object.assign({ carves: false, cleaves: false, icon: 1.2, mat: 'iron', tool: true }, extra || {}));
     S.w = px; S.h = h; if (extra && extra.hitHalf) S.hitHalf = extra.hitHalf;   // (px, as made: not the melee family's 0.6)
     return S;
   };
   Object.assign(LOOKS, {
     pickaxe:  tool(40, 3.4, 1.6, 0.1, 0.86, 'pa', Object.assign({ hitHalf: 11.7, right: 'pry', dig: { kind: 'pick', deep: 2, face: 4, behind: 2, row: 3, pryMs: 450 } }, two(0.5))),
-    handpick: tool(24, 3, 0.8, 0.14, 0.82, 'hp', { hitHalf: 8.6, right: 'pry', dig: { kind: 'pick', deep: 1.25, face: 2, behind: 1, row: 2, pryMs: 320 } }),
+    // (piece 2) …its BACK is a hammer poll: the wheel turns it round (`back`), and then it strikes as a small hammer (`dig.back`)
+    handpick: tool(24, 3, 0.8, 0.14, 0.82, 'hp', { hitHalf: 8.6, right: 'pry', back: true, dig: { kind: 'pick', deep: 1.25, face: 2, behind: 1, row: 2, pryMs: 320,
+      back: { kind: 'hammer', dmg: 0.22, v: [[0, 0], [1, 0]], h: [[0, 0], [0, 1]] } } }),
+  });
+  // ⭐ TOOLS, PIECE 2 (2026-10-25, the tools plan §4c, §13): THE SLEDGEHAMMER (two hands) and THE CLUB HAMMER (one hand) — blunt. `dig` kind 'hammer'
+  //   (client 16z `toolHammer`): its swing stops where it meets the ground (no going in) and every blow DAMAGES A PATCH of cells — the user: "the
+  //   sledgehammer could do less damage but over a wider area … it might take more hits to break the terrain, but you hit more cells at the same time".
+  //   `dmg` = how much of a cell's strength one blow takes (a cell of strength s breaks after s ÷ dmg blows; the middle cell more, brittle rock more);
+  //   `v` = the patch on an overhead swing, `h` on a level one, as [along the face (the way it was going), into the ground] from the cell it struck —
+  //   round 2's §5 shapes. A cell that breaks comes off as a single pick-up ("knock loose cells off"); one behind a cell still there only cracks.
+  Object.assign(LOOKS, {
+    sledgehammer: tool(40, 4.6, 2.6, 0.08, 0.86, 'sg', Object.assign({ hitHalf: 5.4, mark: 'face', dig: { kind: 'hammer', dmg: 0.4, shake: 3,
+      v: [[-2, 0], [-1, 0], [0, 0], [1, 0], [2, 0], [-1, 1], [0, 1], [1, 1]], h: [[-1, 0], [0, 0], [1, 0], [-1, 1], [0, 1], [1, 1], [0, 2]] } }, two(0.5)), 'blunt'),
+    clubhammer: tool(18, 3.2, 1.1, 0.15, 0.8, 'ch', { hitHalf: 3.2, mark: 'face', dig: { kind: 'hammer', dmg: 0.25, shake: 1.5,
+      v: [[-1, 0], [0, 0], [1, 0], [0, 1]], h: [[0, 0], [0, 1], [-1, 0], [-1, 1]] } }, 'blunt'),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;

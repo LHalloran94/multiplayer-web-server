@@ -163,6 +163,11 @@ SVG.pickaxe = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path
 SVG.handpick = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6.4 20.2 L14.4 9.6" stroke="#b08452" stroke-width="2" stroke-linecap="round"/><path d="M12.6 6.4 L16.4 9.2 C18.6 10.6 20.2 13 21 16 C18.4 13.8 16 12.6 13.8 11.6 L11 9.8z" fill="#7e838c" stroke="#3a3d44" stroke-width=".6"/><rect x="10.6" y="4.6" width="3.4" height="3.6" rx=".6" transform="rotate(36 12.3 6.4)" fill="#6a6e76" stroke="#3a3d44" stroke-width=".6"/></svg>';
 ITEMS.pickaxe = { name: 'Pickaxe', kind: 'tool', tier: 0, svg: SVG.pickaxe, obj: HELD.objOf('pickaxe'), make: { mats: [], prima: 40 } };
 ITEMS.hand_pick = { name: 'Hand pick', kind: 'tool', tier: 0, svg: SVG.handpick, obj: HELD.objOf('handpick'), make: { mats: [], prima: 25 } };
+// ⭐ TOOLS, PIECE 2 (2026-10-25): the SLEDGEHAMMER and the CLUB HAMMER (server/held.js `dig` kind 'hammer')
+SVG.sledge = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4.6 20.6 L14.8 9" stroke="#b08452" stroke-width="2" stroke-linecap="round"/><rect x="9.6" y="3.6" width="12" height="6.4" rx="1.4" transform="rotate(-41 15.6 6.8)" fill="#5c626e" stroke="#2e3138" stroke-width=".6"/></svg>';
+SVG.clubhammer = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6.4 20.2 L14.2 10.6" stroke="#b08452" stroke-width="2.2" stroke-linecap="round"/><rect x="10.8" y="4.6" width="9" height="5.6" rx="1.2" transform="rotate(-39 15.3 7.4)" fill="#5c626e" stroke="#2e3138" stroke-width=".6"/></svg>';
+ITEMS.sledgehammer = { name: 'Sledgehammer', kind: 'tool', tier: 0, svg: SVG.sledge, obj: HELD.objOf('sledgehammer'), make: { mats: [], prima: 45 } };
+ITEMS.club_hammer = { name: 'Club hammer', kind: 'tool', tier: 0, svg: SVG.clubhammer, obj: HELD.objOf('clubhammer'), make: { mats: [], prima: 20 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
