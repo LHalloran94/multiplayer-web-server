@@ -409,8 +409,10 @@
   //    way you face, tilted up or down by the pointer (±30° — the user's C2), and into the foreground when you face us. Right with both hands empty takes it off
   //    (as does picking its number again). In a hand it is a small lamp, its beam at the pointer (`lamp.cfg` 'head' = Items → "The headlamp" dials).
   Object.assign(LOOKS, {
-    // (§5z132, the user: in your hand "it should be much smaller, consistent with the size it is when on your head") — 4 px long (was 6)
-    headlamp: weapon(6.5, 3.9, 0.15, 0.3, 0.6, 'blunt', 'hl', { content: '🔦', lamp: { at: 5.4 / 6, r: 1.9 / 6, col: [0.92, 0.96, 1], cone: true, cfg: 'head' }, wear: true,
+    // (§5z132, the user: in your hand "it should be much smaller, consistent with the size it is when on your head") · (§5z133: "It's not really visible in your hand
+    //   at all … better if it was held in such a way as to be a bit visible") — CARRIED BY ITS STRAP: the model is the strap's loop (in your fist, `grip` 0.2) and the
+    //   lamp beyond it, the lamp about the size it is on your head; 16 px end to end
+    headlamp: weapon(27, 8, 0.15, 0.2, 0.6, 'blunt', 'hl', { content: '🔦', lamp: { at: 13.9 / 14, r: 1.9 / 14, col: [0.92, 0.96, 1], cone: true, cfg: 'head' }, wear: true,
       right: 'switch', daze: false, carves: false, icon: 1.1, mat: 'steel', strikes: false, rest: 'level', offTilt: { beside: 1.55, back: -1.55, raised: 1.55 } }),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
