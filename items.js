@@ -146,6 +146,9 @@ SVG.flashlight = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><p
 ITEMS.flashlight = { name: 'Flashlight', kind: 'light', tier: 0, svg: SVG.flashlight, obj: HELD.objOf('flashlight'), make: { mats: [], prima: 30 } };
 // ⭐ LIGHTS, PIECE 2 (2026-10-24, plan file §5z96): the STORM LANTERN (server/held.js `lantern`) — H clips it to your belt; breaks into burning oil when thrown.
 SVG.lantern = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7.4 7.6 C7.4 1.6 16.6 1.6 16.6 7.6" fill="none" stroke="#5c6066" stroke-width="1.1"/><path d="M8.6 6.4h6.8l1 1.6h-8.8z" fill="#2c5438"/><path d="M9.2 8 C6.6 9.6 6.6 14.6 9.2 16.2h5.6c2.6-1.6 2.6-6.6 0-8.2z" fill="#ffd488" opacity=".9"/><path d="M12 10.4c1 1.3 1.1 2.6 0 3.6-1.1-1-1-2.3 0-3.6z" fill="#fff4d0"/><path d="M8.4 9.2v6.2M15.6 9.2v6.2M12 8v8.2" stroke="#5c6066" stroke-width=".7"/><path d="M7 16.2h10l-.6 3.2c-.2.8-.9 1.2-1.7 1.2H9.3c-.8 0-1.5-.4-1.7-1.2z" fill="#2c5438"/></svg>';
+// ⭐ LIGHTS, PIECE 3 (2026-10-24, plan file §5z96): the LED HEADLAMP (server/held.js `headlamp`) — right puts it on your head.
+SVG.headlamp = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 12.5c0-4 4-6.5 9-6.5s9 2.5 9 6.5" fill="none" stroke="#2a2c32" stroke-width="2.4" stroke-linecap="round"/><rect x="7.5" y="9.5" width="9" height="7" rx="2" fill="#3a3d46"/><circle cx="12" cy="13" r="2.4" fill="#f4f8ff"/><circle cx="12" cy="13" r="3.6" fill="#e8f0ff" opacity=".35"/></svg>';
+ITEMS.headlamp = { name: 'Headlamp', kind: 'light', tier: 0, svg: SVG.headlamp, obj: HELD.objOf('headlamp'), make: { mats: [], prima: 30 } };
 ITEMS.lantern = { name: 'Lantern', kind: 'light', tier: 0, svg: SVG.lantern, obj: HELD.objOf('lantern'), make: { mats: [], prima: 25 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);

@@ -404,6 +404,14 @@
       right: 'switch', breaks: 'oil', oilK: 0.35, sticks: true, stickAny: true, daze: false, carves: false, icon: 1.1, mat: 'iron', strikes: false,   /* (sticks + stickAny: thrown, it is looked for along its path and BREAKS on what it meets, as the bottles do) */
       scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 } }),
   });
+  // ⭐ LIGHTS, PIECE 3 (2026-10-24, plan file §5z96 — the user's H1, the LED headlamp). WORN: `wear` = RIGHT puts it on your head (the stand-in for worn gear —
+  //    client 16y `headWear`): it is then no object, drawn on your face BETWEEN YOUR EYES on a flat band round the head, turning with your face; its beam goes the
+  //    way you face, tilted up or down by the pointer (±30° — the user's C2), and into the foreground when you face us. Right with both hands empty takes it off
+  //    (as does picking its number again). In a hand it is a small lamp, its beam at the pointer (`lamp.cfg` 'head' = Items → "The headlamp" dials).
+  Object.assign(LOOKS, {
+    headlamp: weapon(10, 6, 0.15, 0.3, 0.6, 'blunt', 'hl', { content: '🔦', lamp: { at: 5.4 / 6, r: 1.9 / 6, col: [0.92, 0.96, 1], cone: true, cfg: 'head' }, wear: true,
+      right: 'switch', daze: false, carves: false, icon: 1.1, mat: 'steel', strikes: false, rest: 'level', offTilt: { beside: 1.55, back: -1.55, raised: 1.55 } }),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it
