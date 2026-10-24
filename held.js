@@ -393,6 +393,17 @@
       //   way you face, at every rest (a hair short of a quarter, so crossing in front it turns over the top, not under)
       rest: 'level', offTilt: { beside: 1.55, back: -1.55, raised: 1.55 } }),
   });
+  // ⭐ LIGHTS, PIECE 2 (2026-10-24, plan file §5z96 — the user's L2, the STORM LANTERN). A light you carry WITHOUT A HAND: `belt` = H clips it to your
+  //    belt (client 16y `lanternToBelt`; picking its number again, or H with your main hand empty, brings it back). `lamp.round` = a ROUND light, not a
+  //    cone — as strong as a torch (the user's A2), warm; it NEVER burns anything (no `fire`). RIGHT = the SHUTTER (`right: 'switch'` — the flashlight's
+  //    switch: the object's `out`). Held by its BAIL at the top (`grip` 0.96), so it HANGS from your fist (`rest: 'hang'`, `holdUpright`); LEFT held =
+  //    held out towards the pointer (scheme P with `aimsAtRest` false — the torch's way); MIDDLE lobs it. It BREAKS when it hits something hard
+  //    (`breaks: 'oil'`, client 16x — a small Molotov's splash of burning oil, always burning: the wick is lit; `oilK` = its size against a Molotov's).
+  Object.assign(LOOKS, {
+    lantern: weapon(34, 15.3, 0.5, 0.96, 0.6, 'blunt', 'ln', { content: '🏮', lamp: { at: 9.4 / 25, r: 4.4 / 25, col: [1, 0.86, 0.62], round: true }, belt: true,
+      right: 'switch', breaks: 'oil', oilK: 0.35, sticks: true, stickAny: true, daze: false, carves: false, icon: 1.1, mat: 'iron', strikes: false,   /* (sticks + stickAny: thrown, it is looked for along its path and BREAKS on what it meets, as the bottles do) */
+      scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 } }),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it
