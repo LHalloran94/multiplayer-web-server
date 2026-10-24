@@ -17489,7 +17489,7 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
     obj = { id, type, ownerId, owner: ownerName,
             x: Math.max(0, Math.min(WW, data.x)), y: Math.max(0, Math.min(WH, data.y)),
-            content: data.content, w: clampN(data.w, HELD.is(data.look) ? 12 : 24, stampMax(data.look), 64), h: clampN(data.h, HELD.is(data.look) ? 2 : 24, stampMax(data.look), 64),   // (a held thing is a blade or a stick, not a plank: thin — and since 2026-10-15 the weapons are 0.6× (server/held.js `MELEE_K`): a dagger is 18px long and 3.6 thick, which the old 24 / 6 floor quietly made bigger on the server than on every screen)
+            content: data.content, w: clampN(data.w, HELD.is(data.look) ? (HELD.LOOKS[data.look].wear ? 3 : 12) : 24, stampMax(data.look), 64), h: clampN(data.h, HELD.is(data.look) ? 2 : 24, stampMax(data.look), 64),   // (a held thing is a blade or a stick, not a plank: thin — and since 2026-10-15 the weapons are 0.6× (server/held.js `MELEE_K`): a dagger is 18px long and 3.6 thick, which the old 24 / 6 floor quietly made bigger on the server than on every screen)
             // ⚠️ `cam` IS A SHAPE, and it has to be named here or a cam comes back a RECTANGLE — the by-name
             // rebuild trap again, and the one this file has been bitten by most.
             shape: (data.shape === 'ellipse' || data.shape === 'tri' || data.shape === 'cyl'
