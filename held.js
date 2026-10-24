@@ -434,16 +434,17 @@
   //        after `pryMs` (longer in harder rock) the cells it is in and a patch round them come off, each its own pick-up. Which patch, by the swing
   //        (the user: "a vertical swing would … pierce and pry off more terrain … the horizontal swing might only get a few in a horizontal line"):
   //        an overhead swing takes `face` cells down the face and `behind` in the layer behind it; a level swing a row of `row` going in.
-  //        LEFT while it is in pulls it out.
+  //        LEFT while it is in pulls it out. `pull` = the prise's pulling budget (2026-10-25 round 6): each cell costs 0.5 + 0.5 × strength × what is left
+  //        of it (stone 2, earth 1, granite 2.5) — the patch above is only where it may come from (client 16z `toolPrySet`).
   const tool = (px, h, wt, grip, hurtFrom, tag, extra, kind) => {
     const S = weapon(px / MELEE_K, h / MELEE_K, wt, grip, hurtFrom, kind || 'edge', tag, Object.assign({ carves: false, cleaves: false, icon: 1.2, mat: 'iron', tool: true }, extra || {}));
     S.w = px; S.h = h; if (extra && extra.hitHalf) S.hitHalf = extra.hitHalf;   // (px, as made: not the melee family's 0.6)
     return S;
   };
   Object.assign(LOOKS, {
-    pickaxe:  tool(40, 3.4, 1.6, 0.1, 0.86, 'pa', Object.assign({ hitHalf: 11.7, right: 'pry', dig: { kind: 'pick', deep: 2, face: 4, behind: 2, row: 3, pryMs: 450 } }, two(0.5))),
+    pickaxe:  tool(40, 3.4, 1.6, 0.1, 0.86, 'pa', Object.assign({ hitHalf: 11.7, right: 'pry', dig: { kind: 'pick', deep: 2, face: 4, behind: 2, row: 3, pryMs: 450, pull: 12 } }, two(0.5))),
     // (piece 2) …its BACK is a hammer poll: the wheel turns it round (`back`), and then it strikes as a small hammer (`dig.back`)
-    handpick: tool(24, 3, 0.8, 0.14, 0.82, 'hp', { hitHalf: 8.6, right: 'pry', back: true, dig: { kind: 'pick', deep: 1.25, face: 2, behind: 1, row: 2, pryMs: 320,
+    handpick: tool(24, 3, 0.8, 0.14, 0.82, 'hp', { hitHalf: 8.6, right: 'pry', back: true, dig: { kind: 'pick', deep: 1.25, face: 2, behind: 1, row: 2, pryMs: 320, pull: 6,
       back: { kind: 'hammer', dmg: 0.22, v: [[0, 0], [1, 0]], h: [[0, 0], [0, 1]] } } }),
   });
   // ⭐ TOOLS, PIECE 2 (2026-10-25, the tools plan §4c, §13): THE SLEDGEHAMMER (two hands) and THE CLUB HAMMER (one hand) — blunt. `dig` kind 'hammer'
