@@ -24908,14 +24908,14 @@ io.on('connection', (socket) => {
   //   trust as `terrain-drop`: the client says what it broke (it carved it optimistically); the server places the piles.
   socket.on('terrain-bits', (m) => {
     if (!currentAvatarRoom || !canBuild() || !m || !Array.isArray(m.b) || !m.b.length) return;
-    const dims = roomDims(currentAvatarRoom);
+    const dims = roomDims(currentAvatarRoom), hold = Math.max(0, Math.min(4000, m.h | 0));   // (`h`: ms before they can be picked up — the user: "long enough to be seen")
     dropWhy = 'pry';
     for (const e of m.b.slice(0, 16)) {
       if (!Array.isArray(e)) continue;
       const x = +e[0], y = +e[1], mat = e[2] | 0, vx = +e[3] || 0;
       if (!isFinite(x) || !isFinite(y) || mat < 1 || mat > TERRAIN_MAT_HI) continue;
       spawnDrop(currentAvatarRoom, Math.max(0, Math.min(dims.cols * TERRAIN_CELL, x)), Math.max(0, Math.min(dims.rows * TERRAIN_CELL, y)), [[mat, 1]], 0,
-        { vx: Math.max(-0.3, Math.min(0.3, vx)), lone: 1 });
+        { vx: Math.max(-0.3, Math.min(0.3, vx)), lone: 1, hold });
     }
   });
   socket.on('terrain-drop', ({ x, y, mats }) => {
