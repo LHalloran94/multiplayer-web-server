@@ -157,6 +157,12 @@ for (const [id, name, look, c] of [['glowstick_green', 'Glowstick (green)', 'glo
 SVG.headlamp = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 12.5c0-4 4-6.5 9-6.5s9 2.5 9 6.5" fill="none" stroke="#2a2c32" stroke-width="2.4" stroke-linecap="round"/><rect x="7.5" y="9.5" width="9" height="7" rx="2" fill="#3a3d46"/><circle cx="12" cy="13" r="2.4" fill="#f4f8ff"/><circle cx="12" cy="13" r="3.6" fill="#e8f0ff" opacity=".35"/></svg>';
 ITEMS.headlamp = { name: 'Headlamp', kind: 'light', tier: 0, svg: SVG.headlamp, obj: HELD.objOf('headlamp'), make: { mats: [], prima: 30 } };
 ITEMS.lantern = { name: 'Lantern', kind: 'light', tier: 0, svg: SVG.lantern, obj: HELD.objOf('lantern'), make: { mats: [], prima: 25 } };
+// ⭐ TOOLS, PIECE 1 (2026-10-25, the tools plan `scratchpad/kickoff_tools.md` §13): the PICKAXE and the HAND PICK (server/held.js `dig`). Kind 'tool' (the
+//   window's Tools filter). One material each for now (`tier` 0); the tiers come with crafting (the plan's §7).
+SVG.pickaxe = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 20.5 L15.6 7.4" stroke="#b08452" stroke-width="2" stroke-linecap="round"/><path d="M4.2 7.2 C9 3.6 15.4 3.2 21 6.8 C15.6 5.4 10 5.6 4.2 7.2z" fill="#7e838c" stroke="#3a3d44" stroke-width=".6"/><circle cx="15.2" cy="5.6" r="1.6" fill="#6a6e76"/></svg>';
+SVG.handpick = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6.4 20.2 L14.4 9.6" stroke="#b08452" stroke-width="2" stroke-linecap="round"/><path d="M12.6 6.4 L16.4 9.2 C18.6 10.6 20.2 13 21 16 C18.4 13.8 16 12.6 13.8 11.6 L11 9.8z" fill="#7e838c" stroke="#3a3d44" stroke-width=".6"/><rect x="10.6" y="4.6" width="3.4" height="3.6" rx=".6" transform="rotate(36 12.3 6.4)" fill="#6a6e76" stroke="#3a3d44" stroke-width=".6"/></svg>';
+ITEMS.pickaxe = { name: 'Pickaxe', kind: 'tool', tier: 0, svg: SVG.pickaxe, obj: HELD.objOf('pickaxe'), make: { mats: [], prima: 40 } };
+ITEMS.hand_pick = { name: 'Hand pick', kind: 'tool', tier: 0, svg: SVG.handpick, obj: HELD.objOf('handpick'), make: { mats: [], prima: 25 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 

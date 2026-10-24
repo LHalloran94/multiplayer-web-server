@@ -20191,7 +20191,11 @@ function dropThrowLanding(room, x, y, vx) {
 // ⚠️ And only piles that are AT REST and out of their pickup hold — merging into something still in flight
 // would teleport what you just threw back to where you threw it from.
 const DROP_MERGE_R = TERRAIN_CELL * 3;                // within three cells is "the same place"
-function dropMergeTarget(room, x, y, mats, prima) {
+const DROP_GATHER_MS = 10000, DROP_GATHER_R = TERRAIN_CELL * 2, DROP_GATHER_EVERY = 2000;   // (tools piece 1 — `dropGatherSweep`, below `spawnDrop`)
+const roomLoneDrops = {};                              // room → Set of the ids of single cells still lying on their own
+// (2026-10-25, tools piece 1) `R` = how near counts (default DROP_MERGE_R) · `not` = a pile that is not a candidate (the one being gathered)
+function dropMergeTarget(room, x, y, mats, prima, R, not) {
+  R = R || DROP_MERGE_R;
   if (prima > 0 || !mats.length) return null;
   const by = roomDropChunk[room], map = roomDrops[room];
   if (!by || !map) return null;
@@ -20209,8 +20213,9 @@ function dropMergeTarget(room, x, y, mats, prima) {
       const o = map.get(id);
       if (!o || o.prima > 0 || !o.mats || !o.mats.length || (o.items && o.items.length)) continue;
       if (o._np > now) continue;                      // still held — not a merge target
-      if (Math.abs((o.gx != null ? o.gx : o.x) - x) > DROP_MERGE_R) continue;
-      if (Math.abs(o.gy - y) > DROP_MERGE_R) continue;
+      if (o === not || (o.lone && now - o.t0 < DROP_GATHER_MS)) continue;   // (a single cell still lying on its own — `dropGatherSweep`)
+      if (Math.abs((o.gx != null ? o.gx : o.x) - x) > R) continue;
+      if (Math.abs(o.gy - y) > R) continue;
       if (o.mats.map(m => m[0]).sort((a, b) => a - b).join(',') !== key) continue;
       return o;
     }
@@ -20249,7 +20254,9 @@ function spawnDrop(room, x, y, mats, prima, opts) {
   if (items.length) d.items = items;
   // ⚠️ MERGE ONLY WHAT HAS COME TO REST. A thrown pile is merged at its LANDING place, not its release point,
   // which is why this is here rather than at the top: `land` has to be resolved first.
-  const into = (!(opts && opts.hold > 0) && !items.length)
+  // (2026-10-25, tools piece 1) …and never a LONE one: a single cell a tool broke off lies on its own at first (`dropGatherSweep`)
+  const lone = !!(opts && opts.lone) && n === 1 && !items.length && !(prima > 0);
+  const into = (!(opts && opts.hold > 0) && !items.length && !lone)
     ? dropMergeTarget(room, (d.gx != null ? d.gx : d.x), d.gy, mats, prima) : null;
   if (into) {
     for (const [m, k] of mats) {
@@ -20264,10 +20271,42 @@ function spawnDrop(room, x, y, mats, prima, opts) {
     emitToChunk(room, into.ch, 'drop-add', into);      // re-sent whole: the client keys on id, so this updates it
     return into;
   }
+  if (lone) { d.lone = 1; (roomLoneDrops[room] || (roomLoneDrops[room] = new Set())).add(d.id); }
   dropIndex(room, d);
   emitToChunk(room, d.ch, 'drop-add', d);
   return d;
 }
+// ⭐⭐ SINGLE CELLS GATHER INTO STACKS (2026-10-25, the tools plan §4d — the user: "maybe we should have it not be a stack and rather have each
+//   individual cell be on its own … It could however collect into a stack if it is left on the ground, so as to reduce clutter and performance or
+//   memory costs"). A cell a tool broke off (`terrain-bits`) is its own pile, `lone`, and nothing merges into it at first. Every DROP_GATHER_EVERY
+//   ms, each lone pile older than DROP_GATHER_MS joins a pile of the same material within DROP_GATHER_R of it (the merge `spawnDrop` makes, the
+//   other way round: this one is taken away and that one re-sent bigger); with none near, it simply stops being lone (others may now join it).
+//   Only the lone piles are looked at, so the cost is the number of single cells lying about, not every pile in the world.
+//   ⚠️ `lone` is not kept across a restart (the set is in memory): a single cell restored from disk is an ordinary pile.
+//   (DROP_GATHER_MS / DROP_GATHER_R / roomLoneDrops are declared above `dropMergeTarget`, their first reader — the TDZ trap noted at DROP_FALL_A_SRV)
+function dropGatherSweep() {
+  const now = Date.now();
+  for (const room of Object.keys(roomLoneDrops)) {
+    const set = roomLoneDrops[room], map = roomDrops[room];
+    if (!map) { delete roomLoneDrops[room]; continue; }
+    for (const id of [...set]) {
+      const d = map.get(id);
+      if (!d || !d.lone) { set.delete(id); continue; }
+      if (now - d.t0 < DROP_GATHER_MS) continue;
+      set.delete(id); delete d.lone;
+      const into = dropMergeTarget(room, (d.gx != null ? d.gx : d.x), d.gy, d.mats, 0, DROP_GATHER_R, d);
+      if (!into) { dropsTouch(room, d.ch); continue; }
+      for (const [m, k] of d.mats) { const e = into.mats.find(q => q[0] === m); if (e) e[1] += k; else into.mats.push([m, k]); }
+      into.n += d.n;
+      dropUnindex(room, d);
+      emitToChunk(room, d.ch, 'drops-removed', { ids: [d.id] });
+      dropsTouch(room, into.ch);
+      emitToChunk(room, into.ch, 'drop-add', into);
+    }
+    if (!set.size) delete roomLoneDrops[room];
+  }
+}
+setInterval(dropGatherSweep, DROP_GATHER_EVERY);
 // ⭐⭐ EVERYTHING A PLAYER IS CARRYING, PUT BACK INTO THE WORLD. ONE primitive with three eventual callers:
 // leaving with an ephemeral balance (below), DISPERSAL ON DEATH, and the dormancy rule for an absent player.
 // They differ only in when they fire and how widely they scatter, so building it here makes the other two
@@ -24864,6 +24903,21 @@ io.on('connection', (socket) => {
   // A dig turned terrain into a pile on the ground. The client says WHAT it dug (it already had to know, to
   // apply the carve optimistically); the server decides the id, the resting position and whether it exists at
   // all — which is the part that has to be authoritative, because two players must not both collect one pile.
+  // ⭐ (2026-10-25, tools piece 1 — client 16z `toolPry`) CELLS A TOOL BROKE OFF, each its own pick-up: `b` = [[x, y, material, vx], …] — one pile per
+  //   cell, thrown a little (`vx`, px/ms) from where it was, and LONE (`spawnDrop`: it gathers into a stack only once it has lain a while). The same
+  //   trust as `terrain-drop`: the client says what it broke (it carved it optimistically); the server places the piles.
+  socket.on('terrain-bits', (m) => {
+    if (!currentAvatarRoom || !canBuild() || !m || !Array.isArray(m.b) || !m.b.length) return;
+    const dims = roomDims(currentAvatarRoom);
+    dropWhy = 'pry';
+    for (const e of m.b.slice(0, 16)) {
+      if (!Array.isArray(e)) continue;
+      const x = +e[0], y = +e[1], mat = e[2] | 0, vx = +e[3] || 0;
+      if (!isFinite(x) || !isFinite(y) || mat < 1 || mat > TERRAIN_MAT_HI) continue;
+      spawnDrop(currentAvatarRoom, Math.max(0, Math.min(dims.cols * TERRAIN_CELL, x)), Math.max(0, Math.min(dims.rows * TERRAIN_CELL, y)), [[mat, 1]], 0,
+        { vx: Math.max(-0.3, Math.min(0.3, vx)), lone: 1 });
+    }
+  });
   socket.on('terrain-drop', ({ x, y, mats }) => {
     if (!currentAvatarRoom || !canBuild()) return;
     if (!isFinite(x) || !isFinite(y) || !Array.isArray(mats) || !mats.length || mats.length > 8) return;

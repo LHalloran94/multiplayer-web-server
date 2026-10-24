@@ -427,6 +427,23 @@
     headlamp: weapon(27, 8, 0.15, 0.2, 0.6, 'blunt', 'hl', { content: '🔦', lamp: { at: 13.9 / 14, r: 1.9 / 14, col: [0.92, 0.96, 1], cone: true, cfg: 'head' }, wear: true,
       right: 'switch', daze: false, carves: false, icon: 1.1, mat: 'steel', strikes: false, rest: 'level', offTilt: { beside: 1.55, back: -1.55, raised: 1.55 } }),
   });
+  // ⭐ TOOLS, PIECE 1 (2026-10-25, the tools plan `scratchpad/kickoff_tools.md` §4, §13 — looks from `scratchpad/look/items/tools/round2.html`):
+  //    THE PICKAXE (two hands) and THE HAND PICK (one hand). Made at their size in the game (`px`, the round-2 sizes — not × MELEE_K). They are weapons
+  //    of their kind too (a pick pierces). `dig` = what the tool does when its SWING meets the ground (client 16z) — weapons never touch it:
+  //      kind 'pick' — the point EMBEDS where it lands, as far in as `deep` cells (less in harder rock), and you are held there; RIGHT held PRIES:
+  //        after `pryMs` (longer in harder rock) the cells it is in and a patch round them come off, each its own pick-up. Which patch, by the swing
+  //        (the user: "a vertical swing would … pierce and pry off more terrain … the horizontal swing might only get a few in a horizontal line"):
+  //        an overhead swing takes `face` cells down the face and `behind` in the layer behind it; a level swing a row of `row` going in.
+  //        LEFT while it is in pulls it out.
+  const tool = (px, h, wt, grip, hurtFrom, tag, extra) => {
+    const S = weapon(px / MELEE_K, h / MELEE_K, wt, grip, hurtFrom, 'edge', tag, Object.assign({ carves: false, cleaves: false, icon: 1.2, mat: 'iron', tool: true }, extra || {}));
+    S.w = px; S.h = h; if (extra && extra.hitHalf) S.hitHalf = extra.hitHalf;   // (px, as made: not the melee family's 0.6)
+    return S;
+  };
+  Object.assign(LOOKS, {
+    pickaxe:  tool(40, 3.4, 1.6, 0.1, 0.86, 'pa', Object.assign({ hitHalf: 11.7, right: 'pry', dig: { kind: 'pick', deep: 2, face: 4, behind: 2, row: 3, pryMs: 450 } }, two(0.5))),
+    handpick: tool(24, 3, 0.8, 0.14, 0.82, 'hp', { hitHalf: 8.6, right: 'pry', dig: { kind: 'pick', deep: 1.25, face: 2, behind: 1, row: 2, pryMs: 320 } }),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it
