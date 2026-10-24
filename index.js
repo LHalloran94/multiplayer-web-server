@@ -25747,11 +25747,13 @@ io.on('connection', (socket) => {
   // `obj-state` to everybody, so every machine holds it still and a late joiner finds it stuck. Off: the field goes (anybody may say
   // so — the thing it was in moved, or the ground round it was dug away). Picking it up clears it too (`obj-hold`).
   // ⚠️ Only for a sword, and only from whoever is driving it (the thrower) or when nobody is.
-  socket.on('obj-stick', ({ id, on, x, y, a, d, oid, hx, hy, ha, vic, ox, oy, wx, wy } = {}) => {
+  socket.on('obj-stick', ({ id, on, x, y, a, d, oid, hx, hy, ha, vic, ox, oy, wx, wy, hk, kx, ky, ks } = {}) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
     const now = Date.now(); if (now - _settleAt > 1000) { _settleAt = now; _settleN = 0; } if (++_settleN > 40) return;
     const map = roomObjects[room], o = map && map.get(id);
-    if (!o || o.type !== 'stamp' || !o.loose || !HELD.is(o.look) || !HELD.LOOKS[o.look].sticks) return;   // (a held thing that sticks where it lands — server/held.js)
+    // (2026-10-24, lights piece 5) …or a LIGHT HUNG on a wall / ceiling (`hk` — client 16y `hangPress`): held there as a stuck thing is, until somebody takes it down
+    const hung = (hk === 'wall' || hk === 'ceil') && !!o && HELD.is(o.look) && !!(HELD.LOOKS[o.look].lamp || HELD.LOOKS[o.look].fire);
+    if (!o || o.type !== 'stamp' || !o.loose || !HELD.is(o.look) || !(HELD.LOOKS[o.look].sticks || hung || (!on && (HELD.LOOKS[o.look].lamp || HELD.LOOKS[o.look].fire)))) return;   // (a held thing that sticks where it lands — server/held.js)
     const st = objStOf(room), rec = st.get(id) || {};
     if (!on) { if (!rec.stk) return; delete rec.stk; if (Object.keys(rec).length) st.set(id, rec); else st.delete(id); broadcastObjSt(room); return; }
     if (!isFinite(x) || !isFinite(y) || !isFinite(a)) return;
@@ -25775,6 +25777,7 @@ io.on('connection', (socket) => {
     else if (typeof vic === 'string' && vic.length < 80 && isFinite(ox) && isFinite(oy)) { stk.vic = vic; stk.ox = Math.max(-200, Math.min(200, +ox)); stk.oy = Math.max(-200, Math.min(200, +oy));
       // (after wielding round 26) …and where the WOUND it made is on them, from their middle: every machine draws the split there and keeps the sword in it
       if (isFinite(wx) && isFinite(wy)) { stk.wx = Math.max(-100, Math.min(100, +wx)); stk.wy = Math.max(-100, Math.min(100, +wy)); } }
+    if (hung && isFinite(kx) && isFinite(ky)) { stk.hk = hk; stk.kx = Math.round(+kx); stk.ky = Math.round(+ky); stk.ks = ks > 0 ? 1 : ks < 0 ? -1 : 0; }   // (where it hangs from)
     rec.stk = stk; st.set(id, rec);
     socket.to(room).emit('obj-lp', { id, x: px, y: py, a: pa });
     if (dr) { dm.delete(id); if (roomObjDrvAt[room]) roomObjDrvAt[room].delete(id); if (!dm.size) delete roomObjDrv[room]; }
