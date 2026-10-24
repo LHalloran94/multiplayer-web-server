@@ -404,6 +404,18 @@
       right: 'switch', breaks: 'oil', oilK: 0.35, sticks: true, stickAny: true, daze: false, carves: false, icon: 1.1, mat: 'iron', strikes: false,   /* (sticks + stickAny: thrown, it is looked for along its path and BREAKS on what it meets, as the bottles do) */
       scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 } }),
   });
+  // ⭐ LIGHTS, PIECE 4 (2026-10-24, plan file §5z96 — the user's R1 road flare and G1 glowsticks). THROWABLES (a stack in the pouch, one in the hand — the
+  //    throwables' buttons: left throws, middle lobs, RIGHT STRIKES / CRACKS it — client 16x `thrPress`; server `thr-light`). `lamp.lit` = it shines only once
+  //    struck (the object's `lit`, not the flashlight's switch). Their light is FULLY COLOURED (the user's D3). Dials: Items → "Flares and glowsticks".
+  //    THE FLARE: `burn` s after it is struck it has burnt out and is gone (the server takes it away); while it burns it SETS THINGS ALIGHT that its burning end
+  //    touches, as a lit torch lying there does (client 16y `flareStep`). THE GLOWSTICKS (`glow`): four colours as a stand-in, never run out, burn nothing.
+  const glowStick = (col) => weapon(20, 2.2, 0.08, 0.5, 1, 'blunt', 'gs', { throwable: true, glow: true, lamp: { at: 0.5, r: 0.06, col, round: true, cfg: 'glow', lit: true },
+    carves: false, daze: false, icon: 1.1, thrK: 0.9, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true, mat: 'wood' });
+  Object.assign(LOOKS, {
+    flare: weapon(24, 3.6, 0.15, 0.3, 1, 'blunt', 'fl', { throwable: true, flare: true, burn: 60, lamp: { at: 21 / 22, r: 1.6 / 22, col: [1, 0.22, 0.14], round: true, cfg: 'flare', lit: true },
+      carves: false, daze: false, icon: 1.1, thrK: 0.85, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true, mat: 'wood' }),
+    glowg: glowStick([0.55, 1, 0.4]), glowy: glowStick([0.95, 1, 0.35]), glowc: glowStick([0.4, 0.92, 1]), glowp: glowStick([1, 0.45, 0.85]),
+  });
   // ⭐ LIGHTS, PIECE 3 (2026-10-24, plan file §5z96 — the user's H1, the LED headlamp). WORN: `wear` = RIGHT puts it on your head (the stand-in for worn gear —
   //    client 16y `headWear`): it is then no object, drawn on your face BETWEEN YOUR EYES on a flat band round the head, turning with your face; its beam goes the
   //    way you face, tilted up or down by the pointer (±30° — the user's C2), and into the foreground when you face us. Right with both hands empty takes it off

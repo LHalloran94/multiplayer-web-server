@@ -24623,7 +24623,7 @@ io.on('connection', (socket) => {
     if (++_torchIgN > 12) return;                                  // a flame dragged along a hedge, not a flood
     const tObj = typeof d.tid === 'string' && roomObjects[room] ? roomObjects[room].get(d.tid) : null;
     if (tObj) {
-      if (tObj.type !== 'stamp' || !HELD.is(tObj.look) || !HELD.LOOKS[tObj.look].fire) return;
+      if (tObj.type !== 'stamp' || !HELD.is(tObj.look) || !(HELD.LOOKS[tObj.look].fire || (HELD.LOOKS[tObj.look].flare && tObj.lit))) return;   // (2026-10-24: a lit ROAD FLARE sets things alight too)
       const rec = roomObjSt[room] && roomObjSt[room].get(d.tid); if (rec && rec.out) return;
     } else {
       if (invGatedRoom(room)) {
@@ -25541,7 +25541,18 @@ io.on('connection', (socket) => {
   //   really is), and if nobody has a moment later, the server breaks it where it last knew it to be. `off` = put out (it went into soft ground).
   socket.on('thr-light', (m) => {
     const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string') return;
-    const o = roomObjects[room] && roomObjects[room].get(m.id); if (!o || !o.item) return; const S = HELD.of(o.look); if (!S || S.breaks !== 'fire') return;
+    const o = roomObjects[room] && roomObjects[room].get(m.id); if (!o || !o.item) return; const S = HELD.of(o.look); if (!S || !(S.breaks === 'fire' || S.flare || S.glow)) return;
+    // ⭐ (2026-10-24, lights piece 4) a ROAD FLARE struck: it burns `burn` s, then it has burnt out and is GONE (out of a hand: one fewer in the pouch) · a GLOWSTICK
+    //   cracked: it glows for good. Neither goes out or breaks.
+    if (S.flare || S.glow) { if (o.lit || m.off) return; const at = Date.now(); o.lit = 1; o.litAt = at; io.to(room).emit('thr-lit', { id: o.id, fuse: S.flare ? (S.burn || 60) : 0 });
+      if (S.flare) setTimeout(() => { const map = roomObjects[room], q = map && map.get(o.id); if (!q || !q.lit || q.litAt !== at) return;
+        { const hm = roomObjHeld[room]; if (hm) { hm.delete(q.id); if (!hm.size) delete roomObjHeld[room]; } }
+        { const dm = roomObjDrv[room]; if (dm) { dm.delete(q.id); if (!dm.size) delete roomObjDrv[room]; } }
+        if (q.eq) itemObjMove(room, q, null);
+        objStOf(room).delete(q.id);
+        if (map.get(q.id)) eqRemoveObj(room, q);
+        broadcastObjSt(room); }, (S.burn || 60) * 1000);
+      return; }
     if (m.off) { if (!o.lit) return; o.lit = 0; o.litAt = 0; io.to(room).emit('thr-lit', { id: o.id, off: 1 }); return; }
     if (o.lit) return;
     const at = Date.now(); o.lit = 1; o.litAt = at; io.to(room).emit('thr-lit', { id: o.id, fuse: S.fuse || 15 });
