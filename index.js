@@ -20003,13 +20003,21 @@ function objCountInChunk(room, ch) {
   let n = 0; for (const id of s) { const o = map.get(id); if (o && o.ch === ch) n++; }
   return n;
 }
+// a stuck / hung record read back from disk, checked as `obj-stick` checks it when it arrives (null = none, or nonsense)
+function objStkClean(k) {
+  if (!k || typeof k !== 'object' || k.vic || !isFinite(k.x) || !isFinite(k.y) || !isFinite(k.a)) return null;
+  const out = { d: Math.max(0, Math.min(64, Math.round(+k.d || 0))), x: +(+k.x).toFixed(1), y: +(+k.y).toFixed(1), a: +(+k.a).toFixed(3) };
+  if (typeof k.oid === 'string' && k.oid.length < 120 && isFinite(k.hx) && isFinite(k.hy) && isFinite(k.ha)) { out.oid = k.oid; out.hx = +k.hx; out.hy = +k.hy; out.ha = +k.ha; }
+  if ((k.hk === 'wall' || k.hk === 'ceil') && isFinite(k.kx) && isFinite(k.ky)) { out.hk = k.hk; out.kx = Math.round(+k.kx); out.ky = Math.round(+k.ky); out.ks = k.ks > 0 ? 1 : k.ks < 0 ? -1 : 0; }
+  return out;
+}
 function ensureObjectsLoaded(room) {
   if (!objChunked(room) || _objsLoaded.has(room)) return;
   _objsLoaded.add(room);                               // set FIRST: a failed read must not retry on every access
   let rows = [];
   try { rows = _listObjRows.all(room); } catch (e) { console.log('world_objects load failed: ' + e.message); return; }
   if (!rows.length) return;
-  let n = 0;
+  let n = 0, nStk = 0;
   for (const r of rows) {
     let list = null;
     try { list = JSON.parse(r.items); } catch (e) { continue; }
@@ -20028,12 +20036,15 @@ function ensureObjectsLoaded(room) {
       // game (`kickoff_prima.md` §8 row 4b). `buildWorldObject` cannot know it: it is a ledger fact, not a
       // shape fact, so it is reapplied here beside `hp`.
       if (p.cost > 0) o.cost = p.cost | 0;
+      // (2026-10-25) …and a light HUNG on a wall, a sword STUCK in the ground (`obj-stick`): its record is put back, so it is still held there
+      { const k = objStkClean(p.stk); if (k) { o.stk = k; const st = objStOf(room), rec = st.get(o.id) || {}; rec.stk = k; st.set(o.id, rec); (roomLoosePose[room] || (roomLoosePose[room] = new Map())).set(o.id, { x: k.x, y: k.y, a: k.a }); nStk++; } }
       objIndex(room, o);
       n++;
     }
   }
   objsLoadedRows += n;
   _objsDirty.delete(room);                             // loading is not a change
+  if (nStk) broadcastObjSt(room);                      // (the hung / stuck records put back — whoever joined before this load was sent none)
   console.log(`prop persistence: ${n} prop(s) in ${rows.length} chunk(s) restored for ${room}`);
 }
 function objectFlush(max) {
@@ -25809,7 +25820,7 @@ io.on('connection', (socket) => {
     const hung = (hk === 'wall' || hk === 'ceil') && !!o && HELD.is(o.look) && !!(HELD.LOOKS[o.look].lamp || HELD.LOOKS[o.look].fire);
     if (!o || o.type !== 'stamp' || !o.loose || !HELD.is(o.look) || !(HELD.LOOKS[o.look].sticks || hung || (!on && (HELD.LOOKS[o.look].lamp || HELD.LOOKS[o.look].fire)))) return;   // (a held thing that sticks where it lands — server/held.js)
     const st = objStOf(room), rec = st.get(id) || {};
-    if (!on) { if (!rec.stk) return; delete rec.stk; if (Object.keys(rec).length) st.set(id, rec); else st.delete(id); broadcastObjSt(room); return; }
+    if (!on) { if (o.stk) { delete o.stk; objsTouch(room, o.ch); } if (!rec.stk) return; delete rec.stk; if (Object.keys(rec).length) st.set(id, rec); else st.delete(id); broadcastObjSt(room); return; }
     if (!isFinite(x) || !isFinite(y) || !isFinite(a)) return;
     { const hm = roomObjHeld[room]; if (hm && hm.get(id)) return; }
     const dm = roomObjDrv[room], dr = dm && dm.get(id);
@@ -25833,6 +25844,10 @@ io.on('connection', (socket) => {
       if (isFinite(wx) && isFinite(wy)) { stk.wx = Math.max(-100, Math.min(100, +wx)); stk.wy = Math.max(-100, Math.min(100, +wy)); } }
     if (hung && isFinite(kx) && isFinite(ky)) { stk.hk = hk; stk.kx = Math.round(+kx); stk.ky = Math.round(+ky); stk.ks = ks > 0 ? 1 : ks < 0 ? -1 : 0; }   // (where it hangs from)
     rec.stk = stk; st.set(id, rec);
+    // ⭐ (2026-10-25, the user: "When you refresh lights that were hanging are no longer hanging") — the record above is in memory only, so a server restart
+    //   brought every hung light (and every sword stuck in the ground) back as a loose thing that fell. It is kept ON THE OBJECT too, which is what a
+    //   world's prop rows save (`objectFlush`), and put back on load (`ensureObjectsLoaded`). Not one stuck in a PLAYER: that means nothing after a restart.
+    if (!stk.vic && objChunked(room)) { o.stk = stk; objsTouch(room, o.ch); } else if (o.stk) { delete o.stk; objsTouch(room, o.ch); }
     socket.to(room).emit('obj-lp', { id, x: px, y: py, a: pa });
     if (dr) { dm.delete(id); if (roomObjDrvAt[room]) roomObjDrvAt[room].delete(id); if (!dm.size) delete roomObjDrv[room]; }
     broadcastObjSt(room);
@@ -25851,7 +25866,7 @@ io.on('connection', (socket) => {
       setHand();
       hm.set(id, socket.id); (roomObjDrv[room] || (roomObjDrv[room] = new Map())).set(id, socket.id);
       if (o.item) itemObjMove(room, o, socket.id);       // …an item lying in the world: it is the taker's now, one more in their pouch
-      { const sm = roomObjSt[room], r = sm && sm.get(id); if (r && r.stk) delete r.stk; }   // …a sword pulled out of what it was stuck in (`obj-stick`)
+      { const sm = roomObjSt[room], r = sm && sm.get(id); if (r && r.stk) delete r.stk; if (o.stk) { delete o.stk; objsTouch(room, o.ch); } }   // …a sword pulled out of what it was stuck in (`obj-stick`) — and off the saved object
     } else {
       if (hs !== socket.id) { if (!hm.size) delete roomObjHeld[room]; return; }
       hm.delete(id); if (!hm.size) delete roomObjHeld[room];
