@@ -463,9 +463,11 @@
   //   item (server/items.js `pair`): the hammer in the main hand, the chisel in the off hand. RIGHT held puts the chisel to the rock where you point; LEFT held
   //   taps the hammer into its end (`tapMs` a tap). `chisel.n` = how many strokes take a cell of strength 1…4 (earth … granite), `wood` = a cell of wood or
   //   timber — exactly one cell, nothing else touched (client 16z `toolChiselStroke`). Damaged rock takes fewer. The chisels strike nothing themselves.
+  const CHISEL_TILT = { beside: Math.PI - 0.3, back: -(Math.PI - 0.3), raised: Math.PI - 0.3 };
   Object.assign(LOOKS, {
-    coldchisel: tool(10, 1.4, 0.15, 0.4, 0.95, 'cz', { hitHalf: 0.8, strikes: false, mat: 'steel', chisel: { n: [2, 3, 5, 7], wood: 3 } }),
-    woodchisel: tool(11, 1.8, 0.12, 0.3, 0.95, 'wz', { hitHalf: 0.9, strikes: false, mat: 'steel', chisel: { n: [2, 3, 10, 16], wood: 2 } }),
+    // (`offTilt` ≈ π: at rest it hangs EDGE DOWN in the fist, its striking end up, leaning a little forward — the user: "The idle chisel in the off hand is held upside down")
+    coldchisel: tool(10, 1.4, 0.15, 0.4, 0.95, 'cz', { hitHalf: 0.8, strikes: false, mat: 'steel', chisel: { n: [2, 3, 5, 7], wood: 3 }, offTilt: CHISEL_TILT }),
+    woodchisel: tool(11, 1.8, 0.12, 0.3, 0.95, 'wz', { hitHalf: 0.9, strikes: false, mat: 'steel', chisel: { n: [2, 3, 10, 16], wood: 2 }, offTilt: CHISEL_TILT }),
     // (on its own — left without the chisel set — a mallet is a weak hammer)
     mallet: tool(14, 4, 0.45, 0.15, 0.8, 'mt', { hitHalf: 3, mark: 'face', mat: 'wood', tapMs: 340, dig: { kind: 'hammer', dmg: 0.12, shake: 1,
       v: [[0, 0], [1, 0]], h: [[0, 0], [0, 1]] } }, 'blunt'),
