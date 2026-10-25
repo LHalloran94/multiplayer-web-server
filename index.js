@@ -5495,6 +5495,9 @@ function bodySplitCheck(room, obj, S, now, force) {
   const pose = { x: S.x, y: S.y, a: S.a };
   const cells = bodyUnstamp(room, obj.id, true) || cells0;
   const heat0 = bodyOutKeep.get(obj.id);                  // …taken now: the parent's re-stamp below consumes it
+  // …and a fallen piece's materials, taken now too: the parent's `fm` loses the departing cells below, before the pieces are made from them (2026-10-26 — run 1
+  //   of the fix read them there, found 0, and the piece came out Timber again)
+  const pfm0 = obj.look === 'fallen' && typeof obj.fm === 'string' ? fallMats(obj).slice() : null;
   const st = roomCells.get(room);                         // …where the ash an island leaves behind is written
   const keep = new Uint8Array(cells.length);
   for (const k of isles[big]) keep[k] = cells[k];
@@ -5572,11 +5575,15 @@ function bodySplitCheck(room, obj, S, now, force) {
       if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
     const W = c1 - c0 + 1, H = r1 - r0 + 1;
     const fm = new Uint8Array(W * H), codes = new Uint8Array(W * H);
+    // ⭐ (2026-10-26, tools piece 5 round 3 — the user, cutting a felled tree in two: "one of the different parts it split into was a solid object and also looked
+    //   slightly different, with a lighter colour") — a FALLEN piece's sound cells keep what they ARE (its `fm`: tree Wood, leaves …), not Timber: `bodySplitMat` is a
+    //   crate's rule (sound = Timber), and Timber is solid and paler. Charred and burnt-through cells still become what the split calls them.
+    const pfm = pfm0;
     for (const k of isle) {
       const c = k % D.c, r = (k / D.c) | 0, kk = (r - r0) * W + (c - c0);
       // ⚠️ BURNT-THROUGH (bit 8) TRAVELS WITH THE PIECE. Dropped here, a fragment of a crumbling crate arrives as
       //    merely charred and can never crumble again — the same fault as the stamp's fire history, a third time.
-      fm[kk] = bodySplitMat(cells[k]); codes[kk] = ((cells[k] & 3) === 2 ? 2 : (cells[k] & 3) === 3 ? 3 : 1) | (cells[k] & 8);
+      fm[kk] = pfm && (cells[k] & 3) !== 2 && pfm[k] ? pfm[k] : bodySplitMat(cells[k]); codes[kk] = ((cells[k] & 3) === 2 ? 2 : (cells[k] & 3) === 3 ? 3 : 1) | (cells[k] & 8);
       if (cells[k] & 4) codes[kk] |= 4;                   // …a piece that breaks off alight goes on burning
     }
     // where that patch of the body actually is, at the pose it was stamped at
