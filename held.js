@@ -472,6 +472,18 @@
     mallet: tool(14, 4, 0.45, 0.15, 0.8, 'mt', { hitHalf: 3, mark: 'face', mat: 'wood', tapMs: 340, dig: { kind: 'hammer', dmg: 0.12, shake: 1,
       v: [[0, 0], [1, 0]], h: [[0, 0], [0, 1]] } }, 'blunt'),
   });
+  // ⭐ TOOLS, PIECE 4 (2026-10-25, the tools plan §2 "Shovels", §4c): THE SPADE (two hands, a D handle) and THE SMALL SPADE (one hand, a T grip) — round 2's
+  //   models. `spade` = what the blade does (client 16z `toolSpadeMain`): HELD, it is PUSHED along the line from you to the pointer into soft ground, `deep` px
+  //   at most, taking `full` s to get there in sand (longer in earthier ground); LET GO, the scoop — up to `n` cells' worth (`SPADE_SOFT`: what a cell costs) from
+  //   round the blade's push, `reach` px past the blade and `wide` px either side of it — is thrown back over your shoulder (`thrMs` the lift and flick): LEFT lands
+  //   as ground again, RIGHT as pick-ups. In rock: a clang. Not a weapon (the user: "there would be no blunt swing or anything").
+  // What a spade goes into, and what each cell of it costs of a scoop (1 = sand): the powders 1, earthy ground 1.5, clay and mud 2. Shared: the server checks a
+  //   thrown scoop against it. Earth 1 · Sand 3 · Mud 5 · Snow 8 · Turf 18 · Clay 19 · Peat 20 · Scree 21 · Ash 38 · Gravel 39 · Ooze 90 · Cinder 93
+  const SPADE_SOFT = { 1: 1.5, 3: 1, 5: 2, 8: 1, 18: 1.5, 19: 2, 20: 1.5, 21: 1, 38: 1, 39: 1.5, 90: 1.5, 93: 1 };
+  Object.assign(LOOKS, {
+    spade: tool(34, 2, 1.4, 0.03, 2, 'sd', Object.assign({ hitHalf: 3.4, strikes: false, spade: { deep: 14, full: 0.45, n: 6, reach: 10, wide: 8, thrMs: 380 } }, two(0.55)), 'blunt'),
+    smallspade: tool(18, 1.6, 0.6, 0.04, 2, 'sq', { hitHalf: 2.3, strikes: false, spade: { deep: 8, full: 0.32, n: 3, reach: 8, wide: 6, thrMs: 320 } }, 'blunt'),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it
@@ -481,5 +493,5 @@
   //   anything — here so every screen draws everybody's hands the same. The Weapons tab's "Hand size (×)" is a test dial on top of it.
   const HAND_K = 0.65;
 
-  return { LOOKS, is, of, objOf, HAND_K, MELEE_K, BOW_K, ARROW_W };
+  return { LOOKS, is, of, objOf, HAND_K, MELEE_K, BOW_K, ARROW_W, SPADE_SOFT };
 });

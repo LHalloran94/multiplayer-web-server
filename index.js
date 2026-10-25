@@ -4603,11 +4603,15 @@ function powderPushApply(room, list) {
 }
 // …a splash: grains lifted from the surface round (x, y) and flown. `sp` px/step, `vx` the thing's own sideways speed.
 const roomPowderFly = {};                             // room → [{ at, land, v, hp }] grains in the air
+// is this cell open air to a flying grain? 🟥 (2026-10-25, tools piece 4) a page never written is EMPTY in a room that is not generated (`peekCellAt` −1) — a
+//   spade's scoop thrown into untouched air behind you "landed" at the edge of the first such page and was then dropped, every grain of it. On a generated
+//   world it is ground not yet made: not air, and never read with `g()` here (that would make it — see `rp`).
+function peekAir(grid, j) { const v = peekCellAt(grid, j); return v === 0 || (v === -1 && !grid.seedFn); }
 function powderSplashApply(room, x, y, sp, vx, hw) {
   const st = cellsOf(room), grid = st.terrain; if (!grid || !powderSplashCfg.on) return;
   const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n;
   const floorRow = Math.floor(roomFloorTop(room) / T);
-  const air = (j) => j >= 0 && j < N && peekCellAt(grid, j) === 0 && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
   const ic = Math.floor(x / T), ir = Math.floor(y / T), R = Math.max(2, Math.min(10, Math.round(hw / T + sp / 5)));
   const want = Math.max(1, Math.min(powderSplashCfg.max, Math.round(sp * powderSplashCfg.per)));
   // the surface cells near the impact: powder with open air straight above, nearest first
@@ -4629,26 +4633,58 @@ function powderSplashApply(room, x, y, sp, vx, hw) {
     // cells/s: outward from the impact, up by how hard it landed, plus some of the thing's own sideways speed
     const s = sp * 60 / T;
     const vx0 = side * s * powderSplashCfg.out * (0.4 + 0.9 * h1) + vx * 60 / T * 0.3, vy0 = -s * powderSplashCfg.up * (0.55 + 0.6 * h2);
-    let fx = c + 0.5, fy = r + 0.5, fvx = vx0, fvy = vy0, steps = 0, last = i, land = -1;
-    const own = i;
     const hpv = st.terrainHp ? st.terrainHp.g(i) : 0;
     grid.s(i, 0); if (st.terrainHp) st.terrainHp.s(i, 0); gone.push(i, 0);
-    while (steps < 240) {
-      steps++;
-      fvy += powderSplashCfg.g * POWDER_FLY_DT; fvx -= fvx * powderSplashCfg.drag * POWDER_FLY_DT;
-      fx += fvx * POWDER_FLY_DT; fy += fvy * POWDER_FLY_DT;
-      const cc = Math.floor(fx), rr = Math.floor(fy);
-      if (cc < 0 || cc >= COLS || rr < 0 || rr >= ROWS) break;
-      const j = cc * ROWS + rr;
-      if (j === last) continue;
-      if (!air(j) && j !== own) { land = last; break; }
-      last = j;
-    }
-    if (land < 0) land = last;
-    fly.push({ at: now + steps * POWDER_FLY_DT * 1000, land, v, hp: hpv });
-    wire.push(i, v, Math.round(vx0 * 100), Math.round(vy0 * 100), steps);
+    const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.5, vx0, vy0, i);
+    fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: hpv });
+    wire.push(i, v, Math.round(vx0 * 100), Math.round(vy0 * 100), A.steps);
   }
   if (gone.length) { wireFanout(room, 'terrain-set', { cells: gone }); activatePowderRect(room, grid, ic - R - 1, ir - 4, ic + R + 1, ir + 4); }
+  if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: powderSplashCfg.g, d: powderSplashCfg.drag });
+}
+// one grain's flight from (fx, fy) (cells) at (fvx, fvy) cells/s, from launch cell `own`: where it comes down — the last open cell before what it met — and
+//   after how many 60/s steps (the client draws the same arc from the same numbers)
+function powderFlyArc(ROWS, COLS, air, fx, fy, fvx, fvy, own) {
+  let steps = 0, last = own, land = -1;
+  while (steps < 240) {
+    steps++;
+    fvy += powderSplashCfg.g * POWDER_FLY_DT; fvx -= fvx * powderSplashCfg.drag * POWDER_FLY_DT;
+    fx += fvx * POWDER_FLY_DT; fy += fvy * POWDER_FLY_DT;
+    const cc = Math.floor(fx), rr = Math.floor(fy);
+    if (cc < 0 || cc >= COLS || rr < 0 || rr >= ROWS) break;
+    const j = cc * ROWS + rr;
+    if (j === last) continue;
+    if (!air(j) && j !== own) { land = last; break; }
+    last = j;
+  }
+  return { land: land < 0 ? last : land, steps };
+}
+// ⭐ (2026-10-25, tools piece 4) A SPADE'S SCOOP, THROWN BACK OVER THE SHOULDER (the user: "hold left click to drive into the sand … and then let it go to sort of
+//   throw it back over your shoulder"). `m.m` = the materials the client carved, `m.o` = each one's place in the scoop [dc, dr, …] (−1…1: they leave the blade as a
+//   loose clump), (`m.x`, `m.y`) = the blade (px), (`m.vx`, `m.vy`) = the throw (cells/s), `m.p` = how they come down: 0 as the same ground again (a heap behind you
+//   — the user: "left click should make it get thrown as ground that lands again"), 1 as single pick-ups ("right click should do the same dig but should throw it
+//   as pick-ups"), 2 not at all (right in a sandbox: as the other tools' pieces are there); `m.h` = ms before a pick-up may be taken. Flown as a splash's grains
+//   (`powder-fly`: every browser draws the arc), landed by `powderFlyLand`. Only what a spade goes into (`HELD.SPADE_SOFT`), at most `max`, the throw capped.
+const spadeThrowCfg = { max: 12, v: 40 };
+function spadeThrowApply(room, m) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return;
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n;
+  const floorRow = Math.floor(roomFloorTop(room) / T);
+  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  const x = +m.x, y = +m.y; if (!isFinite(x) || !isFinite(y)) return;
+  const cl = Math.floor(x / T), rl = Math.floor(y / T); if (cl < 1 || cl >= COLS - 1 || rl < 1 || rl >= ROWS - 1) return;
+  const cap = (v) => Math.max(-spadeThrowCfg.v, Math.min(spadeThrowCfg.v, +v || 0)), vx = cap(m.vx), vy = cap(m.vy);
+  const how = m.p === 1 ? 1 : m.p === 2 ? 2 : 0, hold = Math.max(0, Math.min(4000, m.h | 0)), off = Array.isArray(m.o) ? m.o : [];
+  const fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], now = Date.now(), salt = now & 0xffff;
+  for (let n = 0; n < Math.min(spadeThrowCfg.max, m.m.length); n++) {
+    const v = m.m[n] | 0; if (!HELD.SPADE_SOFT[v]) continue;
+    if (fly.length > 600) break;
+    const c = cl + Math.max(-1, Math.min(1, off[2 * n] | 0)), r = rl + Math.max(-1, Math.min(1, off[2 * n + 1] | 0)), i = c * ROWS + r;
+    const fvx = vx * (0.75 + 0.5 * fireVar(i, salt, 73 + n)), fvy = vy * (0.85 + 0.3 * fireVar(i, salt, 91 + n));
+    const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.5, fvx, fvy, i);
+    fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: 0, how, hold, settle: 1 });
+    wire.push(i, v, Math.round(fvx * 100), Math.round(fvy * 100), A.steps);
+  }
   if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: powderSplashCfg.g, d: powderSplashCfg.drag });
 }
 // …and the grains that have come down: set back as powder where they landed (or the nearest open cell above it)
@@ -4658,14 +4694,21 @@ function powderFlyLand() {
     const fly = roomPowderFly[room], st = cellsOf(room), grid = st.terrain;
     if (!grid) { delete roomPowderFly[room]; continue; }
     const ROWS = st.rows, cov = roomCover[room] && roomCover[room].n, set = [];
-    let keep = 0;
+    let keep = 0, floorRow = -1;
     for (const F of fly) {
       if (F.at > now) { fly[keep++] = F; continue; }
       let j = F.land;
-      for (let k = 0; k < 6 && j >= 0; k++, j--) if (peekCellAt(grid, j) === 0 && !(cov && cov.has(j))) break;
-      if (j < 0 || peekCellAt(grid, j) !== 0) continue;
+      // (a spade's scoop — `spadeThrowApply`) right in a sandbox: gone where it lands; right: a single pick-up there (it falls to rest on its own)
+      if (F.how === 2) continue;
+      if (F.how === 1) { dropWhy = 'spade'; spawnDrop(room, (Math.floor(j / ROWS) + 0.5) * TERRAIN_CELL, (j % ROWS + 0.5) * TERRAIN_CELL, [[F.v, 1]], 0, { lone: 1, hold: F.hold || 0 }); continue; }
+      for (let k = 0; k < 6 && j >= 0; k++, j--) if (peekAir(grid, j) && !(cov && cov.has(j))) break;
+      if (j < 0 || !peekAir(grid, j)) { if (F.settle) cWhy('spade:lost'); continue; }
+      // …and as ground: it drops onto whatever is below it (earth would otherwise stay stuck where it met a wall's side)
+      if (F.settle) { if (floorRow < 0) floorRow = Math.floor(roomFloorTop(room) / TERRAIN_CELL);
+        for (let k = 0; k < 64 && (j + 1) % ROWS < floorRow && peekAir(grid, j + 1) && !(cov && cov.has(j + 1)); k++) j++;
+        cWhy('spade:landed'); }
       grid.s(j, F.v); if (st.terrainHp) st.terrainHp.s(j, F.hp || 0); set.push(j, F.v);
-      powderSet(room).add(j);
+      if (isPowderId(F.v)) powderSet(room).add(j);
     }
     fly.length = keep;
     if (set.length) wireFanout(room, 'terrain-set', { cells: set });
@@ -26023,6 +26066,14 @@ io.on('connection', (socket) => {
       const x = +s[q], y = +s[q + 1], sp = Math.min(40, Math.max(0, +s[q + 2] / 10 || 0)), vx = Math.max(-40, Math.min(40, +s[q + 3] / 10 || 0)), hw = Math.max(4, Math.min(256, +s[q + 4] || 16));
       if (isFinite(x) && isFinite(y)) powderSplashApply(room, x, y, sp, vx, hw);
     }
+  });
+  // ⭐ (2026-10-25, tools piece 4 — client 16z `toolSpadeThrow`) A SPADE'S SCOOP, THROWN BACK OVER THE SHOULDER — see `spadeThrowApply`. The same trust as
+  //   `terrain-bits`: the client carved what it dug (as every dig does) and says what it was; build rights, and rate-limited.
+  let _spadeAt = 0;
+  socket.on('spade-throw', (m) => {
+    const room = currentAvatarRoom; if (!room || !canBuild() || !m || !Array.isArray(m.m) || !m.m.length) return;
+    const now = Date.now(); if (now - _spadeAt < 150) return; _spadeAt = now;
+    spadeThrowApply(room, m);
   });
   // ⭐ STEP 3 — MINE CELLS OUT OF A FALLEN PIECE. Same gate as digging the ground (build rights), a bounded list.
   socket.on('body-dig', ({ id, ks } = {}) => {
