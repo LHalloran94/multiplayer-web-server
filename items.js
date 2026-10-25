@@ -168,13 +168,19 @@ SVG.sledge = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path 
 SVG.clubhammer = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6.4 20.2 L14.2 10.6" stroke="#b08452" stroke-width="2.2" stroke-linecap="round"/><rect x="10.8" y="4.6" width="9" height="5.6" rx="1.2" transform="rotate(-39 15.3 7.4)" fill="#5c626e" stroke="#2e3138" stroke-width=".6"/></svg>';
 ITEMS.sledgehammer = { name: 'Sledgehammer', kind: 'tool', tier: 0, svg: SVG.sledge, obj: HELD.objOf('sledgehammer'), make: { mats: [], prima: 45 } };
 ITEMS.club_hammer = { name: 'Club hammer', kind: 'tool', tier: 0, svg: SVG.clubhammer, obj: HELD.objOf('clubhammer'), make: { mats: [], prima: 20 } };
+// ⭐ TOOLS, PIECE 3 (2026-10-25): the CHISEL PAIRS — one item in both hands. `obj` = the hammer (the main hand's, and what lies in the world when it is put
+//   down); `pair` = the chisel the off hand holds beside it. The chisel is never an item of its own: it is out only while its hammer is (server `pair` objects).
+SVG.coldchisel = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3.6 20.4 L10.4 13.6" stroke="#b08452" stroke-width="2" stroke-linecap="round"/><rect x="7.6" y="9.4" width="7" height="4.6" rx="1" transform="rotate(-45 11.1 11.7)" fill="#5c626e" stroke="#2e3138" stroke-width=".6"/><path d="M13.6 3.2 L15.4 3.2 L15.4 15.4 L14.5 18.6 L13.6 15.4z" fill="#8a9099" stroke="#3a3d44" stroke-width=".5" transform="rotate(30 14.5 11)"/></svg>';
+SVG.woodchisel = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3.6 20.4 L9.8 14.2" stroke="#c49a62" stroke-width="2" stroke-linecap="round"/><rect x="6.6" y="8.6" width="8.6" height="5.6" rx="1.4" transform="rotate(-45 10.9 11.4)" fill="#c8966a" stroke="#6e4a2a" stroke-width=".6"/><rect x="13.4" y="2.6" width="2.6" height="7" rx=".8" fill="#c49a62" stroke="#6e4a2a" stroke-width=".5" transform="rotate(30 14.7 11)"/><path d="M13.6 9.6 L15.8 9.6 L15.6 17.4 L13.8 17.4z" fill="#a8aeb6" stroke="#3a3d44" stroke-width=".5" transform="rotate(30 14.7 11)"/></svg>';
+ITEMS.cold_chisel = { name: 'Cold chisel & club hammer', kind: 'tool', tier: 0, svg: SVG.coldchisel, obj: HELD.objOf('clubhammer'), pair: HELD.objOf('coldchisel'), make: { mats: [], prima: 30 } };
+ITEMS.wood_chisel = { name: 'Wood chisel & mallet', kind: 'tool', tier: 0, svg: SVG.woodchisel, obj: HELD.objOf('mallet'), pair: HELD.objOf('woodchisel'), make: { mats: [], prima: 22 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
 // The wire shape of the table: [[id, { name, kind, tier, svg }], …]. Sent once per socket.
 function itemDefsWire() {
   return Object.keys(ITEMS).map(id => [id, { name: ITEMS[id].name, kind: ITEMS[id].kind, tier: ITEMS[id].tier | 0, svg: ITEMS[id].svg,
-    make: ITEMS[id].make || null, obj: ITEMS[id].obj || null, stack: ITEMS[id].stack ? 1 : 0 }]);
+    make: ITEMS[id].make || null, obj: ITEMS[id].obj || null, pair: ITEMS[id].pair || null, stack: ITEMS[id].stack ? 1 : 0 }]);
 }
 // is this item a real object out of the pouch (never a pile, never a stack)?
 const isObjItem = (id) => isItem(id) && !!ITEMS[id].obj;

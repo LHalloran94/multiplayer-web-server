@@ -456,8 +456,19 @@
   Object.assign(LOOKS, {
     sledgehammer: tool(40, 4.6, 2.6, 0.08, 0.86, 'sg', Object.assign({ hitHalf: 5.4, mark: 'face', dig: { kind: 'hammer', dmg: 0.4, shake: 3,
       v: [[-2, 0], [-1, 0], [0, 0], [1, 0], [2, 0], [-1, 1], [0, 1], [1, 1]], h: [[-1, 0], [0, 0], [1, 0], [-1, 1], [0, 1], [1, 1], [0, 2]] } }, two(0.5)), 'blunt'),
-    clubhammer: tool(18, 3.2, 1.1, 0.15, 0.8, 'ch', { hitHalf: 3.2, mark: 'face', dig: { kind: 'hammer', dmg: 0.25, shake: 1.5,
+    clubhammer: tool(18, 3.2, 1.1, 0.15, 0.8, 'ch', { hitHalf: 3.2, mark: 'face', tapMs: 300, dig: { kind: 'hammer', dmg: 0.25, shake: 1.5,
       v: [[-1, 0], [0, 0], [1, 0], [0, 1]], h: [[0, 0], [0, 1], [-1, 0], [-1, 1]] } }, 'blunt'),
+  });
+  // ⭐ TOOLS, PIECE 3 (2026-10-25, the tools plan §4c, §13): THE CHISEL PAIRS — a club hammer + COLD CHISEL, a wooden MALLET + WOOD CHISEL. Each pair is ONE
+  //   item (server/items.js `pair`): the hammer in the main hand, the chisel in the off hand. RIGHT held puts the chisel to the rock where you point; LEFT held
+  //   taps the hammer into its end (`tapMs` a tap). `chisel.n` = how many strokes take a cell of strength 1…4 (earth … granite), `wood` = a cell of wood or
+  //   timber — exactly one cell, nothing else touched (client 16z `toolChiselStroke`). Damaged rock takes fewer. The chisels strike nothing themselves.
+  Object.assign(LOOKS, {
+    coldchisel: tool(10, 1.4, 0.15, 0.4, 0.95, 'cz', { hitHalf: 0.8, strikes: false, mat: 'steel', chisel: { n: [2, 3, 5, 7], wood: 3 } }),
+    woodchisel: tool(11, 1.8, 0.12, 0.3, 0.95, 'wz', { hitHalf: 0.9, strikes: false, mat: 'steel', chisel: { n: [2, 3, 10, 16], wood: 2 } }),
+    // (on its own — left without the chisel set — a mallet is a weak hammer)
+    mallet: tool(14, 4, 0.45, 0.15, 0.8, 'mt', { hitHalf: 3, mark: 'face', mat: 'wood', tapMs: 340, dig: { kind: 'hammer', dmg: 0.12, shake: 1,
+      v: [[0, 0], [1, 0]], h: [[0, 0], [0, 1]] } }, 'blunt'),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;

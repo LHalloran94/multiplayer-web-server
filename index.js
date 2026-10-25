@@ -17588,6 +17588,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       //   that item, as a real thing in the world. Named here or a sword left lying comes back from storage as nobody's stick.
       //   ⚠️ `eq` (whose hand it is in) is deliberately NOT kept by this rebuild — it is a fact about a person who is present.
       if (obj.loose === 1 && HELD.is(obj.look) && ITEMS.isItem(data.item)) obj.item = data.item;
+      // (2026-10-25, tools piece 3) …or the CHISEL of a chisel pair: the item's `pair`, beside its hammer — never an item of its own (`itemObjMove`)
+      if (obj.item && data.pair === 1 && ITEMS.ITEMS[obj.item].pair && ITEMS.ITEMS[obj.item].pair.look === obj.look) obj.pair = 1;
     }
   } else if (type === 'checkpoint' || type === 'goal' || type === 'spawn') {
     if (!isFinite(data.x) || !isFinite(data.y)) return null;
@@ -19952,6 +19954,8 @@ function itemObjMove(room, o, toSid) {
   if (!ITEMS.isItem(o.item)) return true;
   const from = o.eq || null, to = toSid || null;
   if (from === to) return true;
+  // (2026-10-25, tools piece 3) a chisel pair's CHISEL is no item of its own: out of the hand that holds it beside its hammer, it is gone (never lying, never taken)
+  if (o.pair) { eqRemoveObj(room, o); return false; }
   const gated = invGatedRoom(room);
   if (from) {
     eqNote(from, o.id, 0); delete o.eq;
@@ -19994,7 +19998,7 @@ function itemObjPlace(room, item, x, y, angle, ownerSid, ownerName) {
 // how many of an item a socket has OUT in its hands right now (they are still in its pouch)
 function eqOutCount(room, sid, item) {
   const mine = eqObjs.get(sid), map = roomObjects[room]; let n = 0;
-  if (mine && map) for (const oid of mine) { const q = map.get(oid); if (q && q.item === item) n++; }
+  if (mine && map) for (const oid of mine) { const q = map.get(oid); if (q && q.item === item && !q.pair) n++; }   // (a chisel beside its hammer is not one more out)
   return n;
 }
 function objCountInChunk(room, ch) {
@@ -24746,9 +24750,15 @@ io.on('connection', (socket) => {
     if (obj.item && ammoAsk) {
       if (invGatedRoom(currentAvatarRoom)) { if (!ledger.spendItem(playerKeyFor(socket.id), obj.item, 1)) { socket.emit('avatar-object-removed', { id }); return; } sendInvSync(socket, currentAvatarRoom); }
       { const m = roomObjDrv[currentAvatarRoom] || (roomObjDrv[currentAvatarRoom] = new Map()), L = roomObjDrvAt[currentAvatarRoom] || (roomObjDrvAt[currentAvatarRoom] = new Map()); m.set(id, socket.id); L.set(id, Date.now()); }   // …the shooter flies it
+    } else if (obj.item && obj.pair) {
+      // (2026-10-25, tools piece 3) A CHISEL beside its hammer: allowed only while that hammer is out in the asker's hand and no chisel of it is; it moves no count
+      const mine = eqObjs.get(socket.id); let ham = 0, chis = 0;
+      if (mine) for (const oid of mine) { const q = map.get(oid); if (q && q.item === obj.item) { if (q.pair) chis++; else ham++; } }
+      if (!eqAsk || !ham || chis || (mine && mine.size >= 2)) { socket.emit('avatar-object-removed', { id }); return; }
+      obj.eq = socket.id;
     } else if (obj.item) {
       const mine = eqObjs.get(socket.id); let same = 0;
-      if (mine) for (const oid of mine) { const q = map.get(oid); if (q && q.item === obj.item) same++; }
+      if (mine) for (const oid of mine) { const q = map.get(oid); if (q && q.item === obj.item && !q.pair) same++; }
       if (!eqAsk || (mine && mine.size >= 2) || (invGatedRoom(currentAvatarRoom) && ledger.itemCount(playerKeyFor(socket.id), obj.item) <= same)) { socket.emit('avatar-object-removed', { id }); return; }
       obj.eq = socket.id;
     }
