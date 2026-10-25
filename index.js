@@ -5808,7 +5808,7 @@ function bodyIgnite(room, obj, x, y, r, px, py, pa) {
 // ⚠ `max` 2,000 → 12,000 with the same reasoning as FALL_DIM: the limit, not the mechanism, was stopping big trees.
 // `min` 6 → 1 now that a hundred pieces cost 0.5ms a frame instead of 256 (the reason it was 6 is gone — see the note
 // on the clause that uses it). Every clump the fire frees is a piece you can mine, and nothing drops pickups any more.
-const fallCfg = { on: 1, max: 12000, min: 6 };
+const fallCfg = { on: 1, max: 12000, min: 6, leafSplit: 1 };   // (`leafSplit`: from wood, only wood holds a tree up and its leaves are the nearer ones — `fallWoodRegion`)
 let fallSeq = 0, fallCuts = 0, fallRefused = 0, fallPiled = 0, fallSmall = 0, fallBurnt = 0, fallCrumbled = 0, fallLast = null;   // fallLast: the last check, for the debug route             // mechanism counters (`/debug/bodies`)
 const FALL_ASH = 38;
 const MAT_CINDER = 93;   // charcoal with nothing holding it up — see `materials.js` and `bodyBake`
@@ -5854,6 +5854,100 @@ function fallDrain() {
     for (const i of gone) { const c = (i / ROWS) | 0, r = i - c * ROWS; fallCheck(room, c, r, c, r, seen, true); }   // …freed by FIRE — see `fallCfg.min`
   }
 }
+// (the region's fate, as `fallCheck` decides it — moved here word for word so the wood rule below shares it) true = it was cut loose as a piece
+function fallFinish(room, st, region, peek, byFire) {
+  let sound = false, charred = false;
+  for (const i of region) { const c = fallCode(peek(i)); if (c === 1) sound = true; else if (c === 2) charred = true; }
+  if (!sound && !charred) {
+    // ⚠️ Only what the FIRE freed: a leaf clump a player cut loose with a dig is their own doing and stays put.
+    if (!byFire) { fallSmall++; return false; }
+    // 🟥🟥 LIT WHERE THE FIRE REACHES IT, NOT ALL OVER (2026-09-23). Two rounds of the same fault: first the whole
+    //    cut-loose clump was CONVERTED in one pass (the canopy vanished the instant the branch under it burnt
+    //    through), then it was SET ALIGHT in one pass — and the user saw the second at once: *"the whole connected
+    //    patch of leaves will ignite at once"* after the flames had been travelling through it normally. A clump
+    //    coming loose is not a clump catching fire. Only the cells of it already touching flame are lit, and the
+    //    fire then spreads through the rest by the ordinary rules, which is the cascade they remember.
+    // ⚠️ If the fire has moved on and nothing of it touches flame any more, the LOWEST few are lit instead, so a
+    //    clump the fire freed and then left behind still burns away rather than hanging there unlit for ever.
+    const lit = [], fs2 = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map());
+    const ROWS2 = st.rows, touching = [];
+    for (const i of region) {
+      if (!fallCand(peek(i)) || fs2.has(i)) continue;
+      const rr = i % ROWS2;
+      if (fs2.has(i - ROWS2) || fs2.has(i + ROWS2) || (rr > 0 && fs2.has(i - 1)) || (rr < ROWS2 - 1 && fs2.has(i + 1))) touching.push(i);
+    }
+    let seeds = touching;
+    if (!seeds.length) {
+      const cand = region.filter((i) => fallCand(peek(i)) && !fs2.has(i));
+      cand.sort((a, b) => (b % ROWS2) - (a % ROWS2));            // …the lowest rows first
+      seeds = cand.slice(0, 3);
+    }
+    for (const i of seeds) { fs2.add(i); ages.set(i, 0); lit.push(i, 1); fallBurnt++; }
+    if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
+    return false;
+  }
+  if (!sound) { fallCharCrumble(room, region, peek); return false; }
+  // 🟥🟥 A SCRAP OF SOUND WOOD IS SET ALIGHT, NOT TURNED INTO A PICKUP (2026-09-23). Sending it to `fallPile` — which
+  //    had been DEAD CODE, and drops the material as collectable matter — carpeted the user's burning wood in wood
+  //    pickups, in a Sandbox where pickups should not exist at all, and deleted the cells to make them ("burnt
+  //    through without leaving charcoal or anything at all"). Every twig a fire cuts loose took that path.
+  //    A burning scrap burns away in a few seconds; what it chars into is then handled by the rule above, because
+  //    losing a neighbour asks the question again.
+  if (region.length < fallCfg.min) {
+    if (!byFire) { fallSmall++; return false; }                   // a player's dig: their doing, leave it standing
+    const lit = [], fs2 = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map());
+    for (const i of region) {
+      if (!fallCand(peek(i)) || fs2.has(i)) continue;
+      fs2.add(i); ages.set(i, 0); lit.push(i, 1); fallBurnt++;
+    }
+    if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
+    return false;
+  }
+  return !!fallCut(room, region);
+}
+// ⭐ (2026-10-26, tools piece 5 round 6 — the midpoint rule, the user's) A TREE CUT FROM ITS WOOD. Only WOOD holds a tree up: from `start` the walk goes through
+//   wood, timber and charcoal (8-neighbour) to the level's floor, unbuilt ground or solid ground (as `fallCheck`'s own walk); leaves are not walked. If that wood
+//   is loose, its leaves are the ones NEARER IT than any other tree's wood: every leaf joined to it through leaves, shared out by a walk through the leaves from
+//   this wood and from any other wood touching them at once (the first to reach a leaf takes it; a tie stays with the standing tree). → { region (wood + its
+//   leaves), mark (what this has looked at), supported, overflow }
+function fallWoodRegion(start, peek, COLS, ROWS, nn, FLOOR_ROW) {
+  const woody = (v) => fallCand(v) && fallCode(v) !== 3;
+  const W = [], wm = new Set([start]), stack = [start];
+  let supported = false, overflow = false;
+  const nb = (i, f) => { const ic = (i / ROWS) | 0, ir = i - ic * ROWS; for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) { if (!dc && !dr) continue; if (f(ic + dc, ir + dr) === false) return false; } return true; };
+  while (stack.length && !supported) {
+    const i = stack.pop(); W.push(i);
+    if (W.length > fallCfg.max) { overflow = true; break; }
+    nb(i, (nc, nr) => {
+      if (nr >= FLOOR_ROW) { supported = true; fallLast = { why: 'floor', nc, nr, region: W.length, wood: 1 }; return false; }
+      if (nc < 0 || nc >= COLS || nr < 0 || nr >= ROWS) return;
+      const j = nc * ROWS + nr; if (j < 0 || j >= nn) return;
+      const v = peek(j);
+      if (v < 0) { supported = true; fallLast = { why: 'unbuilt', nc, nr, region: W.length, wood: 1 }; return false; }
+      if (fallCand(v)) { if (woody(v) && !wm.has(j)) { wm.add(j); stack.push(j); } return; }
+      if (isSolidCell(v) && !isBodyId(v) && v !== FALL_ASH && v !== MAT_CINDER) { supported = true; fallLast = { why: 'solid', v, nc, nr, region: W.length, wood: 1 }; return false; }
+    });
+  }
+  if (supported || overflow) return { region: [], mark: wm, supported, overflow };
+  // the leaves joined to it, and any OTHER wood touching those leaves
+  const L = new Set(), O = new Set(), q = [];
+  const leafStep = (i) => nb(i, (nc, nr) => { if (nc < 0 || nc >= COLS || nr < 0 || nr >= ROWS) return; const j = nc * ROWS + nr; if (j < 0 || j >= nn) return; const v = peek(j);
+    if (!fallCand(v)) return; if (woody(v)) { if (!wm.has(j)) O.add(j); return; } if (!L.has(j) && L.size < fallCfg.max) { L.add(j); q.push(j); } });
+  for (const i of W) leafStep(i);
+  while (q.length) leafStep(q.pop());
+  // shared out: one walk through the leaves from both at once, the standing tree's wood first in each step (a tie stays with it)
+  const lab = new Map(); let fr = [];
+  for (const i of O) fr.push(i, 2);
+  for (const i of W) fr.push(i, 1);
+  while (fr.length) { const nx = [];
+    for (let k = 0; k < fr.length; k += 2) { const l = fr[k + 1];
+      nb(fr[k], (nc, nr) => { if (nc < 0 || nc >= COLS || nr < 0 || nr >= ROWS) return; const j = nc * ROWS + nr; if (L.has(j) && !lab.has(j)) { lab.set(j, l); nx.push(j, l); } }); }
+    fr = nx; }
+  const region = W.slice(); let mine = 0;
+  for (const [j, l] of lab) if (l === 1) { region.push(j); wm.add(j); mine++; }
+  fallLast = { why: 'loose', wood: W.length, leaves: mine, leavesKept: lab.size - mine, otherWood: O.size };
+  return { region, mark: wm, supported: false, overflow: false };
+}
 // Look for unsupported falling-capable regions touching a rectangle of cells (a dig, or a cell the fire finished).
 function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
   const st = cellsOf(room), grid = st.terrain; if (!grid) return 0;
@@ -5867,6 +5961,18 @@ function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
   for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) {
     const start = c * ROWS + r;
     if (seen.has(start) || !fallCand(peek(start))) continue;
+    // ⭐ (2026-10-26, tools piece 5 round 6 — the user: "I split a tree trunk but the tree didn't fall and I think it's because its leaves are touching another
+    //   trees at the top … we could also just have some basic rule that separated the leaves between the next tree along the midpoint"; asked: the midpoint rule)
+    //   — FROM WOOD, ONLY WOOD HOLDS A TREE UP, AND ITS LEAVES ARE THE ONES NEARER ITS WOOD (`fallWoodRegion`): a crown touching a neighbour's was one region with
+    //   the neighbour's trunk, which stands on the ground, so a cut tree never fell. A cut starting in leaves alone is checked as before.
+    if (fallCfg.leafSplit && fallCode(peek(start)) !== 3) {
+      const R = fallWoodRegion(start, peek, COLS, ROWS, nn, FLOOR_ROW);
+      for (const i of R.mark) seen.add(i);
+      if (R.supported || !R.region.length) continue;
+      if (R.overflow) { fallRefused++; continue; }
+      if (fallFinish(room, st, R.region, peek, byFire)) cut++;
+      continue;
+    }
     const region = [], stack = [start], mark = new Set([start]);
     let supported = false, overflow = false;
     while (stack.length && !supported) {
@@ -5911,54 +6017,7 @@ function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
     //     · sound wood in it     → a real branch falls, as before; a scrap too small to be an object is a pickup
     // 🟥 THE OLD RULE SET SMALL CLUMPS ALIGHT INSTEAD, and that is the user's floating cells: charcoal smoulders for
     //    about a minute, so specks hung in the air burning the whole time and only then turned to ash.
-    let sound = false, charred = false;
-    for (const i of region) { const c = fallCode(peek(i)); if (c === 1) sound = true; else if (c === 2) charred = true; }
-    if (!sound && !charred) {
-      // ⚠️ Only what the FIRE freed: a leaf clump a player cut loose with a dig is their own doing and stays put.
-      if (!byFire) { fallSmall++; continue; }
-      // 🟥🟥 LIT WHERE THE FIRE REACHES IT, NOT ALL OVER (2026-09-23). Two rounds of the same fault: first the whole
-      //    cut-loose clump was CONVERTED in one pass (the canopy vanished the instant the branch under it burnt
-      //    through), then it was SET ALIGHT in one pass — and the user saw the second at once: *"the whole connected
-      //    patch of leaves will ignite at once"* after the flames had been travelling through it normally. A clump
-      //    coming loose is not a clump catching fire. Only the cells of it already touching flame are lit, and the
-      //    fire then spreads through the rest by the ordinary rules, which is the cascade they remember.
-      // ⚠️ If the fire has moved on and nothing of it touches flame any more, the LOWEST few are lit instead, so a
-      //    clump the fire freed and then left behind still burns away rather than hanging there unlit for ever.
-      const lit = [], fs2 = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map());
-      const ROWS2 = st.rows, touching = [];
-      for (const i of region) {
-        if (!fallCand(peek(i)) || fs2.has(i)) continue;
-        const rr = i % ROWS2;
-        if (fs2.has(i - ROWS2) || fs2.has(i + ROWS2) || (rr > 0 && fs2.has(i - 1)) || (rr < ROWS2 - 1 && fs2.has(i + 1))) touching.push(i);
-      }
-      let seeds = touching;
-      if (!seeds.length) {
-        const cand = region.filter((i) => fallCand(peek(i)) && !fs2.has(i));
-        cand.sort((a, b) => (b % ROWS2) - (a % ROWS2));            // …the lowest rows first
-        seeds = cand.slice(0, 3);
-      }
-      for (const i of seeds) { fs2.add(i); ages.set(i, 0); lit.push(i, 1); fallBurnt++; }
-      if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
-      continue;
-    }
-    if (!sound) { fallCharCrumble(room, region, peek); continue; }
-    // 🟥🟥 A SCRAP OF SOUND WOOD IS SET ALIGHT, NOT TURNED INTO A PICKUP (2026-09-23). Sending it to `fallPile` — which
-    //    had been DEAD CODE, and drops the material as collectable matter — carpeted the user's burning wood in wood
-    //    pickups, in a Sandbox where pickups should not exist at all, and deleted the cells to make them ("burnt
-    //    through without leaving charcoal or anything at all"). Every twig a fire cuts loose took that path.
-    //    A burning scrap burns away in a few seconds; what it chars into is then handled by the rule above, because
-    //    losing a neighbour asks the question again.
-    if (region.length < fallCfg.min) {
-      if (!byFire) { fallSmall++; continue; }                   // a player's dig: their doing, leave it standing
-      const lit = [], fs2 = fineFireSet(room), ages = st.fireAge || (st.fireAge = new Map());
-      for (const i of region) {
-        if (!fallCand(peek(i)) || fs2.has(i)) continue;
-        fs2.add(i); ages.set(i, 0); lit.push(i, 1); fallBurnt++;
-      }
-      if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
-      continue;
-    }
-    if (fallCut(room, region)) cut++;
+    if (fallFinish(room, st, region, peek, byFire)) cut++;
   }
   return cut;
 }
