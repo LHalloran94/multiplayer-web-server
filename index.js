@@ -18017,6 +18017,9 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
           f0: clampN(b.f0, 0, 20000, 0), e0: clampN(b.e0, 0, 20000, 0), z: clampN(b.z, 0, 400, 0), s: clampN(b.s, 0, 1, 0) } : null; });
       if (Array.isArray(data.rc)) { const rc = data.rc.slice(0, 8).filter(c => Array.isArray(c) && isFinite(+c[0]) && isFinite(+c[1]) && isFinite(+c[2]))
         .map(c => [clampN(c[0], 0, 20000, 0), +c[1], clampN(c[2], 0, 10000, 1500)]); if (rc.length) obj.rc = rc; }
+      // (2026-10-26, tools piece 6) A GRAPPLING HOOK'S ROPE: `rh` = the hook it is tied to (client 16za); thinner than a built rope may be (the user: "the
+      //   existing rope object we have, albeit an appropriately thin one")
+      if (typeof data.rh === 'string' && data.rh.length < 120) { obj.rh = data.rh; obj.h = clampN(data.h, 3, 60, 4); }
     }
     // ⭐⭐ A BELT is the same trick once more, and the only face here that keeps its own SOLIDITY: a
     // conveyor laid as a floor is the one-way bar everybody knows, one laid as a ceiling is solid. Which wheels
@@ -20069,6 +20072,13 @@ function eqRemoveObj(room, o) {
   if (o.eq) { eqNote(o.eq, o.id, 0); delete o.eq; }
   objUnindex(room, o);
   emitObjToChunks(room, o, 'avatar-object-removed', { id: o.id });
+  if (HELD.is(o.look) && HELD.LOOKS[o.look].hook) hookRopesDrop(room, o.id);
+}
+// ⭐ (2026-10-26, tools piece 6) A GRAPPLING HOOK'S ROPE (`rh`, client 16za) exists only while the hook is out in the world: when the hook is taken into a hand
+//   (anybody's), put in a pouch or erased, its rope is coiled back into it — removed here, for everybody.
+function hookRopesDrop(room, hookId) {
+  const map = roomObjects[room]; if (!map) return;
+  for (const r of [...map.values()]) if (r.look === 'rope' && r.rh === hookId) { objUnindex(room, r); emitObjToChunks(room, r, 'avatar-object-removed', { id: r.id }); }
 }
 // `toSid` = whose hand it is going into, or null = into the world. False when the thing had to be removed instead: its holder
 // no longer carries one (their pouch was emptied under it), and leaving it lying would make a second one out of nothing.
@@ -20090,6 +20100,7 @@ function itemObjMove(room, o, toSid) {
     }
   }
   if (to) {
+    if (HELD.is(o.look) && HELD.LOOKS[o.look].hook) hookRopesDrop(room, o.id);   // (tools piece 6) a grappling hook taken into a hand: its rope is coiled back into it
     o.eq = to; eqNote(to, o.id, 1);
     if (gated) { ledger.creditItems(playerKeyFor(to), [[o.item, 1]]); const ts = io.sockets.sockets.get(to); if (ts) sendInvSync(ts, room); }
   }
@@ -24871,7 +24882,10 @@ io.on('connection', (socket) => {
     const eqAsk = !!(data.eq && data.type === 'stamp' && ITEMS.isItem(data.item));
     // (2026-10-20, plan file §5z38 piece 3) an ARROW LOOSED from a bow: one comes out of the shooter's pouch as the object (16w `bowShoot`)
     const ammoAsk = !!(data.ammo && data.type === 'stamp' && ITEMS.isItem(data.item) && ITEMS.ITEMS[data.item].kind === 'ammo');
-    if (!canBuild() && !eqAsk && !ammoAsk) return;                      // Phase 3: L2 build permission
+    // (2026-10-26, tools piece 6) …nor is the ROPE a grappling hook takes with it as it is thrown (client 16za `hookOnLaunch`): asked while the hook is still in the
+    //   asker's hand — checked below, once the room's props are loaded. Like an arrow it is free, not counted, and allowed on the spawn.
+    const hookAsk = !!(data.hookRope && data.type === 'platform' && data.look === 'rope' && typeof data.rh === 'string');
+    if (!canBuild() && !eqAsk && !ammoAsk && !hookAsk) return;                      // Phase 3: L2 build permission
     const type = data.type;
     // Client supplies the id (for optimistic local placement). Require it to be namespaced to
     // this socket (anti-spoof); otherwise mint a fallback. Echoing the same id back means the
@@ -24882,6 +24896,7 @@ io.on('connection', (socket) => {
     if (!roomObjects[currentAvatarRoom]) roomObjects[currentAvatarRoom] = new Map();
     const map = roomObjects[currentAvatarRoom];
     if (map.has(id)) return;                                // ignore duplicate spawn for an existing id
+    if (hookAsk) { const h = map.get(data.rh); if (!h || h.eq !== socket.id || !HELD.is(h.look) || !HELD.LOOKS[h.look].hook) return; hookRopesDrop(currentAvatarRoom, h.id); }
     const obj = buildWorldObject(type, data, id, socket.id, currentUsername || socket.id, currentAvatarRoom);   // shared with 7b hydration
     if (!obj) return;
     // ⭐ A HAND ITEM (see `itemObjMove`): allowed only as something in the asker's own hand, only while they carry one more of it
@@ -24914,7 +24929,7 @@ io.on('connection', (socket) => {
     // (2026-10-20, arrows round 3) …nor is a loosed ARROW building: it was refused here when shot from near the spawn — AFTER it had been
     //   spent and its driver set — so nobody else saw it and it was lost from the pouch; it was also charged a Prima price and counted
     //   against the caps below. An arrow is exempt from all four, as a thing in your hand is.
-    if (!obj.eq && !ammoAsk && type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal' && type !== 'region' && type !== 'sign' && type !== 'painting') {  // no building solids on the spawn (world mode); the non-solid ones — flags, regions, signs, paintings — are allowed
+    if (!obj.eq && !ammoAsk && !hookAsk && type !== 'checkpoint' && type !== 'goal' && type !== 'spawn' && type !== 'portal' && type !== 'region' && type !== 'sign' && type !== 'painting') {  // no building solids on the spawn (world mode); the non-solid ones — flags, regions, signs, paintings — are allowed
       const clear = spawnClearRect(currentAvatarRoom);
       if (clear) {
         let bx0, by0, bx1, by1;
@@ -24934,7 +24949,7 @@ io.on('connection', (socket) => {
     // built would be told the world was full. Per chunk it is a local clutter bound instead, and it is enforced
     // where the props are, so one player cannot exhaust another's build site from the far side of the map.
     if (objChunked(currentAvatarRoom)) {
-      if (!obj.eq && !ammoAsk && objCountInChunk(currentAvatarRoom, dropChunkOf(currentAvatarRoom, obj)) >= MAX_OBJECTS_PER_CHUNK) {
+      if (!obj.eq && !ammoAsk && !hookAsk && objCountInChunk(currentAvatarRoom, dropChunkOf(currentAvatarRoom, obj)) >= MAX_OBJECTS_PER_CHUNK) {
         socket.emit('build-refused', { why: 'Too much built here already — spread out a little.' });
         return;
       }
@@ -24947,7 +24962,7 @@ io.on('connection', (socket) => {
       // ⚠️ …unless it came from the BUILD MENU, which is the editor and is outside the economy (see the same
       // flag on `terrain-edit`). A prop placed there costs nothing and therefore refunds nothing — `cost` is
       // simply absent, and every refund path already keys on it being present.
-      if (invGatedRoom(currentAvatarRoom) && !data.editor && !obj.eq && !ammoAsk) {
+      if (invGatedRoom(currentAvatarRoom) && !data.editor && !obj.eq && !ammoAsk && !hookAsk) {
         const _k = playerKeyFor(socket.id), _cost = objPriceOf(obj);
         if (ledger.prima(_k) < _cost) {
           socket.emit('build-refused', { why: `That costs ✦${_cost.toLocaleString()} — refine some more first.` });
@@ -24968,7 +24983,7 @@ io.on('connection', (socket) => {
     }
     let userObjs = 0;
     for (const k of map.keys()) if (!(typeof k === 'string' && k.startsWith('world-'))) userObjs++;
-    if (userObjs >= MAX_OBJECTS_PER_ROOM && !obj.eq && !ammoAsk) return;
+    if (userObjs >= MAX_OBJECTS_PER_ROOM && !obj.eq && !ammoAsk && !hookAsk) return;
     map.set(id, obj);
     if (obj.eq) eqNote(socket.id, id, 1);
     io.to(currentAvatarRoom).emit('avatar-object-add', obj);     // whole room incl. sender (authoritative id)
@@ -24990,6 +25005,7 @@ io.on('connection', (socket) => {
     //   else dropped and you picked up. Without this it stayed in the world, held by you for ever, the moment you chose another number.
     if (!obj || !(mine || obj.eq === socket.id || adminSockets.has(socket.id))) return;
     objUnindex(currentAvatarRoom, obj);
+    if (HELD.is(obj.look) && HELD.LOOKS[obj.look].hook) hookRopesDrop(currentAvatarRoom, obj.id);   // (tools piece 6) …and a grappling hook's rope with it
     // ⭐ ERASING YOUR OWN PROP HANDS THE DEPOSIT STRAIGHT BACK, because this path is owner-only — it is
     // un-building, not a raid, and making you chase your own Prima across the floor for changing your mind
     // would be a penalty on tidying up. SMASHING one scatters instead (see `avatar-object-hit`): the difference
@@ -25962,13 +25978,14 @@ io.on('connection', (socket) => {
   // `obj-state` to everybody, so every machine holds it still and a late joiner finds it stuck. Off: the field goes (anybody may say
   // so — the thing it was in moved, or the ground round it was dug away). Picking it up clears it too (`obj-hold`).
   // ⚠️ Only for a sword, and only from whoever is driving it (the thrower) or when nobody is.
-  socket.on('obj-stick', ({ id, on, x, y, a, d, oid, hx, hy, ha, vic, ox, oy, wx, wy, hk, kx, ky, ks } = {}) => {
+  socket.on('obj-stick', ({ id, on, x, y, a, d, oid, hx, hy, ha, vic, ox, oy, wx, wy, hk, kx, ky, ks, gh, ux, uy } = {}) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
     const now = Date.now(); if (now - _settleAt > 1000) { _settleAt = now; _settleN = 0; } if (++_settleN > 40) return;
     const map = roomObjects[room], o = map && map.get(id);
     // (2026-10-24, lights piece 5) …or a LIGHT HUNG on a wall / ceiling (`hk` — client 16y `hangPress`): held there as a stuck thing is, until somebody takes it down
     const hung = (hk === 'wall' || hk === 'ceil') && !!o && HELD.is(o.look) && !!(HELD.LOOKS[o.look].lamp || HELD.LOOKS[o.look].fire);
-    if (!o || o.type !== 'stamp' || !o.loose || !HELD.is(o.look) || !(HELD.LOOKS[o.look].sticks || hung || (!on && (HELD.LOOKS[o.look].lamp || HELD.LOOKS[o.look].fire)))) return;   // (a held thing that sticks where it lands — server/held.js)
+    const hookC = !!o && HELD.is(o.look) && !!HELD.LOOKS[o.look].hook;   // (2026-10-26, tools piece 6) a grappling hook caught on the ground (client 16za)
+    if (!o || o.type !== 'stamp' || !o.loose || !HELD.is(o.look) || !(HELD.LOOKS[o.look].sticks || hung || hookC || (!on && (HELD.LOOKS[o.look].lamp || HELD.LOOKS[o.look].fire)))) return;   // (a held thing that sticks where it lands — server/held.js)
     const st = objStOf(room), rec = st.get(id) || {};
     if (!on) { if (o.stk) { delete o.stk; objsTouch(room, o.ch); } if (!rec.stk) return; delete rec.stk; if (Object.keys(rec).length) st.set(id, rec); else st.delete(id); broadcastObjSt(room); return; }
     if (!isFinite(x) || !isFinite(y) || !isFinite(a)) return;
@@ -25992,6 +26009,7 @@ io.on('connection', (socket) => {
     else if (typeof vic === 'string' && vic.length < 80 && isFinite(ox) && isFinite(oy)) { stk.vic = vic; stk.ox = Math.max(-200, Math.min(200, +ox)); stk.oy = Math.max(-200, Math.min(200, +oy));
       // (after wielding round 26) …and where the WOUND it made is on them, from their middle: every machine draws the split there and keeps the sword in it
       if (isFinite(wx) && isFinite(wy)) { stk.wx = Math.max(-100, Math.min(100, +wx)); stk.wy = Math.max(-100, Math.min(100, +wy)); } }
+    if (hookC && gh && isFinite(ux) && isFinite(uy)) { stk.gh = 1; stk.ux = +(+ux).toFixed(3); stk.uy = +(+uy).toFixed(3); }
     if (hung && isFinite(kx) && isFinite(ky)) { stk.hk = hk; stk.kx = Math.round(+kx); stk.ky = Math.round(+ky); stk.ks = ks > 0 ? 1 : ks < 0 ? -1 : 0; }   // (where it hangs from)
     rec.stk = stk; st.set(id, rec);
     // ⭐ (2026-10-25, the user: "When you refresh lights that were hanging are no longer hanging") — the record above is in memory only, so a server restart

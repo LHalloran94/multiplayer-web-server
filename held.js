@@ -504,6 +504,16 @@
     pickheadaxe: tool(38, 3, 1.6, 0.08, 0.84, 'pq', Object.assign({ hitHalf: 8.8, right: 'pry', back: true, dig: { kind: 'axe', v: 1, h: 2,
       back: { kind: 'pick', deep: 1.75, face: 3, behind: 1, row: 3, pryMs: 420, pull: 10 } } }, two(0.5))),
   });
+  // ⭐ TOOLS, PIECE 6 (2026-10-26, the tools plan §1b, §1d, §2 "Grapple"): THE GRAPPLING HOOK ON A ROPE (one hand, ~10 px — round 2's G1) — client 16za.
+  //   Its buttons are a throwable's (LEFT held winds up, let go throws, the dotted arc shows where; MIDDLE lobs), but it is no stack: it is the item itself, and
+  //   once thrown it is nobody's — anybody may pull its rope or pick it up. Thrown, it takes `hook.len` px of the game's own rope with it, `hook.h` thick (a built
+  //   rope is 8), its far end tied to the hook's eye and the near end in the thrower's hands; the spare lies in a heap at their feet and is paid out as it flies.
+  //   RIGHT HELD on the rope pulls it in hand over hand; dragged so, its prongs (`tipX` of its length back from the far end, `tipY` px either side) bite into
+  //   rock, ice, packed ground or wood they are pulled against, and it holds while pulled the way it bit (the client's dials: Items → "Grappling hook: …").
+  Object.assign(LOOKS, {
+    grapnel: tool(10, 6, 0.35, 0.16, 1, 'gn', { hitHalf: 3, throwable: true, strikes: false, sticks: false, pierces: false, right: 'none', mat: 'iron',
+      hook: { len: 320, h: 4, tipX: 0.24, tipY: 2.4 } }, 'blunt'),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it
