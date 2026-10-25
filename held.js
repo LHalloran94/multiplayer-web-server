@@ -487,7 +487,8 @@
     smallspade: tool(18, 1.6, 0.6, 0.04, 0.69, 'sq', { hitHalf: 2.3, strikes: false, spade: { deep: 8, full: 0.32, n: 3, reach: 8, wide: 6, thrMs: 320 } }, 'blunt'),
   });
   // ⭐ TOOLS, PIECE 5 (2026-10-25, the tools plan §1b, §2 "Axes" / "Mattock" / "One piece of metal", §4c): THE FELLING AXE (two hands) and THE HATCHET (one hand) —
-  //   `dig` kind 'axe' (client 16z `toolChop`): a press swings at once at the pointer (the picks' press scheme: left a downward chop, right the level felling cut);
+  //   `dig` kind 'axe' (client 16z `toolChop`): left a downward chop, right the level felling cut — held, drawn back; let go, it swings to land at the pointer
+  //   (round 2; a left click is the quick chop);
   //   where its edge meets wood the chop BREAKS THE WOOD IT CUT at once — `v` cells on a downward chop (on along the way the edge was going), `h` in a horizontal
   //   line on a level one — the user: "if you swing vertically down against it it cuts into a cell or two, but if you swing it horizontally into the wood you might
   //   hit 2 or 3 cells in a horizontal line". Wood, timber, charcoal and every plant are cut; soft ground stops it with a thud, rock with a clang. Nothing to pull.
@@ -495,11 +496,12 @@
   //   on a downward swing (almost nothing), `wide` = the row ACROSS the face a level swing pries, `hardK` = each strength step dearer to pry (best in soft ground).
   //   THE PICK-HEAD AXE (two hands): its axe leads (the felling axe's cut); turned round, a pick a little smaller than the pickaxe.
   Object.assign(LOOKS, {
-    fellingaxe: tool(38, 3, 1.5, 0.08, 0.84, 'fe', Object.assign({ hitHalf: 7, dig: { kind: 'axe', v: 2, h: 3 } }, two(0.5))),
-    hatchet: tool(20, 2.4, 0.7, 0.14, 0.78, 'hc', { hitHalf: 5.6, dig: { kind: 'axe', v: 1, h: 2 } }),
+    // (round 2, the user: "the level swing cutting away 3 cells seems like too much and it should probably be 2" → felling 1 / 2, hatchet 1 / 1)
+    fellingaxe: tool(38, 3, 1.5, 0.08, 0.84, 'fe', Object.assign({ hitHalf: 7, dig: { kind: 'axe', v: 1, h: 2 } }, two(0.5))),
+    hatchet: tool(20, 2.4, 0.7, 0.14, 0.78, 'hc', { hitHalf: 5.6, dig: { kind: 'axe', v: 1, h: 1 } }),
     mattock: tool(40, 3.4, 1.7, 0.1, 0.86, 'mk', Object.assign({ hitHalf: 11, right: 'pry', back: true, dig: { kind: 'pick', deep: 2, face: 4, behind: 2, row: 3, pryMs: 450, pull: 12,
       back: { kind: 'pick', adze: true, deep: 1, vDeep: 0.3, face: 1, behind: 0, row: 1, wide: 5, hardK: 0.6, pryMs: 400, pull: 9 } } }, two(0.5))),
-    pickheadaxe: tool(38, 3, 1.6, 0.08, 0.84, 'pq', Object.assign({ hitHalf: 8.8, right: 'pry', back: true, dig: { kind: 'axe', v: 2, h: 3,
+    pickheadaxe: tool(38, 3, 1.6, 0.08, 0.84, 'pq', Object.assign({ hitHalf: 8.8, right: 'pry', back: true, dig: { kind: 'axe', v: 1, h: 2,
       back: { kind: 'pick', deep: 1.75, face: 3, behind: 1, row: 3, pryMs: 420, pull: 10 } } }, two(0.5))),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
