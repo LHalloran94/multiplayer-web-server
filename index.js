@@ -855,6 +855,21 @@ if (process.env.MW_DEV_LOGIN === '1') {
     const token = jwt.sign({ sub, username: name, avatar: null }, JWT_SECRET, { expiresIn: '30d' });
     res.json({ jwt: token, username: name, avatar: null });
   });
+  // (rigs, 2026-10-26 — tools piece 5 round 4) A FELLED PIECE WHERE YOU ASK: a block of tree Wood `w`×`h` cells with its top-left cell at world px (x, y), written into
+  //   the room (the TEST Overworld unless `room` names another) and cut loose by the fall's own `fallCut` — so a rig can make a real felled piece where there is no
+  //   tree (the test Overworld's spawns have none). Loopback + MW_DEV_LOGIN only, as /dev/login.
+  app.get('/dev/fall-test', (req, res) => {
+    if (!LOOPBACK.test(String(req.socket.remoteAddress || ''))) return res.status(404).end();
+    const room = String(req.query.room || OVERWORLD_TEST_ROOM), st = roomCells.get(room);
+    if (!st || !st.terrain) return res.json({ ok: false, why: 'no terrain for ' + room });
+    const C = TERRAIN_CELL, c0 = Math.floor(+req.query.x / C), r0 = Math.floor(+req.query.y / C), w = Math.max(1, Math.min(8, req.query.w | 0 || 2)), h = Math.max(1, Math.min(40, req.query.h | 0 || 10));
+    if (!isFinite(c0) || !isFinite(r0)) return res.json({ ok: false, why: 'x, y' });
+    const region = [], set = [];
+    for (let c = c0; c < c0 + w; c++) for (let r = r0; r < r0 + h; r++) { const i = c * st.rows + r; if (i < 0 || i >= st.terrain.length) continue; st.terrain.s(i, 28); if (st.terrainHp) st.terrainHp.s(i, 0); region.push(i); set.push(i, 28); }
+    if (set.length) wireFanout(room, 'terrain-set', { cells: set });
+    const before = fallSeq, ok = region.length ? fallCut(room, region) : false;
+    res.json({ ok: !!ok, cells: region.length, made: fallSeq - before, room });
+  });
   console.log('⚠ MW_DEV_LOGIN is ON — GET /dev/login?name=x mints a dev:x identity for loopback callers');
 }
 
@@ -20065,6 +20080,17 @@ function objStkClean(k) {
   if ((k.hk === 'wall' || k.hk === 'ceil') && isFinite(k.kx) && isFinite(k.ky)) { out.hk = k.hk; out.kx = Math.round(+k.kx); out.ky = Math.round(+k.ky); out.ks = k.ks > 0 ? 1 : k.ks < 0 ? -1 : 0; }
   return out;
 }
+// (above) a stored fallen piece, checked as `fallCut` / `bodySplitCheck` make one: its box whole cells no bigger than `FALL_DIM` a side, one material per cell in
+//   `fm`, a crate's picture (`src`) if it was cut from one. Null = not a valid one (dropped).
+function fallenFromRow(p) {
+  const C = TERRAIN_CELL, w = +p.w, h = +p.h, x = +p.x, y = +p.y, a = +p.angle || 0;
+  if (typeof p.fm !== 'string' || p.type !== 'stamp' || ![w, h, x, y, a].every(isFinite) || w < C || h < C || w > FALL_DIM * C || h > FALL_DIM * C) return null;
+  let n = 0; try { n = Buffer.from(p.fm, 'base64').length; } catch (e) { return null; }
+  if (!n || n > FALL_DIM * FALL_DIM) return null;
+  const o = { id: String(p.id), type: 'stamp', look: 'fallen', content: '🪵', shape: 'rect', ownerId: 'world', owner: 'world', x, y, w, h, angle: a, loose: 1, hp: null, fm: p.fm };
+  const s = p.src; if (s && typeof s.look === 'string' && [s.w, s.h, s.ox, s.oy].every(v => isFinite(+v))) o.src = { look: s.look, shape: typeof s.shape === 'string' ? s.shape : 'rect', w: +s.w, h: +s.h, ox: +s.ox, oy: +s.oy };
+  return o;
+}
 function ensureObjectsLoaded(room) {
   if (!objChunked(room) || _objsLoaded.has(room)) return;
   _objsLoaded.add(room);                               // set FIRST: a failed read must not retry on every access
@@ -20082,6 +20108,11 @@ function ensureObjectsLoaded(room) {
       // function is that every field a prop carries has been clamped by it. Re-running it costs nothing here and
       // means there is exactly one definition of what a valid prop is.
       if (!p || !p.id || !OBJ_TYPES.has(p.type)) continue;
+      // ⭐ (2026-10-26, tools piece 5 round 4 — the user: after a refresh "the felled tree objects become just plain stamp boxes") — A FALLEN PIECE comes back AS ONE.
+      //   `buildWorldObject` knows nothing of it: 'fallen' is no stamp look (dropped), its box is clamped to a prop's (24px at least) and its cells (`fm`) are not
+      //   carried — so a restart made every felled piece a plain box. Re-validated by its own rule instead (`fallenFromRow`); its cells are stored as air with the
+      //   ground and stamped again where it rests, as before.
+      if (p.look === 'fallen') { const f = fallenFromRow(p); if (f) { objIndex(room, f); n++; } continue; }
       const o = buildWorldObject(p.type, p, p.id, p.ownerId || '', p.owner || '', room);
       if (!o) continue;
       if (typeof p.hp === 'number' || p.hp === null) o.hp = p.hp;   // damage survives a restart; the ground it stands on does
