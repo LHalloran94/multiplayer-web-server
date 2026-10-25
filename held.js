@@ -481,8 +481,10 @@
   //   thrown scoop against it. Earth 1 · Sand 3 · Mud 5 · Snow 8 · Turf 18 · Clay 19 · Peat 20 · Scree 21 · Ash 38 · Gravel 39 · Ooze 90 · Cinder 93
   const SPADE_SOFT = { 1: 1.5, 3: 1, 5: 2, 8: 1, 18: 1.5, 19: 2, 20: 1.5, 21: 1, 38: 1, 39: 1.5, 90: 1.5, 93: 1 };
   Object.assign(LOOKS, {
-    spade: tool(34, 2, 1.4, 0.03, 2, 'sd', Object.assign({ hitHalf: 3.4, strikes: false, spade: { deep: 14, full: 0.45, n: 6, reach: 10, wide: 8, thrMs: 380 } }, two(0.55)), 'blunt'),
-    smallspade: tool(18, 1.6, 0.6, 0.04, 2, 'sq', { hitHalf: 2.3, strikes: false, spade: { deep: 8, full: 0.32, n: 3, reach: 8, wide: 6, thrMs: 320 } }, 'blunt'),
+    // (`hurtFrom` = where the blade starts — it strikes nothing (`strikes: false`), but a fast swing's TRAIL is drawn from there to its end: round 2 had 2, and the
+    //   trail was drawn far out past the blade — the user: "The motion blur for the spade … shows much further out than the tip is")
+    spade: tool(34, 2, 1.4, 0.03, 0.77, 'sd', Object.assign({ hitHalf: 3.4, strikes: false, spade: { deep: 14, full: 0.45, n: 6, reach: 10, wide: 8, thrMs: 380 } }, two(0.55)), 'blunt'),
+    smallspade: tool(18, 1.6, 0.6, 0.04, 0.69, 'sq', { hitHalf: 2.3, strikes: false, spade: { deep: 8, full: 0.32, n: 3, reach: 8, wide: 6, thrMs: 320 } }, 'blunt'),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
