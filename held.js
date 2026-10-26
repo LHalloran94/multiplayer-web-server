@@ -512,7 +512,7 @@
   //   rock, ice, packed ground or wood they are pulled against, and it holds while pulled the way it bit (the client's dials: Items → "Grappling hook: …").
   Object.assign(LOOKS, {
     grapnel: tool(10, 6, 0.35, 0.16, 1, 'gn', { hitHalf: 3, throwable: true, strikes: false, sticks: false, pierces: false, right: 'none', mat: 'iron',
-      hook: { len: 320, h: 4, tipX: 0.24, tipY: 2.4 } }, 'blunt'),
+      hook: { len: 640, h: 4, tipX: 0.24, tipY: 2.4 } }, 'blunt'),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
