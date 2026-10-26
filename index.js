@@ -18019,7 +18019,9 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
         .map(c => [clampN(c[0], 0, 20000, 0), +c[1], clampN(c[2], 0, 10000, 1500)]); if (rc.length) obj.rc = rc; }
       // (2026-10-26, tools piece 6) A GRAPPLING HOOK'S ROPE: `rh` = the hook it is tied to (client 16za); thinner than a built rope may be (the user: "the
       //   existing rope object we have, albeit an appropriately thin one")
-      if (typeof data.rh === 'string' && data.rh.length < 120) { obj.rh = data.rh; obj.h = clampN(data.h, 3, 60, 4); }
+      if (typeof data.rh === 'string' && data.rh.length < 120) { obj.rh = data.rh; obj.h = clampN(data.h, 3, 60, 4);
+        // (round 3) `ro` = how much of it is OUT of the thrower's coil (the rest, up to `rl`, is coiled in their hand): it pays out as the hook flies
+        if (isFinite(+data.ro)) obj.ro = clampN(data.ro, 8, obj.rl || 1200, obj.rl || 640); }
     }
     // ⭐⭐ A BELT is the same trick once more, and the only face here that keeps its own SOLIDITY: a
     // conveyor laid as a floor is the one-way bar everybody knows, one laid as a ceiling is solid. Which wheels
@@ -20080,6 +20082,19 @@ function hookRopesDrop(room, hookId) {
   const map = roomObjects[room]; if (!map) return;
   for (const r of [...map.values()]) if (r.look === 'rope' && r.rh === hookId) { objUnindex(room, r); emitObjToChunks(room, r, 'avatar-object-removed', { id: r.id }); }
 }
+// ⭐ (round 3, the user: "all the loose rope just immediately disappears as soon as the grapple hook is back in your hand") — taken into a HAND, its rope is
+//   REELED into that hand's coil first: the holder's screen pulls it in (client 16za `hookReelStep`) and says when it is in (`hook-rope-done`). Removed then,
+//   or after `HOOK_REEL_MS` whatever happens, so a screen that never says leaves no rope behind.
+const HOOK_REEL_MS = 4000;
+function hookRopesReel(room, hookId, sid) {
+  const map = roomObjects[room]; if (!map) return;
+  for (const r of map.values()) if (r.look === 'rope' && r.rh === hookId && !r.reel) {
+    // (…a rope already all in — pulled in to the hand, `ro` at its least — goes at once)
+    if (!(r.ro > 40)) { objUnindex(room, r); emitObjToChunks(room, r, 'avatar-object-removed', { id: r.id }); continue; }
+    r.reel = sid; const id = r.id;
+    setTimeout(() => { const m = roomObjects[room], q = m && m.get(id); if (q && q.reel) { objUnindex(room, q); emitObjToChunks(room, q, 'avatar-object-removed', { id }); } }, HOOK_REEL_MS);
+  }
+}
 // `toSid` = whose hand it is going into, or null = into the world. False when the thing had to be removed instead: its holder
 // no longer carries one (their pouch was emptied under it), and leaving it lying would make a second one out of nothing.
 function itemObjMove(room, o, toSid) {
@@ -20100,7 +20115,7 @@ function itemObjMove(room, o, toSid) {
     }
   }
   if (to) {
-    if (HELD.is(o.look) && HELD.LOOKS[o.look].hook) hookRopesDrop(room, o.id);   // (tools piece 6) a grappling hook taken into a hand: its rope is coiled back into it
+    if (HELD.is(o.look) && HELD.LOOKS[o.look].hook) hookRopesReel(room, o.id, to);   // (tools piece 6) a grappling hook taken into a hand: its rope is reeled back into it
     o.eq = to; eqNote(to, o.id, 1);
     if (gated) { ledger.creditItems(playerKeyFor(to), [[o.item, 1]]); const ts = io.sockets.sockets.get(to); if (ts) sendInvSync(ts, room); }
   }
@@ -24740,6 +24755,21 @@ io.on('connection', (socket) => {
   //    original behind and added a second one. Build permission is the only gate, the same as placing.
   // ⚠️ THE ROUTE GOES THROUGH `buildWorldObject`, so it is clamped and cleaned exactly as a placed rope's is — and only
   //    the route fields are taken from the result; what kind of rope it is and who placed it stay as they were.
+  // ⭐ (round 3) A GRAPPLING HOOK'S ROPE PAID OUT OR TAKEN IN (client 16za): how much of it is out of the coil, from the screen whose hands are on its end.
+  //   Kept on the rope (a screen that joins builds it at that length) and passed to everybody else. Anybody in the room may hold a hook's rope, so it is not
+  //   owner-only; it is only a length, clamped to the rope's own.
+  socket.on('hook-rope-out', (d) => {
+    if (!currentAvatarRoom || !d || typeof d.id !== 'string' || !isFinite(+d.ro)) return;
+    const map = roomObjects[currentAvatarRoom], o = map && map.get(d.id); if (!o || o.look !== 'rope' || !o.rh) return;
+    o.ro = Math.max(8, Math.min(o.rl || 640, Math.round(+d.ro)));
+    emitObjToChunks(currentAvatarRoom, o, 'hook-rope-out', { id: o.id, ro: o.ro, by: socket.id });
+  });
+  // …and a rope REELED all the way into the hand that took its hook (`hookRopesReel`): gone now
+  socket.on('hook-rope-done', (d) => {
+    if (!currentAvatarRoom || !d || typeof d.id !== 'string') return;
+    const map = roomObjects[currentAvatarRoom], o = map && map.get(d.id); if (!o || o.look !== 'rope' || !o.rh || o.reel !== socket.id) return;
+    objUnindex(currentAvatarRoom, o); emitObjToChunks(currentAvatarRoom, o, 'avatar-object-removed', { id: o.id });
+  });
   socket.on('rope-relay', (data) => {
     if (!currentAvatarRoom || !data || typeof data.id !== 'string') return;
     if (!canBuild()) return;
