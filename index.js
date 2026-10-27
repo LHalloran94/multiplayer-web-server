@@ -25467,7 +25467,9 @@ io.on('connection', (socket) => {
     if (!currentAvatarRoom || !canBuild() || !m || !Array.isArray(m.c)) return;
     const c = m.c.slice(0, 16).filter(v => Number.isInteger(v) && v >= 0);
     if (!c.length || c.length % 2) return;
-    socket.to(currentAvatarRoom).emit('terrain-wear', { c });
+    // (2026-10-28) `p` = where the cells were struck (world px) — every screen starts their cracks there; only relayed, never stored
+    const p = Array.isArray(m.p) && m.p.length === 2 && m.p.every(Number.isFinite) ? [Math.round(m.p[0]), Math.round(m.p[1])] : null;
+    socket.to(currentAvatarRoom).emit('terrain-wear', p ? { c, p } : { c });
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip, thrown }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
