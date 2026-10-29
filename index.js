@@ -5456,7 +5456,7 @@ function bodySplitMat(code) { return (code & 3) === 2 ? 92 : (code & 3) === 3 ? 
 //   without one the check does the half that needs no pose: it throws the specks away. A real split waits until the
 //   body is back in the world, where it can be put somewhere.
 const bodySplitAt = new Map();          // id → when it was last asked, for bodies with no stamp to hang it on
-function bodySplitCheck(room, obj, S, now, force) {
+function bodySplitCheck(room, obj, S, now, force, mined) {   // (`mined`: cut by a player — `bodyMine` — not burnt or crumbled)
   if (!bodySplitCfg.on) return false;
   if (S) {
     if (!force && S.splitAt && now - S.splitAt < bodySplitCfg.everyMs) return false;
@@ -5572,6 +5572,16 @@ function bodySplitCheck(room, obj, S, now, force) {
     }
     if (isle.length < bodySplitCfg.min) {
       bodySplitGone += isle.length;
+      // 🟥 (2026-10-29, the user: chopping a felled piece in two turned the bits broken off into grey powder) — ASH is what a speck left by FIRE becomes; a
+      //   speck CUT off a fallen piece (`mined`, from `bodyMine`) is what it was, so it comes off as pick-ups, one a cell, as the chop's own cells do
+      //   (what each gives dug — `MATGEN.yieldOf`; nothing for leaves and the like)
+      if (mined && pfm0) {
+        dropWhy = 'dig';
+        for (const k of isle) { const q = bodyRep(obj, D, pose.x, pose.y, pose.a, k), m0 = pfm0[k]; if (!q || !m0) continue;
+          const y = MATGEN.yieldOf(m0), d = MATGEN.DEFS[y]; if (!d || d.behavior !== 'solid') continue;
+          spawnDrop(room, (q.c + 0.5) * TERRAIN_CELL, (q.r + 0.5) * TERRAIN_CELL, [[y, 1]], 0, { lone: 1 }); }
+        continue;
+      }
       const set = [];
       for (const k of isle) {
         const q = bodyRep(obj, D, pose.x, pose.y, pose.a, k); if (!q) continue;
@@ -6127,7 +6137,7 @@ function bodyMine(room, obj, ks) {
   // ⭐ …and mining a piece IN TWO makes two pieces (`bodySplitCheck`). Digging a channel through a fallen log is
   //   the same event as burning through one, and it is the half a player does on purpose.
   { const S2 = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id);
-    if (S2) bodySplitCheck(room, obj, S2, Date.now(), true); }
+    if (S2) bodySplitCheck(room, obj, S2, Date.now(), true, true); }
   broadcastObjSt(room);
   return took;
 }
@@ -13194,6 +13204,8 @@ function sendChunkContent(sock, room, chunks) {
     if (dmg.length) _msg.dmg = dmg;      // sparse [wireIndex, hpLeft, …] — see the note where it is gathered
     sock.emit('terrain-set', _msg);
   }
+  // (2026-10-29) …and a tool's wear on these chunks' cells (`wearFor`), after their terrain, which it needs to land on
+  { const _wr = wearFor(room, chunks, s.terrain); if (_wr) sock.emit('terrain-wear', _wr); }
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
   sock.emit('liquid-fine-cells', { sub: 1, cols: geom.cols, cells, clear: chunks.slice() });
   // ⭐⭐ AND WHAT IS ALIGHT IN THESE CHUNKS — layer (a)'s repair path, on the same seam and for the same reason
@@ -14606,6 +14618,55 @@ const _putChunkRow = db.prepare(`INSERT INTO world_chunks (room, chunk, ver, kin
 const _getChunkRow = db.prepare('SELECT ver, kind, terrain, liquid FROM world_chunks WHERE room = ? AND chunk = ?');
 const _delChunkRow = db.prepare('DELETE FROM world_chunks WHERE room = ? AND chunk = ?');
 const _countChunkRows = db.prepare('SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(terrain)), 0) AS b FROM world_chunks');
+
+// ⭐⭐ (2026-10-29, the user: "cracks often disappear between refreshes") A TOOL'S WEAR, KEPT. A hammer's, a pick's crack, a chisel's, an axe's, a weapon's
+//   damage to a cell is WEAR (`terrain-wear`: the client's `terrainWear`, 1..60 of the way through — its exact count, `toolHits`, is worked back from it), and
+//   it used to be relayed only: a refresh showed the cell whole and it took the full number of blows again; a restart, the same for everyone. Now each cell's
+//   latest wear is held here, by chunk, with the material it was made on and where it was struck, saved to disk, and sent with its chunk (`sendChunkContent`)
+//   or after a whole-world `terrain-init`. ⚠️ An entry is only true of the cell it was made on: when the cell has been broken or replaced since (its material
+//   differs) it is dropped on the next read, not sent. Its own table — like the piles, no generator version: it is keyed by cell, read only against the cell.
+db.exec(`CREATE TABLE IF NOT EXISTS world_wear (
+  room TEXT    NOT NULL,
+  wi   INTEGER NOT NULL,
+  w    INTEGER NOT NULL,
+  mat  INTEGER NOT NULL,
+  px   INTEGER,
+  py   INTEGER,
+  PRIMARY KEY (room, wi)
+)`);
+const _putWear = db.prepare(`INSERT INTO world_wear (room, wi, w, mat, px, py) VALUES (?, ?, ?, ?, ?, ?)
+  ON CONFLICT(room, wi) DO UPDATE SET w=excluded.w, mat=excluded.mat, px=excluded.px, py=excluded.py`);
+const _getWear = db.prepare('SELECT wi, w, mat, px, py FROM world_wear WHERE room = ?');
+const _delWear = db.prepare('DELETE FROM world_wear WHERE room = ? AND wi = ?');
+const roomWear = new Map();   // room → { n, by: Map(chunk → Map(wi → [w, mat, px, py])) } — loaded from disk the first time a room is asked about
+const WEAR_CAP = 50000;       // per room: past it the oldest chunk's entries go (a hammer swung a whole afternoon is a few thousand)
+function wearChunkOf(geom, wi) { const col = (wi / geom.rows) | 0, row = wi - col * geom.rows; return ((col / CHUNK_SIDE) | 0) * geom.cy + ((row / CHUNK_SIDE) | 0); }
+function wearOf(room) {
+  let W = roomWear.get(room); if (W) return W;
+  W = { n: 0, by: new Map() }; roomWear.set(room, W);
+  const geom = worldGeom(room);
+  try { for (const e of _getWear.all(room)) { const ch = wearChunkOf(geom, e.wi); let m = W.by.get(ch); if (!m) W.by.set(ch, m = new Map()); m.set(e.wi, [e.w, e.mat, e.px, e.py]); W.n++; } } catch (e) {}
+  return W;
+}
+function wearPut(room, wi, w, mat, p) {
+  const W = wearOf(room), ch = wearChunkOf(worldGeom(room), wi); let m = W.by.get(ch); if (!m) W.by.set(ch, m = new Map());
+  if (!m.has(wi)) W.n++;
+  m.set(wi, [w, mat, p ? p[0] : null, p ? p[1] : null]);
+  try { _putWear.run(room, wi, w, mat, p ? p[0] : null, p ? p[1] : null); } catch (e) {}
+  while (W.n > WEAR_CAP && W.by.size) { const [k0, m0] = W.by.entries().next().value; W.by.delete(k0); for (const k of m0.keys()) { try { _delWear.run(room, k); } catch (e) {} } W.n -= m0.size; }
+}
+// …what to send for these chunks (all, when `chunks` is null): { c: [wi, w, …], pp: [px, py, …] (−1 = not known) } or null. Entries whose cell is no longer
+//   the material they were made on are dropped here.
+function wearFor(room, chunks, terrain) {
+  const W = wearOf(room); if (!W.n) return null;
+  const c = [], pp = [];
+  for (const ch of (chunks || Array.from(W.by.keys()))) { const m = W.by.get(ch | 0); if (!m) continue;
+    for (const [wi, e] of m) {
+      if (terrain.g(wi) !== e[1]) { m.delete(wi); W.n--; try { _delWear.run(room, wi); } catch (er) {} continue; }
+      c.push(wi, e[0]); pp.push(e[2] == null ? -1 : e[2], e[3] == null ? -1 : e[3]); }
+    if (!m.size) W.by.delete(ch | 0); }
+  return c.length ? { c, pp } : null;
+}
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
 //  ⭐⭐ PILES ON THE GROUND, ON DISK. THE LAST CONSERVATION LEAK THAT WAS MINE TO FIX (kickoff_prima.md §8).
@@ -24029,6 +24090,8 @@ io.on('connection', (socket) => {
     if (!_isOver) {
       materializeRoom(avRoom);   // join replay reads the whole world — an evicted chunk would arrive empty
       if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: tg.geom.cols, rows: tg.geom.rows, ...terrainRLE(tg), hpRuns: _cs.terrainHp ? terrainRLE(_cs.terrainHp).runs : undefined });
+      if (tg) { const _wr = wearFor(avRoom, null, tg); if (_wr) socket.emit('terrain-wear', _wr); }   // (2026-10-29) …and the tools' wear kept on it
+
       // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
       if (tg) { const fi = buildFineInit(avRoom); if (fi && fi.cells.length) socket.emit('liquid-fine-init', fi); }
     }
@@ -25461,7 +25524,7 @@ io.on('connection', (socket) => {
     socket.emit('drop-removed', { id, by: socket.id });
   });
   // ⭐ (2026-10-14, held items plan §5i) WEAR — a weapon striking soft ground cracks it a little (the client's `terrainWear`). It is a mark,
-  //   not an edit: nothing is stored and nothing breaks here (a cell worn through is broken by an ordinary `terrain-edit` carve from the
+  //   not an edit: nothing breaks here (since 2026-10-29 it IS stored — `wearPut`, below) (a cell worn through is broken by an ordinary `terrain-edit` carve from the
   //   striker). Relayed to the rest of the room as sent, after the same room / permission checks, at most 8 cells a message.
   socket.on('terrain-wear', (m) => {
     if (!currentAvatarRoom || !canBuild() || !m || !Array.isArray(m.c)) return;
@@ -25470,6 +25533,10 @@ io.on('connection', (socket) => {
     // (2026-10-28) `p` = where the cells were struck (world px) — every screen starts their cracks there; only relayed, never stored
     const p = Array.isArray(m.p) && m.p.length === 2 && m.p.every(Number.isFinite) ? [Math.round(m.p[0]), Math.round(m.p[1])] : null;
     socket.to(currentAvatarRoom).emit('terrain-wear', p ? { c, p } : { c });
+    // (2026-10-29) …and KEPT now (`wearPut`): each cell's latest wear, on the material it is, for whoever loads it later — a refresh, a restart
+    const st = peekCells(currentAvatarRoom), geom = worldGeom(currentAvatarRoom), N = geom.cols * geom.rows;
+    if (st && st.terrain) for (let i = 0; i + 1 < c.length; i += 2) { const wi = c[i], w = Math.min(255, c[i + 1]); if (wi >= N || !w) continue;
+      const mat = st.terrain.g(wi); if (mat > 0) wearPut(currentAvatarRoom, wi, w, mat, p); }
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip, thrown }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never

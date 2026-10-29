@@ -489,19 +489,21 @@
   // ⭐ TOOLS, PIECE 5 (2026-10-25, the tools plan §1b, §2 "Axes" / "Mattock" / "One piece of metal", §4c): THE FELLING AXE (two hands) and THE HATCHET (one hand) —
   //   `dig` kind 'axe' (client 16z `toolChop`): left a downward chop, right the level felling cut — held, drawn back; let go, it swings to land at the pointer
   //   (round 2; a left click is the quick chop);
-  //   where its edge meets wood the chop BREAKS THE WOOD IT CUT at once — `v` cells on a downward chop (on along the way the edge was going), `h` in a horizontal
+  //   where its edge meets wood the chop CUTS INTO the wood it meets (2026-10-29: `dmg` of each cell's strength a chop, broken when used up — it used to break at once) — `v` cells on a downward chop (on along the way the edge was going), `h` in a horizontal
   //   line on a level one — the user: "if you swing vertically down against it it cuts into a cell or two, but if you swing it horizontally into the wood you might
   //   hit 2 or 3 cells in a horizontal line". Wood, timber, charcoal and every plant are cut; soft ground stops it with a thud, rock with a clang. Nothing to pull.
   //   THE MATTOCK (two hands): its pick leads (the pickaxe's numbers); turned round (`back`, the wheel) the ADZE — "a wider pick": `vDeep` = how far in, of `deep`,
   //   on a downward swing (almost nothing), `wide` = the row ACROSS the face a level swing pries, `hardK` = each strength step dearer to pry (best in soft ground).
   //   THE PICK-HEAD AXE (two hands): its axe leads (the felling axe's cut); turned round, a pick a little smaller than the pickaxe.
   Object.assign(LOOKS, {
+    // (2026-10-29, the user: wood took one hit — it should take several, so axes can be better or worse) `dmg` = the strength a chop takes off each cell it cuts
+    //   (wood takes 2: the felling axe 2 chops, the pick-head axe 3, the hatchet 4); a cell of strength 1 (leaves, plants) still goes at once
     // (round 2, the user: "the level swing cutting away 3 cells seems like too much and it should probably be 2" → felling 1 / 2, hatchet 1 / 1)
-    fellingaxe: tool(38, 3, 1.5, 0.08, 0.84, 'fe', Object.assign({ hitHalf: 7, dig: { kind: 'axe', v: 1, h: 2 } }, two(0.5))),
-    hatchet: tool(20, 2.4, 0.7, 0.14, 0.78, 'hc', { hitHalf: 5.6, dig: { kind: 'axe', v: 1, h: 1 } }),
+    fellingaxe: tool(38, 3, 1.5, 0.08, 0.84, 'fe', Object.assign({ hitHalf: 7, dig: { kind: 'axe', v: 1, h: 2, dmg: 1 } }, two(0.5))),
+    hatchet: tool(20, 2.4, 0.7, 0.14, 0.78, 'hc', { hitHalf: 5.6, dig: { kind: 'axe', v: 1, h: 1, dmg: 0.5 } }),
     mattock: tool(40, 3.4, 1.7, 0.1, 0.86, 'mk', Object.assign({ hitHalf: 11, right: 'pry', back: true, dig: { kind: 'pick', deep: 2, face: 4, behind: 2, row: 3, pryMs: 450, pull: 12,
       back: { kind: 'pick', adze: true, deep: 1, vDeep: 0.3, face: 1, behind: 0, row: 1, wide: 5, hardK: 0.6, pryMs: 400, pull: 9 } } }, two(0.5))),
-    pickheadaxe: tool(38, 3, 1.6, 0.08, 0.84, 'pq', Object.assign({ hitHalf: 8.8, right: 'pry', back: true, dig: { kind: 'axe', v: 1, h: 2,
+    pickheadaxe: tool(38, 3, 1.6, 0.08, 0.84, 'pq', Object.assign({ hitHalf: 8.8, right: 'pry', back: true, dig: { kind: 'axe', v: 1, h: 2, dmg: 0.7,
       back: { kind: 'pick', deep: 1.75, face: 3, behind: 1, row: 3, pryMs: 420, pull: 10 } } }, two(0.5))),
   });
   // ⭐ TOOLS, PIECE 6 (2026-10-26, the tools plan §1b, §1d, §2 "Grapple"): THE GRAPPLING HOOK ON A ROPE (one hand, ~10 px — round 2's G1) — client 16za.
