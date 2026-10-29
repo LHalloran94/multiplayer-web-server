@@ -627,7 +627,9 @@ function computeColumn(W, C, c) {
 }
 
 // One column of cells, written into `out` (length rN), for rows [r0, r0+rN).
-function fillColumn(W, C, c, r0, rN, out, outBack) {
+// ⭐ (2026-10-30, the ore look) `outHost`, optional: for each cell a MINERAL took, the rock it took it from (the value `v` held just before the minerals —
+//   the host the game draws the ore's flecks in); 0 everywhere else. Reading it changes nothing about `out`.
+function fillColumn(W, C, c, r0, rN, out, outBack, outHost) {
   const seed = W.o.seed;
   const ci = columnInfo(W, C, c);
   const { surfRow, lith } = ci;
@@ -725,7 +727,7 @@ function fillColumn(W, C, c, r0, rN, out, outBack) {
   const VS = C.volc || [];
   for (let k = 0; k < rN; k++) {
     const r = r0 + k;
-    let v = M.air;
+    let v = M.air, hostV = 0;
     // ⭐⭐ EVERY VOID THIS LOOP CAN PRODUCE IS PROPOSED HERE AND RESOLVED IN ONE PLACE. Caves, fracture swarms,
     // flooded galleries and deep halls all used to write straight into `v`, which is why lava ended up with air
     // beside it: three separate generators, each of them individually right, none of them aware of the melt.
@@ -842,11 +844,13 @@ function fillColumn(W, C, c, r0, rN, out, outBack) {
       if (C.U) {
         // ⭐ MINERALS — association x depth x rarity, with a shape each. Depth is measured from the SURFACE, so
         // the same bed is two thousand rows down under a mountain and two hundred under a plain.
+        const preMin = v;
         const mn = mineralAt(RCmin, ci.oreCtx, c, r, d, C.seaRow - r, lr, seed);
         if (mn >= 0) v = mn;
         if (RCore) { const ob = oreBodyAt(RCore, c, r, lr, seed); if (ob >= 0) v = ob; }
+        if (v !== preMin) hostV = preMin;
         const dep = depositAt(C.U, W, M, ci, c, r, d, seed);
-        if (dep >= 0) v = dep;
+        if (dep >= 0) { v = dep; hostV = 0; }
         carve = underAt(C.U, W, M, ci, c, r, d, seed, lr);
         // ⭐ CAVE SYSTEMS — storeys, the shafts that join them, chambers, and the way in. A placed record, so
         // there is no coarse sample anywhere in the answer and the question "can a player reach this" has an
@@ -954,6 +958,7 @@ function fillColumn(W, C, c, r0, rN, out, outBack) {
       }
     }
     out[k] = v;
+    if (outHost) outHost[k] = v === M.air || carve >= 0 ? 0 : hostV;
   }
 
   // ⭐ SNOW LIES ON ICE — a POST-PASS over the finished column, for the same reason the speleothems are one.

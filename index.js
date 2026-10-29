@@ -13112,6 +13112,25 @@ setInterval(chunkResidencySweep, Math.max(1000, chunkCfg.sweepMs | 0));
 // generating nothing. No amount of staring at the code says that; one timestamp does.
 // Hoisted to a const so the hot paths read a boolean rather than doing a property lookup on process.env.
 const TRACE_SUBS = !!process.env.MW_TRACE_SUBS;
+// ⭐ (2026-10-30, the ore look — scratchpad/kickoff_ore_wood.md) THE HOST ROCK OF EACH ORE CELL in these chunks: { c: [wireIndex, hostId, …] } or null. A cell
+//   holds one byte, its material, so the rock an ore vein runs through is gone from it — the generator is asked again (`hostPage`: the rock it put there
+//   before the mineral, made in the same pass as the page and cached beside it). Only for the ores drawn as flecks (`MATGEN.HOST_KIND`) where the generator
+//   put a mineral; elsewhere (ore a player placed, a page room's older generator) nothing is sent and the client uses the ore's fallback host.
+//   It GENERATES and never reads the store, as `backingPage`; the page is generated again only if it holds a hosted ore and fell out of the cache.
+function hostFor(room, chunks, terrain, geom) {
+  const g = _genRooms.get(room) || _roomGens.get(room); if (!g || !g.hostPage) return null;
+  const K = MATGEN.HOST_KIND, out = [];
+  for (const p of chunks) {
+    const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE; let hp;
+    for (let lc = 0; lc < CHUNK_SIDE && c0 + lc < geom.cols; lc++)
+      for (let lr = 0; lr < CHUNK_SIDE && r0 + lr < geom.rows; lr++) {
+        const i = (c0 + lc) * geom.rows + r0 + lr; if (!K[terrain.g(i)]) continue;
+        if (hp === undefined) hp = g.hostPage(p, geom);
+        const h = hp ? hp[lr * CHUNK_SIDE + lc] : 0; if (h) out.push(i, h);
+      }
+  }
+  return out.length ? { c: out } : null;
+}
 function sendChunkContent(sock, room, chunks) {
   if (!chunks || !chunks.length) return;
   const _T0 = TRACE_SUBS ? Date.now() : 0;
@@ -13206,6 +13225,8 @@ function sendChunkContent(sock, room, chunks) {
   }
   // (2026-10-29) …and a tool's wear on these chunks' cells (`wearFor`), after their terrain, which it needs to land on
   { const _wr = wearFor(room, chunks, s.terrain); if (_wr) sock.emit('terrain-wear', _wr); }
+  // (2026-10-30) …and the rock each ore cell's flecks are drawn in (`hostFor`)
+  { const _hr = hostFor(room, chunks, s.terrain, geom); if (_hr) sock.emit('terrain-host', _hr); }
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
   sock.emit('liquid-fine-cells', { sub: 1, cols: geom.cols, cells, clear: chunks.slice() });
   // ⭐⭐ AND WHAT IS ALIGHT IN THESE CHUNKS — layer (a)'s repair path, on the same seam and for the same reason

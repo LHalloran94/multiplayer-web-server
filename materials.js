@@ -420,9 +420,20 @@
   // …and so is charcoal that has burnt through: it is still charcoal to anyone who digs it out.
   DIG_YIELD[NAMES['Spent charcoal']] = NAMES.Charcoal;
   const yieldOf = (id) => DIG_YIELD[id] || id;
+  // ⭐ (2026-10-30, the ore look — scratchpad/kickoff_ore_wood.md) THE ORES DRAWN AS FLECKS IN THEIR HOST ROCK, and each one's FALLBACK host: the generator's
+  //   main host for it (worldspike/minerals.js). A cell's real host is the rock the generator put there before the mineral (server `hostFor`, sent with the
+  //   chunk); this one is used only where that is not known — ore a player placed, a page room's generator. 1 = a metal/mineral's flecks, 2 = a gem's crystals.
+  //   Not here, staying their own look (the user's call): coal, oil shale, bauxite, hematite, salt (their own rock); quartz, crystal, amethyst, jade, lapis,
+  //   agate, opal, turquoise, fluorite (crystal blocks with facets).
+  const HOSTED = [['Iron', 'Granite', 1], ['Copper', 'Granite', 1], ['Tin', 'Granite', 1], ['Silver', 'Granite', 1], ['Gold', 'Granite', 1],
+    ['Galena', 'Limestone', 1], ['Platinum', 'Granite', 1], ['Pyrite', 'Shale', 1], ['Cinnabar', 'Granite', 1], ['Uranium', 'Granite', 1],
+    ['Malachite', 'Granite', 1], ['Sulphur', 'Basalt', 1], ['Realgar', 'Shale', 1], ['Orpiment', 'Limestone', 1],
+    ['Ruby', 'Limestone', 2], ['Sapphire', 'Basalt', 2], ['Emerald', 'Granite', 2], ['Diamond', 'Granite', 2], ['Topaz', 'Granite', 2], ['Garnet', 'Granite', 2]];
+  const HOST_DEF = new Uint8Array(256), HOST_KIND = new Uint8Array(256);   // id → fallback host id · id → 1 flecks / 2 crystals (0 = not hosted)
+  for (const [o, h, k] of HOSTED) { HOST_DEF[NAMES[o]] = NAMES[h]; HOST_KIND[NAMES[o]] = k; }
 
   return {
-    ROWS, DEFS, NAMES, NAME_TO_ID, idOf, STRENGTH, EMIT, DIG_YIELD, yieldOf,
+    ROWS, DEFS, NAMES, NAME_TO_ID, idOf, STRENGTH, EMIT, DIG_YIELD, yieldOf, HOST_DEF, HOST_KIND,
     WORTH, PRIMA_WORTH, PRIMA_REFINE_MIN, primaWorthOf, primaRefinable,
     GEN_MAT_MIN, GEN_MAT_MAX, EXTRA_IDS,
     POWDER_IDS, PLANT_IDS, HANGS_IDS,

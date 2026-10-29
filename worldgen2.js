@@ -232,10 +232,11 @@ function makeGen2(cfg) {
   // ── the cell queries. ABSOLUTE WORLD COORDINATES, always. ───────────────────────────────────────────────────
   // `out` receives GAME material ids. The spike writes its own palette indices and they are translated in place
   // — one extra pass over 64 bytes, against a column that costs microseconds to synthesise.
-  function fillColumn(c, r0, rN, out, outBack) {
-    spikeFillColumn(W, C, c, r0, rN, out, outBack);
+  function fillColumn(c, r0, rN, out, outBack, outHost) {
+    spikeFillColumn(W, C, c, r0, rN, out, outBack, outHost);
     for (let k = 0; k < rN; k++) { const v = out[k]; if (v) out[k] = XLAT[v]; }
     if (outBack) for (let k = 0; k < rN; k++) { const v = outBack[k]; if (v) outBack[k] = XLAT[v]; }
+    if (outHost) for (let k = 0; k < rN; k++) { const v = outHost[k]; if (v) outHost[k] = XLAT[v]; }
   }
   const _one = new Uint8Array(1);
   function matAt(c, rr) { fillColumn(c, rr, 1, _one); return _one[0]; }
@@ -269,25 +270,51 @@ function makeGen2(cfg) {
     if (_backCache.size >= BACK_CACHE_MAX) { const k = _backCache.keys().next().value; _backCache.delete(k); }
     _backCache.set(p, buf);
   }
-  const _colBuf = new Uint8Array(CHUNK_SIDE), _colBack = new Uint8Array(CHUNK_SIDE);
+  // ⭐ (2026-10-30, the ore look) …and each page's HOSTS: for a cell a mineral took, the rock it took it from (the spike's `outHost`) — the rock the client
+  //   draws that ore's flecks in. Made in the same pass, kept the same way; `null` for a page with no mineral in it (most of them).
+  const _hostCache = new Map();                    // page → Uint8Array(4096) | null
+  function _hostCacheSet(p, buf) {
+    if (_hostCache.size >= BACK_CACHE_MAX) { const k = _hostCache.keys().next().value; _hostCache.delete(k); }
+    _hostCache.set(p, buf);
+  }
+  const _colBuf = new Uint8Array(CHUNK_SIDE), _colBack = new Uint8Array(CHUNK_SIDE), _colHost = new Uint8Array(CHUNK_SIDE);
   function fillPage(page, hpPage, p, geom, T) {
     const stride = (T | 0) || 1;
     const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
     const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
     if (rN <= 0 || cN <= 0) return;
-    const col = _colBuf, bcol = _colBack;
+    const col = _colBuf, bcol = _colBack, hcol = _colHost;
     const back = new Uint8Array(CHUNK_SIDE * CHUNK_SIDE);
+    let host = null;
     for (let lc = 0; lc < cN; lc++) {
-      bcol.fill(0);
-      fillColumn(originCol + c0 + lc, originRow + r0, rN, col, bcol);
+      bcol.fill(0); hcol.fill(0);
+      fillColumn(originCol + c0 + lc, originRow + r0, rN, col, bcol, hcol);
       for (let lr = 0; lr < rN; lr++) {
         const v = col[lr], o = lr * CHUNK_SIDE + lc;
         if (v) { page[o * stride] = v; if (hpPage) hpPage[o] = STRENGTH[v]; }
         back[o] = bcol[lr];
+        if (hcol[lr]) (host || (host = new Uint8Array(CHUNK_SIDE * CHUNK_SIDE)))[o] = hcol[lr];
       }
     }
-    _backCacheSet(p, back);
+    _backCacheSet(p, back); _hostCacheSet(p, host);
   }
+  // A page's hosts (Uint8Array(4096), index row * 64 + column) or null when no mineral is in it — from the cache, else generated again (a page restored from
+  //   disk, or one that fell out of the cache). It GENERATES, like `backingPage`: it never reads or faults in the store.
+  function hostPage(p, geom) {
+    if (_hostCache.has(p)) return _hostCache.get(p);
+    const c0 = ((p / geom.cy) | 0) * CHUNK_SIDE, r0 = (p % geom.cy) * CHUNK_SIDE;
+    const rN = Math.min(CHUNK_SIDE, geom.rows - r0), cN = Math.min(CHUNK_SIDE, geom.cols - c0);
+    if (rN <= 0 || cN <= 0) return null;
+    let host = null;
+    for (let lc = 0; lc < cN; lc++) {
+      _hostBuf.fill(0);
+      fillColumn(originCol + c0 + lc, originRow + r0, rN, _hostCol, null, _hostBuf);
+      for (let lr = 0; lr < rN; lr++) if (_hostBuf[lr]) (host || (host = new Uint8Array(CHUNK_SIDE * CHUNK_SIDE)))[lr * CHUNK_SIDE + lc] = _hostBuf[lr];
+    }
+    _hostCacheSet(p, host);
+    return host;
+  }
+  const _hostBuf = new Uint8Array(CHUNK_SIDE), _hostCol = new Uint8Array(CHUNK_SIDE);
 
   // ── ONE 64x64 PAGE OF THE **UNCARVED** WORLD ────────────────────────────────────────────────────────────────
   //  The rock this page is made of, before caves, voids, descents, vents and volcano tubes were cut out of it —
@@ -458,7 +485,7 @@ function makeGen2(cfg) {
     // the surface `index.js` actually consumes — measured, not assumed: `fillPage` (3 call sites),
     // `pageEmpty` (1, via `PagedArray.seedEmpty`) and `bandGroundAt` (2, the spawn seam). The rest are here
     // because the probes and previewers need them.
-    fillPage, backingPage, pageEmpty, topLimitAt, surfAt, biomeAt, bandGroundAt, fillColumn, matAt, strengthOf, skyIsles,
+    fillPage, backingPage, hostPage, pageEmpty, topLimitAt, surfAt, biomeAt, bandGroundAt, fillColumn, matAt, strengthOf, skyIsles,
     // The region names, so the wire can carry a byte and the client can still say what it means. ONE list, two
     // readers — the rule this whole port exists to keep.
     biomeKeys: BIOME.map(b => b.key), biomeNames: BIOME.map(b => b.name),
