@@ -13397,6 +13397,9 @@ function sendChunkContent(sock, room, chunks) {
     }
   }
   if (TRACE_SUBS) console.log('[subs] ...emitted in ' + (Date.now() - _T0) + 'ms total');
+  // (2026-10-30, the loading round) …and LAST: these chunks are wholly in — their ground, wear, ore hosts, liquid, fire, drops, builds and props. The client's loading
+  //   gate waits for this, not for the ground alone (16a `twMarkDone`)
+  sock.emit('chunks-done', { c: chunks.slice() });
 }
 // ==INTEREST_BLOCK_START== (probe_subscriptions slices this out — stub io/chunkHash/worldGeom/geomPage when you do)
 const interestCfg = {
@@ -24216,6 +24219,8 @@ io.on('connection', (socket) => {
     // Replay the custom material registry so the joiner can render/paint any custom blocks already in this room.
     const mm = roomMats[avRoom];
     if (mm && Object.keys(mm).length) socket.emit('mats-init', { levelIndex, mats: mm });
+    // (2026-10-30, the loading round) …and a page room's whole world is now in (objects, terrain, liquid, materials): the client's loading gate may let go (16a `twDoneAll`)
+    if (!_isOver) socket.emit('chunks-done', { all: 1, levelIndex });
     // Auto host-hydration (Phase 2b follow-up): if the room OWNER joins a still-blank Level we haven't
     // hydrated yet this server lifetime, ask their client to apply its host-local saved content. Emitted
     // LAST (after the empty replay above) so the inits can't clobber what the host is about to apply.
