@@ -4043,16 +4043,32 @@ function fallWear(obj) {
   if (typeof obj.fw === 'string') { try { const b = Buffer.from(obj.fw, 'base64'); if (b.length === n) a.set(b); } catch (e) {} }
   return a;
 }
-// (2026-10-30, the notch — round E) …and the angle of the first blow on each cell (`fp`, a byte a cell: 1…254 over half a turn in the PIECE's frame, 0 = none), so
-//   its notch turns with it
-function fallAng(obj) {
-  const n = fallMats(obj).length, a = new Uint8Array(n);
-  if (typeof obj.fp === 'string') { try { const b = Buffer.from(obj.fp, 'base64'); if (b.length === n) a.set(b); } catch (e) {} }
+// ⭐ (2026-10-30, THE NOTCH ROUND 2 — scratchpad/kickoff_notch_2.md) …and each cell's two NOTCHES (`fn`, base64, six bytes a cell in the PIECE's frame: level
+//   depth, position, tilt · upright depth, position, tilt — as the client's `terrainNotch` parts: depth 0…255 (255 cut through), position 1…254 over the cell,
+//   tilt 128 = straight, a quarter degree a step). A fresh copy, six times `fm`'s length.
+function fallNotch(obj) {
+  const n = fallMats(obj).length * 6, a = new Uint8Array(n);
+  if (typeof obj.fn === 'string') { try { const b = Buffer.from(obj.fn, 'base64'); if (b.length === n) a.set(b); } catch (e) {} }
   return a;
 }
-function fallAngSet(obj, a) { let any = false; for (let k = 0; k < a.length; k++) if (a[k]) { any = true; break; } if (any) obj.fp = Buffer.from(a).toString('base64'); else delete obj.fp; }
-// an angle byte turned by `rad` (half-turn bytes: a line has no direction)
-function angByteTurn(b, rad) { if (!b) return 0; const t = ((b - 1) / 253 * Math.PI + rad) % Math.PI; return 1 + Math.round(((t + Math.PI) % Math.PI) / Math.PI * 253) % 254; }
+function fallNotchSet(obj, a) { let any = false; for (let k = 0; k < a.length; k++) if (a[k]) { any = true; break; } if (any) obj.fn = Buffer.from(a).toString('base64'); else delete obj.fn; }
+// the world's notch record (24 bits: depth | position << 8 | tilt << 16) ↔ a piece's three bytes
+function nkBytes(n, out, j) { out[j] = n & 255; out[j + 1] = (n >> 8) & 255; out[j + 2] = (n >> 16) & 255; }
+function nkOfBytes(a, j) { return a[j] ? (a[j] | (a[j + 1] << 8) | (a[j + 2] << 16)) : 0; }
+// a cell's two notches [level, upright] turned by `rad` (a piece laid into the world as it lies — `bodyBake`): each line turned about the cell's middle, then
+//   level or upright again by its new angle (within 45° of across = level), its place where it crosses the middle, its tilt clamped to ±14°
+function nkTurn(L, U, rad) {
+  const out = [0, 0]; if (!rad) return [L, U];
+  for (const [n, up] of [[L, 0], [U, 1]]) { if (!(n & 255)) continue;
+    const pos = (((n >> 8) & 255) - 1) / 253 * 17 - 8.5, tilt = ((((n >> 16) & 255) || 128) - 128) / 4 * Math.PI / 180, a0 = up ? Math.PI / 2 - tilt : tilt;
+    const px = up ? pos : 0, py = up ? 0 : pos, c = Math.cos(rad), sn = Math.sin(rad), qx = px * c - py * sn, qy = px * sn + py * c;
+    let t = ((a0 + rad) % Math.PI + Math.PI) % Math.PI; if (t > Math.PI / 2) t -= Math.PI;
+    const up2 = Math.abs(t) > Math.PI / 4 ? 1 : 0, dev = up2 ? (t > 0 ? t - Math.PI / 2 : t + Math.PI / 2) : t, tl = Math.max(-0.2443, Math.min(0.2443, up2 ? -dev : dev));
+    const p2 = up2 ? qx - qy * Math.tan(tl) : qy - qx * Math.tan(tl), pb = 1 + Math.round(Math.max(0, Math.min(17, p2 + 8.5)) / 17 * 253);
+    const rec = (n & 255) | (pb << 8) | (Math.max(1, Math.min(255, 128 + Math.round(tl * 180 / Math.PI * 4))) << 16);
+    if ((out[up2] & 255) < (n & 255)) out[up2] = rec; }
+  return out;
+}
 function fallWearSet(obj, a) { let any = false; for (let k = 0; k < a.length; k++) if (a[k]) { any = true; break; } if (any) obj.fw = Buffer.from(a).toString('base64'); else delete obj.fw; }
 // what a material is as a body: charcoal chars, woody things are wood, every other plant is foliage (burns fast, leaves nothing)
 function fallCode(m) { return !m ? 0 : (m === 92 || m === 254) ? 2 : (m === 28 || m === 91 || m === 40) ? 1 : 3; }
@@ -5531,7 +5547,7 @@ function bodySplitCheck(room, obj, S, now, force, mined) {   // (`mined`: cut by
   // …and a fallen piece's materials, taken now too: the parent's `fm` loses the departing cells below, before the pieces are made from them (2026-10-26 — run 1
   //   of the fix read them there, found 0, and the piece came out Timber again)
   const pfm0 = obj.look === 'fallen' && typeof obj.fm === 'string' ? fallMats(obj).slice() : null;
-  const pfw0 = pfm0 ? fallWear(obj) : null, pfp0 = pfm0 ? fallAng(obj) : null;   // (2026-10-30, round D) …and its damage, which each piece keeps for its own cells
+  const pfw0 = pfm0 ? fallWear(obj) : null, pfn0 = pfm0 ? fallNotch(obj) : null;   // (2026-10-30, round D) …and its damage, which each piece keeps for its own cells
   const st = roomCells.get(room);                         // …where the ash an island leaves behind is written
   const keep = new Uint8Array(cells.length);
   for (const k of isles[big]) keep[k] = cells[k];
@@ -5618,7 +5634,7 @@ function bodySplitCheck(room, obj, S, now, force, mined) {   // (`mined`: cut by
     for (const k of isle) { const c = k % D.c, r = (k / D.c) | 0;
       if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
     const W = c1 - c0 + 1, H = r1 - r0 + 1;
-    const fm = new Uint8Array(W * H), codes = new Uint8Array(W * H), fw2 = new Uint8Array(W * H), fp2 = new Uint8Array(W * H);
+    const fm = new Uint8Array(W * H), codes = new Uint8Array(W * H), fw2 = new Uint8Array(W * H), fn2 = new Uint8Array(W * H * 6);
     // ⭐ (2026-10-26, tools piece 5 round 3 — the user, cutting a felled tree in two: "one of the different parts it split into was a solid object and also looked
     //   slightly different, with a lighter colour") — a FALLEN piece's sound cells keep what they ARE (its `fm`: tree Wood, leaves …), not Timber: `bodySplitMat` is a
     //   crate's rule (sound = Timber), and Timber is solid and paler. Charred and burnt-through cells still become what the split calls them.
@@ -5627,7 +5643,7 @@ function bodySplitCheck(room, obj, S, now, force, mined) {   // (`mined`: cut by
       const c = k % D.c, r = (k / D.c) | 0, kk = (r - r0) * W + (c - c0);
       // ⚠️ BURNT-THROUGH (bit 8) TRAVELS WITH THE PIECE. Dropped here, a fragment of a crumbling crate arrives as
       //    merely charred and can never crumble again — the same fault as the stamp's fire history, a third time.
-      if (pfw0 && k < pfw0.length) { fw2[kk] = pfw0[k]; fp2[kk] = pfp0[k]; }
+      if (pfw0 && k < pfw0.length) { fw2[kk] = pfw0[k]; for (let b = 0; b < 6; b++) fn2[kk * 6 + b] = pfn0[k * 6 + b]; }
       fm[kk] = pfm && (cells[k] & 3) !== 2 && pfm[k] ? pfm[k] : bodySplitMat(cells[k]); codes[kk] = ((cells[k] & 3) === 2 ? 2 : (cells[k] & 3) === 3 ? 3 : 1) | (cells[k] & 8);
       if (cells[k] & 4) codes[kk] |= 4;                   // …a piece that breaks off alight goes on burning
     }
@@ -5637,7 +5653,7 @@ function bodySplitCheck(room, obj, S, now, force, mined) {   // (`mined`: cut by
                  content: '🪵', shape: 'rect', ownerId: 'world', owner: 'world',
                  x: pose.x + lx * ca - ly * sa, y: pose.y + lx * sa + ly * ca, w: W * cw, h: H * ch,
                  angle: pose.a, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64') };
-    fallWearSet(o2, fw2); fallAngSet(o2, fp2);
+    fallWearSet(o2, fw2); fallNotchSet(o2, fn2);
     // ⭐⭐ A PIECE OF A CRATE STILL LOOKS LIKE A PIECE OF THAT CRATE (user, 2026-09-22: *"some cells are coming through as
     //   the other kind of charcoal"*). A fallen piece is drawn one flat colour per cell from its materials — right for a
     //   tree, whose cells ARE terrain materials, and wrong for a crate: the planks vanished and its char became the
@@ -5979,6 +5995,37 @@ function fallWoodRegion(start, peek, COLS, ROWS, nn, FLOOR_ROW) {
   fallLast = { why: 'loose', wood: W.length, leaves: mine, leavesKept: lab.size - mine, otherWood: O.size };
   return { region, mark: wm, supported: false, overflow: false };
 }
+// ⭐⭐ (2026-10-30, THE NOTCH ROUND 2 — the user: "Standing trees never lose cells to chopping … The tree falls when a connected line of fully cut cells separates the
+//   part above from the ground") A TREE FELLED BY ITS CUT. A standing tree's wood cell whose LEVEL notch is cut right through (the world's wear, `nl`) holds
+//   nothing up: from the wood above each newly cut cell the tree's own walk (`fallWoodRegion` — only wood holds a tree up, its leaves the nearer ones) is made
+//   with those cells as open air; if it no longer reaches the ground, that part falls (`fallFinish` → `fallCut`, as a dug-through trunk does). The cut cells
+//   under it go with it AND stay on the stump (`fallCopyNow`) — the user: "half notches on both the stump and the log" (each copy drawn as its own half).
+let fallCopyNow = null;
+function fallCheckCut(room, cutWis) {
+  if (!fallCfg.on) return 0;
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return 0;
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows, nn = grid.length, gen = !!grid.seedFn, WR = wearOf(room), wg = worldGeom(room);
+  const peek0 = gen ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
+  const isCut = (j) => { const v = peek0(j); if (v !== 28) return false; const wm = WR.n && WR.by.get(wearChunkOf(wg, j)), e = wm && wm.get(j); return !!(e && e[1] === v && ((e[5] || 0) & 255) >= 254 && !e[7]); };
+  const peek = (j) => isCut(j) ? 0 : peek0(j);
+  const FLOOR_ROW = Math.floor(roomFloorTop(room) / TERRAIN_CELL), seen = new Set();
+  let fell = 0;
+  for (const wi of cutWis) { const c = (wi / ROWS) | 0, r = wi - c * ROWS;
+    for (let dc = -1; dc <= 1; dc++) { const nc = c + dc, nr = r - 1; if (nc < 0 || nc >= COLS || nr < 0) continue; const start = nc * ROWS + nr;
+      if (seen.has(start) || !fallCand(peek(start)) || fallCode(peek(start)) === 3) continue;
+      const R = fallWoodRegion(start, peek, COLS, ROWS, nn, FLOOR_ROW);
+      for (const i of R.mark) seen.add(i);
+      if (R.supported || R.overflow || !R.region.length) continue;
+      // the cut cells under the falling wood (straight or diagonally below one of its cells) go with it too
+      const inR = new Set(R.region), copies = new Set();
+      for (const i of R.region) { const ic = (i / ROWS) | 0, ir = i - ic * ROWS; if (fallCode(peek0(i)) !== 1) continue;
+        for (let d = -1; d <= 1; d++) { const j = (ic + d) * ROWS + ir + 1; if (ic + d >= 0 && ic + d < COLS && !inR.has(j) && isCut(j)) copies.add(j); } }
+      const region = R.region.concat([...copies]);
+      fallCopyNow = copies;
+      try { if (fallFinish(room, st, region, peek0, false)) { fell++; fallLast = { why: 'felled', wood: R.region.length, rowCut: copies.size }; } }
+      finally { fallCopyNow = null; } } }
+  return fell;
+}
 // Look for unsupported falling-capable regions touching a rectangle of cells (a dig, or a cell the fire finished).
 function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
   const st = cellsOf(room), grid = st.terrain; if (!grid) return 0;
@@ -6105,13 +6152,16 @@ function fallCut(room, region) {
   if (W > FALL_DIM || H > FALL_DIM) { fallRefused++; return false; }
   const fm = new Uint8Array(W * H), codes = new Uint8Array(W * H), set = [], out = [];
   // (2026-10-30, round D) …and the damage its cells had standing (the tools' kept wear, 1…60), so a half-chopped tree falls half-chopped
-  const fw = new Uint8Array(W * H), fpC = new Uint8Array(W * H), WR = wearOf(room), wg = worldGeom(room);
+  const fw = new Uint8Array(W * H), fnC = new Uint8Array(W * H * 6), WR = wearOf(room), wg = worldGeom(room), copies = fallCopyNow;
   let lit = false;
   for (const i of region) {
     const v = grid.g(i); if (!fallCand(v)) continue;
     const c = (i / ROWS) | 0, r = i - c * ROWS, k = (r - r0) * W + (c - c0);
     fm[k] = v; codes[k] = fallCode(v);
-    { const wm = WR.n && WR.by.get(wearChunkOf(wg, i)), e = wm && wm.get(i); if (e && e[1] === v) { fw[k] = Math.min(253, Math.round(e[0] / 60 * 255)); fpC[k] = e[4] || 0; } }
+    { const wm = WR.n && WR.by.get(wearChunkOf(wg, i)), e = wm && wm.get(i); if (e && e[1] === v) { fw[k] = Math.min(253, Math.round(e[0] / 60 * 255)); nkBytes(e[5] || 0, fnC, k * 6); nkBytes(e[6] || 0, fnC, k * 6 + 3); } }
+    // ⭐ (2026-10-30, the notch round 2 — the user: "half notches on both the stump and the log") the FELLED ROW's cells (`fallCheckCut`) go with the log AND stay on
+    //   the stump: each copy draws only its own half (the client's `NOTCH` — the side away from its wood is gone)
+    if (copies && copies.has(i)) continue;
     if (fs && fs.has(i)) { codes[k] |= 4; lit = true; fs.delete(i); out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); }
     grid.s(i, 0); hp.s(i, 0); if (st.sat) st.sat.s(i, 0); set.push(i, 0);
   }
@@ -6119,7 +6169,7 @@ function fallCut(room, region) {
   const obj = { id: 'fall-' + (++fallSeq) + '-' + (Date.now() % 1e8).toString(36), type: 'stamp', look: 'fallen', content: '🪵',
                 shape: 'rect', ownerId: 'world', owner: 'world', x: c0 * C + W * C / 2, y: r0 * C + H * C / 2, w: W * C, h: H * C,
                 angle: 0, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64') };
-  fallWearSet(obj, fw); fallAngSet(obj, fpC);   // (a piece starts unturned: the world's angles are its own)
+  fallWearSet(obj, fw); fallNotchSet(obj, fnC);   // (a piece starts unturned: the world's notches are its own)
   wireFanout(room, 'terrain-set', { cells: set });
   if (out.length) wireFanout(room, 'fire-cells', { cells: out, lift: 1 });
   objIndex(room, obj);
@@ -6142,10 +6192,10 @@ function bodyMine(room, obj, ks) {
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
   const codes = cells || bodyCellsOf(rec, obj);
   let took = 0;
-  const fw = fallWear(obj), fpM = fallAng(obj);
-  for (const k of ks) { const kk = k | 0; if (kk < 0 || kk >= n || !fm[kk]) continue; fm[kk] = 0; codes[kk] = 0; if (kk < fw.length) { fw[kk] = 0; fpM[kk] = 0; } took++; }
+  const fw = fallWear(obj), fnM = fallNotch(obj);
+  for (const k of ks) { const kk = k | 0; if (kk < 0 || kk >= n || !fm[kk]) continue; fm[kk] = 0; codes[kk] = 0; if (kk < fw.length) { fw[kk] = 0; fnM.fill(0, kk * 6, kk * 6 + 6); } took++; }
   if (!took) { if (pose) bodyStamp(room, obj, pose.x, pose.y, pose.a); return 0; }
-  fallWearSet(obj, fw); fallAngSet(obj, fpM);   // (2026-10-30, round D: a mined cell's damage goes with it — and its notch's angle)
+  fallWearSet(obj, fw); fallNotchSet(obj, fnM);   // (2026-10-30, round D: a mined cell's damage goes with it — and its notches)
   fallMined += took;
   let any = false; for (let k = 0; k < n; k++) if (fm[k]) { any = true; break; }
   if (!any) {
@@ -6276,7 +6326,7 @@ function bodyBake(room, obj, force) {
   if (!st || !st.terrain || !st.terrainHp || st.terrain !== S.g) return false;
   const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows;
   const ost = objStOf(room), rec = ost.get(obj.id);
-  const cells = bodyCellsOf(rec, obj), D = bodyDims(obj), fm = fallMats(obj), fwB = fallWear(obj), fpB = fallAng(obj);
+  const cells = bodyCellsOf(rec, obj), D = bodyDims(obj), fm = fallMats(obj), fwB = fallWear(obj), fnB = fallNotch(obj), nkOut = [];
   if (D.c !== S.dc || D.r !== S.dr) return false;
   const set = [];
   let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
@@ -6299,12 +6349,19 @@ function bodyBake(room, obj, force) {
     const mat = code === 2 ? MAT_CINDER : (fm[k] || bodySplitMat(cells[k]));
     grid.s(i, mat); hp.s(i, 0); if (st.sat) st.sat.s(i, 0);
     // (2026-10-30, round D) …its damage kept as the ground's wear (`wearPut` — sent with the chunk), so baking does not mend a chopped log
-    if (fwB[k] && mat === fm[k]) wearPut(room, i, Math.max(1, Math.round(fwB[k] / 255 * 60)), mat, fpB[k] ? [null, null, angByteTurn(fpB[k], S.a || 0)] : null);
+    //   (the notch round 2) …and its notches turned as it lies, every wood cell marked a LOG (`lg`): it breaks off when cut through, as the piece's did — a
+    //   standing tree's wood never does
+    if (mat === fm[k] && fallCode(mat) === 1) { const N = nkTurn(nkOfBytes(fnB, k * 6), nkOfBytes(fnB, k * 6 + 3), S.a || 0);
+      wearPut(room, i, fwB[k] ? Math.max(1, Math.round(fwB[k] / 255 * 60)) : 0, mat, null, [N[0], N[1], 1]); nkOut.push(i, N[0], N[1], 1); }
+    else if (fwB[k] && mat === fm[k]) wearPut(room, i, Math.max(1, Math.round(fwB[k] / 255 * 60)), mat, null);
     set.push(i, mat);
     if (q.c < c0) c0 = q.c; if (q.c > c1) c1 = q.c; if (q.r < r0) r0 = q.r; if (q.r > r1) r1 = q.r;
   }
   if (!set.length) return false;
   wireFanout(room, 'terrain-set', { cells: set });
+  // (2026-10-30, the notch round 2) …its notches and its log mark after it (the cells' `terrain-set` forgets a cell's wear on every screen) — before, a rested
+  //   log's damage showed only after a reload
+  for (let q = 0; q < nkOut.length; q += 64) wireFanout(room, 'terrain-wear', { c: [], n: nkOut.slice(q, q + 64) });
   // ⭐ THE STAMP IS FORGOTTEN WITHOUT CLEARING WHAT IT WROTE. `bodyUnstamp` only erases a cell that still reads as a body
   //   id, and every one of them is a real material now — so this drops the record, the `bs` pose and the bookkeeping and
   //   leaves the world alone. Anything alight stays alight, in the world, where the fire already lives.
@@ -14686,38 +14743,44 @@ db.exec(`CREATE TABLE IF NOT EXISTS world_wear (
 )`);
 // (2026-10-30, the notch — round E) …and the blow's ANGLE where it was struck (`pa`: 1…254 over half a turn, 0/null = not known): a wood cell's notch runs along it
 try { db.exec('ALTER TABLE world_wear ADD COLUMN pa INTEGER'); } catch (e) { /* already there */ }
-const _putWear = db.prepare(`INSERT INTO world_wear (room, wi, w, mat, px, py, pa) VALUES (?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT(room, wi) DO UPDATE SET w=excluded.w, mat=excluded.mat, px=excluded.px, py=excluded.py, pa=excluded.pa`);
-const _getWear = db.prepare('SELECT wi, w, mat, px, py, pa FROM world_wear WHERE room = ?');
+// (2026-10-30, THE NOTCH ROUND 2) …a wood cell's two notches (`nl` level, `nu` upright — 24 bits each: depth | position << 8 | tilt << 16, the client's
+//   `terrainNotch`) and `lg` 1 = the wood of a felled tree that came to rest (`bodyBake`): it breaks off when cut through; a standing tree's never does
+for (const col of ['nl', 'nu', 'lg']) { try { db.exec('ALTER TABLE world_wear ADD COLUMN ' + col + ' INTEGER'); } catch (e) { /* already there */ } }
+const _putWear = db.prepare(`INSERT INTO world_wear (room, wi, w, mat, px, py, pa, nl, nu, lg) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(room, wi) DO UPDATE SET w=excluded.w, mat=excluded.mat, px=excluded.px, py=excluded.py, pa=excluded.pa, nl=excluded.nl, nu=excluded.nu, lg=excluded.lg`);
+const _getWear = db.prepare('SELECT wi, w, mat, px, py, pa, nl, nu, lg FROM world_wear WHERE room = ?');
 const _delWear = db.prepare('DELETE FROM world_wear WHERE room = ? AND wi = ?');
-const roomWear = new Map();   // room → { n, by: Map(chunk → Map(wi → [w, mat, px, py])) } — loaded from disk the first time a room is asked about
+const roomWear = new Map();   // room → { n, by: Map(chunk → Map(wi → [w, mat, px, py, pa, nl, nu, lg])) } — loaded from disk the first time a room is asked about
 const WEAR_CAP = 50000;       // per room: past it the oldest chunk's entries go (a hammer swung a whole afternoon is a few thousand)
 function wearChunkOf(geom, wi) { const col = (wi / geom.rows) | 0, row = wi - col * geom.rows; return ((col / CHUNK_SIDE) | 0) * geom.cy + ((row / CHUNK_SIDE) | 0); }
 function wearOf(room) {
   let W = roomWear.get(room); if (W) return W;
   W = { n: 0, by: new Map() }; roomWear.set(room, W);
   const geom = worldGeom(room);
-  try { for (const e of _getWear.all(room)) { const ch = wearChunkOf(geom, e.wi); let m = W.by.get(ch); if (!m) W.by.set(ch, m = new Map()); m.set(e.wi, [e.w, e.mat, e.px, e.py, e.pa || 0]); W.n++; } } catch (e) {}
+  try { for (const e of _getWear.all(room)) { const ch = wearChunkOf(geom, e.wi); let m = W.by.get(ch); if (!m) W.by.set(ch, m = new Map()); m.set(e.wi, [e.w, e.mat, e.px, e.py, e.pa || 0, e.nl || 0, e.nu || 0, e.lg || 0]); W.n++; } } catch (e) {}
   return W;
 }
-function wearPut(room, wi, w, mat, p) {
+// (`nk` = [level, upright, log] — the notch round 2; absent = the cell's own kept, if it is still the same material)
+function wearPut(room, wi, w, mat, p, nk) {
   const W = wearOf(room), ch = wearChunkOf(worldGeom(room), wi); let m = W.by.get(ch); if (!m) W.by.set(ch, m = new Map());
-  if (!m.has(wi)) W.n++;
-  m.set(wi, [w, mat, p ? p[0] : null, p ? p[1] : null, p && p[2] ? p[2] : 0]);
-  try { _putWear.run(room, wi, w, mat, p ? p[0] : null, p ? p[1] : null, p && p[2] ? p[2] : null); } catch (e) {}
+  const old = m.get(wi); if (!old) W.n++;
+  const N = nk || (old && old[1] === mat ? [old[5] || 0, old[6] || 0, old[7] || 0] : [0, 0, 0]);
+  m.set(wi, [w, mat, p ? p[0] : null, p ? p[1] : null, p && p[2] ? p[2] : 0, N[0] | 0, N[1] | 0, N[2] ? 1 : 0]);
+  try { _putWear.run(room, wi, w, mat, p ? p[0] : null, p ? p[1] : null, p && p[2] ? p[2] : null, N[0] | 0, N[1] | 0, N[2] ? 1 : 0); } catch (e) {}
   while (W.n > WEAR_CAP && W.by.size) { const [k0, m0] = W.by.entries().next().value; W.by.delete(k0); for (const k of m0.keys()) { try { _delWear.run(room, k); } catch (e) {} } W.n -= m0.size; }
 }
 // …what to send for these chunks (all, when `chunks` is null): { c: [wi, w, …], pp: [px, py, …] (−1 = not known) } or null. Entries whose cell is no longer
 //   the material they were made on are dropped here.
 function wearFor(room, chunks, terrain) {
   const W = wearOf(room); if (!W.n) return null;
-  const c = [], pp = [], pa = [];
+  const c = [], pp = [], pa = [], n = [];
   for (const ch of (chunks || Array.from(W.by.keys()))) { const m = W.by.get(ch | 0); if (!m) continue;
     for (const [wi, e] of m) {
       if (terrain.g(wi) !== e[1]) { m.delete(wi); W.n--; try { _delWear.run(room, wi); } catch (er) {} continue; }
-      c.push(wi, e[0]); pp.push(e[2] == null ? -1 : e[2], e[3] == null ? -1 : e[3]); pa.push(e[4] || 0); }
+      c.push(wi, e[0]); pp.push(e[2] == null ? -1 : e[2], e[3] == null ? -1 : e[3]); pa.push(e[4] || 0);
+      if (e[5] || e[6] || e[7]) n.push(wi, e[5] || 0, e[6] || 0, e[7] || 0); }   // (the notch round 2: [wi, level, upright, log])
     if (!m.size) W.by.delete(ch | 0); }
-  return c.length ? { c, pp, pa } : null;
+  return c.length ? { c, pp, pa, n } : null;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -20287,7 +20350,7 @@ function fallenFromRow(p) {
   if (!n || n > FALL_DIM * FALL_DIM) return null;
   const o = { id: String(p.id), type: 'stamp', look: 'fallen', content: '🪵', shape: 'rect', ownerId: 'world', owner: 'world', x, y, w, h, angle: a, loose: 1, hp: null, fm: p.fm };
   if (typeof p.fw === 'string' && p.fw.length <= 50000) o.fw = p.fw;
-  if (typeof p.fp === 'string' && p.fp.length <= 50000) o.fp = p.fp;   // (2026-10-30, round D) its damage, kept
+  if (typeof p.fn === 'string' && p.fn.length <= 300000) o.fn = p.fn;   // (2026-10-30, the notch round 2) its notches, kept
   const s = p.src; if (s && typeof s.look === 'string' && [s.w, s.h, s.ox, s.oy].every(v => isFinite(+v))) o.src = { look: s.look, shape: typeof s.shape === 'string' ? s.shape : 'rect', w: +s.w, h: +s.h, ox: +s.ox, oy: +s.oy };
   return o;
 }
@@ -25587,11 +25650,18 @@ io.on('connection', (socket) => {
     // (2026-10-28) `p` = where the cells were struck (world px) — every screen starts their cracks there; only relayed, never stored
     //   (2026-10-30) …with the blow's angle as a third number (1…254 over half a turn — a wood cell's notch runs along it), kept with the wear
     const p = Array.isArray(m.p) && (m.p.length === 2 || m.p.length === 3) && m.p.every(Number.isFinite) ? [Math.round(m.p[0]), Math.round(m.p[1])].concat(m.p.length === 3 ? [Math.max(0, Math.min(254, Math.round(m.p[2])))] : []) : null;
-    socket.to(currentAvatarRoom).emit('terrain-wear', p ? { c, p } : { c });
+    // (2026-10-30, THE NOTCH ROUND 2) `n` = wood cells' notches, four numbers a cell [wi, level, upright, log] (the client's `terrainNotch`)
+    const nn = Array.isArray(m.n) ? m.n.slice(0, 32).map(v => Math.max(0, Math.min(0xffffff, v | 0))) : null, nk = new Map();
+    if (nn) for (let i = 0; i + 3 < nn.length; i += 4) nk.set(nn[i], [nn[i + 1], nn[i + 2], nn[i + 3] ? 1 : 0]);
+    const out = p ? { c, p } : { c }; if (nk.size) out.n = nn.slice(0, nk.size * 4);
+    socket.to(currentAvatarRoom).emit('terrain-wear', out);
     // (2026-10-29) …and KEPT now (`wearPut`): each cell's latest wear, on the material it is, for whoever loads it later — a refresh, a restart
-    const st = peekCells(currentAvatarRoom), geom = worldGeom(currentAvatarRoom), N = geom.cols * geom.rows;
+    const st = peekCells(currentAvatarRoom), geom = worldGeom(currentAvatarRoom), N = geom.cols * geom.rows, cut = [];
     if (st && st.terrain) for (let i = 0; i + 1 < c.length; i += 2) { const wi = c[i], w = Math.min(255, c[i + 1]); if (wi >= N || !w) continue;
-      const mat = st.terrain.g(wi); if (mat > 0) wearPut(currentAvatarRoom, wi, w, mat, p); }
+      const mat = st.terrain.g(wi); if (!(mat > 0)) continue; const k = nk.get(wi); wearPut(currentAvatarRoom, wi, w, mat, p, k);
+      // …a STANDING tree's wood cut right through by a LEVEL notch: does a line of such cells now free the part above? (`fallCheckCut`)
+      if (k && (k[0] & 255) >= 254 && !k[2] && mat === 28) cut.push(wi); }
+    if (cut.length) fallCheckCut(currentAvatarRoom, cut);
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip, thrown }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
@@ -26354,16 +26424,22 @@ io.on('connection', (socket) => {
   // ⭐ (2026-10-30, round D) AN AXE'S CHOP INTO A FELLED PIECE: each named cell takes its share `fs[i]` (0…1 of the cell — the axe's damage over the
   //   material's strength, worked out by the chopper as a standing tree's chop is); the damage is kept on the piece (`fw`), sent to everyone (`body-fw`),
   //   saved with it, and a cell whose damage is used up is MINED (`bodyMine` — the split, the pick-ups' rule, as before)
-  socket.on('body-chop', ({ id, ks, fs, a } = {}) => {
+  //   (2026-10-30, THE NOTCH ROUND 2) …each cell's notch of kind `u` (0 level, 1 upright, in the piece's frame) deepened by its share: a new notch takes its line
+  //   from `nq` (the client's packed record, no depth: position << 8 | tilt << 16); a notch already cut through takes no more; a cell either notch of which is
+  //   cut through is mined. `fw` = the deeper of its two (the cracks of a non-wood cell)
+  socket.on('body-chop', ({ id, ks, fs, u, nq } = {}) => {
     const room = currentAvatarRoom; if (!room || !canBuild() || !Array.isArray(ks) || !ks.length || ks.length > 64 || !Array.isArray(fs) || fs.length !== ks.length) return;
     const obj = roomObjects[room] && roomObjects[room].get(id);
     if (!obj || bodySpec(obj) !== 'fallen') return;
-    const fm = fallMats(obj), fw = fallWear(obj), fp = fallAng(obj), ab = Number.isFinite(+a) ? Math.max(0, Math.min(254, Math.round(+a))) : 0, mine = [];
+    const fm = fallMats(obj), fw = fallWear(obj), fn = fallNotch(obj), up = u ? 1 : 0, mine = [];
     for (let i = 0; i < ks.length; i++) { const k = ks[i] | 0, f = Math.max(0, Math.min(1, +fs[i] || 0)); if (k < 0 || k >= fm.length || !fm[k] || !f) continue;
-      const w = fw[k] + Math.round(f * 255); if (w >= 254) { mine.push(k); fw[k] = 0; fp[k] = 0; } else { fw[k] = w; if (!fp[k] && ab) fp[k] = ab; } }
-    fallWearSet(obj, fw); fallAngSet(obj, fp);
+      const j = k * 6 + up * 3; if (fn[j] >= 254) continue;
+      if (!fn[j]) { const q = Array.isArray(nq) ? nq[i] | 0 : 0; fn[j + 1] = ((q >> 8) & 255) || 128; fn[j + 2] = ((q >> 16) & 255) || 128; }
+      const d = Math.min(255, fn[j] + Math.max(1, Math.round(f * 255)));
+      if (d >= 254) { mine.push(k); fw[k] = 0; fn.fill(0, k * 6, k * 6 + 6); } else { fn[j] = d; fw[k] = Math.max(fw[k], Math.min(253, d)); } }
+    fallWearSet(obj, fw); fallNotchSet(obj, fn);
     if (objChunked(room)) objsTouch(room, obj.ch);
-    emitObjToChunks(room, obj, 'body-fw', { id: obj.id, fw: obj.fw || '', fp: obj.fp || '' });
+    emitObjToChunks(room, obj, 'body-fw', { id: obj.id, fw: obj.fw || '', fn: obj.fn || '' });
     if (mine.length) bodyMine(room, obj, mine);
   });
   // ⭐ TEST: A CRATE THAT HAS ALREADY BURNT OUT, COLD, WHERE YOU ASK (user, 2026-09-22: judging the crumbling speed *"is
