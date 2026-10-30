@@ -21,6 +21,7 @@ const WORLDGEN2 = require('./worldgen2'); // the PORTED world redesign (port inc
 const DOMAINS = require('./domains');   // Phase 6 inc 6: which column of the Overworld a site spawns at
 const LEDGER = require('./ledger');     // the Prima economy: what each player carries, held HERE and not in a browser
 const ITEMS = require('./items');       // what an item IS (a kind + a count, like a material) — the only copy of the table
+const WOOD = require('./wood');         // (2026-10-31, the notch round 3) the axe's line rule — shared with the client as MWWood
 const HELD = require('./held');         // what each thing you can hold in your hand is and does, by its look (shared with the client as MWHeld)
 const MATGEN = require('./materials');  // Phase 6 world-redesign port inc 1: the generator's materials, ids 18..89
                                         // ⚠️ ALSO INLINED INTO THE CLIENT BUNDLE by extension/build.js (as MWMats),
@@ -6001,6 +6002,7 @@ function fallWoodRegion(start, peek, COLS, ROWS, nn, FLOOR_ROW) {
 //   with those cells as open air; if it no longer reaches the ground, that part falls (`fallFinish` → `fallCut`, as a dug-through trunk does). The cut cells
 //   under it go with it AND stay on the stump (`fallCopyNow`) — the user: "half notches on both the stump and the log" (each copy drawn as its own half).
 let fallCopyNow = null;
+let fallNotchNow = null;   // (2026-10-31, the notch round 3) wi → a level notch cut through (24 bits, as `nl`) for the felled line's cells, laid into the log (`fallCut`)
 function fallCheckCut(room, cutWis) {
   if (!fallCfg.on) return 0;
   const st = cellsOf(room), grid = st.terrain; if (!grid) return 0;
@@ -6025,6 +6027,45 @@ function fallCheckCut(room, cutWis) {
       try { if (fallFinish(room, st, region, peek0, false)) { fell++; fallLast = { why: 'felled', wood: R.region.length, rowCut: copies.size }; } }
       finally { fallCopyNow = null; } } }
   return fell;
+}
+// ⭐⭐ (2026-10-31, THE NOTCH ROUND 3, increment 2 — scratchpad/kickoff_notch_3.md) A TREE FELLED BY ITS LINE. A right click on a line drawn right across a standing tree
+//   (`wood-blow`, server/wood.js `lineAt` — the same rule the client showed it by) thickens every stroke of it; after `WOOD.need` blows the tree is felled HERE: the cells
+//   the line cuts (`WOOD.cutCells` — a row that steps keeps both cells, so the 8-neighbour walk cannot slip round it) count as open, the wood above walked from just
+//   over them (`fallWoodRegion`: only wood holds a tree up, its leaves the nearer ones); if it no longer reaches the ground it falls (`fallFinish` → `fallCut`), the cut
+//   cells going with it AND staying on the stump (`fallCopyNow`) — the log's copy carrying the line as a level notch cut through (`fallNotchNow`, its half drawn), the
+//   stump's strokes marked as left on a stump (`k` 2, their half drawn). (Increment 3 will turn the fall itself into the animated one.)
+function strokeTreeAt(room, st, geom) { const WR = wearOf(room);
+  return (x, y) => { const c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL); if (c < 0 || r < 0 || c >= geom.cols || r >= geom.rows) return false;
+    const wi = c * geom.rows + r; if (st.terrain.g(wi) !== 28) return false; const wm = WR.n && WR.by.get(wearChunkOf(geom, wi)), e = wm && wm.get(wi); return !(e && e[7]); }; }
+function strokesNear(room, x, y) { const S = strokesOf(room), out = [];
+  for (const m of S.by.values()) for (const [id, e] of m) if (e[2] === 0 && Math.abs(e[1] - y) <= 32 && Math.abs(e[0] - x) <= 600) out.push({ id, x: e[0], y: e[1], k: e[2], t: ((e[3] | 0) - 128) * Math.PI / 720, b: e[4] | 0, e });
+  return out; }
+function woodFell(room, Ln, by) {
+  if (!fallCfg.on) return false;
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return false;
+  const COLS = grid.geom.cols, ROWS = grid.geom.rows, nn = grid.length, gen = !!grid.seedFn;
+  const peek0 = gen ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
+  const cut = new Set(); for (const [c, r] of WOOD.cutCells(Ln)) { if (c < 0 || r < 0 || c >= COLS || r >= ROWS) continue; const j = c * ROWS + r; if (peek0(j) === 28) cut.add(j); }
+  if (!cut.size) return false;
+  const peek = (j) => cut.has(j) ? 0 : peek0(j), FLOOR_ROW = Math.floor(roomFloorTop(room) / TERRAIN_CELL), seen = new Set();
+  let felled = false;
+  for (const wi of cut) { if (felled) break; const c = (wi / ROWS) | 0, r = wi - c * ROWS;
+    for (let dc = -1; dc <= 1 && !felled; dc++) { const nc = c + dc, nr = r - 1; if (nc < 0 || nc >= COLS || nr < 0) continue; const start = nc * ROWS + nr;
+      if (seen.has(start) || !fallCand(peek(start)) || fallCode(peek(start)) === 3) continue;
+      const R = fallWoodRegion(start, peek, COLS, ROWS, nn, FLOOR_ROW);
+      for (const i of R.mark) seen.add(i);
+      if (R.supported || R.overflow || !R.region.length) { fallLast = { why: R.supported ? 'line: still held up' : 'line: too big', line: Ln.cells, by }; continue; }
+      const notch = new Map(); for (const j of cut) { const c2 = (j / ROWS) | 0, r2 = j - c2 * ROWS, xm = (c2 + 0.5) * TERRAIN_CELL, y = WOOD.yAt(Ln, xm);
+        let t = 0, bd = 1e9; for (const s of Ln.strokes) { const d = Math.abs(s.x - xm); if (d < bd) { bd = d; t = s.t; } }
+        const p17 = Math.max(0, Math.min(17, (y / TERRAIN_CELL - r2) * 17));
+        notch.set(j, 255 | ((1 + Math.round(p17 / 17 * 253)) << 8) | (Math.max(1, Math.min(255, 128 + Math.round(t * 720 / Math.PI))) << 16)); }
+      fallCopyNow = cut; fallNotchNow = notch;
+      try { if (fallFinish(room, st, R.region.concat([...cut]), peek0, false)) { felled = true; fallLast = { why: 'felled by a line', wood: R.region.length, rowCut: cut.size, line: Ln.cells, by }; } }
+      finally { fallCopyNow = null; fallNotchNow = null; } } }
+  if (felled) { const a = [];
+    for (const s of Ln.strokes) { s.e[2] = 2; strokePut(room, s.id, s.e); a.push(s.id, Math.round(s.e[0] * 4), Math.round(s.e[1] * 4), 2, s.e[3], s.e[4]); }
+    io.to(room).emit('wood-strokes', { a }); }
+  return felled;
 }
 // Look for unsupported falling-capable regions touching a rectangle of cells (a dig, or a cell the fire finished).
 function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
@@ -6159,6 +6200,8 @@ function fallCut(room, region) {
     const c = (i / ROWS) | 0, r = i - c * ROWS, k = (r - r0) * W + (c - c0);
     fm[k] = v; codes[k] = fallCode(v);
     { const wm = WR.n && WR.by.get(wearChunkOf(wg, i)), e = wm && wm.get(i); if (e && e[1] === v) { fw[k] = Math.min(253, Math.round(e[0] / 60 * 255)); nkBytes(e[5] || 0, fnC, k * 6); nkBytes(e[6] || 0, fnC, k * 6 + 3); } }
+    // (2026-10-31, the notch round 3) …a cell of the felled LINE: its half of the cut on the log (the client's `NOTCH` draws a level notch cut through as the half)
+    if (fallNotchNow && fallNotchNow.has(i)) { nkBytes(fallNotchNow.get(i), fnC, k * 6); fw[k] = Math.max(fw[k], 253); }
     // ⭐ (2026-10-30, the notch round 2 — the user: "half notches on both the stump and the log") the FELLED ROW's cells (`fallCheckCut`) go with the log AND stay on
     //   the stump: each copy draws only its own half (the client's `NOTCH` — the side away from its wood is gone)
     if (copies && copies.has(i)) continue;
@@ -25734,6 +25777,18 @@ io.on('connection', (socket) => {
     const k = m.a[3] ? 1 : 0, t = Math.max(1, Math.min(255, m.a[4] | 0)), b = Math.max(0, Math.min(255, m.a[5] | 0));
     strokePut(room, id, [x, y, k, t, b, mat]);
     socket.to(room).emit('wood-strokes', { a: [id, Math.round(x * 4), Math.round(y * 4), k, t, b] });
+  });
+  // ⭐ (2026-10-31, the notch round 3, increment 2) a FINISHING BLOW (a right click on a standing tree): if it lands on a line drawn right across it (`WOOD.lineAt` — the
+  //   client's own check showed it already), every stroke of the line takes it (kept, sent to everyone); after `WOOD.need` of them the tree is felled (`woodFell`)
+  socket.on('wood-blow', (m) => {
+    const room = currentAvatarRoom; if (!room || !canBuild() || !m || !Number.isFinite(+m.x) || !Number.isFinite(+m.y)) return;
+    const st = peekCells(room); if (!st || !st.terrain) return;
+    const geom = worldGeom(room), jy = Math.max(0, Math.min(17, m.j != null && Number.isFinite(+m.j) ? +m.j : 4)) * TERRAIN_CELL / 17, kk = Math.max(0.25, Math.min(4, +m.k || 1));
+    const Ln = WOOD.lineAt(+m.x, +m.y, strokesNear(room, +m.x, +m.y), jy, strokeTreeAt(room, st, geom)); if (!Ln) return;
+    const a = [];
+    for (const s of Ln.strokes) { s.e[4] = Math.min(255, (s.e[4] | 0) + 1); s.b = s.e[4]; strokePut(room, s.id, s.e); a.push(s.id, Math.round(s.e[0] * 4), Math.round(s.e[1] * 4), s.e[2], s.e[3], s.e[4]); }
+    socket.emit('wood-strokes', { a }); socket.to(room).emit('wood-strokes', { a });
+    if (WOOD.blows(Ln) >= WOOD.need(Ln, kk)) woodFell(room, Ln, socket.id);
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip, thrown }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
