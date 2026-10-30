@@ -4036,6 +4036,14 @@ function fallMats(obj) {
   Object.defineProperty(obj, '_fmS', { value: obj.fm, writable: true, enumerable: false, configurable: true });
   return a;
 }
+// ⭐ (2026-10-30, felled pieces round D — scratchpad/kickoff_ore_wood.md) A FALLEN PIECE'S DAMAGE: one byte a cell beside `fm` (`fw`, base64, 0 = whole …
+//   255 = about to break), so a chop takes as many blows on a felled log as on a standing tree. Absent = undamaged. A fresh copy, length `fm`'s.
+function fallWear(obj) {
+  const n = fallMats(obj).length, a = new Uint8Array(n);
+  if (typeof obj.fw === 'string') { try { const b = Buffer.from(obj.fw, 'base64'); if (b.length === n) a.set(b); } catch (e) {} }
+  return a;
+}
+function fallWearSet(obj, a) { let any = false; for (let k = 0; k < a.length; k++) if (a[k]) { any = true; break; } if (any) obj.fw = Buffer.from(a).toString('base64'); else delete obj.fw; }
 // what a material is as a body: charcoal chars, woody things are wood, every other plant is foliage (burns fast, leaves nothing)
 function fallCode(m) { return !m ? 0 : (m === 92 || m === 254) ? 2 : (m === 28 || m === 91 || m === 40) ? 1 : 3; }
 // A whole one. Codes: 0 gone · 1 wood · 2 charcoal, +4 alight. A round thing (barrel, log) has its four corner cells
@@ -5513,6 +5521,7 @@ function bodySplitCheck(room, obj, S, now, force, mined) {   // (`mined`: cut by
   // …and a fallen piece's materials, taken now too: the parent's `fm` loses the departing cells below, before the pieces are made from them (2026-10-26 — run 1
   //   of the fix read them there, found 0, and the piece came out Timber again)
   const pfm0 = obj.look === 'fallen' && typeof obj.fm === 'string' ? fallMats(obj).slice() : null;
+  const pfw0 = pfm0 ? fallWear(obj) : null;   // (2026-10-30, round D) …and its damage, which each piece keeps for its own cells
   const st = roomCells.get(room);                         // …where the ash an island leaves behind is written
   const keep = new Uint8Array(cells.length);
   for (const k of isles[big]) keep[k] = cells[k];
@@ -5599,7 +5608,7 @@ function bodySplitCheck(room, obj, S, now, force, mined) {   // (`mined`: cut by
     for (const k of isle) { const c = k % D.c, r = (k / D.c) | 0;
       if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
     const W = c1 - c0 + 1, H = r1 - r0 + 1;
-    const fm = new Uint8Array(W * H), codes = new Uint8Array(W * H);
+    const fm = new Uint8Array(W * H), codes = new Uint8Array(W * H), fw2 = new Uint8Array(W * H);
     // ⭐ (2026-10-26, tools piece 5 round 3 — the user, cutting a felled tree in two: "one of the different parts it split into was a solid object and also looked
     //   slightly different, with a lighter colour") — a FALLEN piece's sound cells keep what they ARE (its `fm`: tree Wood, leaves …), not Timber: `bodySplitMat` is a
     //   crate's rule (sound = Timber), and Timber is solid and paler. Charred and burnt-through cells still become what the split calls them.
@@ -5608,6 +5617,7 @@ function bodySplitCheck(room, obj, S, now, force, mined) {   // (`mined`: cut by
       const c = k % D.c, r = (k / D.c) | 0, kk = (r - r0) * W + (c - c0);
       // ⚠️ BURNT-THROUGH (bit 8) TRAVELS WITH THE PIECE. Dropped here, a fragment of a crumbling crate arrives as
       //    merely charred and can never crumble again — the same fault as the stamp's fire history, a third time.
+      if (pfw0 && k < pfw0.length) fw2[kk] = pfw0[k];
       fm[kk] = pfm && (cells[k] & 3) !== 2 && pfm[k] ? pfm[k] : bodySplitMat(cells[k]); codes[kk] = ((cells[k] & 3) === 2 ? 2 : (cells[k] & 3) === 3 ? 3 : 1) | (cells[k] & 8);
       if (cells[k] & 4) codes[kk] |= 4;                   // …a piece that breaks off alight goes on burning
     }
@@ -5617,6 +5627,7 @@ function bodySplitCheck(room, obj, S, now, force, mined) {   // (`mined`: cut by
                  content: '🪵', shape: 'rect', ownerId: 'world', owner: 'world',
                  x: pose.x + lx * ca - ly * sa, y: pose.y + lx * sa + ly * ca, w: W * cw, h: H * ch,
                  angle: pose.a, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64') };
+    fallWearSet(o2, fw2);
     // ⭐⭐ A PIECE OF A CRATE STILL LOOKS LIKE A PIECE OF THAT CRATE (user, 2026-09-22: *"some cells are coming through as
     //   the other kind of charcoal"*). A fallen piece is drawn one flat colour per cell from its materials — right for a
     //   tree, whose cells ARE terrain materials, and wrong for a crate: the planks vanished and its char became the
@@ -6083,11 +6094,14 @@ function fallCut(room, region) {
   const W = c1 - c0 + 1, H = r1 - r0 + 1;
   if (W > FALL_DIM || H > FALL_DIM) { fallRefused++; return false; }
   const fm = new Uint8Array(W * H), codes = new Uint8Array(W * H), set = [], out = [];
+  // (2026-10-30, round D) …and the damage its cells had standing (the tools' kept wear, 1…60), so a half-chopped tree falls half-chopped
+  const fw = new Uint8Array(W * H), WR = wearOf(room), wg = worldGeom(room);
   let lit = false;
   for (const i of region) {
     const v = grid.g(i); if (!fallCand(v)) continue;
     const c = (i / ROWS) | 0, r = i - c * ROWS, k = (r - r0) * W + (c - c0);
     fm[k] = v; codes[k] = fallCode(v);
+    { const wm = WR.n && WR.by.get(wearChunkOf(wg, i)), e = wm && wm.get(i); if (e && e[1] === v) fw[k] = Math.min(253, Math.round(e[0] / 60 * 255)); }
     if (fs && fs.has(i)) { codes[k] |= 4; lit = true; fs.delete(i); out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); }
     grid.s(i, 0); hp.s(i, 0); if (st.sat) st.sat.s(i, 0); set.push(i, 0);
   }
@@ -6095,6 +6109,7 @@ function fallCut(room, region) {
   const obj = { id: 'fall-' + (++fallSeq) + '-' + (Date.now() % 1e8).toString(36), type: 'stamp', look: 'fallen', content: '🪵',
                 shape: 'rect', ownerId: 'world', owner: 'world', x: c0 * C + W * C / 2, y: r0 * C + H * C / 2, w: W * C, h: H * C,
                 angle: 0, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64') };
+  fallWearSet(obj, fw);
   wireFanout(room, 'terrain-set', { cells: set });
   if (out.length) wireFanout(room, 'fire-cells', { cells: out, lift: 1 });
   objIndex(room, obj);
@@ -6117,8 +6132,10 @@ function bodyMine(room, obj, ks) {
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
   const codes = cells || bodyCellsOf(rec, obj);
   let took = 0;
-  for (const k of ks) { const kk = k | 0; if (kk < 0 || kk >= n || !fm[kk]) continue; fm[kk] = 0; codes[kk] = 0; took++; }
+  const fw = fallWear(obj);
+  for (const k of ks) { const kk = k | 0; if (kk < 0 || kk >= n || !fm[kk]) continue; fm[kk] = 0; codes[kk] = 0; if (kk < fw.length) fw[kk] = 0; took++; }
   if (!took) { if (pose) bodyStamp(room, obj, pose.x, pose.y, pose.a); return 0; }
+  fallWearSet(obj, fw);   // (2026-10-30, round D: a mined cell's damage goes with it)
   fallMined += took;
   let any = false; for (let k = 0; k < n; k++) if (fm[k]) { any = true; break; }
   if (!any) {
@@ -6249,7 +6266,7 @@ function bodyBake(room, obj, force) {
   if (!st || !st.terrain || !st.terrainHp || st.terrain !== S.g) return false;
   const grid = st.terrain, hp = st.terrainHp, ROWS = st.rows;
   const ost = objStOf(room), rec = ost.get(obj.id);
-  const cells = bodyCellsOf(rec, obj), D = bodyDims(obj), fm = fallMats(obj);
+  const cells = bodyCellsOf(rec, obj), D = bodyDims(obj), fm = fallMats(obj), fwB = fallWear(obj);
   if (D.c !== S.dc || D.r !== S.dr) return false;
   const set = [];
   let c0 = Infinity, r0 = Infinity, c1 = -Infinity, r1 = -Infinity;
@@ -6271,6 +6288,8 @@ function bodyBake(room, obj, force) {
     //   the sound middle, which is what actually happened to it.
     const mat = code === 2 ? MAT_CINDER : (fm[k] || bodySplitMat(cells[k]));
     grid.s(i, mat); hp.s(i, 0); if (st.sat) st.sat.s(i, 0);
+    // (2026-10-30, round D) …its damage kept as the ground's wear (`wearPut` — sent with the chunk), so baking does not mend a chopped log
+    if (fwB[k] && mat === fm[k]) wearPut(room, i, Math.max(1, Math.round(fwB[k] / 255 * 60)), mat, null);
     set.push(i, mat);
     if (q.c < c0) c0 = q.c; if (q.c > c1) c1 = q.c; if (q.r < r0) r0 = q.r; if (q.r > r1) r1 = q.r;
   }
@@ -20255,6 +20274,7 @@ function fallenFromRow(p) {
   let n = 0; try { n = Buffer.from(p.fm, 'base64').length; } catch (e) { return null; }
   if (!n || n > FALL_DIM * FALL_DIM) return null;
   const o = { id: String(p.id), type: 'stamp', look: 'fallen', content: '🪵', shape: 'rect', ownerId: 'world', owner: 'world', x, y, w, h, angle: a, loose: 1, hp: null, fm: p.fm };
+  if (typeof p.fw === 'string' && p.fw.length <= 50000) o.fw = p.fw;   // (2026-10-30, round D) its damage, kept
   const s = p.src; if (s && typeof s.look === 'string' && [s.w, s.h, s.ox, s.oy].every(v => isFinite(+v))) o.src = { look: s.look, shape: typeof s.shape === 'string' ? s.shape : 'rect', w: +s.w, h: +s.h, ox: +s.ox, oy: +s.oy };
   return o;
 }
@@ -26316,6 +26336,21 @@ io.on('connection', (socket) => {
     const obj = roomObjects[room] && roomObjects[room].get(id);
     if (!obj || bodySpec(obj) !== 'fallen') return;
     bodyMine(room, obj, ks);
+  });
+  // ⭐ (2026-10-30, round D) AN AXE'S CHOP INTO A FELLED PIECE: each named cell takes its share `fs[i]` (0…1 of the cell — the axe's damage over the
+  //   material's strength, worked out by the chopper as a standing tree's chop is); the damage is kept on the piece (`fw`), sent to everyone (`body-fw`),
+  //   saved with it, and a cell whose damage is used up is MINED (`bodyMine` — the split, the pick-ups' rule, as before)
+  socket.on('body-chop', ({ id, ks, fs } = {}) => {
+    const room = currentAvatarRoom; if (!room || !canBuild() || !Array.isArray(ks) || !ks.length || ks.length > 64 || !Array.isArray(fs) || fs.length !== ks.length) return;
+    const obj = roomObjects[room] && roomObjects[room].get(id);
+    if (!obj || bodySpec(obj) !== 'fallen') return;
+    const fm = fallMats(obj), fw = fallWear(obj), mine = [];
+    for (let i = 0; i < ks.length; i++) { const k = ks[i] | 0, f = Math.max(0, Math.min(1, +fs[i] || 0)); if (k < 0 || k >= fm.length || !fm[k] || !f) continue;
+      const w = fw[k] + Math.round(f * 255); if (w >= 254) { mine.push(k); fw[k] = 0; } else fw[k] = w; }
+    fallWearSet(obj, fw);
+    if (objChunked(room)) objsTouch(room, obj.ch);
+    emitObjToChunks(room, obj, 'body-fw', { id: obj.id, fw: obj.fw || '' });
+    if (mine.length) bodyMine(room, obj, mine);
   });
   // ⭐ TEST: A CRATE THAT HAS ALREADY BURNT OUT, COLD, WHERE YOU ASK (user, 2026-09-22: judging the crumbling speed *"is
   //   tedious to test because I have to wait for the whole thing to burn through"*). Debug-panel only. Every cell is
