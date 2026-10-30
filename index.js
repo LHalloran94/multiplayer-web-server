@@ -25724,7 +25724,10 @@ io.on('connection', (socket) => {
   // ⭐ (2026-10-31, THE NOTCH ROUND 3) an axe's STROKE on wood (`a` = the client's `woodStrokeWire`: id, x·4, y·4, kind, tilt byte, blows) — kept on the wood under
   //   its middle (`strokePut`) and relayed to the room
   socket.on('wood-stroke', (m) => {
-    const room = currentAvatarRoom; if (!room || !canBuild() || !m || !Array.isArray(m.a) || m.a.length !== 6 || !m.a.every(Number.isFinite)) return;
+    const room = currentAvatarRoom; if (!room || !canBuild() || !m) return;
+    // (round 3) `d` = a stroke replaced by one landing on it (the client's chop): gone here and on every screen
+    if (Number.isInteger(m.d)) { const S = strokesOf(room); for (const [ch, mm] of S.by) if (mm.has(m.d)) { strokeDel(room, S, mm, m.d); if (!mm.size) S.by.delete(ch); socket.to(room).emit('wood-strokes', { d: [m.d] }); break; } return; }
+    if (!Array.isArray(m.a) || m.a.length !== 6 || !m.a.every(Number.isFinite)) return;
     const st = peekCells(room); if (!st || !st.terrain) return;
     const geom = worldGeom(room), id = m.a[0] | 0, x = m.a[1] / 4, y = m.a[2] / 4; if (!id || x < 0 || y < 0 || x >= geom.cols * TERRAIN_CELL || y >= geom.rows * TERRAIN_CELL) return;
     const mat = st.terrain.g(strokeCell(geom, x, y)); if (!(mat > 0)) return;
