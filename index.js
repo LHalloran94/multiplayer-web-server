@@ -13311,6 +13311,8 @@ function sendChunkContent(sock, room, chunks) {
   }
   // (2026-10-29) …and a tool's wear on these chunks' cells (`wearFor`), after their terrain, which it needs to land on
   { const _wr = wearFor(room, chunks, s.terrain); if (_wr) sock.emit('terrain-wear', _wr); }
+  // (2026-10-31, the notch round 3) …and the axe's strokes on their wood (`strokesFor`)
+  { const _sr = strokesFor(room, chunks, s.terrain); if (_sr) sock.emit('wood-strokes', _sr); }
   // (2026-10-30) …and the rock each ore cell's flecks are drawn in (`hostFor`)
   { const _hr = hostFor(room, chunks, s.terrain, geom); if (_hr) sock.emit('terrain-host', _hr); }
   const cells = []; if (fine.length) fineWirePush(room, fine, cells);
@@ -14784,6 +14786,56 @@ function wearFor(room, chunks, terrain) {
       if (e[5] || e[6] || e[7]) n.push(wi, e[5] || 0, e[6] || 0, e[7] || 0); }   // (the notch round 2: [wi, level, upright, log])
     if (!m.size) W.by.delete(ch | 0); }
   return c.length ? { c, pp, pa, n } : null;
+}
+// ⭐⭐ (2026-10-31, THE NOTCH ROUND 3 — scratchpad/kickoff_notch_3.md) THE AXE'S STROKES. A chop leaves one short cut where the head met the wood (the client's
+//   16a `woodStrokes`): [x, y (world px), kind (0 level, 1 upright), tilt byte (128 = none), blows, the material under its middle]. Kept here by chunk (its middle's),
+//   saved, sent with its chunk after the terrain and the wear (`strokesFor`), relayed when made (`wood-stroke`). Only true of the wood it was made on: when the cell
+//   under its middle is no longer that material it is dropped on the next read, as the wear is. Round 2's per-cell notches (`nl` / `nu`) are no longer drawn on
+//   the terrain — cleared once here.
+db.exec(`CREATE TABLE IF NOT EXISTS world_strokes (
+  room TEXT    NOT NULL,
+  id   INTEGER NOT NULL,
+  x    REAL    NOT NULL,
+  y    REAL    NOT NULL,
+  k    INTEGER NOT NULL,
+  t    INTEGER NOT NULL,
+  b    INTEGER NOT NULL,
+  mat  INTEGER NOT NULL,
+  PRIMARY KEY (room, id)
+)`);
+try { db.exec('UPDATE world_wear SET nl = 0, nu = 0 WHERE nl OR nu'); } catch (e) {}
+const _putStroke = db.prepare(`INSERT INTO world_strokes (room, id, x, y, k, t, b, mat) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  ON CONFLICT(room, id) DO UPDATE SET x=excluded.x, y=excluded.y, k=excluded.k, t=excluded.t, b=excluded.b, mat=excluded.mat`);
+const _getStrokes = db.prepare('SELECT id, x, y, k, t, b, mat FROM world_strokes WHERE room = ?');
+const _delStroke = db.prepare('DELETE FROM world_strokes WHERE room = ? AND id = ?');
+const roomStrokes = new Map();   // room → { n, by: Map(chunk → Map(id → [x, y, k, t, b, mat])) }
+const STROKE_CAP = 40000, STROKE_CHUNK_CAP = 600;   // per room / per chunk: past them the oldest go
+function strokeCell(geom, x, y) { return Math.floor(x / TERRAIN_CELL) * geom.rows + Math.floor(y / TERRAIN_CELL); }
+function strokesOf(room) {
+  let S = roomStrokes.get(room); if (S) return S;
+  S = { n: 0, by: new Map() }; roomStrokes.set(room, S);
+  const geom = worldGeom(room);
+  try { for (const e of _getStrokes.all(room)) { const ch = wearChunkOf(geom, strokeCell(geom, e.x, e.y)); let m = S.by.get(ch); if (!m) S.by.set(ch, m = new Map()); m.set(e.id, [e.x, e.y, e.k, e.t, e.b, e.mat]); S.n++; } } catch (e) {}
+  return S;
+}
+function strokeDel(room, S, m, id) { if (m.delete(id)) { S.n--; try { _delStroke.run(room, id); } catch (e) {} } }
+function strokePut(room, id, e) {
+  const S = strokesOf(room), ch = wearChunkOf(worldGeom(room), strokeCell(worldGeom(room), e[0], e[1])); let m = S.by.get(ch); if (!m) S.by.set(ch, m = new Map());
+  if (!m.has(id)) S.n++; m.set(id, e);
+  try { _putStroke.run(room, id, e[0], e[1], e[2], e[3], e[4], e[5]); } catch (er) {}
+  while (m.size > STROKE_CHUNK_CAP) strokeDel(room, S, m, m.keys().next().value);
+  while (S.n > STROKE_CAP && S.by.size) { const [k0, m0] = S.by.entries().next().value; for (const k of Array.from(m0.keys())) strokeDel(room, S, m0, k); S.by.delete(k0); }
+}
+// …what to send for these chunks (all, when `chunks` is null): { a: [id, x·4, y·4, kind, tilt, blows, …] } (the client's `woodStrokeWire`) or null
+function strokesFor(room, chunks, terrain) {
+  const S = strokesOf(room); if (!S.n) return null;
+  const geom = worldGeom(room), a = [];
+  for (const ch of (chunks || Array.from(S.by.keys()))) { const m = S.by.get(ch | 0); if (!m) continue;
+    for (const [id, e] of Array.from(m)) {
+      if (terrain.g(strokeCell(geom, e[0], e[1])) !== e[5]) { strokeDel(room, S, m, id); continue; }
+      a.push(id, Math.round(e[0] * 4), Math.round(e[1] * 4), e[2], e[3], e[4]); }
+    if (!m.size) S.by.delete(ch | 0); }
+  return a.length ? { a } : null;
 }
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════════════════════
@@ -24211,6 +24263,7 @@ io.on('connection', (socket) => {
       materializeRoom(avRoom);   // join replay reads the whole world — an evicted chunk would arrive empty
       if (tg) socket.emit('terrain-init', { levelIndex, cell: TERRAIN_CELL, cols: tg.geom.cols, rows: tg.geom.rows, ...terrainRLE(tg), hpRuns: _cs.terrainHp ? terrainRLE(_cs.terrainHp).runs : undefined });
       if (tg) { const _wr = wearFor(avRoom, null, tg); if (_wr) socket.emit('terrain-wear', _wr); }   // (2026-10-29) …and the tools' wear kept on it
+      if (tg) { const _sr = strokesFor(avRoom, null, tg); if (_sr) socket.emit('wood-strokes', _sr); }   // (2026-10-31) …and the axe's strokes
 
       // Replay the multi-liquid stacks (layers per cell) so the joiner renders partial pools + composition correctly.
       if (tg) { const fi = buildFineInit(avRoom); if (fi && fi.cells.length) socket.emit('liquid-fine-init', fi); }
@@ -25667,6 +25720,17 @@ io.on('connection', (socket) => {
       // …a STANDING tree's wood cut right through by a LEVEL notch: does a line of such cells now free the part above? (`fallCheckCut`)
       if (k && (k[0] & 255) >= 254 && !k[2] && mat === 28) cut.push(wi); }
     if (cut.length) fallCheckCut(currentAvatarRoom, cut);
+  });
+  // ⭐ (2026-10-31, THE NOTCH ROUND 3) an axe's STROKE on wood (`a` = the client's `woodStrokeWire`: id, x·4, y·4, kind, tilt byte, blows) — kept on the wood under
+  //   its middle (`strokePut`) and relayed to the room
+  socket.on('wood-stroke', (m) => {
+    const room = currentAvatarRoom; if (!room || !canBuild() || !m || !Array.isArray(m.a) || m.a.length !== 6 || !m.a.every(Number.isFinite)) return;
+    const st = peekCells(room); if (!st || !st.terrain) return;
+    const geom = worldGeom(room), id = m.a[0] | 0, x = m.a[1] / 4, y = m.a[2] / 4; if (!id || x < 0 || y < 0 || x >= geom.cols * TERRAIN_CELL || y >= geom.rows * TERRAIN_CELL) return;
+    const mat = st.terrain.g(strokeCell(geom, x, y)); if (!(mat > 0)) return;
+    const k = m.a[3] ? 1 : 0, t = Math.max(1, Math.min(255, m.a[4] | 0)), b = Math.max(0, Math.min(255, m.a[5] | 0));
+    strokePut(room, id, [x, y, k, t, b, mat]);
+    socket.to(room).emit('wood-strokes', { a: [id, Math.round(x * 4), Math.round(y * 4), k, t, b] });
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip, thrown }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
