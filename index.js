@@ -6257,7 +6257,7 @@ function fallCut(room, region) {
   bodyStamp(room, obj, obj.x, obj.y, obj.angle || 0);
   broadcastObjSt(room);
   fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
-  if (obj.fa) setTimeout(() => { delete obj.fa; }, obj.fa.ms + 3000);   // (its animation is for those watching it fall, not for whoever loads it later)
+  if (obj.fa) setTimeout(() => { delete obj.fa; }, obj.fa.ms + 6000);   // (its animation is for those watching it fall, not for whoever loads it later)
   fallCuts++;
   return true;
 }
