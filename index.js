@@ -6126,8 +6126,16 @@ function woodFell(room, Ln, by, dir) {
         const p17 = Math.max(0, Math.min(17, (y / TERRAIN_CELL - r2) * 17));
         notch.set(j, 255 | ((1 + Math.round(p17 / 17 * 253)) << 8) | (Math.max(1, Math.min(255, 128 + Math.round(t * 720 / Math.PI))) << 16)); }
       fallCopyNow = both; fallNotchNow = notch;
+      // (2026-11-02, the user: cutting a tree that had been cut before, "the existing line disappears when it separates") — the strokes on the part that FALLS go with it,
+      //   into the log's own frame (px from its box's top-left, unturned — as `fallCut` makes it), kept as they were (a stump-top's half, `k` 2, still cut away above);
+      //   before, they stayed in the ground under cells that had gone, and went
+      const moving = [], goneSet = new Set(R.region.concat(logOnly)); let bc0 = 1e9, br0 = 1e9;
+      for (const i of R.region.concat([...both], logOnly)) { const c = (i / ROWS) | 0, r = i - c * ROWS; if (c < bc0) bc0 = c; if (r < br0) br0 = r; }
+      { const SS = strokesOf(room); for (const [ch, mm] of SS.by) for (const [sid, e] of Array.from(mm)) { const j = Math.floor(e[0] / TERRAIN_CELL) * ROWS + Math.floor(e[1] / TERRAIN_CELL);
+          if (!goneSet.has(j)) continue; moving.push([sid, Math.round((e[0] - bc0 * TERRAIN_CELL) * 4), Math.round((e[1] - br0 * TERRAIN_CELL) * 4), e[2], e[3], e[4]]); strokeDel(room, SS, mm, sid); if (!mm.size) SS.by.delete(ch); } }
+      if (moving.length) io.to(room).emit('wood-strokes', { d: moving.map(e => e[0]) });
       // (increment 3) …turned about the stump's edge on the side away from the last chopper
-      { const xe = dir > 0 ? Ln.x1 : Ln.x0, pv = [xe, WOOD.yAt(Ln, xe)]; fallPoseNow = (obj) => fellSweep(room, obj, pv, dir > 0 ? 1 : -1); }
+      { const xe = dir > 0 ? Ln.x1 : Ln.x0, pv = [xe, WOOD.yAt(Ln, xe)]; fallPoseNow = (obj) => { if (moving.length) obj.st = moving.slice(-300); return fellSweep(room, obj, pv, dir > 0 ? 1 : -1); }; }
       fallLast = null;
       try { if (fallFinish(room, st, R.region.concat([...both], logOnly), peek0, false)) { felled = true; fallLast = Object.assign({ why: 'felled by a line', wood: R.region.length, rowCut: cut.size, both: both.size, line: Ln.cells, by }, fallLast && fallLast.rest != null ? { rest: fallLast.rest, dir: fallLast.dir, ms: fallLast.ms } : {}); } }
       finally { fallCopyNow = null; fallNotchNow = null; fallPoseNow = null; } } }
