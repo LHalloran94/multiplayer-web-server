@@ -974,6 +974,9 @@ app.get('/debug/bodies', (req, res) => {
   if (req.query.powderfire != null) powderFireCfg.carry = +req.query.powderfire ? 1 : 0;   // a falling grain takes its fire (A/B)
   for (const k of ['min', 'diag']) if (req.query['split' + k] != null) bodySplitCfg[k] = +req.query['split' + k] | 0;
   for (const k of ['min', 'max']) if (req.query[k] != null && isFinite(+req.query[k])) fallCfg[k] = Math.max(1, +req.query[k] | 0);
+  // (2026-11-02, rigs — `diag_axe.js` LG) `bakenow=1`: every felled piece resting in a room written back into the ground at once, whatever the cap (a settled log to cut)
+  if (req.query.bakenow != null) { let nb = 0; for (const room of Object.keys(roomObjects)) { const map = roomObjects[room]; if (!map) continue;
+    for (const o of Array.from(map.values())) if (o && o.look === 'fallen' && bodyLoose(o) && bodyBake(room, o, true)) nb++; } bodyBakedNow = nb; }
   // …and the bake's dials, for an A/B: `bake=0|1` · `bakecap` (0 = never) · `bakerest` ms · `bakeper` a tick
   if (req.query.bake != null) bakeCfg.on = +req.query.bake ? 1 : 0;
   for (const [q, k] of [['bakecap', 'cap'], ['bakerest', 'restMs'], ['bakeper', 'perTick']])
@@ -6038,8 +6041,8 @@ function fallCheckCut(room, cutWis) {
 function strokeTreeAt(room, st, geom) { const WR = wearOf(room);
   return (x, y) => { const c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL); if (c < 0 || r < 0 || c >= geom.cols || r >= geom.rows) return false;
     const wi = c * geom.rows + r; if (st.terrain.g(wi) !== 28) return false; const wm = WR.n && WR.by.get(wearChunkOf(geom, wi)), e = wm && wm.get(wi); return !(e && e[7]); }; }
-function strokesNear(room, x, y) { const S = strokesOf(room), out = [];
-  for (const m of S.by.values()) for (const [id, e] of m) if (e[2] === 0 && Math.abs(e[1] - y) <= 32 && Math.abs(e[0] - x) <= 600) out.push({ id, x: e[0], y: e[1], k: e[2], t: ((e[3] | 0) - 128) * Math.PI / 720, b: e[4] | 0, e });
+function strokesNear(room, x, y, both) { const S = strokesOf(room), out = [];   // (`both`: upright strokes too — a settled log's line across it)
+  for (const m of S.by.values()) for (const [id, e] of m) if ((e[2] === 0 || (both && e[2] === 1)) && Math.abs(e[1] - y) <= (both ? 600 : 32) && Math.abs(e[0] - x) <= 600) out.push({ id, x: e[0], y: e[1], k: e[2], t: ((e[3] | 0) - 128) * Math.PI / 720, b: e[4] | 0, e });
   return out; }
 // ⭐⭐ (2026-11-02, the notch round 3, increment 3 — the user: "a tree should FALL SIDEWAYS, ANIMATED, and only become an object once it has fallen down"; "away from
 //   the player who gave the last blow") WHERE A FELLED TREE COMES TO REST: turned about the stump's edge on the side away from the chopper (`dir` +1 = to the right,
@@ -6066,6 +6069,38 @@ function fellSweep(room, obj, pivot, dir) {
   const ms = Math.round(Math.max(400, Math.min(2500, 2400 * Math.sqrt(L / 1000) * Math.sqrt(Math.max(0.05, a / (Math.PI / 2))))));
   fallLast = Object.assign(fallLast || {}, { rest: +(a * 180 / Math.PI).toFixed(0), dir, ms });
   return { x: pivot[0] + vx * c - vy * s, y: pivot[1] + vx * s + vy * c, a: th, fa: a > 0 ? { px: pivot[0], py: pivot[1], a1: th, ms, t0: Date.now() } : null };
+}
+// ⭐ (2026-11-02, the notch round 3 — the user: "do the felled log settled into the ground thing") A SETTLED LOG CUT BY ITS LINE (tree Wood marked `lg` in the wear —
+//   a felled piece written back into the ground, `bodyBake`). It is part of the ground, so nothing falls: the line's cells (`WOOD.cutCellsOf`, turned back if the line
+//   is upright) come out as pick-ups (the saw's kerf — one each, its yield, drawn as the wood), and each side of the log they leave that is 3 cells or fewer ALONG it (the
+//   user: "about 2–3 cells thick … breaks into pick-ups; thicker becomes its own log segment") does too; a longer side stays where it lies.
+let lgCuts = 0;
+function strokeLgAt(room, st, geom) { const WR = wearOf(room);
+  return (x, y) => { const c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL); if (c < 0 || r < 0 || c >= geom.cols || r >= geom.rows) return false;
+    const wi = c * geom.rows + r; if (st.terrain.g(wi) !== 28) return false; const wm = WR.n && WR.by.get(wearChunkOf(geom, wi)), e = wm && wm.get(wi); return !!(e && e[7]); }; }
+function lgCut(room, Ln, by) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return false;
+  const geom = worldGeom(room), ROWS = grid.geom.rows, COLS = grid.geom.cols, lgAt = strokeLgAt(room, st, geom), C = TERRAIN_CELL;
+  const isLg = (c, r) => lgAt((c + 0.5) * C, (r + 0.5) * C), cut = new Set(), gone = [];
+  for (const [c, r] of WOOD.cutCellsOf(Ln)) if (isLg(c, r)) { cut.add(c + ',' + r); gone.push([c, r]); }
+  if (!gone.length) return false;
+  // each side: the settled wood joined to a cut cell, the cut cells taken out; its length along the log (columns if the line is upright, rows if level)
+  const seen = new Set(cut);
+  for (const [c0, r0] of gone) for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) { const k0 = (c0 + dc) + ',' + (r0 + dr); if (seen.has(k0) || !isLg(c0 + dc, r0 + dr)) continue;
+    const side = [[c0 + dc, r0 + dr]]; seen.add(k0); let a0 = 1e9, a1 = -1e9;
+    for (let i = 0; i < side.length && side.length < 3000; i++) { const [a, b] = side[i]; const along = Ln.up ? a : b; if (along < a0) a0 = along; if (along > a1) a1 = along;
+      for (let y = -1; y <= 1; y++) for (let x = -1; x <= 1; x++) { const k = (a + x) + ',' + (b + y); if (seen.has(k) || !isLg(a + x, b + y)) continue; seen.add(k); side.push([a + x, b + y]); } }
+    if (a1 - a0 + 1 <= 3) for (const q of side) gone.push(q); }
+  const set = []; dropWhy = 'dig';
+  for (const [c, r] of gone) { const i = c * ROWS + r, v = grid.g(i); if (v !== 28) continue;
+    grid.s(i, 0); if (st.terrainHp) st.terrainHp.s(i, 0); if (st.sat) st.sat.s(i, 0); set.push(i, 0);
+    const y = MATGEN.yieldOf(v); spawnDrop(room, (c + 0.5) * C, (r + 0.5) * C, [[y, 1]], 0, { lone: 1, lk: y !== v ? v : 0 }); }
+  if (!set.length) return false;
+  wireFanout(room, 'terrain-set', { cells: set });
+  let c0 = 1e9, r0 = 1e9, c1 = -1, r1 = -1; for (const [c, r] of gone) { if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
+  fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
+  lgCuts++; fallLast = { why: 'settled log cut by a line', cells: set.length / 2, kerf: cut.size, by };
+  return true;
 }
 function woodFell(room, Ln, by, dir) {
   if (!fallCfg.on) return false;
@@ -6450,6 +6485,7 @@ function bakeEligible(room, obj) {
   if (!obj || !bodyLoose(obj) || !bodySpec(obj)) return false;
   return obj.look === 'fallen' ? true : (bakeCfg.burntFrac > 0 && bakeBurntEnough(room, obj));
 }
+let bodyBakedNow = 0;
 function bodyBake(room, obj, force) {
   if (!force && !bakeEligible(room, obj)) return false;
   const m = roomBodyStamp[room], S = m && m.get(obj.id);
@@ -25894,12 +25930,14 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || !canBuild() || !m || !Number.isFinite(+m.x) || !Number.isFinite(+m.y)) return;
     const st = peekCells(room); if (!st || !st.terrain) return;
     const geom = worldGeom(room), jy = Math.max(0, Math.min(17, m.j != null && Number.isFinite(+m.j) ? +m.j : 4)) * TERRAIN_CELL / 17, kk = Math.max(0.25, Math.min(4, +m.k || 1));
-    const Ln = WOOD.lineAt(+m.x, +m.y, strokesNear(room, +m.x, +m.y), jy, strokeTreeAt(room, st, geom)); if (!Ln) return;
+    // (2026-11-02) …on a SETTLED log (`lg`): the line across it — upright strokes if `up` (a lying log), the rule turned a quarter — and its cut (`lgCut`)
+    const Ln = m.lg ? (m.up ? WOOD.lineAtUp(+m.x, +m.y, strokesNear(room, +m.x, +m.y, 1), jy, strokeLgAt(room, st, geom)) : WOOD.lineAt(+m.x, +m.y, strokesNear(room, +m.x, +m.y), jy, strokeLgAt(room, st, geom)))
+      : WOOD.lineAt(+m.x, +m.y, strokesNear(room, +m.x, +m.y), jy, strokeTreeAt(room, st, geom)); if (!Ln) return;
     const a = [];
     for (const s of Ln.strokes) { s.e[4] = Math.min(255, (s.e[4] | 0) + 1); s.b = s.e[4]; strokePut(room, s.id, s.e); a.push(s.id, Math.round(s.e[0] * 4), Math.round(s.e[1] * 4), s.e[2], s.e[3], s.e[4]); }
     socket.emit('wood-strokes', { a }); socket.to(room).emit('wood-strokes', { a });
     // (increment 3) it falls AWAY from whoever gave the last blow (`px`, their x as they swung — the user's answer)
-    if (WOOD.blows(Ln) >= WOOD.need(Ln, kk)) woodFell(room, Ln, socket.id, Number.isFinite(+m.px) && +m.px > (Ln.x0 + Ln.x1) / 2 ? -1 : 1);
+    if (WOOD.blows(Ln) >= WOOD.need(Ln, kk)) { if (m.lg) lgCut(room, Ln, socket.id); else woodFell(room, Ln, socket.id, Number.isFinite(+m.px) && +m.px > (Ln.x0 + Ln.x1) / 2 ? -1 : 1); }
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip, thrown }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never

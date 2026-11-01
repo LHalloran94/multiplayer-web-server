@@ -60,5 +60,10 @@
       pc = c; pr = r; }
     return Array.from(out.values());
   }
-  return { CELL, LEN, JOIN_GAP, EDGE_GAP, joins, lineOf, lineAt, need, blows, yAt, cutCells };
+  // (2026-11-02) A LINE OF UPRIGHT STROKES — across a log lying in the ground (a SETTLED log, the user: "the same rule"): the rule above turned a quarter (x ↔ y; an
+  //   upright stroke tilted t becomes a level one tilted t). The line it gives is in the turned frame (`up` 1); `cutCellsOf` turns its cells back.
+  function turned(s) { return { id: s.id, x: s.y, y: s.x, k: s.k === 1 ? 0 : s.k === 0 ? 1 : s.k, t: s.t, b: s.b, e: s.e }; }
+  function lineAtUp(x, y, all, jy, wood) { const L = lineAt(y, x, all.map(turned), jy, (a, b) => wood(b, a)); if (L) L.up = 1; return L; }
+  function cutCellsOf(Ln) { const C = cutCells(Ln); return Ln.up ? C.map(([c, r]) => [r, c]) : C; }
+  return { CELL, LEN, JOIN_GAP, EDGE_GAP, joins, lineOf, lineAt, lineAtUp, need, blows, yAt, cutCells, cutCellsOf };
 });
