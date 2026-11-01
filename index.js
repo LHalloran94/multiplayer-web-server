@@ -6002,7 +6002,8 @@ function fallWoodRegion(start, peek, COLS, ROWS, nn, FLOOR_ROW) {
 //   with those cells as open air; if it no longer reaches the ground, that part falls (`fallFinish` → `fallCut`, as a dug-through trunk does). The cut cells
 //   under it go with it AND stay on the stump (`fallCopyNow`) — the user: "half notches on both the stump and the log" (each copy drawn as its own half).
 let fallCopyNow = null;
-let fallNotchNow = null;   // (2026-10-31, the notch round 3) wi → a level notch cut through (24 bits, as `nl`) for the felled line's cells, laid into the log (`fallCut`)
+let fallNotchNow = null;
+let fallPoseNow = null;    // (2026-11-02, the notch round 3, increment 3) obj → { x, y, a, fa } — where a felled tree comes to REST and how every screen animates it there (`fellSweep`)   // (2026-10-31, the notch round 3) wi → a level notch cut through (24 bits, as `nl`) for the felled line's cells, laid into the log (`fallCut`)
 function fallCheckCut(room, cutWis) {
   if (!fallCfg.on) return 0;
   const st = cellsOf(room), grid = st.terrain; if (!grid) return 0;
@@ -6040,7 +6041,33 @@ function strokeTreeAt(room, st, geom) { const WR = wearOf(room);
 function strokesNear(room, x, y) { const S = strokesOf(room), out = [];
   for (const m of S.by.values()) for (const [id, e] of m) if (e[2] === 0 && Math.abs(e[1] - y) <= 32 && Math.abs(e[0] - x) <= 600) out.push({ id, x: e[0], y: e[1], k: e[2], t: ((e[3] | 0) - 128) * Math.PI / 720, b: e[4] | 0, e });
   return out; }
-function woodFell(room, Ln, by) {
+// ⭐⭐ (2026-11-02, the notch round 3, increment 3 — the user: "a tree should FALL SIDEWAYS, ANIMATED, and only become an object once it has fallen down"; "away from
+//   the player who gave the last blow") WHERE A FELLED TREE COMES TO REST: turned about the stump's edge on the side away from the chopper (`dir` +1 = to the right,
+//   screen y down so a positive turn is clockwise), a degree at a time, until any of its cells — the crown too — would be in solid ground, another object or the
+//   level's floor (other trees' wood and leaves and liquids it falls through); the last clear angle is where it rests (at most 120°: over a cliff, the physics takes it
+//   from there). → the piece's pose + `fa` { px, py (the pivot), a1 (the turn), ms, t0 } for every screen to play (16b `fallAnimPose`). PROCESSOR, once a fall:
+//   its cells × ≤ 120 turns of cell reads.
+function fellSweep(room, obj, pivot, dir) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return null;
+  const C = TERRAIN_CELL, ROWS = grid.geom.rows, COLS = grid.geom.cols, gen = !!grid.seedFn, floorY = roomFloorTop(room);
+  const peek = gen ? (j) => { const v = peekCellAt(grid, j); return v >= 0 ? v : (grid.skyAt(j) ? 0 : -1); } : (j) => grid.g(j);
+  const D = bodyDims(obj), fm = fallMats(obj), x0 = obj.x - obj.w / 2, y0 = obj.y - obj.h / 2, pts = [];
+  for (let k = 0; k < fm.length; k++) if (fm[k]) pts.push([x0 + (k % D.c + 0.5) * C - pivot[0], y0 + (((k / D.c) | 0) + 0.5) * C - pivot[1]]);
+  if (!pts.length) return null;
+  const blocked = (x, y) => { if (y >= floorY) return true; const c = Math.floor(x / C), r = Math.floor(y / C); if (c < 0 || r < 0 || c >= COLS || r >= ROWS) return true;
+    const v = peek(c * ROWS + r); if (v < 0) return true; return isSolidCell(v) && !fallCand(v) && !isFluidId(v) && v !== FALL_ASH; };
+  const step = Math.PI / 180, max = 120 * step; let a = 0;
+  for (let t = step; t <= max + 1e-9; t += step) { const c = Math.cos(dir * t), s = Math.sin(dir * t); let hit = false;
+    for (const p of pts) if (blocked(pivot[0] + p[0] * c - p[1] * s, pivot[1] + p[0] * s + p[1] * c)) { hit = true; break; }
+    if (hit) break; a = t; }
+  let L = 0; for (const p of pts) L = Math.max(L, Math.hypot(p[0], p[1]));
+  const th = dir * a, c = Math.cos(th), s = Math.sin(th), vx = obj.x - pivot[0], vy = obj.y - pivot[1];
+  // (its time: a rod falling about its end takes about √(L / g) — here 2.4 × √(L / 1000 px) s, by the turn's share of a quarter turn, 0.4–2.5 s)
+  const ms = Math.round(Math.max(400, Math.min(2500, 2400 * Math.sqrt(L / 1000) * Math.sqrt(Math.max(0.05, a / (Math.PI / 2))))));
+  fallLast = Object.assign(fallLast || {}, { rest: +(a * 180 / Math.PI).toFixed(0), dir, ms });
+  return { x: pivot[0] + vx * c - vy * s, y: pivot[1] + vx * s + vy * c, a: th, fa: a > 0 ? { px: pivot[0], py: pivot[1], a1: th, ms, t0: Date.now() } : null };
+}
+function woodFell(room, Ln, by, dir) {
   if (!fallCfg.on) return false;
   const st = cellsOf(room), grid = st.terrain; if (!grid) return false;
   const COLS = grid.geom.cols, ROWS = grid.geom.rows, nn = grid.length, gen = !!grid.seedFn;
@@ -6055,13 +6082,20 @@ function woodFell(room, Ln, by) {
       const R = fallWoodRegion(start, peek, COLS, ROWS, nn, FLOOR_ROW);
       for (const i of R.mark) seen.add(i);
       if (R.supported || R.overflow || !R.region.length) { fallLast = { why: R.supported ? 'line: still held up' : 'line: too big', line: Ln.cells, by }; continue; }
-      const notch = new Map(); for (const j of cut) { const c2 = (j / ROWS) | 0, r2 = j - c2 * ROWS, xm = (c2 + 0.5) * TERRAIN_CELL, y = WOOD.yAt(Ln, xm);
+      // (2026-11-02) per column, ONLY the cell the line runs through is copied to both (its half on each); a cut cell above it goes with the log alone, one below it
+      //   stays with the stump alone — the extra cells a stepping line cuts (so the walk cannot slip round) showed as whole dark cells on the stump
+      const notch = new Map(), both = new Set(), logOnly = [];
+      for (const j of cut) { const c2 = (j / ROWS) | 0, r2 = j - c2 * ROWS, lr = Math.floor(WOOD.yAt(Ln, (c2 + 0.5) * TERRAIN_CELL) / TERRAIN_CELL); if (r2 === lr) both.add(j); else if (r2 < lr) logOnly.push(j); }
+      for (const j of both) { const c2 = (j / ROWS) | 0, r2 = j - c2 * ROWS, xm = (c2 + 0.5) * TERRAIN_CELL, y = WOOD.yAt(Ln, xm);
         let t = 0, bd = 1e9; for (const s of Ln.strokes) { const d = Math.abs(s.x - xm); if (d < bd) { bd = d; t = s.t; } }
         const p17 = Math.max(0, Math.min(17, (y / TERRAIN_CELL - r2) * 17));
         notch.set(j, 255 | ((1 + Math.round(p17 / 17 * 253)) << 8) | (Math.max(1, Math.min(255, 128 + Math.round(t * 720 / Math.PI))) << 16)); }
-      fallCopyNow = cut; fallNotchNow = notch;
-      try { if (fallFinish(room, st, R.region.concat([...cut]), peek0, false)) { felled = true; fallLast = { why: 'felled by a line', wood: R.region.length, rowCut: cut.size, line: Ln.cells, by }; } }
-      finally { fallCopyNow = null; fallNotchNow = null; } } }
+      fallCopyNow = both; fallNotchNow = notch;
+      // (increment 3) …turned about the stump's edge on the side away from the last chopper
+      { const xe = dir > 0 ? Ln.x1 : Ln.x0, pv = [xe, WOOD.yAt(Ln, xe)]; fallPoseNow = (obj) => fellSweep(room, obj, pv, dir > 0 ? 1 : -1); }
+      fallLast = null;
+      try { if (fallFinish(room, st, R.region.concat([...both], logOnly), peek0, false)) { felled = true; fallLast = Object.assign({ why: 'felled by a line', wood: R.region.length, rowCut: cut.size, both: both.size, line: Ln.cells, by }, fallLast && fallLast.rest != null ? { rest: fallLast.rest, dir: fallLast.dir, ms: fallLast.ms } : {}); } }
+      finally { fallCopyNow = null; fallNotchNow = null; fallPoseNow = null; } } }
   if (felled) { const a = [];
     for (const s of Ln.strokes) { s.e[2] = 2; strokePut(room, s.id, s.e); a.push(s.id, Math.round(s.e[0] * 4), Math.round(s.e[1] * 4), 2, s.e[3], s.e[4]); }
     io.to(room).emit('wood-strokes', { a }); }
@@ -6213,14 +6247,17 @@ function fallCut(room, region) {
                 shape: 'rect', ownerId: 'world', owner: 'world', x: c0 * C + W * C / 2, y: r0 * C + H * C / 2, w: W * C, h: H * C,
                 angle: 0, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64') };
   fallWearSet(obj, fw); fallNotchSet(obj, fnC);   // (a piece starts unturned: the world's notches are its own)
+  // (2026-11-02, the notch round 3, increment 3) a tree felled by a line is made where it comes to REST, with how to animate it there (`fa`) — no physics drop
+  if (fallPoseNow) { const P = fallPoseNow(obj); if (P) { obj.x = P.x; obj.y = P.y; obj.angle = P.a; if (P.fa) obj.fa = P.fa; } }
   wireFanout(room, 'terrain-set', { cells: set });
   if (out.length) wireFanout(room, 'fire-cells', { cells: out, lift: 1 });
   objIndex(room, obj);
   emitObjToChunks(room, obj, 'avatar-object-add', obj);
   if (lit) { const ost = objStOf(room), rec = ost.get(obj.id) || {}; bodyCellsSet(rec, obj, codes); ost.set(obj.id, rec); }
-  bodyStamp(room, obj, obj.x, obj.y, 0);
+  bodyStamp(room, obj, obj.x, obj.y, obj.angle || 0);
   broadcastObjSt(room);
   fineWakeRect(room, c0 - 1, r0 - 1, c1 + 1, r1 + 1); activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1);
+  if (obj.fa) setTimeout(() => { delete obj.fa; }, obj.fa.ms + 3000);   // (its animation is for those watching it fall, not for whoever loads it later)
   fallCuts++;
   return true;
 }
@@ -25788,7 +25825,8 @@ io.on('connection', (socket) => {
     const a = [];
     for (const s of Ln.strokes) { s.e[4] = Math.min(255, (s.e[4] | 0) + 1); s.b = s.e[4]; strokePut(room, s.id, s.e); a.push(s.id, Math.round(s.e[0] * 4), Math.round(s.e[1] * 4), s.e[2], s.e[3], s.e[4]); }
     socket.emit('wood-strokes', { a }); socket.to(room).emit('wood-strokes', { a });
-    if (WOOD.blows(Ln) >= WOOD.need(Ln, kk)) woodFell(room, Ln, socket.id);
+    // (increment 3) it falls AWAY from whoever gave the last blow (`px`, their x as they swung — the user's answer)
+    if (WOOD.blows(Ln) >= WOOD.need(Ln, kk)) woodFell(room, Ln, socket.id, Number.isFinite(+m.px) && +m.px > (Ln.x0 + Ln.x1) / 2 ? -1 : 1);
   });
   socket.on('terrain-edit', ({ op, x, y, r, mat, shape, hard, keepLiq, hits, editor, skip, thrown }) => {
     // ⚠️ AT THE VERY TOP, BEFORE EVERY GUARD. A trace that sits after the guards cannot tell "the message never
