@@ -6101,6 +6101,58 @@ function woodFell(room, Ln, by, dir) {
     io.to(room).emit('wood-strokes', { a }); }
   return felled;
 }
+// ⭐⭐ (2026-11-02, THE NOTCH ROUND 3, increment 4) A FELLED LOG CUT BY ITS LINE (`body-blow` after `WOOD.need` blows). In its own frame (a felled tree's trunk upright),
+//   each column's cell the line runs through goes to BOTH new pieces (a level notch cut through at the line's height: each draws its own half — the client's `NOTCH`),
+//   the cells above it to one and below it to the other. A side whose cells span 3 rows or fewer along the log (the user: "about 2–3 cells THICK") breaks into pick-ups
+//   (one a cell, its yield, drawn as what it was — `lk`); a thicker one is its own piece where it lay, keeping its damage, notches and the strokes on its side.
+let logCuts = 0;
+function fallStrokesSrv(obj) { return (Array.isArray(obj.st) ? obj.st : []).map(e => ({ id: e[0], x: e[1] / 4, y: e[2] / 4, k: e[3] | 0, t: ((e[4] | 0) - 128) * Math.PI / 720, b: e[5] | 0 })); }
+function fallWoodSrv(obj) { const D = bodyDims(obj), fm = fallMats(obj), cw = (obj.w || 64) / D.c, ch = (obj.h || 64) / D.r;
+  return (x, y) => { const c = Math.floor(x / cw), r = Math.floor(y / ch); return c >= 0 && r >= 0 && c < D.c && r < D.r && fm[r * D.c + c] === 28; }; }
+function logCutByLine(room, obj, Ln) {
+  const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id), pose = S ? { x: S.x, y: S.y, a: S.a } : { x: obj.x, y: obj.y, a: +obj.angle || 0 };
+  const D = bodyDims(obj), n = D.c * D.r, fm = fallMats(obj), fw = fallWear(obj), fn = fallNotch(obj), cw = (obj.w || 64) / D.c, ch = (obj.h || 64) / D.r;
+  const ost = objStOf(room), codes0 = bodyCellsOf(ost.get(obj.id) || {}, obj).slice(), side = new Int8Array(n), lineN = new Map();
+  for (let k = 0; k < n; k++) { if (!fm[k]) continue; const c = k % D.c, r = (k / D.c) | 0, xm = (c + 0.5) * cw, y = WOOD.yAt(Ln, xm), lr = Math.floor(y / ch);
+    side[k] = r < lr ? 1 : r > lr ? 2 : 3;
+    if (side[k] === 3) { let t = 0, bd = 1e9; for (const s of Ln.strokes) { const d = Math.abs(s.x - xm); if (d < bd) { bd = d; t = s.t; } }
+      lineN.set(k, 255 | ((1 + Math.round(Math.max(0, Math.min(17, (y / ch - r) * 17)) / 17 * 253)) << 8) | (Math.max(1, Math.min(255, 128 + Math.round(t * 720 / Math.PI))) << 16)); } }
+  // the log goes; its pieces take its place
+  bodyUnstamp(room, obj.id, true); ost.delete(obj.id); objUnindex(room, obj);
+  emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id });
+  const ca = Math.cos(pose.a), sa = Math.sin(pose.a), lineIds = new Set(Ln.strokes.map(s => s.id)), made = []; let bits = 0;
+  for (const part of [1, 2]) {
+    let c0 = D.c, r0 = D.r, c1 = -1, r1 = -1, own = 0;
+    for (let k = 0; k < n; k++) { if (side[k] !== part && side[k] !== 3) continue; if (side[k] === part) own++; const c = k % D.c, r = (k / D.c) | 0;
+      if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r; }
+    if (!own) continue;
+    const W = c1 - c0 + 1, H = r1 - r0 + 1;
+    if (H <= 3) { dropWhy = 'dig';
+      for (let k = 0; k < n; k++) { if (side[k] !== part && side[k] !== 3) continue; const m0 = fm[k], y = MATGEN.yieldOf(m0), d = MATGEN.DEFS[y]; if (!d || d.behavior !== 'solid') continue;
+        const q = bodyRep(obj, D, pose.x, pose.y, pose.a, k); if (!q) continue;
+        spawnDrop(room, (q.c + 0.5) * TERRAIN_CELL, (q.r + 0.5) * TERRAIN_CELL, [[y, 1]], 0, { lone: 1, lk: m0 !== y ? m0 : 0 }); bits++; }
+      continue; }
+    const fm2 = new Uint8Array(W * H), codes = new Uint8Array(W * H), fw2 = new Uint8Array(W * H), fn2 = new Uint8Array(W * H * 6);
+    for (let k = 0; k < n; k++) { if (side[k] !== part && side[k] !== 3) continue; const c = k % D.c, r = (k / D.c) | 0, kk = (r - r0) * W + (c - c0);
+      fm2[kk] = fm[k]; fw2[kk] = fw[k] || 0; for (let b = 0; b < 6; b++) fn2[kk * 6 + b] = fn[k * 6 + b] || 0;
+      if (side[k] === 3) nkBytes(lineN.get(k), fn2, kk * 6); codes[kk] = codes0[k] || 1; }
+    const lx = -(obj.w || 64) / 2 + (c0 + W / 2) * cw, ly = -(obj.h || 64) / 2 + (r0 + H / 2) * ch;
+    const o2 = { id: 'fall-' + (++fallSeq) + '-' + (Date.now() % 1e8).toString(36), type: 'stamp', look: 'fallen', content: '🪵', shape: 'rect', ownerId: 'world', owner: 'world',
+                 x: pose.x + lx * ca - ly * sa, y: pose.y + lx * sa + ly * ca, w: W * cw, h: H * ch, angle: pose.a, loose: 1, hp: null, fm: Buffer.from(fm2).toString('base64') };
+    fallWearSet(o2, fw2); fallNotchSet(o2, fn2);
+    // (its strokes: those on its side of the line, moved into its own frame — the line's own go, its cut drawn as the notch's halves)
+    const st2 = []; for (const e of (Array.isArray(obj.st) ? obj.st : [])) { if (lineIds.has(e[0])) continue; const x = e[1] / 4, y = e[2] / 4; if ((part === 1) !== (y < WOOD.yAt(Ln, x))) continue;
+      st2.push([e[0], Math.round((x - c0 * cw) * 4), Math.round((y - r0 * ch) * 4), e[3], e[4], e[5]]); }
+    if (st2.length) o2.st = st2;
+    objIndex(room, o2); emitObjToChunks(room, o2, 'avatar-object-add', o2);
+    { const r2 = ost.get(o2.id) || {}; bodyCellsSet(r2, o2, codes); if (Object.keys(r2).length) ost.set(o2.id, r2); }
+    bodyStamp(room, o2, o2.x, o2.y, o2.angle);
+    { const S2 = roomBodyStamp[room] && roomBodyStamp[room].get(o2.id); if (S2) S2.fresh = Date.now(); }
+    made.push(o2.id); }
+  broadcastObjSt(room); logCuts++;
+  fallLast = { why: 'log cut by a line', pieces: made.length, bits, line: Ln.cells };
+  return made;
+}
 // Look for unsupported falling-capable regions touching a rectangle of cells (a dig, or a cell the fire finished).
 function fallCheck(room, c0, r0, c1, r1, seenIn, byFire) {
   const st = cellsOf(room), grid = st.terrain; if (!grid) return 0;
@@ -20486,6 +20538,7 @@ function fallenFromRow(p) {
   const o = { id: String(p.id), type: 'stamp', look: 'fallen', content: '🪵', shape: 'rect', ownerId: 'world', owner: 'world', x, y, w, h, angle: a, loose: 1, hp: null, fm: p.fm };
   if (typeof p.fw === 'string' && p.fw.length <= 50000) o.fw = p.fw;
   if (typeof p.fn === 'string' && p.fn.length <= 300000) o.fn = p.fn;   // (2026-10-30, the notch round 2) its notches, kept
+  if (Array.isArray(p.st) && p.st.length <= 300) { const st = p.st.filter(e => Array.isArray(e) && e.length === 6 && e.every(Number.isFinite)); if (st.length) o.st = st; }   // (2026-11-02) its axe strokes
   const s = p.src; if (s && typeof s.look === 'string' && [s.w, s.h, s.ox, s.oy].every(v => isFinite(+v))) o.src = { look: s.look, shape: typeof s.shape === 'string' ? s.shape : 'rect', w: +s.w, h: +s.h, ox: +s.ox, oy: +s.oy };
   return o;
 }
@@ -25817,6 +25870,26 @@ io.on('connection', (socket) => {
   });
   // ⭐ (2026-10-31, the notch round 3, increment 2) a FINISHING BLOW (a right click on a standing tree): if it lands on a line drawn right across it (`WOOD.lineAt` — the
   //   client's own check showed it already), every stroke of the line takes it (kept, sent to everyone); after `WOOD.need` of them the tree is felled (`woodFell`)
+  // ⭐ (2026-11-02, the notch round 3, increment 4) a FELLED LOG's axe stroke (its own frame; `d` = one it replaced) — kept on it, saved with it, sent to everyone
+  socket.on('body-stroke', (m) => {
+    const room = currentAvatarRoom; if (!room || !canBuild() || !m || !Array.isArray(m.a) || m.a.length !== 6 || !m.a.every(Number.isFinite)) return;
+    const obj = roomObjects[room] && roomObjects[room].get(m.id); if (!obj || bodySpec(obj) !== 'fallen') return;
+    const a = m.a, e = [a[0] | 0, Math.round(a[1]), Math.round(a[2]), a[3] ? 1 : 0, Math.max(1, Math.min(255, a[4] | 0)), 0];
+    let st = Array.isArray(obj.st) ? obj.st : []; st = st.filter(q => q[0] !== e[0] && q[0] !== m.d).concat([e]); if (st.length > 300) st = st.slice(-300); obj.st = st;
+    if (objChunked(room)) objsTouch(room, obj.ch);
+    emitObjToChunks(room, obj, 'body-st', { id: obj.id, st });
+  });
+  // …a FINISHING BLOW on one: the line it lands on (server/wood.js in the log's frame) takes it; after `WOOD.need` the log is cut there (`logCutByLine`)
+  socket.on('body-blow', (m) => {
+    const room = currentAvatarRoom; if (!room || !canBuild() || !m || !Number.isFinite(+m.x) || !Number.isFinite(+m.y)) return;
+    const obj = roomObjects[room] && roomObjects[room].get(m.id); if (!obj || bodySpec(obj) !== 'fallen' || !Array.isArray(obj.st)) return;
+    const jy = Math.max(0, Math.min(17, m.j != null && Number.isFinite(+m.j) ? +m.j : 4)) * TERRAIN_CELL / 17, kk = Math.max(0.25, Math.min(4, +m.k || 1));
+    const Ln = WOOD.lineAt(+m.x, +m.y, fallStrokesSrv(obj).filter(q => q.k === 0), jy, fallWoodSrv(obj)); if (!Ln) return;
+    const ids = new Set(Ln.strokes.map(q => q.id)); obj.st = obj.st.map(e => ids.has(e[0]) ? [e[0], e[1], e[2], e[3], e[4], Math.min(255, (e[5] | 0) + 1)] : e);
+    for (const q of Ln.strokes) q.b++;
+    if (objChunked(room)) objsTouch(room, obj.ch);
+    if (WOOD.blows(Ln) >= WOOD.need(Ln, kk)) logCutByLine(room, obj, Ln); else emitObjToChunks(room, obj, 'body-st', { id: obj.id, st: obj.st });
+  });
   socket.on('wood-blow', (m) => {
     const room = currentAvatarRoom; if (!room || !canBuild() || !m || !Number.isFinite(+m.x) || !Number.isFinite(+m.y)) return;
     const st = peekCells(room); if (!st || !st.terrain) return;
