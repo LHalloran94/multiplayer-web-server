@@ -20728,7 +20728,7 @@ function spawnDrop(room, x, y, mats, prima, opts) {
     emitToChunk(room, into.ch, 'drop-add', into);      // re-sent whole: the client keys on id, so this updates it
     return into;
   }
-  if (lone) { d.lone = 1; (roomLoneDrops[room] || (roomLoneDrops[room] = new Set())).add(d.id); }
+  if (lone) { d.lone = 1; if (opts.lk) d.lk = opts.lk | 0; (roomLoneDrops[room] || (roomLoneDrops[room] = new Set())).add(d.id); }   // (2026-11-02: `lk` = what it was cut from — drawn as that, collected as its yield)
   dropIndex(room, d);
   emitToChunk(room, d.ch, 'drop-add', d);
   return d;
@@ -25400,10 +25400,10 @@ io.on('connection', (socket) => {
     dropWhy = 'pry';
     for (const e of m.b.slice(0, 16)) {
       if (!Array.isArray(e)) continue;
-      const x = +e[0], y = +e[1], mat = e[2] | 0, vx = +e[3] || 0;
+      const x = +e[0], y = +e[1], mat = e[2] | 0, vx = +e[3] || 0, lk = e[4] | 0;
       if (!isFinite(x) || !isFinite(y) || mat < 1 || mat > TERRAIN_MAT_HI) continue;
       spawnDrop(currentAvatarRoom, Math.max(0, Math.min(dims.cols * TERRAIN_CELL, x)), Math.max(0, Math.min(dims.rows * TERRAIN_CELL, y)), [[mat, 1]], 0,
-        { vx: Math.max(-0.3, Math.min(0.3, vx)), lone: 1, hold });
+        { vx: Math.max(-0.3, Math.min(0.3, vx)), lone: 1, hold, lk: lk >= 1 && lk <= TERRAIN_MAT_HI && lk !== mat ? lk : 0 });
     }
   });
   socket.on('terrain-drop', ({ x, y, mats }) => {
