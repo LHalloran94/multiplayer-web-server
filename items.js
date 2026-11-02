@@ -191,6 +191,9 @@ ITEMS.pick_head_axe = { name: 'Pick-head axe', kind: 'tool', tier: 0, svg: SVG.p
 // ⭐ TOOLS, PIECE 6 (2026-10-26): the GRAPPLING HOOK on a rope (server/held.js `grapnel` — client 16za)
 SVG.grapnel = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 21 C6 17 5 13 9.4 10.6" fill="none" stroke="#c8a26a" stroke-width="1.4" stroke-linecap="round"/><circle cx="10.2" cy="9.8" r="1.4" fill="none" stroke="#5b6170" stroke-width="1.1"/><path d="M11.2 8.8 L17.6 2.4" stroke="#7e838c" stroke-width="1.8" stroke-linecap="round"/><path d="M17 3 C20.4 4.4 21 7.6 18.8 9.8 M17 3 C15.6 6.4 12.4 7 10.2 4.8 M17 3 C19.2 2.2 21.6 1.6 22 3.6" fill="none" stroke="#7e838c" stroke-width="1.4" stroke-linecap="round"/></svg>';
 ITEMS.grappling_hook = { name: 'Grappling hook', kind: 'tool', tier: 0, svg: SVG.grapnel, obj: HELD.objOf('grapnel'), make: { mats: [], prima: 25 } };
+// ⭐ TOOLS, PIECE 7 (2026-11-03): the GRAPPLE LAUNCHER (server/held.js `launcher` — client 16zc)
+SVG.launcher = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="3" y="6.5" width="17" height="4.4" rx="1" fill="#5c626e"/><rect x="20" y="7.3" width="2.4" height="2.8" rx=".6" fill="#7e838c"/><path d="M4.4 10.9 H9.4 L8 15 L7.4 20 H3.6 L3.4 18.4 L4.8 15 Z" fill="#26262a"/><path d="M9.2 10.9 L9.6 13 C10.2 14.6 13.4 14.6 14 13 L14.2 10.9" fill="none" stroke="#b8c0cc" stroke-width="1"/><path d="M11.2 10.9 L11.9 12.8" stroke="#e2e8f0" stroke-width="1"/><circle cx="17.6" cy="12.2" r="2.4" fill="#7e8490"/><circle cx="17.6" cy="12.2" r=".9" fill="#3a3e48"/></svg>';
+ITEMS.grapple_launcher = { name: 'Grapple launcher', kind: 'tool', tier: 0, svg: SVG.launcher, obj: HELD.objOf('launcher'), make: { mats: [], prima: 40 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 

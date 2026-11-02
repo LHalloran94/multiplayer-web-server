@@ -516,6 +516,14 @@
     grapnel: tool(10, 6, 0.35, 0.16, 1, 'gn', { hitHalf: 3, throwable: true, strikes: false, sticks: false, pierces: false, right: 'none', mat: 'iron',
       hook: { len: 640, h: 4, tipX: 0.24, tipY: 2.4 } }, 'blunt'),
   });
+  // ⭐ TOOLS, PIECE 7 (2026-11-03, the tools plan §1b, §1d, §2 "Grapple"): THE GRAPPLE LAUNCHER (one hand, either hand, ~14 px — round 2's G2 with a new grip) — client 16zc.
+  //   It fires the player's own grapple ability (16e `grapFire`), the same rope and hook as the Z key. Its one button is the click of whichever hand it is in (left in the main
+  //   hand, right in the off hand): press fires · with a rope out a tap lets go and fires again, a hold lets go. The wheel sets the rope's length. It points at the pointer.
+  //   `launcher.at` / `launcher.y` = its muzzle, as fractions of its length (16r `M.launcher`).
+  Object.assign(LOOKS, {
+    launcher: tool(14, 8, 0.6, 0.19, 1, 'gl', { hitHalf: 3, strikes: false, sticks: false, pierces: false, right: 'none', mat: 'steel', rest: 'level', offTilt: { beside: 1.55, back: -1.55, raised: 1.55 },
+      launcher: { at: 1, y: -6 / 26 } }, 'blunt'),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it
