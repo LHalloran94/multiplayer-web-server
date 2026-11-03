@@ -20616,6 +20616,7 @@ function vesselMove(room, o, V, x, y, fill, want) {
   const c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL), R = st.rows, changed = [];
   if (r < 0 || r >= R || c < 0 || c >= st.cols) return 0;
   const at = c * R + r, order = [at, r + 1 < R ? at + 1 : -1, at - R, at + R]; let moved = 0;
+  if (!vesselCellOpen(room, at)) return 0;   // (2026-11-03, the user: not inside terrain — a mouth in rock must not reach the cave beside it through the wall)
   let held = -1; if (o.vl) for (let k = 0; k < LIQ_T; k++) if (o.vl[k] > 0) { held = k; break; }   // (the first build: one liquid at a time)
   if (fill) {
     const room0 = V.cap - (o.vl ? o.vl.reduce((a, b) => a + b, 0) : 0); want = Math.min(want, room0);
