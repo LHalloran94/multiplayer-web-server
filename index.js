@@ -8771,6 +8771,8 @@ function sendInvSync(socket, room) {
     // kind and picture) rides along on the first sync of a socket only — the table is the server's, the client
     // keeps no copy of its own.
     items: snap.items.filter(e => ITEMS.isItem(e[0])), itemDefs,
+    // (2026-11-03) each container you carry, one by one (`vesselRows`): null where there is no pouch
+    vessels: vesselRowsSync(room, socket.id, snap.items.filter(e => ITEMS.isItem(e[0]))),
     // ⭐ WHICH NUMBER HOLDS WHAT. null = this player has never sent one, which tells the client to push up the
     // bar it already has in its browser rather than starting from nothing.
     hotbar: snap.hotbar,
@@ -20508,7 +20510,11 @@ function hookRopesReel(room, hookId, sid) {
 //   world, or in a hand, its contents are on the object (`vl`: six numbers, one per liquid, as a cell holds them; absent when empty). In the pouch they are a row here, per player, and the one put
 //   away last comes out first. A row stays while its object is in a hand (`out`), kept up to date, so a server restart with a full bucket in your hand loses nothing. A page room keeps its own
 //   rows, so what is filled in a sandbox stays in that sandbox. Written straight away when it is put away; while it fills or pours, at most once a second.
-const vesselRows = new Map();    // key → [{ item, vl, t, out }]
+// ⭐ (2026-11-03, the user: "just not have any stacking of such things at all … each one is its own thing") IN A WORLD WITH A POUCH EVERY CONTAINER YOU CARRY HAS A ROW OF ITS OWN, EMPTY ONES TOO, and `u`, its number for good: the
+//   hotbar names that (`vu`), so a number stays that flask, full or empty. `vesselRowsSync` keeps as many rows as the ledger says you carry. A sandbox has no count of anything: it keeps rows only for what holds something, the newest first out.
+const vesselRows = new Map();    // key → [{ u, item, vl, t, out }]
+const vesselSidOf = new Map();   // key → the socket told about its rows (only keys with a pouch are here)
+let vesselWantU = 0;             // (`inv-drop`) which one is being put down
 const vesselOut = new Map();     // object id → { k, r: its row or null }
 const vesselFlowAt = new Map();  // object id → { t, carry } its last `vessel-flow`
 const vesselSaveT = new Map();   // key → the timer of a save still to come
@@ -20520,7 +20526,23 @@ function vesselClean(v, V) {
   for (let rk = 0; rk < LIQ_T; rk++) { const n = Math.min(room, Math.max(0, +v[rk] | 0)); out[rk] = n; room -= n; }
   return room < V.cap ? out : null;
 }
-function vesselKeyOf(room, sid) { return playerKeyFor(sid) + (invGatedRoom(room) ? '' : '|' + room); }
+function vesselKeyOf(room, sid) { const g = invGatedRoom(room), k = playerKeyFor(sid) + (g ? '' : '|' + room); if (g) vesselSidOf.set(k, sid); return k; }
+function vesselRowNew(L, item, vl) { let u = 0; for (const r of L) if (r.u > u) u = r.u; const r = { u: u + 1, item, vl: vl || null, t: Date.now(), out: null }; L.push(r); return r; }
+function vesselRowsWire(L) { return L.map(r => ({ u: r.u, item: r.item, vl: r.vl, out: r.out || 0 })); }
+function vesselTell(k) { const sid = vesselSidOf.get(k), L = vesselRows.get(k); if (sid && L) io.to(sid).emit('inv-vessels', { rows: vesselRowsWire(L) }); }
+// as many rows as you carry: one more for each you have come by, and any over goes, empty ones first (never one in a hand)
+function vesselRowsSync(room, sid, items) {
+  if (!invGatedRoom(room)) return null;
+  const k = vesselKeyOf(room, sid), L = vesselList(k), want = new Map();
+  for (const e of items) { const D = ITEMS.ITEMS[e[0]]; if (D && D.obj && vesselSpec({ type: 'stamp', look: D.obj.look })) want.set(e[0], e[1] | 0); }
+  for (const r of L) if (!want.has(r.item)) want.set(r.item, 0);
+  let ch = false;
+  for (const [item, n] of want) { let have = 0; for (const r of L) if (r.item === item) have++;
+    while (have < n) { vesselRowNew(L, item, null); have++; ch = true; }
+    while (have > n) { let i = L.findIndex(r => r.item === item && !r.out && !r.vl); if (i < 0) i = L.findIndex(r => r.item === item && !r.out); if (i < 0) break; if (L[i].vl) console.log('[vessel] ' + k + ': a row with something in it dropped: ' + item); L.splice(i, 1); have--; ch = true; } }
+  if (ch) vesselSaveSoon(k);
+  return vesselRowsWire(L);
+}
 function vesselList(k) {
   let L = vesselRows.get(k); if (L) return L;
   L = [];
@@ -20530,7 +20552,8 @@ function vesselList(k) {
       _vesselPut = db.prepare('INSERT INTO player_vessels (vkey, rows) VALUES (?, ?) ON CONFLICT(vkey) DO UPDATE SET rows = excluded.rows'); }
     const row = _vesselGet.get(k);
     // (…and `out` is never read back: whatever it was in a hand of went with the last server)
-    if (row) for (const r of JSON.parse(row.rows)) { const vl = r && ITEMS.isItem(r.item) && vesselClean(r.vl, vesselSpec({ type: 'stamp', look: ITEMS.ITEMS[r.item].obj && ITEMS.ITEMS[r.item].obj.look })); if (vl) L.push({ item: r.item, vl, t: +r.t || 0, out: null }); }
+    if (row) { let nu = 0; for (const r of JSON.parse(row.rows)) { if (!r || !ITEMS.isItem(r.item)) continue; const vl = vesselClean(r.vl, vesselSpec({ type: 'stamp', look: ITEMS.ITEMS[r.item].obj && ITEMS.ITEMS[r.item].obj.look })) || null; if (vl || r.u) { const u = (+r.u | 0) || 0; if (u > nu) nu = u; L.push({ u, item: r.item, vl, t: +r.t || 0, out: null }); } }
+      for (const r of L) if (!r.u) r.u = ++nu; }   // (a row saved before they had numbers gets one)
   } catch (e) { console.log('[vessel] could not read ' + k + ': ' + e.message); }
   vesselRows.set(k, L);
   return L;
@@ -20538,23 +20561,25 @@ function vesselList(k) {
 function vesselSave(k) {
   const T = vesselSaveT.get(k); if (T) { clearTimeout(T); vesselSaveT.delete(k); }
   const L = vesselRows.get(k); if (!L || !_vesselPut) return;
-  try { if (L.length) _vesselPut.run(k, JSON.stringify(L.map(r => ({ item: r.item, vl: r.vl, t: r.t })))); else _vesselDel.run(k); }
+  try { if (L.length) _vesselPut.run(k, JSON.stringify(L.map(r => ({ u: r.u, item: r.item, vl: r.vl, t: r.t })))); else _vesselDel.run(k); }
   catch (e) { console.log('[vessel] could not save ' + k + ': ' + e.message); }
+  vesselTell(k);
 }
 function vesselSaveSoon(k) { if (!vesselSaveT.has(k)) vesselSaveT.set(k, setTimeout(() => vesselSave(k), 1000)); }
 // out of the pouch into a hand: the row put away last comes with it
-function vesselFromPouch(room, sid, o) {
+function vesselFromPouch(room, sid, o, vu) {
   if (!vesselSpec(o) || !o.item) return;
-  const k = vesselKeyOf(room, sid), L = vesselList(k); let best = null;
-  for (const r of L) if (r.item === o.item && !r.out && (!best || r.t > best.t)) best = r;
-  if (best) { best.out = o.id; o.vl = best.vl.slice(); }
+  const k = vesselKeyOf(room, sid), L = vesselList(k); let best = vu ? L.find(r => r.u === (vu | 0) && r.item === o.item && !r.out) : null;   // (`vu`: THAT one, the one on the number)
+  if (!best) for (const r of L) if (r.item === o.item && !r.out && (!best || (!!r.vl === !!best.vl ? r.t > best.t : !!r.vl))) best = r;
+  if (best) { best.out = o.id; if (best.vl) o.vl = best.vl.slice(); }
   vesselOut.set(o.id, { k, r: best });
+  vesselTell(k);
 }
 // taken into a hand from the world: what is in it comes on to the taker's list
 function vesselToHand(room, sid, o) {
   if (!vesselSpec(o) || !o.item) return;
   const k = vesselKeyOf(room, sid), L = vesselList(k), e = { k, r: null };
-  if (o.vl) { e.r = { item: o.item, vl: o.vl.slice(), t: Date.now(), out: o.id }; L.push(e.r); vesselSave(k); }
+  if (o.vl || vesselSidOf.has(k)) { e.r = vesselRowNew(L, o.item, o.vl ? o.vl.slice() : null); e.r.out = o.id; vesselSave(k); }
   vesselOut.set(o.id, e);
 }
 // out of a hand into the world: the object keeps what is in it, and the row goes
@@ -20566,28 +20591,29 @@ function vesselToWorld(o) {
 function vesselPutAway(o) {
   const e = vesselOut.get(o.id); vesselOut.delete(o.id); vesselFlowAt.delete(o.id); if (!e) return;
   const L = vesselList(e.k);
-  if (e.r) { e.r.out = null; e.r.t = Date.now(); if (o.vl) e.r.vl = o.vl.slice(); else { const i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); } }
-  else if (o.vl) L.push({ item: o.item, vl: o.vl.slice(), t: Date.now(), out: null });
+  if (e.r) { e.r.out = null; e.r.t = Date.now(); e.r.vl = o.vl ? o.vl.slice() : null; if (!o.vl && !vesselSidOf.has(e.k)) { const i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); } }
+  else if (o.vl) vesselRowNew(L, o.item, o.vl.slice());
   vesselSave(e.k);
 }
 // a thing lying in the world put in the pouch with no hand between
 function vesselPocketed(room, sid, o) {
-  if (!vesselSpec(o) || !o.vl) return;
-  const k = vesselKeyOf(room, sid); vesselList(k).push({ item: o.item, vl: o.vl.slice(), t: Date.now(), out: null }); vesselSave(k);
+  if (!vesselSpec(o)) return;
+  const k = vesselKeyOf(room, sid); if (!o.vl && !vesselSidOf.has(k)) return; vesselRowNew(vesselList(k), o.item, o.vl ? o.vl.slice() : null); vesselSave(k);
 }
 // leaving the pouch for the world with no hand between (dragged out of the inventory window, a death's scatter): the row put away last goes with it
 function vesselFromPouchToWorld(room, sid, o) {
   if (!vesselSpec(o) || !sid) return;
-  const k = vesselKeyOf(room, sid), L = vesselList(k); let best = null;
-  for (const r of L) if (r.item === o.item && !r.out && (!best || r.t > best.t)) best = r;
-  if (best) { o.vl = best.vl.slice(); L.splice(L.indexOf(best), 1); vesselSave(k); }
+  const k = vesselKeyOf(room, sid), L = vesselList(k); let best = vesselWantU ? L.find(r => r.u === vesselWantU && r.item === o.item && !r.out) : null;   // (dragged out of the window: that one)
+  if (!best) for (const r of L) if (r.item === o.item && !r.out && (!best || (!!r.vl === !!best.vl ? r.t > best.t : !!r.vl))) best = r;
+  if (best) { if (best.vl) o.vl = best.vl.slice(); L.splice(L.indexOf(best), 1); vesselSave(k); }
 }
 // the contents changed in a hand: the row follows, and everybody is told
 function vesselChanged(room, o) {
   const e = vesselOut.get(o.id);
   if (e) { const L = vesselList(e.k);
-    if (o.vl && !e.r) { e.r = { item: o.item, vl: o.vl.slice(), t: Date.now(), out: o.id }; L.push(e.r); }
+    if (o.vl && !e.r) { e.r = vesselRowNew(L, o.item, o.vl.slice()); e.r.out = o.id; }
     else if (o.vl) e.r.vl = o.vl.slice();
+    else if (e.r && vesselSidOf.has(e.k)) e.r.vl = null;
     else if (e.r) { const i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); e.r = null; }
     vesselSaveSoon(e.k); }
   emitObjToChunks(room, o, 'vessel-state', { id: o.id, vl: o.vl || 0 });
@@ -25527,7 +25553,7 @@ io.on('connection', (socket) => {
       if (mine) for (const oid of mine) { const q = map.get(oid); if (q && q.item === obj.item && !q.pair) same++; }
       if (!eqAsk || (mine && mine.size >= 2) || (invGatedRoom(currentAvatarRoom) && ledger.itemCount(playerKeyFor(socket.id), obj.item) <= same)) { socket.emit('avatar-object-removed', { id }); return; }
       obj.eq = socket.id;
-      vesselFromPouch(currentAvatarRoom, socket.id, obj);   // (tools piece 8) a bucket comes out with what it held when it was put away
+      vesselFromPouch(currentAvatarRoom, socket.id, obj, data && data.vu);   // (tools piece 8) a bucket comes out with what it held when it was put away
     }
     // Phase 6: clamp placement into the playable band (no-op at 'large'). Anti-cheat belt+suspenders — the
     // client is already confined by camera/walls; this keeps a crafted packet from landing objects in the
@@ -25756,7 +25782,7 @@ io.on('connection', (socket) => {
     const c = socket.data.throwCredit || (socket.data.throwCredit = []);
     c.push({ m, t: Date.now() }); if (c.length > 8) c.shift();
   });
-  socket.on('inv-drop', ({ mat, item, n, vx }) => {
+  socket.on('inv-drop', ({ mat, item, n, vx, vu }) => {
     if (!currentAvatarRoom) return;
     const key = playerKeyFor(socket.id);
     const p = lastBodyPos(currentAvatarRoom, socket.id);
@@ -25774,7 +25800,7 @@ io.on('connection', (socket) => {
         const gated = invGatedRoom(currentAvatarRoom);
         if (gated && ledger.itemCount(key, item) - eqOutCount(currentAvatarRoom, socket.id, item) < 1) return;
         const s = (+vx || 0) < 0 ? -1 : 1;
-        if (!itemObjPlace(currentAvatarRoom, item, p.x + s * 22, p.y - 26, s * 0.25, socket.id, currentUsername || socket.id)) return;
+        vesselWantU = vu | 0; const placed = itemObjPlace(currentAvatarRoom, item, p.x + s * 22, p.y - 26, s * 0.25, socket.id, currentUsername || socket.id); vesselWantU = 0; if (!placed) return;
         if (gated) { ledger.spendItem(key, item, 1); sendInvSync(socket, currentAvatarRoom); }
         return;
       }
@@ -25975,7 +26001,7 @@ io.on('connection', (socket) => {
     if (!Array.isArray(slots)) return;
     const cleanSlot = (s) => {
       if (s && s.k === 'mat' && (s.id | 0) > 0 && (s.id | 0) < 256) return { k: 'mat', id: s.id | 0 };
-      if (s && s.k === 'item' && ITEMS.isItem(s.id)) return { k: 'item', id: s.id };
+      if (s && s.k === 'item' && ITEMS.isItem(s.id)) return (s.vu | 0) > 0 ? { k: 'item', id: s.id, vu: s.vu | 0 } : { k: 'item', id: s.id };   // (`vu`: which container, 2026-11-03)
       if (s && s.k === 'tool' && typeof s.id === 'string' && /^[a-z]{1,16}$/.test(s.id)) return { k: 'tool', id: s.id };
       return 0;
     };
@@ -26732,8 +26758,8 @@ io.on('connection', (socket) => {
     if (hm) { hm.delete(id); if (!hm.size) delete roomObjHeld[room]; }
     { const dm = roomObjDrv[room]; if (dm) { dm.delete(id); if (!dm.size) delete roomObjDrv[room]; } }
     { const sm = roomObjSt[room]; if (sm) sm.delete(id); }
+    vesselPocketed(room, socket.id, o);                  // (tools piece 8) what a bucket holds goes in with it (first: the sync below counts rows)
     if (invGatedRoom(room)) { ledger.creditItems(playerKeyFor(socket.id), [[o.item, 1]]); sendInvSync(socket, room); }
-    vesselPocketed(room, socket.id, o);                  // (tools piece 8) what a bucket holds goes in with it
     eqRemoveObj(room, o);
     if (objChunked(room)) socket.emit('avatar-object-removed', { id });   // …the taker may not be subscribed there
     broadcastObjSt(room);
