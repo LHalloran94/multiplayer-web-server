@@ -345,17 +345,17 @@
   //    ground / a wall / a person where they land, the fire creeping outward from each, the edges dying first (round 4 of the renders). Not liquid.
   //    `sticks` + `stickAny` = it flies along its path and is looked for at its leading end, as a thrown star is — it breaks there instead of sticking.
   Object.assign(LOOKS, {
-    molotov: weapon(27, 9, 0.7, 0.3, 1, 'blunt', 'mo', { throwable: true, breaks: 'fire', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
+    molotov: weapon(27, 9, 0.7, 0.3, 1, 'blunt', 'mo', { iconUp: true, throwable: true, breaks: 'fire', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
       thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true, fuse: 15 }),   // (§5z67) follows the pointer (H rests it) · lit, its rag burns 15s, then it bursts where it is
     // ⭐ PIECE 3 PART B2 (2026-10-21, plan file §5z69): THE GREASE FLASK — a corked flask of dark grease that BREAKS as the Molotov does (`breaks: 'grease'`):
     //    whoever it strikes is SOAKED (the coat sweeps across them from the hit, runs down, drips into a puddle — round 5 of the renders), the spray lands
     //    round about as grease on the ground's cells. Greased = slippery, and what is greased BURNS much harder. Nothing to light: right does nothing.
     //    (held by its NECK — `grip` 0.7: at 0.3, as the Molotov, the hand covered its whole belly)
-    greaseflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'gf', { throwable: true, breaks: 'grease', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
+    greaseflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'gf', { iconUp: true, throwable: true, breaks: 'grease', sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
       thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
     // ⭐ PIECE 3 PART C (2026-10-21, plan file §5z72): THE FROST FLASK (the user's F1 — "frosted and held still; water within reach turns to ice") and
     //    THE SMOKE FLASK (B — "part of sight"). Both break the same way; `reach` = how far the frost goes (px), `hold` = how long somebody is frozen (s).
-    frostflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'ff', { throwable: true, breaks: 'frost', reach: 56, hold: 2.5, sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
+    frostflask: weapon(26, 12, 0.75, 0.7, 1, 'blunt', 'ff', { iconUp: true, throwable: true, breaks: 'frost', reach: 56, hold: 2.5, sticks: true, stickAny: true, carves: false, daze: false, icon: 1.1,
       thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true }),
   });
   // (§5z73 — the user: "It should also look more like a real smoke bomb, rather than a flask, in the same vein as the flash-bang") THE SMOKE BOMB: a can on
@@ -400,7 +400,7 @@
   //    held out towards the pointer (scheme P with `aimsAtRest` false — the torch's way); MIDDLE lobs it. It BREAKS when it hits something hard
   //    (`breaks: 'oil'`, client 16x — a small Molotov's splash of burning oil, always burning: the wick is lit; `oilK` = its size against a Molotov's).
   Object.assign(LOOKS, {
-    lantern: weapon(34, 15.3, 0.5, 0.96, 0.6, 'blunt', 'ln', { content: '🏮', lamp: { at: 9.4 / 25, r: 4.4 / 25, col: [1, 0.86, 0.62], round: true }, belt: true,
+    lantern: weapon(34, 15.3, 0.5, 0.96, 0.6, 'blunt', 'ln', { iconUp: true, content: '🏮', lamp: { at: 9.4 / 25, r: 4.4 / 25, col: [1, 0.86, 0.62], round: true }, belt: true,
       right: 'switch', breaks: 'oil', oilK: 0.35, sticks: true, stickAny: true, daze: false, carves: false, icon: 1.1, mat: 'iron', strikes: false,   /* (sticks + stickAny: thrown, it is looked for along its path and BREAKS on what it meets, as the bottles do) */
       scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 } }),
   });
