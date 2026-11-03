@@ -529,7 +529,8 @@
   //   2 brine · 3 acid · 4 water · 5 oil — the user, 2026-11-03: acid only in glass), and the inside of it as fractions of its length: `floor`, `floorR`, `rim`, `rimR`.
   Object.assign(LOOKS, {
     woodbucket: tool(20, 11.5, 0.7, 0.97, 1, 'wb', { content: '🪣', hitHalf: 5, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 },
-      vessel: { cap: 96, rate: 64, holds: [1, 2, 4, 5], open: true, bail: true, floor: 1.2 / 26, floorR: 5.6 / 26, rim: 12.6 / 26, rimR: 6.5 / 26 } }, 'blunt'),
+      // (`burn`: 2026-11-03, the user: it catches in lava, as a flare burns, for this many seconds, and is gone. Server `vessel-burn`, client 16zd `vesselBurnStep`)
+      vessel: { cap: 96, rate: 64, holds: [1, 2, 4, 5], open: true, bail: true, burn: 6, floor: 1.2 / 26, floorR: 5.6 / 26, rim: 12.6 / 26, rimR: 6.5 / 26 } }, 'blunt'),
     // (increment 2) THE STEEL PAIL: as the bucket, ribbed; it holds lava too (`holds` 0), not acid: only glass does (the user, 2026-11-03).
     steelpail: tool(20, 11.5, 0.8, 0.97, 1, 'vp', { content: '🪣', hitHalf: 5, sticks: false, pierces: false, daze: false, right: 'none', mat: 'steel', scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 },
       vessel: { cap: 96, rate: 64, holds: [0, 1, 2, 4, 5], open: true, bail: true, floor: 1 / 26, floorR: 5.4 / 26, rim: 13 / 26, rimR: 7 / 26 } }, 'blunt'),

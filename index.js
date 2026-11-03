@@ -20482,7 +20482,7 @@ function eqNote(sid, id, on) {
   else if (s) { s.delete(id); if (!s.size) eqObjs.delete(sid); }
 }
 function eqRemoveObj(room, o) {
-  if (o.eq) { vesselPutAway(o); delete o.uc; eqNote(o.eq, o.id, 0); delete o.eq; }
+  if (o.eq) { vesselPutAway(o); delete o.uc; delete o.vb; eqNote(o.eq, o.id, 0); delete o.eq; }
   objUnindex(room, o);
   emitObjToChunks(room, o, 'avatar-object-removed', { id: o.id });
   if (HELD.is(o.look) && HELD.LOOKS[o.look].hook) hookRopesDrop(room, o.id);
@@ -20617,6 +20617,18 @@ function vesselChanged(room, o) {
     else if (e.r) { const i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); e.r = null; }
     vesselSaveSoon(e.k); }
   emitObjToChunks(room, o, 'vessel-state', { id: o.id, vl: o.vl || 0, uc: o.uc ? 1 : 0 });
+}
+// (`vessel-burn`) burnt through, where it is: as a road flare's end (`thr-light`), after what was in it has been let out
+function vesselBurnEnd(room, o, x, y) {
+  const map = roomObjects[room]; if (!map || map.get(o.id) !== o || !o.vb) return;
+  delete o.vb; if (o.vl) vesselSpill(room, o, x, y, 0, 0);
+  io.to(room).emit('vessel-burnt', { id: o.id, x, y });
+  { const hm = roomObjHeld[room]; if (hm) { hm.delete(o.id); if (!hm.size) delete roomObjHeld[room]; } }
+  { const dm = roomObjDrv[room]; if (dm) { dm.delete(o.id); if (!dm.size) delete roomObjDrv[room]; } }
+  if (o.eq) itemObjMove(room, o, null);
+  objStOf(room).delete(o.id);
+  if (map.get(o.id)) eqRemoveObj(room, o);
+  broadcastObjSt(room);
 }
 // ── the one place liquid crosses between a cell and a container. Written as a paint is (`fineSetBlock`), from outside the tick: the next tick's strips take the cell from the active set as
 //    they do a painted one, and the wire, the chunk's saved diff and the reactions all see an ordinary change. Only ever on a cell that already exists: this never builds world.
@@ -26776,6 +26788,21 @@ io.on('connection', (socket) => {
     const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o); if (!V || !V.glass || o.eq !== socket.id) return;
     if (m.open) o.uc = 1; else delete o.uc;
     vesselChanged(room, o);
+  });
+  // ⭐ (2026-11-03, the user: "if you hold it for long enough it should set you on fire. Dipping it in water should save it though") A WOODEN BUCKET ALIGHT: its mouth met lava (the machine holding or moving it says so, as a flare's fire is told): `o.vb` = when, for `V.burn` s. In water it goes out (`off`). At the end the machine that has it says where it is (`vessel-burnt`), and if nobody has a moment later, the server goes by where it last knew it to be: what is in it pours out as real liquid and the bucket is gone, one fewer in the pouch if it was in a hand.
+  socket.on('vessel-burn', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string') return;
+    const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o); if (!V || !V.burn || (o.eq && o.eq !== socket.id)) return;
+    if (m.off) { if (!o.vb) return; delete o.vb; io.to(room).emit('vessel-burn', { id: o.id, off: 1 }); return; }
+    if (o.vb) return;
+    const at = Date.now(); o.vb = at; io.to(room).emit('vessel-burn', { id: o.id, s: V.burn });
+    setTimeout(() => { const M = roomObjects[room], q = M && M.get(o.id); if (!q || q.vb !== at) return;
+      const hp = q.eq && roomPos[room] && roomPos[room].get(q.eq), lp = roomLoosePose[room] && roomLoosePose[room].get(q.id), P = hp || lp || q; vesselBurnEnd(room, q, P.x, P.y); }, V.burn * 1000 + 900);
+  });
+  socket.on('vessel-burnt', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !isFinite(m.x) || !isFinite(m.y)) return;
+    const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o); if (!V || !V.burn || !o.vb || (o.eq && o.eq !== socket.id) || Date.now() - o.vb < V.burn * 1000 - 400) return;
+    vesselBurnEnd(room, o, +m.x, +m.y);
   });
   socket.on('vessel-flow', (m) => {
     const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !isFinite(m.x) || !isFinite(m.y) || !canBuild()) return;
