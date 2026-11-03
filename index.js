@@ -20517,13 +20517,14 @@ const vesselSidOf = new Map();   // key → the socket told about its rows (only
 let vesselWantU = 0;             // (`inv-drop`) which one is being put down
 const vesselOut = new Map();     // object id → { k, r: its row or null }
 const vesselFlowAt = new Map();  // object id → { t, carry } its last `vessel-flow`
+const VESSEL_LUMP = LIQ_T, VESSEL_VL_N = LIQ_T + 2;   // (8.5) what is in a thing: one number per liquid, then its stone lump, then its glass lump
 const vesselSaveT = new Map();   // key → the timer of a save still to come
 let _vesselGet = null, _vesselPut = null, _vesselDel = null;
 function vesselSpec(o) { return (o && o.type === 'stamp' && HELD.is(o.look) && HELD.LOOKS[o.look].vessel) || null; }
 function vesselClean(v, V) {
   if (!Array.isArray(v) || !V) return null;
-  const out = new Array(LIQ_T).fill(0); let room = V.cap;
-  for (let rk = 0; rk < LIQ_T; rk++) { const n = Math.min(room, Math.max(0, +v[rk] | 0)); out[rk] = n; room -= n; }
+  const out = new Array(VESSEL_VL_N).fill(0); let room = V.cap;
+  for (let rk = 0; rk < VESSEL_VL_N; rk++) { const n = Math.min(room, Math.max(0, +v[rk] | 0)); out[rk] = n; room -= n; }
   return room < V.cap ? out : null;
 }
 function vesselKeyOf(room, sid) { const g = invGatedRoom(room), k = playerKeyFor(sid) + (g ? '' : '|' + room); if (g) vesselSidOf.set(k, sid); return k; }
@@ -20589,7 +20590,7 @@ function vesselToWorld(o) {
 }
 // out of a hand into the pouch (put away, disconnected, dying): the row is free again, the newest of them
 function vesselPutAway(o) {
-  const e = vesselOut.get(o.id); vesselOut.delete(o.id); vesselFlowAt.delete(o.id); if (!e) return;
+  const e = vesselOut.get(o.id); vesselOut.delete(o.id); vesselFlowAt.delete(o.id); vesselReactFinish(o); if (!e) return;
   const L = vesselList(e.k);
   if (e.r) { e.r.out = null; e.r.t = Date.now(); e.r.vl = o.vl ? o.vl.slice() : null; if (!o.vl && !vesselSidOf.has(e.k)) { const i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); } }
   else if (o.vl) vesselRowNew(L, o.item, o.vl.slice());
@@ -20597,7 +20598,7 @@ function vesselPutAway(o) {
 }
 // a thing lying in the world put in the pouch with no hand between
 function vesselPocketed(room, sid, o) {
-  if (!vesselSpec(o)) return;
+  if (!vesselSpec(o)) return; vesselReactFinish(o);
   const k = vesselKeyOf(room, sid); if (!o.vl && !vesselSidOf.has(k)) return; vesselRowNew(vesselList(k), o.item, o.vl ? o.vl.slice() : null); vesselSave(k);
 }
 // leaving the pouch for the world with no hand between (dragged out of the inventory window, a death's scatter): the row put away last goes with it
@@ -20617,6 +20618,51 @@ function vesselChanged(room, o) {
     else if (e.r) { const i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); e.r = null; }
     vesselSaveSoon(e.k); }
   emitObjToChunks(room, o, 'vessel-state', { id: o.id, vl: o.vl || 0, uc: o.uc ? 1 : 0 });
+  vesselReactKick(room, o);
+}
+// ⭐ (8.5, 2026-11-03, the user: "layers by weight and then also things reacting inside") WHAT TOUCHES IN IT REACTS, as the same two do in the world (`FINE REACTIONS`): two layers lying against each other. Lava with water, brine or acid: stone · with quicksand: glass · with oil: the oil burns off · acid with water: it is neutralised (`ACID_K`'s saturation, as a sum).
+//   The lava becomes the lump, unit for unit, and the other flashes off, so a thing never holds more than it did. THE LUMP (`vl[LIQ_T]` stone, `vl[LIQ_T + 1]` glass: on the end of the same list, so it goes where the list goes: rows, the pouch, a save, the wire) lies at the bottom and takes up room, "stays in until emptied, then a pick-up" (`vessel-lump`). SERVER, one object ten times a second while it is reacting; a thing put away finishes at once.
+function vesselPair(a, b) {   // (ranks, either order) what those two make, or null
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  if (lo === 0) return hi === 1 ? 'glass' : hi === 5 ? 'burn' : hi >= 2 && hi <= 4 ? 'stone' : null;
+  return lo === 3 && hi === 4 ? 'fizz' : null;
+}
+function vesselReactPair(o) { if (!o.vl) return null; let was = -1; for (let k = 0; k < LIQ_T; k++) { if (!(o.vl[k] > 0)) continue; if (was >= 0) { const kind = vesselPair(was, k); if (kind) return { a: was, b: k, kind }; } was = k; } return null; }
+function vesselReactStep(o, V) {
+  const P = vesselReactPair(o); if (!P) return null;
+  const n = Math.min(o.vl[P.a], o.vl[P.b], Math.max(2, Math.round(V.cap / 12)));
+  if (P.kind === 'burn') o.vl[P.b] -= n;
+  else if (P.kind === 'fizz') { o.vl[P.a] -= n; o.vl[P.b] -= Math.max(1, n >> 1); o.vl[P.b] = Math.max(0, o.vl[P.b]); }   // (acid gone; of the water it soaked up, half left)
+  else { const L = VESSEL_LUMP + (P.kind === 'glass' ? 1 : 0); o.vl[P.a] -= n; o.vl[P.b] -= n; o.vl[L] = (o.vl[L] || 0) + n; }   // (`|| 0`: a thing lying since before lumps has a shorter list)
+  if (o.vl.every(v => v <= 0)) delete o.vl;
+  return P.kind;
+}
+function vesselReactFinish(o) { const V = vesselSpec(o); if (!V || !o.vl) return; for (let i = 0; i < 256 && vesselReactStep(o, V) && o.vl; i++); }
+const vesselReactT = new Map();   // object id → its next step
+function vesselReactKick(room, o) {
+  if (vesselReactT.has(o.id) || !vesselReactPair(o)) return;
+  vesselReactT.set(o.id, setTimeout(() => { vesselReactT.delete(o.id); const M = roomObjects[room], V = vesselSpec(o); if (!M || M.get(o.id) !== o || !V) return;
+    const kind = vesselReactStep(o, V); if (!kind) return; emitObjToChunks(room, o, 'vessel-react', { id: o.id, kind }); vesselChanged(room, o); }, 100));
+}
+// (`vessel-flow` with `meet`) ITS OPEN MOUTH IN SOMETHING THAT REACTS WITH WHAT IS AT ITS MOUTH (the user: "dipping a bucket of lava into water or entering water with a bucket of lava should turn it into stone, and vice versa for a bucket of water in lava"), full or not: nothing comes in to stay, they meet there. Only what it could hold: a wooden bucket in lava burns (`vessel-burn`). The units used up, from the cell at its mouth.
+function vesselMeet(room, o, V, x, y, want, rk) {
+  const st = cellsOf(room); ensureFineArrays(room, 1);
+  const c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL), R = st.rows, at = c * R + r, changed = [];
+  if (r < 0 || r >= R || c < 0 || c >= st.cols || !vesselCellOpen(room, at) || !o.vl || !(o.vl[rk] > 0) || !V.holds.includes(rk) || !(peekCellAt(st.fineTotal, at) > 0)) return null;
+  for (let k = LIQ_T - 1; k >= 0; k--) { if (!(st.fineAmt.rp(at)[st.fineAmt.o(at) + k] > 0) || !V.holds.includes(k)) continue; const kind = vesselPair(rk, k); if (!kind || kind === 'fizz') continue;
+    const n = Math.min(want, kind === 'burn' && rk === 0 ? want : o.vl[rk]), got = vesselCellTake(room, at, k, n, changed); if (got <= 0) continue;
+    if (kind === 'burn') { if (rk === 5) o.vl[5] = Math.max(0, o.vl[5] - got); }   // (oil in it, lava at its mouth: its oil burns; lava in it, oil at its mouth: that oil does)
+    else { const L = VESSEL_LUMP + (kind === 'glass' ? 1 : 0); o.vl[rk] -= got; o.vl[L] = (o.vl[L] || 0) + got; }
+    if (changed.length) emitFineCells(room, changed); if (o.vl.every(v => v <= 0)) delete o.vl; return kind; }
+  return null;
+}
+// (`vessel-lump`, `vesselSpill`) THE LUMP COMES OUT: a pick-up where it falls, a stack of one for each cell's worth, at least one. A sandbox has no pick-ups: it breaks up as it lands (client's `vessel-lump`).
+function vesselLumpOut(room, o, x, y) {
+  if (!o.vl) return false; let any = false;
+  for (const [k, mat] of [[VESSEL_LUMP, 2], [VESSEL_LUMP + 1, 16]]) { const n = o.vl[k] | 0; if (n <= 0) continue; o.vl[k] = 0; any = true;
+    if (invGatedRoom(room)) { dropWhy = 'vessel'; spawnDrop(room, x, y, [[mat, Math.max(1, Math.round(n / LIQUID_MAX))]], 0, { lone: 1 }); } }
+  if (any) { io.to(room).emit('vessel-lump', { x, y }); if (o.vl.every(v => v <= 0)) delete o.vl; }
+  return any;
 }
 // (`vessel-burn`) burnt through, where it is: as a road flare's end (`thr-light`), after what was in it has been let out
 function vesselBurnEnd(room, o, x, y) {
@@ -20666,7 +20712,7 @@ function vesselMove(room, o, V, x, y, fill, want, askRk) {
     if (V.glass && !(r > 0 && lvlOf(at - 1) > 0) && y < (r + 1 - Math.max(lvlOf(at), lvlOf(at - R), lvlOf(at + R))) * TERRAIN_CELL) return 0;
     for (const i of (V.glass ? [at, at - R, at + R, r > 0 ? at - 1 : -1] : order)) { if (want <= 0) break; if (!vesselCellOpen(room, i) || !(peekCellAt(st.fineTotal, i) > 0)) continue;
       let rk = -1; for (let k = LIQ_T - 1; k >= 0; k--) if (V.holds.includes(k) && st.fineAmt.rp(i)[st.fineAmt.o(i) + k] > 0) { rk = k; break; } if (rk < 0) continue;
-      const n = vesselCellTake(room, i, rk, want, changed); if (n > 0) { if (!o.vl) o.vl = new Array(LIQ_T).fill(0); o.vl[rk] += n; moved += n; want -= n; } }
+      const n = vesselCellTake(room, i, rk, want, changed); if (n > 0) { if (!o.vl) o.vl = new Array(VESSEL_VL_N).fill(0); o.vl[rk] += n; moved += n; want -= n; } }
   } else if (o.vl) {
     let rk = askRk >= 0 && askRk < LIQ_T && o.vl[askRk] > 0 ? askRk : -1; if (rk < 0) for (let k = LIQ_T - 1; k >= 0; k--) if (o.vl[k] > 0) { rk = k; break; }
     if (rk >= 0) { want = Math.min(want, o.vl[rk]);
@@ -20680,7 +20726,7 @@ function vesselMove(room, o, V, x, y, fill, want, askRk) {
 // (increment 2) ALL OF WHAT IS IN IT, OUT AT ONCE, as real liquid: from the open cell nearest (x, y), along the way it was going and spreading out from there, at most half a cell's worth a cell, then whatever room
 //   is left. Everybody is shown the spray (`vessel-splash`, holding nothing). What is put is what leaves `vl`; only a thing broken in a pocket with no room at all could lose any, and that is said in the log.
 function vesselSpill(room, o, x, y, vx, vy) {
-  if (!o.vl) return; const st = cellsOf(room); ensureFineArrays(room, 1);
+  if (!o.vl) return; vesselLumpOut(room, o, x, y); if (!o.vl) return; const st = cellsOf(room); ensureFineArrays(room, 1);
   const R = st.rows, C = st.cols, cOf = (px) => Math.floor(px / TERRAIN_CELL), rOf = (py) => Math.floor(py / TERRAIN_CELL), idx = (c, r) => (c < 0 || c >= C || r < 0 || r >= R) ? -1 : c * R + r;
   let start = idx(cOf(x), rOf(y));
   if (!vesselCellOpen(room, start)) { const sp = Math.hypot(vx, vy) || 1; for (let k = 1; k <= 6 && !vesselCellOpen(room, start); k++) start = idx(cOf(x - vx / sp * k * 4), rOf(y - vy / sp * k * 4 - (vx || vy ? 0 : k * 4))); }
@@ -26804,6 +26850,14 @@ io.on('connection', (socket) => {
     const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o); if (!V || !V.burn || !o.vb || (o.eq && o.eq !== socket.id) || Date.now() - o.vb < V.burn * 1000 - 400) return;
     vesselBurnEnd(room, o, +m.x, +m.y);
   });
+  // (8.5) only a lump left in it, and it is tipped past level: out it comes
+  socket.on('vessel-lump', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !isFinite(m.x) || !isFinite(m.y) || !canBuild()) return;
+    const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o); if (!V || !o.vl || !(V.open || o.uc) || (o.eq && o.eq !== socket.id)) return;
+    { const ps = o.eq && roomPos[room] && roomPos[room].get(socket.id); if (ps && isFinite(ps.x) && isFinite(ps.y) && Math.hypot(ps.x - m.x, ps.y - m.y) > 160) return; }
+    for (let k = 0; k < LIQ_T; k++) if (o.vl[k] > 0) return;
+    if (vesselLumpOut(room, o, +m.x, +m.y)) vesselChanged(room, o);
+  });
   socket.on('vessel-flow', (m) => {
     const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !isFinite(m.x) || !isFinite(m.y) || !canBuild()) return;
     const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o);
@@ -26816,9 +26870,10 @@ io.on('connection', (socket) => {
       if (!(V.open || o.uc) || m.fill || (hm && hm.has(o.id)) || Math.hypot(ox - m.x, oy - m.y) > 400) return;
     }
     const now = Date.now(), Fl = vesselFlowAt.get(o.id) || { t: now - 100, carry: 0 };
-    const dt = Math.min(0.25, Math.max(0, (now - Fl.t) / 1000)), k = m.fill ? 1 : Math.max(0, Math.min(1, +m.k || 0));
+    const dt = Math.min(0.25, Math.max(0, (now - Fl.t) / 1000)), k = m.fill || m.meet ? 1 : Math.max(0, Math.min(1, +m.k || 0));
     const amt = V.rate * dt * k + Fl.carry, want = Math.floor(amt);
     Fl.t = now; Fl.carry = Math.min(1, amt - want); vesselFlowAt.set(o.id, Fl);
+    if (m.meet) { const kind = want > 0 && Number.isInteger(m.rk) ? vesselMeet(room, o, V, +m.x, +m.y, want, m.rk) : null; if (kind) { emitObjToChunks(room, o, 'vessel-react', { id: o.id, kind }); vesselChanged(room, o); } return; }
     if (want > 0 && vesselMove(room, o, V, +m.x, +m.y, !!m.fill, want, Number.isInteger(m.rk) ? m.rk : -1) > 0) vesselChanged(room, o);
   });
   // (increment 2) A BUCKET THROWN: what is in it flies out as it leaves the hand (client 16zd `vesselOnThrow`), asked while it is still in that hand. A flask's comes from its breaking (`thrBreakDo`).
