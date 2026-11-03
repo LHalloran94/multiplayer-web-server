@@ -57,6 +57,7 @@
   //    shield, model   a shield, and the curved board it is drawn from (see the shields below)
   //    hands, grip2    hands 2 = it takes BOTH hands (the off hand is put away while it is out, and it cannot go in the off hand);
   //                grip2 = where the second hand closes on it (a fraction of its length, like `grip`)
+  //    noSlide     (2026-11-03) two hands, but the upper one stays put through a swing (a greatsword's hands are on a short grip; a staff's are mid-shaft; a scythe's on its handles) — 16z `heldSlides`
   //    twoFree     held in BOTH hands (at `grip2`) while the other hand is empty, in one otherwise — it can go in the off hand (a spear)
   //    stabBack    how far a QUICK stab draws back before it drives in (px) — absent = the Weapons tab's dial (a spear's is longer)
   //    spin        right SPINS it round your hand instead of stabbing (the flail — its head on its chain does the hitting)
@@ -191,9 +192,9 @@
     sabre:         weapon(70, 7, 0.9, 0.11, 0.21, 'edge', 'sa'),
     rapier:        weapon(84, 6, 0.8, 0.10, 0.17, 'edge', 'ra'),
     // greatswords (two hands)
-    greatsword:    weapon(100, 8, 2.2, 0.06, 0.285, 'edge', 'gs', Object.assign({ cleaves: true }, two(0.2))),
-    claymore:      weapon(108, 8, 2.4, 0.06, 0.275, 'edge', 'cl', Object.assign({ cleaves: true }, two(0.2))),
-    flamberge:     weapon(118, 8, 2.6, 0.05, 0.26, 'edge', 'fl', Object.assign({ cleaves: true }, two(0.2))),
+    greatsword:    weapon(100, 8, 2.2, 0.06, 0.285, 'edge', 'gs', Object.assign({ cleaves: true, noSlide: true }, two(0.2))),
+    claymore:      weapon(108, 8, 2.4, 0.06, 0.275, 'edge', 'cl', Object.assign({ cleaves: true, noSlide: true }, two(0.2))),
+    flamberge:     weapon(118, 8, 2.6, 0.05, 0.26, 'edge', 'fl', Object.assign({ cleaves: true, noSlide: true }, two(0.2))),
     // daggers
     dagger:        weapon(30, 6, 0.5, 0.18, 0.35, 'edge', 'dg'),
     stiletto:      weapon(31, 6, 0.4, 0.18, 0.34, 'edge', 'st'),
@@ -233,7 +234,7 @@
   //    staff's other end · the poleaxe's hammer face), `brace` (the pike), `pullCut` (the scythe).
   const pole = (g2, extra) => Object.assign({ pole: true, rest: 'pole' }, two(g2), extra || {});
   Object.assign(LOOKS, {
-    quarterstaff:  weapon(150, 5, 1.6, 0.30, 0.82, 'blunt', 'qs', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', right: 'stab', ends: 2 })),
+    quarterstaff:  weapon(150, 5, 1.6, 0.30, 0.82, 'blunt', 'qs', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', right: 'stab', ends: 2, noSlide: true })),
     pike:          weapon(230, 4, 2.2, 0.12, 0.95, 'edge', 'pk', pole(0.34, { hitHalf: 2, stabBack: 30, brace: true, inFrom: 0.42 })),
     glaive:        weapon(136, 6, 2.2, 0.10, 0.80, 'edge', 'gv', pole(0.38, { hitHalf: 5, cleaves: true })),
     naginata:      weapon(132, 6, 1.8, 0.10, 0.74, 'edge', 'ng', pole(0.40, { hitHalf: 4 })),
@@ -245,7 +246,7 @@
     lucerne:       weapon(130, 7, 2.6, 0.10, 0.80, 'blunt', 'lh', pole(0.38, { hitHalf: 12, right: 'stab', pierces: true, nicks: true, cracks: true, mark: 'spikes', both: 'hook', hookBack: true, back: true })),
     bill:          weapon(136, 7, 2.4, 0.10, 0.72, 'edge', 'bi', pole(0.38, { hitHalf: 16, cleaves: true, both: 'hook', back: true })),
     // (no point to stab with: right swings it, both buttons are the heavy blow)
-    scythe:        weapon(130, 6, 2.0, 0.08, 0.92, 'edge', 'sy', pole(0.46, { hitHalf: 30, right: 'chop' })),
+    scythe:        weapon(130, 6, 2.0, 0.08, 0.92, 'edge', 'sy', pole(0.46, { hitHalf: 30, right: 'chop', noSlide: true })),
   });
 
   // ── BOWS (2026-10-20, plan file §5z38 piece 2 — looks agreed in four rounds of renders, `scratchpad/look/items/bow/index.html`; the models
