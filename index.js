@@ -25954,6 +25954,7 @@ io.on('connection', (socket) => {
   let lastDeathAt = 0;
   socket.on('avt-died', () => {
     if (!currentAvatarRoom) return;
+    if (adminSockets.has(socket.id)) return;              // (2026-11-03, the user: in admin mode you keep what you carry when you die)
     const now = Date.now();
     if (now - lastDeathAt < 1500) return;
     lastDeathAt = now;
