@@ -20482,7 +20482,7 @@ function eqNote(sid, id, on) {
   else if (s) { s.delete(id); if (!s.size) eqObjs.delete(sid); }
 }
 function eqRemoveObj(room, o) {
-  if (o.eq) { vesselPutAway(o); eqNote(o.eq, o.id, 0); delete o.eq; }
+  if (o.eq) { vesselPutAway(o); delete o.uc; eqNote(o.eq, o.id, 0); delete o.eq; }
   objUnindex(room, o);
   emitObjToChunks(room, o, 'avatar-object-removed', { id: o.id });
   if (HELD.is(o.look) && HELD.LOOKS[o.look].hook) hookRopesDrop(room, o.id);
@@ -20616,7 +20616,7 @@ function vesselChanged(room, o) {
     else if (e.r && vesselSidOf.has(e.k)) e.r.vl = null;
     else if (e.r) { const i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); e.r = null; }
     vesselSaveSoon(e.k); }
-  emitObjToChunks(room, o, 'vessel-state', { id: o.id, vl: o.vl || 0 });
+  emitObjToChunks(room, o, 'vessel-state', { id: o.id, vl: o.vl || 0, uc: o.uc ? 1 : 0 });
 }
 // ── the one place liquid crosses between a cell and a container. Written as a paint is (`fineSetBlock`), from outside the tick: the next tick's strips take the cell from the active set as
 //    they do a painted one, and the wire, the chunk's saved diff and the reactions all see an ordinary change. Only ever on a cell that already exists: this never builds world.
@@ -26770,15 +26770,23 @@ io.on('connection', (socket) => {
   });
   // ⭐ (2026-11-03, tools piece 8) RIGHT HELD WITH A BUCKET OR FLASK (client 16zd): about ten times a second, `x`, `y` = its mouth, `fill` = it is dipped in liquid (else it pours), `k` = how hard it pours (0–1).
   //   Trusted only as far as its holder: it must be in this socket's own hand and near them, and the amount comes from the clock here (`rate` × the time since the last one), so sending faster moves nothing more.
+  // (2026-11-03) A FLASK'S STOPPER: out or in, by whoever holds it (`o.uc`: out). Nothing goes in or comes out of glass with it in. Put away, it goes back in.
+  socket.on('vessel-cork', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string') return;
+    const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o); if (!V || !V.glass || o.eq !== socket.id) return;
+    if (m.open) o.uc = 1; else delete o.uc;
+    vesselChanged(room, o);
+  });
   socket.on('vessel-flow', (m) => {
     const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !isFinite(m.x) || !isFinite(m.y) || !canBuild()) return;
     const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o);
     if (!V) return;
+    if (V.glass && !o.uc) return;
     if (o.eq) { if (o.eq !== socket.id) return; const ps = roomPos[room] && roomPos[room].get(socket.id); if (ps && isFinite(ps.x) && isFinite(ps.y) && Math.hypot(ps.x - m.x, ps.y - m.y) > 160) return; }
     else {
       // (increment 2, the user: "tipping should spill it") one lying or flying, tipped: only an open one, only pouring out, by nobody's hand, and near where it is said to be
       const hm = roomObjHeld[room], lp = roomLoosePose[room] && roomLoosePose[room].get(o.id), ox = lp ? lp.x : o.x, oy = lp ? lp.y : o.y;
-      if (!V.open || m.fill || (hm && hm.has(o.id)) || Math.hypot(ox - m.x, oy - m.y) > 400) return;
+      if (!(V.open || o.uc) || m.fill || (hm && hm.has(o.id)) || Math.hypot(ox - m.x, oy - m.y) > 400) return;
     }
     const now = Date.now(), Fl = vesselFlowAt.get(o.id) || { t: now - 100, carry: 0 };
     const dt = Math.min(0.25, Math.max(0, (now - Fl.t) / 1000)), k = m.fill ? 1 : Math.max(0, Math.min(1, +m.k || 0));
