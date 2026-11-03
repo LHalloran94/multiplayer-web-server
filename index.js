@@ -88,7 +88,7 @@ const RATE_CLASS = new Map(Object.entries({
   cursor: 'hot', 'avt-pos': 'hot', 'avt-where': 'hot', 'avatar-move': 'hot', 'avatar-input': 'hot',
   'avt-evt': 'hot', 'terrain-edit': 'hot', 'terrain-drop': 'hot', 'terrain-set': 'hot',
   'chunk-want': 'hot', 'chunk-verify': 'hot', 'draw-points': 'hot', 'canvas-stroke-points': 'hot',
-  'scroll-position': 'hot', 'pointer-pulse': 'hot', 'liquid-step': 'hot',
+  'scroll-position': 'hot', 'pointer-pulse': 'hot', 'liquid-step': 'hot', 'vessel-flow': 'hot',
   message: 'low', 'dm-message': 'low', 'private-room-message': 'low', 'group-message': 'low',
   reaction: 'low', 'spray-add': 'low', highlight: 'low', soundboard: 'low', 'media-add': 'low',
   'annotation-add': 'low', 'room-invite': 'low', 'group-invite': 'low', 'cursor-emote': 'low',
@@ -20478,7 +20478,7 @@ function eqNote(sid, id, on) {
   else if (s) { s.delete(id); if (!s.size) eqObjs.delete(sid); }
 }
 function eqRemoveObj(room, o) {
-  if (o.eq) { eqNote(o.eq, o.id, 0); delete o.eq; }
+  if (o.eq) { vesselPutAway(o); eqNote(o.eq, o.id, 0); delete o.eq; }
   objUnindex(room, o);
   emitObjToChunks(room, o, 'avatar-object-removed', { id: o.id });
   if (HELD.is(o.look) && HELD.LOOKS[o.look].hook) hookRopesDrop(room, o.id);
@@ -20502,6 +20502,136 @@ function hookRopesReel(room, hookId, sid) {
     setTimeout(() => { const m = roomObjects[room], q = m && m.get(id); if (q && q.reel) { objUnindex(room, q); emitObjToChunks(room, q, 'avatar-object-removed', { id }); } }, HOOK_REEL_MS);
   }
 }
+// ⭐ (2026-11-03, tools piece 8, the tools plan §10) WHAT A BUCKET OR FLASK HOLDS (the user's A — the first thing an item carries that makes it differ from another of its kind). While it is out in the
+//   world, or in a hand, its contents are on the object (`vl`: six numbers, one per liquid, as a cell holds them; absent when empty). In the pouch they are a row here, per player, and the one put
+//   away last comes out first. A row stays while its object is in a hand (`out`), kept up to date, so a server restart with a full bucket in your hand loses nothing. A page room keeps its own
+//   rows, so what is filled in a sandbox stays in that sandbox. Written straight away when it is put away; while it fills or pours, at most once a second.
+const vesselRows = new Map();    // key → [{ item, vl, t, out }]
+const vesselOut = new Map();     // object id → { k, r: its row or null }
+const vesselFlowAt = new Map();  // object id → { t, carry } its last `vessel-flow`
+const vesselSaveT = new Map();   // key → the timer of a save still to come
+let _vesselGet = null, _vesselPut = null, _vesselDel = null;
+function vesselSpec(o) { return (o && o.type === 'stamp' && HELD.is(o.look) && HELD.LOOKS[o.look].vessel) || null; }
+function vesselClean(v, V) {
+  if (!Array.isArray(v) || !V) return null;
+  const out = new Array(LIQ_T).fill(0); let room = V.cap;
+  for (let rk = 0; rk < LIQ_T; rk++) { const n = Math.min(room, Math.max(0, +v[rk] | 0)); out[rk] = n; room -= n; }
+  return room < V.cap ? out : null;
+}
+function vesselKeyOf(room, sid) { return playerKeyFor(sid) + (invGatedRoom(room) ? '' : '|' + room); }
+function vesselList(k) {
+  let L = vesselRows.get(k); if (L) return L;
+  L = [];
+  try {
+    if (!_vesselGet) { db.exec('CREATE TABLE IF NOT EXISTS player_vessels (vkey TEXT PRIMARY KEY, rows TEXT NOT NULL)');
+      _vesselGet = db.prepare('SELECT rows FROM player_vessels WHERE vkey = ?'); _vesselDel = db.prepare('DELETE FROM player_vessels WHERE vkey = ?');
+      _vesselPut = db.prepare('INSERT INTO player_vessels (vkey, rows) VALUES (?, ?) ON CONFLICT(vkey) DO UPDATE SET rows = excluded.rows'); }
+    const row = _vesselGet.get(k);
+    // (…and `out` is never read back: whatever it was in a hand of went with the last server)
+    if (row) for (const r of JSON.parse(row.rows)) { const vl = r && ITEMS.isItem(r.item) && vesselClean(r.vl, vesselSpec({ type: 'stamp', look: ITEMS.ITEMS[r.item].obj && ITEMS.ITEMS[r.item].obj.look })); if (vl) L.push({ item: r.item, vl, t: +r.t || 0, out: null }); }
+  } catch (e) { console.log('[vessel] could not read ' + k + ': ' + e.message); }
+  vesselRows.set(k, L);
+  return L;
+}
+function vesselSave(k) {
+  const T = vesselSaveT.get(k); if (T) { clearTimeout(T); vesselSaveT.delete(k); }
+  const L = vesselRows.get(k); if (!L || !_vesselPut) return;
+  try { if (L.length) _vesselPut.run(k, JSON.stringify(L.map(r => ({ item: r.item, vl: r.vl, t: r.t })))); else _vesselDel.run(k); }
+  catch (e) { console.log('[vessel] could not save ' + k + ': ' + e.message); }
+}
+function vesselSaveSoon(k) { if (!vesselSaveT.has(k)) vesselSaveT.set(k, setTimeout(() => vesselSave(k), 1000)); }
+// out of the pouch into a hand: the row put away last comes with it
+function vesselFromPouch(room, sid, o) {
+  if (!vesselSpec(o) || !o.item) return;
+  const k = vesselKeyOf(room, sid), L = vesselList(k); let best = null;
+  for (const r of L) if (r.item === o.item && !r.out && (!best || r.t > best.t)) best = r;
+  if (best) { best.out = o.id; o.vl = best.vl.slice(); }
+  vesselOut.set(o.id, { k, r: best });
+}
+// taken into a hand from the world: what is in it comes on to the taker's list
+function vesselToHand(room, sid, o) {
+  if (!vesselSpec(o) || !o.item) return;
+  const k = vesselKeyOf(room, sid), L = vesselList(k), e = { k, r: null };
+  if (o.vl) { e.r = { item: o.item, vl: o.vl.slice(), t: Date.now(), out: o.id }; L.push(e.r); vesselSave(k); }
+  vesselOut.set(o.id, e);
+}
+// out of a hand into the world: the object keeps what is in it, and the row goes
+function vesselToWorld(o) {
+  const e = vesselOut.get(o.id); vesselOut.delete(o.id); vesselFlowAt.delete(o.id); if (!e) return;
+  if (e.r) { const L = vesselList(e.k), i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); vesselSave(e.k); }
+}
+// out of a hand into the pouch (put away, disconnected, dying): the row is free again, the newest of them
+function vesselPutAway(o) {
+  const e = vesselOut.get(o.id); vesselOut.delete(o.id); vesselFlowAt.delete(o.id); if (!e) return;
+  const L = vesselList(e.k);
+  if (e.r) { e.r.out = null; e.r.t = Date.now(); if (o.vl) e.r.vl = o.vl.slice(); else { const i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); } }
+  else if (o.vl) L.push({ item: o.item, vl: o.vl.slice(), t: Date.now(), out: null });
+  vesselSave(e.k);
+}
+// a thing lying in the world put in the pouch with no hand between
+function vesselPocketed(room, sid, o) {
+  if (!vesselSpec(o) || !o.vl) return;
+  const k = vesselKeyOf(room, sid); vesselList(k).push({ item: o.item, vl: o.vl.slice(), t: Date.now(), out: null }); vesselSave(k);
+}
+// leaving the pouch for the world with no hand between (dragged out of the inventory window, a death's scatter): the row put away last goes with it
+function vesselFromPouchToWorld(room, sid, o) {
+  if (!vesselSpec(o) || !sid) return;
+  const k = vesselKeyOf(room, sid), L = vesselList(k); let best = null;
+  for (const r of L) if (r.item === o.item && !r.out && (!best || r.t > best.t)) best = r;
+  if (best) { o.vl = best.vl.slice(); L.splice(L.indexOf(best), 1); vesselSave(k); }
+}
+// the contents changed in a hand: the row follows, and everybody is told
+function vesselChanged(room, o) {
+  const e = vesselOut.get(o.id);
+  if (e) { const L = vesselList(e.k);
+    if (o.vl && !e.r) { e.r = { item: o.item, vl: o.vl.slice(), t: Date.now(), out: o.id }; L.push(e.r); }
+    else if (o.vl) e.r.vl = o.vl.slice();
+    else if (e.r) { const i = L.indexOf(e.r); if (i >= 0) L.splice(i, 1); e.r = null; }
+    vesselSaveSoon(e.k); }
+  emitObjToChunks(room, o, 'vessel-state', { id: o.id, vl: o.vl || 0 });
+}
+// ── the one place liquid crosses between a cell and a container. Written as a paint is (`fineSetBlock`), from outside the tick: the next tick's strips take the cell from the active set as
+//    they do a painted one, and the wire, the chunk's saved diff and the reactions all see an ordinary change. Only ever on a cell that already exists: this never builds world.
+function vesselCellOpen(room, i) { const st = cellsOf(room), grid = st.terrain; if (!grid || i < 0 || i >= grid.length) return false; const v = peekCellAt(grid, i); return v >= 0 && (v === 0 || isFluidId(v)); }
+function vesselCellDone(room, i, changed) {
+  const st = cellsOf(room), act = fineSet(room);
+  if (st.fineTotal.g(i) > 0) act.add(i); else act.delete(i);
+  fineSyncGrid(room, i); fineWakeAround(room, i); seedFineReactAround(room, i); seedSoilAround(room, st.terrain, i); changed.push(i);
+}
+function vesselCellTake(room, i, rk, want, changed) {
+  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, have = peekCellAt(tot, i) > 0 ? amt.rp(i)[amt.o(i) + rk] : 0, n = Math.min(have, want);
+  if (n <= 0) return 0;
+  amt.wp(i)[amt.o(i) + rk] = have - n; tot.s(i, tot.g(i) - n); vesselCellDone(room, i, changed);
+  return n;
+}
+function vesselCellPut(room, i, rk, want, changed) {
+  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, n = Math.min(LIQUID_MAX - tot.g(i), want);
+  if (n <= 0) return 0;
+  const p = amt.wp(i), b = amt.o(i); p[b + rk] += n; tot.s(i, tot.g(i) + n); vesselCellDone(room, i, changed);
+  return n;
+}
+// (`vessel-flow`) fill from the cell at (x, y) and those round it, or pour into it. Returns the units moved; nothing is made or lost: what leaves one side is what the other gets.
+function vesselMove(room, o, V, x, y, fill, want) {
+  const st = cellsOf(room); ensureFineArrays(room, 1);
+  const c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL), R = st.rows, changed = [];
+  if (r < 0 || r >= R || c < 0 || c >= st.cols) return 0;
+  const at = c * R + r, order = [at, r + 1 < R ? at + 1 : -1, at - R, at + R]; let moved = 0;
+  let held = -1; if (o.vl) for (let k = 0; k < LIQ_T; k++) if (o.vl[k] > 0) { held = k; break; }   // (the first build: one liquid at a time)
+  if (fill) {
+    const room0 = V.cap - (o.vl ? o.vl.reduce((a, b) => a + b, 0) : 0); want = Math.min(want, room0);
+    for (const i of order) { if (want <= 0) break; if (!vesselCellOpen(room, i) || !(peekCellAt(st.fineTotal, i) > 0)) continue;
+      let rk = held; if (rk < 0) { for (let k = LIQ_T - 1; k >= 0; k--) if (V.holds.includes(k) && st.fineAmt.rp(i)[st.fineAmt.o(i) + k] > 0) { rk = k; break; } if (rk < 0) continue; held = rk; }
+      if (!V.holds.includes(rk)) continue;
+      const n = vesselCellTake(room, i, rk, want, changed); if (n > 0) { if (!o.vl) o.vl = new Array(LIQ_T).fill(0); o.vl[rk] += n; moved += n; want -= n; } }
+  } else if (held >= 0) {
+    want = Math.min(want, o.vl[held]);
+    for (const i of order) { if (want <= 0) break; if (!vesselCellOpen(room, i)) continue;
+      const n = vesselCellPut(room, i, held, want, changed); if (n > 0) { o.vl[held] -= n; moved += n; want -= n; } }
+    if (o.vl.every(v => v <= 0)) delete o.vl;
+  }
+  if (changed.length) emitFineCells(room, changed);
+  return moved;
+}
 // `toSid` = whose hand it is going into, or null = into the world. False when the thing had to be removed instead: its holder
 // no longer carries one (their pouch was emptied under it), and leaving it lying would make a second one out of nothing.
 function itemObjMove(room, o, toSid) {
@@ -20514,6 +20644,7 @@ function itemObjMove(room, o, toSid) {
   if (o.pair) { eqRemoveObj(room, o); return false; }
   const gated = invGatedRoom(room);
   if (from) {
+    vesselToWorld(o);
     eqNote(from, o.id, 0); delete o.eq;
     if (gated) {
       const took = ledger.spendItem(playerKeyFor(from), o.item, 1);
@@ -20523,7 +20654,7 @@ function itemObjMove(room, o, toSid) {
   }
   if (to) {
     if (HELD.is(o.look) && HELD.LOOKS[o.look].hook) hookRopesReel(room, o.id, to);   // (tools piece 6) a grappling hook taken into a hand: its rope is reeled back into it
-    o.eq = to; eqNote(to, o.id, 1);
+    o.eq = to; eqNote(to, o.id, 1); vesselToHand(room, to, o);
     if (gated) { ledger.creditItems(playerKeyFor(to), [[o.item, 1]]); const ts = io.sockets.sockets.get(to); if (ts) sendInvSync(ts, room); }
   }
   if (objChunked(room)) objsTouch(room, o.ch);          // …saved from now on (or no longer)
@@ -20548,6 +20679,7 @@ function itemObjPlace(room, item, x, y, angle, ownerSid, ownerName) {
   const o = buildWorldObject('stamp', { type: 'stamp', content: S.content, shape: S.shape || 'rect', x, y, w: S.w, h: S.h, angle: angle || 0,
     breakable: false, loose: 1, look: S.look, lwt: S.lwt, lbnc: S.lbnc || 0, item }, id, ownerSid || '', ownerName || '', room);
   if (!o || o.item !== item) return null;
+  vesselFromPouchToWorld(room, ownerSid, o);            // (tools piece 8) a bucket with something in it takes that with it
   objIndex(room, o);
   if (objChunked(room)) emitObjToChunks(room, o, 'avatar-object-add', o); else io.to(room).emit('avatar-object-add', o);
   return o;
@@ -20616,6 +20748,8 @@ function ensureObjectsLoaded(room) {
       // game (`kickoff_prima.md` §8 row 4b). `buildWorldObject` cannot know it: it is a ledger fact, not a
       // shape fact, so it is reapplied here beside `hp`.
       if (p.cost > 0) o.cost = p.cost | 0;
+      // (2026-11-03, tools piece 8) …and what a bucket lying there holds
+      { const vl = vesselClean(p.vl, vesselSpec(o)); if (vl) o.vl = vl; }
       // (2026-10-25) …and a light HUNG on a wall, a sword STUCK in the ground (`obj-stick`): its record is put back, so it is still held there
       { const k = objStkClean(p.stk); if (k) { o.stk = k; const st = objStOf(room), rec = st.get(o.id) || {}; rec.stk = k; st.set(o.id, rec); (roomLoosePose[room] || (roomLoosePose[room] = new Map())).set(o.id, { x: k.x, y: k.y, a: k.a }); nStk++; } }
       objIndex(room, o);
@@ -25361,6 +25495,7 @@ io.on('connection', (socket) => {
       if (mine) for (const oid of mine) { const q = map.get(oid); if (q && q.item === obj.item && !q.pair) same++; }
       if (!eqAsk || (mine && mine.size >= 2) || (invGatedRoom(currentAvatarRoom) && ledger.itemCount(playerKeyFor(socket.id), obj.item) <= same)) { socket.emit('avatar-object-removed', { id }); return; }
       obj.eq = socket.id;
+      vesselFromPouch(currentAvatarRoom, socket.id, obj);   // (tools piece 8) a bucket comes out with what it held when it was put away
     }
     // Phase 6: clamp placement into the playable band (no-op at 'large'). Anti-cheat belt+suspenders — the
     // client is already confined by camera/walls; this keeps a crafted packet from landing objects in the
@@ -25449,6 +25584,7 @@ io.on('connection', (socket) => {
     // (hand items) …and what is in your own HAND is yours to put away whoever first brought it into the world — a sword somebody
     //   else dropped and you picked up. Without this it stayed in the world, held by you for ever, the moment you chose another number.
     if (!obj || !(mine || obj.eq === socket.id || adminSockets.has(socket.id))) return;
+    if (obj.eq) vesselPutAway(obj);                         // (tools piece 8) put away, a bucket's contents go in the pouch with it
     objUnindex(currentAvatarRoom, obj);
     if (HELD.is(obj.look) && HELD.LOOKS[obj.look].hook) hookRopesDrop(currentAvatarRoom, obj.id);   // (tools piece 6) …and a grappling hook's rope with it
     // ⭐ ERASING YOUR OWN PROP HANDS THE DEPOSIT STRAIGHT BACK, because this path is owner-only — it is
@@ -26564,9 +26700,23 @@ io.on('connection', (socket) => {
     { const dm = roomObjDrv[room]; if (dm) { dm.delete(id); if (!dm.size) delete roomObjDrv[room]; } }
     { const sm = roomObjSt[room]; if (sm) sm.delete(id); }
     if (invGatedRoom(room)) { ledger.creditItems(playerKeyFor(socket.id), [[o.item, 1]]); sendInvSync(socket, room); }
+    vesselPocketed(room, socket.id, o);                  // (tools piece 8) what a bucket holds goes in with it
     eqRemoveObj(room, o);
     if (objChunked(room)) socket.emit('avatar-object-removed', { id });   // …the taker may not be subscribed there
     broadcastObjSt(room);
+  });
+  // ⭐ (2026-11-03, tools piece 8) RIGHT HELD WITH A BUCKET OR FLASK (client 16zd): about ten times a second, `x`, `y` = its mouth, `fill` = it is dipped in liquid (else it pours), `k` = how hard it pours (0–1).
+  //   Trusted only as far as its holder: it must be in this socket's own hand and near them, and the amount comes from the clock here (`rate` × the time since the last one), so sending faster moves nothing more.
+  socket.on('vessel-flow', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !isFinite(m.x) || !isFinite(m.y) || !canBuild()) return;
+    const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o);
+    if (!V || o.eq !== socket.id) return;
+    { const ps = roomPos[room] && roomPos[room].get(socket.id); if (ps && isFinite(ps.x) && isFinite(ps.y) && Math.hypot(ps.x - m.x, ps.y - m.y) > 160) return; }
+    const now = Date.now(), Fl = vesselFlowAt.get(o.id) || { t: now - 100, carry: 0 };
+    const dt = Math.min(0.25, Math.max(0, (now - Fl.t) / 1000)), k = m.fill ? 1 : Math.max(0, Math.min(1, +m.k || 0));
+    const amt = V.rate * dt * k + Fl.carry, want = Math.floor(amt);
+    Fl.t = now; Fl.carry = Math.min(1, amt - want); vesselFlowAt.set(o.id, Fl);
+    if (want > 0 && vesselMove(room, o, V, +m.x, +m.y, !!m.fill, want) > 0) vesselChanged(room, o);
   });
   // ⭐ (2026-10-20, plan file §5z38 piece 3) AN ARROW CAUGHT — the user: "blocking arrows unarmed, it should be like the weapons where you can block the
   //   arrow if you parry it, and we could have this as the player catching the arrow". The SHOOTER's machine judges it (it flies the arrow and has the
@@ -27721,6 +27871,7 @@ function worldFlushAll(why) {
   catch (e) { console.log('build flush on ' + why + ' failed: ' + e.message); }
   try { const n = objectFlush(1e9); if (n) console.log(`prop persistence: flushed ${n} chunk(s) on ${why}`); }
   catch (e) { console.log('prop flush on ' + why + ' failed: ' + e.message); }
+  for (const k of [...vesselSaveT.keys()]) vesselSave(k);   // (tools piece 8) what a bucket in a hand holds, changed in the last second
 }
 process.on('SIGTERM', () => {
   worldFlushAll('SIGTERM');

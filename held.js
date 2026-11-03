@@ -524,6 +524,13 @@
     launcher: tool(14, 8, 0.6, 0.19, 1, 'gl', { hitHalf: 3, strikes: false, sticks: false, pierces: false, right: 'none', mat: 'steel', rest: 'level', offTilt: { beside: 1.55, back: -1.55, raised: 1.55 },
       launcher: { at: 1, y: -6 / 26 } }, 'blunt'),
   });
+  // ⭐ TOOLS, PIECE 8 (2026-11-03, the tools plan §10): THE BUCKETS AND FLASKS — client 16zd, server `vessel-flow`. Hangs from the fist by its bail (the lantern's way); RIGHT held: in liquid it fills, out of
+  //   it it tips towards the pointer and pours real liquid. `vessel`: `cap` units (24 = one cell of liquid), `rate` units a second, `holds` the liquids it may take (ranks: 0 lava · 1 quicksand ·
+  //   2 brine · 3 acid · 4 water · 5 oil — the user, 2026-11-03: acid only in glass), and the inside of it as fractions of its length: `floor`, `floorR`, `rim`, `rimR`.
+  Object.assign(LOOKS, {
+    woodbucket: tool(26, 15, 0.7, 0.97, 1, 'wb', { content: '🪣', hitHalf: 7, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 },
+      vessel: { cap: 96, rate: 64, holds: [1, 2, 4, 5], floor: 1.2 / 26, floorR: 5.6 / 26, rim: 12.6 / 26, rimR: 6.5 / 26 } }, 'blunt'),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it

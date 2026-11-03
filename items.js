@@ -194,6 +194,9 @@ ITEMS.grappling_hook = { name: 'Grappling hook', kind: 'tool', tier: 0, svg: SVG
 // ⭐ TOOLS, PIECE 7 (2026-11-03): the GRAPPLE LAUNCHER (server/held.js `launcher` — client 16zc)
 SVG.launcher = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="3" y="6.5" width="17" height="4.4" rx="1" fill="#5c626e"/><rect x="20" y="7.3" width="2.4" height="2.8" rx=".6" fill="#7e838c"/><path d="M4.4 10.9 H9.4 L8 15 L7.4 20 H3.6 L3.4 18.4 L4.8 15 Z" fill="#26262a"/><path d="M9.2 10.9 L9.6 13 C10.2 14.6 13.4 14.6 14 13 L14.2 10.9" fill="none" stroke="#b8c0cc" stroke-width="1"/><path d="M11.2 10.9 L11.9 12.8" stroke="#e2e8f0" stroke-width="1"/><circle cx="17.6" cy="12.2" r="2.4" fill="#7e8490"/><circle cx="17.6" cy="12.2" r=".9" fill="#3a3e48"/></svg>';
 ITEMS.grapple_launcher = { name: 'Grapple launcher', kind: 'tool', tier: 0, svg: SVG.launcher, obj: HELD.objOf('launcher'), make: { mats: [], prima: 40 } };
+// ⭐ TOOLS, PIECE 8 (2026-11-03): the WOODEN BUCKET (server/held.js `woodbucket` — client 16zd). What it holds is not part of the item: see `vesselRows` in index.js
+SVG.woodbucket = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 9.5 C5 2.5 19 2.5 19 9.5" fill="none" stroke="#b29a6e" stroke-width="1.3"/><path d="M4.2 9.5 H19.8 L18 21 H6 Z" fill="#96683e"/><path d="M8.2 9.5 L9 21 M12 9.5 V21 M15.8 9.5 L15 21" stroke="#6a4626" stroke-width=".8"/><path d="M4.6 12 H19.4 M5.4 18 H18.6" stroke="#767a82" stroke-width="1.4"/></svg>';
+ITEMS.wood_bucket = { name: 'Wooden bucket', kind: 'tool', tier: 0, svg: SVG.woodbucket, obj: HELD.objOf('woodbucket'), make: { mats: [], prima: 15 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
