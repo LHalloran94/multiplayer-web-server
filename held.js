@@ -528,8 +528,18 @@
   //   it it tips towards the pointer and pours real liquid. `vessel`: `cap` units (24 = one cell of liquid), `rate` units a second, `holds` the liquids it may take (ranks: 0 lava · 1 quicksand ·
   //   2 brine · 3 acid · 4 water · 5 oil — the user, 2026-11-03: acid only in glass), and the inside of it as fractions of its length: `floor`, `floorR`, `rim`, `rimR`.
   Object.assign(LOOKS, {
-    woodbucket: tool(20, 11.5, 0.7, 0.97, 1, 'wb', { content: '🪣', hitHalf: 5, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 },
-      vessel: { cap: 96, rate: 64, holds: [1, 2, 4, 5], floor: 1.2 / 26, floorR: 5.6 / 26, rim: 12.6 / 26, rimR: 6.5 / 26 } }, 'blunt'),
+    woodbucket: tool(20, 11.5, 0.7, 0.97, 1, 'wb', { content: '🪣', hitHalf: 5, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 },
+      vessel: { cap: 96, rate: 64, holds: [1, 2, 4, 5], open: true, bail: true, floor: 1.2 / 26, floorR: 5.6 / 26, rim: 12.6 / 26, rimR: 6.5 / 26 } }, 'blunt'),
+    // (increment 2) THE STEEL PAIL: as the bucket, ribbed; it holds lava too (`holds` 0), not acid: only glass does (the user, 2026-11-03).
+    steelpail: tool(20, 11.5, 0.8, 0.97, 1, 'vp', { content: '🪣', hitHalf: 5, sticks: false, pierces: false, daze: false, right: 'none', mat: 'steel', scheme: 'P', aimsAtRest: false, holdUpright: true, rest: 'hang', offTilt: { beside: 0, back: 0, raised: 0 },
+      vessel: { cap: 96, rate: 64, holds: [0, 1, 2, 4, 5], open: true, bail: true, floor: 1 / 26, floorR: 5.4 / 26, rim: 13 / 26, rimR: 7 / 26 } }, 'blunt'),
+    // (increment 2) THE FLASKS, glass: the round flask (1 cell) and the bottle (2 cells), corked, held by the neck (at the belly the hand hid it, as it did the grease flask's): `pivot` = the hand, what they turn about as they tip; `inner` = their inside, from the floor's
+    //   middle up to the mouth, as fractions of their length. They hold water, brine, oil and ACID; not lava (it cracks them), not quicksand (the neck is too narrow). `breaks: 'vessel'` (client 16x, server `thrBreakDo`):
+    //   thrown, or dropped hard, what is in it lands as real liquid.
+    roundflask: tool(15, 8, 0.45, 0.72, 1, 'rf', { content: '⚗️', hitHalf: 3, throwable: true, breaks: 'vessel', sticks: true, stickAny: true, strikes: false, pierces: false, daze: false, right: 'none', mat: 'glass', thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true, offTilt: { beside: 0, back: 0, raised: 0 },
+      vessel: { cap: 24, rate: 24, holds: [2, 3, 4, 5], glass: true, pivot: 0.72, tip: 2.3, dip: 0.5, rim: 18 / 22, rimR: 1.3 / 22, inner: [[0.45 / 22, 0], [0.45 / 22, 2.9 / 22], [1.2 / 22, 4.5 / 22], [2.9 / 22, 5.45 / 22], [5.6 / 22, 5.75 / 22], [8.3 / 22, 5.35 / 22], [10.2 / 22, 4 / 22], [11.6 / 22, 2.2 / 22], [12.5 / 22, 1.35 / 22], [18 / 22, 1.3 / 22]] } }, 'blunt'),
+    bottleflask: tool(18, 7, 0.5, 0.68, 1, 'bf', { content: '🍾', hitHalf: 3, throwable: true, breaks: 'vessel', sticks: true, stickAny: true, strikes: false, pierces: false, daze: false, right: 'none', mat: 'glass', thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true, offTilt: { beside: 0, back: 0, raised: 0 },
+      vessel: { cap: 48, rate: 32, holds: [2, 3, 4, 5], glass: true, pivot: 0.68, tip: 2.3, dip: 0.5, rim: 21.5 / 26, rimR: 1.25 / 26, inner: [[0.5 / 26, 0], [0.5 / 26, 3.5 / 26], [1 / 26, 3.95 / 26], [12 / 26, 3.95 / 26], [13.9 / 26, 3.15 / 26], [15.9 / 26, 1.3 / 26], [21.5 / 26, 1.25 / 26]] } }, 'blunt'),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;

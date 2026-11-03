@@ -197,6 +197,13 @@ ITEMS.grapple_launcher = { name: 'Grapple launcher', kind: 'tool', tier: 0, svg:
 // ⭐ TOOLS, PIECE 8 (2026-11-03): the WOODEN BUCKET (server/held.js `woodbucket` — client 16zd). What it holds is not part of the item: see `vesselRows` in index.js
 SVG.woodbucket = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 9.5 C5 2.5 19 2.5 19 9.5" fill="none" stroke="#b29a6e" stroke-width="1.3"/><path d="M4.2 9.5 H19.8 L18 21 H6 Z" fill="#96683e"/><path d="M8.2 9.5 L9 21 M12 9.5 V21 M15.8 9.5 L15 21" stroke="#6a4626" stroke-width=".8"/><path d="M4.6 12 H19.4 M5.4 18 H18.6" stroke="#767a82" stroke-width="1.4"/></svg>';
 ITEMS.wood_bucket = { name: 'Wooden bucket', kind: 'tool', tier: 0, svg: SVG.woodbucket, obj: HELD.objOf('woodbucket'), make: { mats: [], prima: 15 } };
+// (increment 2) the STEEL PAIL and the two glass FLASKS (stacks, as the other flasks are: the next comes to hand after a throw)
+SVG.steelpail = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 9.5 C5 2.5 19 2.5 19 9.5" fill="none" stroke="#c6ccd2" stroke-width="1"/><rect x="10" y="2.6" width="4" height="1.5" rx=".7" fill="#8e6236"/><path d="M4.2 9.5 H19.8 L18 21 H6 Z" fill="#a0a8ac"/><path d="M4.9 13 H19.1 M5.5 17 H18.5" stroke="#ced4d6" stroke-width="1.1"/></svg>';
+SVG.roundflask = flaskSvg('#cfe6f2', '#6fb2dc');
+SVG.bottleflask = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10.4 4h3.2v4.2c1.9.8 3 2.3 3 4.3V20a1.5 1.5 0 0 1-1.5 1.5H8.9A1.5 1.5 0 0 1 7.4 20v-7.5c0-2 1.1-3.5 3-4.3z" fill="#cfe6f2"/><path d="M7.4 14h9.2v6a1.5 1.5 0 0 1-1.5 1.5H8.9A1.5 1.5 0 0 1 7.4 20z" fill="#6fb2dc"/><rect x="9.9" y="2" width="4.2" height="2.6" rx=".8" fill="#b08a5a"/></svg>';
+ITEMS.steel_pail = { name: 'Steel pail', kind: 'tool', tier: 0, svg: SVG.steelpail, obj: HELD.objOf('steelpail'), make: { mats: [], prima: 30 } };
+ITEMS.round_flask = { name: 'Round flask', kind: 'throwable', tier: 0, svg: SVG.roundflask, obj: HELD.objOf('roundflask'), stack: true, make: { mats: [], prima: 8 } };
+ITEMS.glass_bottle = { name: 'Glass bottle', kind: 'throwable', tier: 0, svg: SVG.bottleflask, obj: HELD.objOf('bottleflask'), stack: true, make: { mats: [], prima: 10 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 

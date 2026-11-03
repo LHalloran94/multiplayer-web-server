@@ -7190,6 +7190,8 @@ function thrBreakDo(room, o, m, sock) {
   if (!sock && lit && S.breaks === 'fire') igniteBox(room, x, y + 4, 4);
   // (§5z72) a FROST flask freezes the water in its reach and puts out what burns there
   if (S.breaks === 'frost') { try { thrFreeze(room, x, y, S.reach || 56); } catch (e) { console.warn('[thrFreeze]', e && e.message); } }
+  // (tools piece 8, increment 2) a glass flask lets out what is in it, as real liquid, where it broke
+  if (S.breaks === 'vessel' && o.vl) { try { vesselSpill(room, o, x, y, out.vx, out.vy); } catch (e) { console.warn('[vesselSpill]', e && e.message); } }
   // (§5z68 — the user: "whether the terrain is flammable or not doesn't really matter since the fuel is the catalyst and the thing being burned") — the
   //   server NO LONGER lights the ground's own cells where it broke (that was the fire "inside the cells" of dirt): the fuel burns, on every screen, from the
   //   seed. `pts` (where its fuel landed) is still sent and ignored. (§5z69) Burnable ground under fuel that has caught is lit by `thr-burn`.
@@ -20633,6 +20635,34 @@ function vesselMove(room, o, V, x, y, fill, want) {
   if (changed.length) emitFineCells(room, changed);
   return moved;
 }
+// (increment 2) ALL OF WHAT IS IN IT, OUT AT ONCE, as real liquid: from the open cell nearest (x, y), along the way it was going and spreading out from there, at most half a cell's worth a cell, then whatever room
+//   is left. Everybody is shown the spray (`vessel-splash`, holding nothing). What is put is what leaves `vl`; only a thing broken in a pocket with no room at all could lose any, and that is said in the log.
+function vesselSpill(room, o, x, y, vx, vy) {
+  if (!o.vl) return; const st = cellsOf(room); ensureFineArrays(room, 1);
+  const R = st.rows, C = st.cols, cOf = (px) => Math.floor(px / TERRAIN_CELL), rOf = (py) => Math.floor(py / TERRAIN_CELL), idx = (c, r) => (c < 0 || c >= C || r < 0 || r >= R) ? -1 : c * R + r;
+  let start = idx(cOf(x), rOf(y));
+  if (!vesselCellOpen(room, start)) { const sp = Math.hypot(vx, vy) || 1; for (let k = 1; k <= 6 && !vesselCellOpen(room, start); k++) start = idx(cOf(x - vx / sp * k * 4), rOf(y - vy / sp * k * 4 - (vx || vy ? 0 : k * 4))); }
+  if (!vesselCellOpen(room, start)) { for (let k = 1; k <= 8 && !vesselCellOpen(room, start); k++) start = idx(cOf(x), rOf(y - k * TERRAIN_CELL)); }
+  const queue = [], seen = new Set(), push = (i) => { if (i >= 0 && !seen.has(i) && vesselCellOpen(room, i)) { seen.add(i); queue.push(i); } };
+  push(start);
+  // (…the way it was going first: a thrown bucket's goes on ahead of it)
+  { const sp = Math.hypot(vx, vy); if (sp > 1 && start >= 0) { const ux = vx / sp, uy = vy / sp, c0 = Math.floor(start / R), r0 = start % R, n = Math.min(10, Math.round(sp / 2)); for (let k = 1; k <= n; k++) { const i = idx(c0 + Math.round(ux * k), r0 + Math.round(uy * k)); if (i < 0 || !vesselCellOpen(room, i)) break; push(i); } } }
+  const changed = []; let rk0 = -1, total = 0;
+  for (let rk = LIQ_T - 1; rk >= 0; rk--) if (o.vl[rk] > 0) { if (rk0 < 0) rk0 = rk; total += o.vl[rk]; }
+  const halfCell = Math.max(1, LIQUID_MAX >> 1);
+  for (let q = 0, visits = 0; q < queue.length && visits < 500; q++, visits++) {
+    const i = queue[q]; let any = false;
+    for (let rk = LIQ_T - 1; rk >= 0; rk--) { if (!(o.vl[rk] > 0)) continue; const n = vesselCellPut(room, i, rk, Math.min(o.vl[rk], halfCell), changed); if (n > 0) { o.vl[rk] -= n; any = true; } break; }
+    if (o.vl.every(v => v <= 0)) break;
+    const c = Math.floor(i / R), r = i % R; push(idx(c, r + 1)); push(idx(c - 1, r)); push(idx(c + 1, r)); push(idx(c, r - 1));
+  }
+  // (…and a second round, filling, for a thing broken somewhere tight)
+  if (!o.vl.every(v => v <= 0)) for (const i of queue) { for (let rk = LIQ_T - 1; rk >= 0; rk--) { if (!(o.vl[rk] > 0)) continue; const n = vesselCellPut(room, i, rk, o.vl[rk], changed); if (n > 0) o.vl[rk] -= n; } if (o.vl.every(v => v <= 0)) break; }
+  const left = o.vl.reduce((a, b) => a + b, 0); if (left > 0) console.log('[vessel] spill at ' + Math.round(x) + ',' + Math.round(y) + ': no room for ' + left + ' unit(s)');
+  delete o.vl;
+  if (changed.length) emitFineCells(room, [...new Set(changed)]);
+  emitObjToChunks(room, o, 'vessel-splash', { x: Math.round(x), y: Math.round(y), vx: +(+vx).toFixed(1), vy: +(+vy).toFixed(1), rk: rk0 < 0 ? 4 : rk0, n: total });
+}
 // `toSid` = whose hand it is going into, or null = into the world. False when the thing had to be removed instead: its holder
 // no longer carries one (their pouch was emptied under it), and leaving it lying would make a second one out of nothing.
 function itemObjMove(room, o, toSid) {
@@ -26711,13 +26741,26 @@ io.on('connection', (socket) => {
   socket.on('vessel-flow', (m) => {
     const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !isFinite(m.x) || !isFinite(m.y) || !canBuild()) return;
     const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o);
-    if (!V || o.eq !== socket.id) return;
-    { const ps = roomPos[room] && roomPos[room].get(socket.id); if (ps && isFinite(ps.x) && isFinite(ps.y) && Math.hypot(ps.x - m.x, ps.y - m.y) > 160) return; }
+    if (!V) return;
+    if (o.eq) { if (o.eq !== socket.id) return; const ps = roomPos[room] && roomPos[room].get(socket.id); if (ps && isFinite(ps.x) && isFinite(ps.y) && Math.hypot(ps.x - m.x, ps.y - m.y) > 160) return; }
+    else {
+      // (increment 2, the user: "tipping should spill it") one lying or flying, tipped: only an open one, only pouring out, by nobody's hand, and near where it is said to be
+      const hm = roomObjHeld[room], lp = roomLoosePose[room] && roomLoosePose[room].get(o.id), ox = lp ? lp.x : o.x, oy = lp ? lp.y : o.y;
+      if (!V.open || m.fill || (hm && hm.has(o.id)) || Math.hypot(ox - m.x, oy - m.y) > 400) return;
+    }
     const now = Date.now(), Fl = vesselFlowAt.get(o.id) || { t: now - 100, carry: 0 };
     const dt = Math.min(0.25, Math.max(0, (now - Fl.t) / 1000)), k = m.fill ? 1 : Math.max(0, Math.min(1, +m.k || 0));
     const amt = V.rate * dt * k + Fl.carry, want = Math.floor(amt);
     Fl.t = now; Fl.carry = Math.min(1, amt - want); vesselFlowAt.set(o.id, Fl);
     if (want > 0 && vesselMove(room, o, V, +m.x, +m.y, !!m.fill, want) > 0) vesselChanged(room, o);
+  });
+  // (increment 2) A BUCKET THROWN: what is in it flies out as it leaves the hand (client 16zd `vesselOnThrow`), asked while it is still in that hand. A flask's comes from its breaking (`thrBreakDo`).
+  socket.on('vessel-spill', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !isFinite(m.x) || !isFinite(m.y) || !canBuild()) return;
+    const map = roomObjects[room], o = map && map.get(m.id), V = vesselSpec(o); if (!V || !V.open || o.eq !== socket.id || !o.vl) return;
+    { const ps = roomPos[room] && roomPos[room].get(socket.id); if (ps && isFinite(ps.x) && isFinite(ps.y) && Math.hypot(ps.x - m.x, ps.y - m.y) > 160) return; }
+    vesselSpill(room, o, +m.x, +m.y, +m.vx || 0, +m.vy || 0);
+    vesselChanged(room, o);
   });
   // ⭐ (2026-10-20, plan file §5z38 piece 3) AN ARROW CAUGHT — the user: "blocking arrows unarmed, it should be like the weapons where you can block the
   //   arrow if you parry it, and we could have this as the player catching the arrow". The SHOOTER's machine judges it (it flies the arrow and has the
