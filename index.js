@@ -20648,7 +20648,11 @@ function vesselMove(room, o, V, x, y, fill, want) {
   let held = -1; if (o.vl) for (let k = 0; k < LIQ_T; k++) if (o.vl[k] > 0) { held = k; break; }   // (the first build: one liquid at a time)
   if (fill) {
     const room0 = V.cap - (o.vl ? o.vl.reduce((a, b) => a + b, 0) : 0); want = Math.min(want, room0);
-    for (const i of order) { if (want <= 0) break; if (!vesselCellOpen(room, i) || !(peekCellAt(st.fineTotal, i) > 0)) continue;
+    // (2026-11-03, the user: "it should also only ever fill if the opening is actually covered by the liquid") glass drinks through its mouth: only with the mouth under the surface, the surface being that of the cells on either side too
+    //   (what it drinks dips its own cell first, and a level pool is slow to fill so small a dip: that is no real surface), and from there alone. The cell above holding any: well under
+    const lvlOf = (i) => (i >= 0 && vesselCellOpen(room, i) ? Math.min(1, peekCellAt(st.fineTotal, i) / LIQUID_MAX) : 0);
+    if (V.glass && !(r > 0 && lvlOf(at - 1) > 0) && y < (r + 1 - Math.max(lvlOf(at), lvlOf(at - R), lvlOf(at + R))) * TERRAIN_CELL) return 0;
+    for (const i of (V.glass ? [at, at - R, at + R, r > 0 ? at - 1 : -1] : order)) { if (want <= 0) break; if (!vesselCellOpen(room, i) || !(peekCellAt(st.fineTotal, i) > 0)) continue;
       let rk = held; if (rk < 0) { for (let k = LIQ_T - 1; k >= 0; k--) if (V.holds.includes(k) && st.fineAmt.rp(i)[st.fineAmt.o(i) + k] > 0) { rk = k; break; } if (rk < 0) continue; held = rk; }
       if (!V.holds.includes(rk)) continue;
       const n = vesselCellTake(room, i, rk, want, changed); if (n > 0) { if (!o.vl) o.vl = new Array(LIQ_T).fill(0); o.vl[rk] += n; moved += n; want -= n; } }
