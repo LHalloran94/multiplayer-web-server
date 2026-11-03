@@ -20642,7 +20642,8 @@ function vesselSpill(room, o, x, y, vx, vy) {
   const R = st.rows, C = st.cols, cOf = (px) => Math.floor(px / TERRAIN_CELL), rOf = (py) => Math.floor(py / TERRAIN_CELL), idx = (c, r) => (c < 0 || c >= C || r < 0 || r >= R) ? -1 : c * R + r;
   let start = idx(cOf(x), rOf(y));
   if (!vesselCellOpen(room, start)) { const sp = Math.hypot(vx, vy) || 1; for (let k = 1; k <= 6 && !vesselCellOpen(room, start); k++) start = idx(cOf(x - vx / sp * k * 4), rOf(y - vy / sp * k * 4 - (vx || vy ? 0 : k * 4))); }
-  if (!vesselCellOpen(room, start)) { for (let k = 1; k <= 8 && !vesselCellOpen(room, start); k++) start = idx(cOf(x), rOf(y - k * TERRAIN_CELL)); }
+  // (…by then it has often stopped, so that way lies along the wall: the nearest open cell round it)
+  if (!vesselCellOpen(room, start)) { const c0 = cOf(x), r0 = rOf(y); let found = -1; for (let d = 1; d <= 6 && found < 0; d++) for (const [dc, dr] of [[0, -d], [d, 0], [-d, 0], [0, d], [d, -d], [-d, -d], [d, d], [-d, d]]) { const i = idx(c0 + dc, r0 + dr); if (vesselCellOpen(room, i)) { found = i; break; } } start = found; }
   const queue = [], seen = new Set(), push = (i) => { if (i >= 0 && !seen.has(i) && vesselCellOpen(room, i)) { seen.add(i); queue.push(i); } };
   push(start);
   // (…the way it was going first: a thrown bucket's goes on ahead of it)
