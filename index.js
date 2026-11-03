@@ -20651,13 +20651,13 @@ function vesselCellPut(room, i, rk, want, changed) {
   return n;
 }
 // (`vessel-flow`) fill from the cell at (x, y) and those round it, or pour into it. Returns the units moved; nothing is made or lost: what leaves one side is what the other gets.
-function vesselMove(room, o, V, x, y, fill, want) {
+//   ⭐ (8.4, 2026-11-03, the user: "layers by weight") ANY OF WHAT IT HOLDS GOES IN BESIDE WHAT IS THERE: what is on top in the cell at its mouth. Out comes the layer at its lip, which only its holder's screen knows (`rk`, client `vesselPourRank`); not said, or none of that left: the top one.
+function vesselMove(room, o, V, x, y, fill, want, askRk) {
   const st = cellsOf(room); ensureFineArrays(room, 1);
   const c = Math.floor(x / TERRAIN_CELL), r = Math.floor(y / TERRAIN_CELL), R = st.rows, changed = [];
   if (r < 0 || r >= R || c < 0 || c >= st.cols) return 0;
   const at = c * R + r, order = [at, r + 1 < R ? at + 1 : -1, at - R, at + R]; let moved = 0;
   if (!vesselCellOpen(room, at)) return 0;   // (2026-11-03, the user: not inside terrain — a mouth in rock must not reach the cave beside it through the wall)
-  let held = -1; if (o.vl) for (let k = 0; k < LIQ_T; k++) if (o.vl[k] > 0) { held = k; break; }   // (the first build: one liquid at a time)
   if (fill) {
     const room0 = V.cap - (o.vl ? o.vl.reduce((a, b) => a + b, 0) : 0); want = Math.min(want, room0);
     // (2026-11-03, the user: "it should also only ever fill if the opening is actually covered by the liquid") glass drinks through its mouth: only with the mouth under the surface, the surface being that of the cells on either side too
@@ -20665,13 +20665,13 @@ function vesselMove(room, o, V, x, y, fill, want) {
     const lvlOf = (i) => (i >= 0 && vesselCellOpen(room, i) ? Math.min(1, peekCellAt(st.fineTotal, i) / LIQUID_MAX) : 0);
     if (V.glass && !(r > 0 && lvlOf(at - 1) > 0) && y < (r + 1 - Math.max(lvlOf(at), lvlOf(at - R), lvlOf(at + R))) * TERRAIN_CELL) return 0;
     for (const i of (V.glass ? [at, at - R, at + R, r > 0 ? at - 1 : -1] : order)) { if (want <= 0) break; if (!vesselCellOpen(room, i) || !(peekCellAt(st.fineTotal, i) > 0)) continue;
-      let rk = held; if (rk < 0) { for (let k = LIQ_T - 1; k >= 0; k--) if (V.holds.includes(k) && st.fineAmt.rp(i)[st.fineAmt.o(i) + k] > 0) { rk = k; break; } if (rk < 0) continue; held = rk; }
-      if (!V.holds.includes(rk)) continue;
+      let rk = -1; for (let k = LIQ_T - 1; k >= 0; k--) if (V.holds.includes(k) && st.fineAmt.rp(i)[st.fineAmt.o(i) + k] > 0) { rk = k; break; } if (rk < 0) continue;
       const n = vesselCellTake(room, i, rk, want, changed); if (n > 0) { if (!o.vl) o.vl = new Array(LIQ_T).fill(0); o.vl[rk] += n; moved += n; want -= n; } }
-  } else if (held >= 0) {
-    want = Math.min(want, o.vl[held]);
-    for (const i of order) { if (want <= 0) break; if (!vesselCellOpen(room, i)) continue;
-      const n = vesselCellPut(room, i, held, want, changed); if (n > 0) { o.vl[held] -= n; moved += n; want -= n; } }
+  } else if (o.vl) {
+    let rk = askRk >= 0 && askRk < LIQ_T && o.vl[askRk] > 0 ? askRk : -1; if (rk < 0) for (let k = LIQ_T - 1; k >= 0; k--) if (o.vl[k] > 0) { rk = k; break; }
+    if (rk >= 0) { want = Math.min(want, o.vl[rk]);
+      for (const i of order) { if (want <= 0) break; if (!vesselCellOpen(room, i)) continue;
+        const n = vesselCellPut(room, i, rk, want, changed); if (n > 0) { o.vl[rk] -= n; moved += n; want -= n; } } }
     if (o.vl.every(v => v <= 0)) delete o.vl;
   }
   if (changed.length) emitFineCells(room, changed);
@@ -26819,7 +26819,7 @@ io.on('connection', (socket) => {
     const dt = Math.min(0.25, Math.max(0, (now - Fl.t) / 1000)), k = m.fill ? 1 : Math.max(0, Math.min(1, +m.k || 0));
     const amt = V.rate * dt * k + Fl.carry, want = Math.floor(amt);
     Fl.t = now; Fl.carry = Math.min(1, amt - want); vesselFlowAt.set(o.id, Fl);
-    if (want > 0 && vesselMove(room, o, V, +m.x, +m.y, !!m.fill, want) > 0) vesselChanged(room, o);
+    if (want > 0 && vesselMove(room, o, V, +m.x, +m.y, !!m.fill, want, Number.isInteger(m.rk) ? m.rk : -1) > 0) vesselChanged(room, o);
   });
   // (increment 2) A BUCKET THROWN: what is in it flies out as it leaves the hand (client 16zd `vesselOnThrow`), asked while it is still in that hand. A flask's comes from its breaking (`thrBreakDo`).
   socket.on('vessel-spill', (m) => {
