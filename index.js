@@ -946,6 +946,22 @@ app.get('/debug/voice-prox', (req, res) => {
 // ⭐ WHAT IS ALIGHT, PER ROOM — the size of the burning set is the one fire number no readout carried, and the
 //   per-turn cap (`fireMaxCells`) works against it. Per strip as well, because a sectored room caps each strip's
 //   turn separately. Materials by `peekCellAt`, so asking never builds a chunk. Read-only.
+// (2026-11-08, liquid on slopes) the cells round each player in the Overworld (or ?x=&y= world px) AS THE LIQUID SEES THEM: one line a row —
+//   '#' ground · '.' open · 'w' a wedge (the server's) · a number: the liquid in the cell (of LIQUID_MAX), '*' after it when the step is awake on it,
+//   'W' after it when that cell is also a wedge. Non-faulting reads (an unbuilt cell '?'); nothing is changed.
+app.get('/debug/slope-cells', (req, res) => {
+  const room = OVERWORLD_ROOM, st = peekCells(room), grid = st && st.terrain; if (!grid) return res.json({ err: 'no terrain' });
+  const ROWS = st.rows, tot = st.fineTotal, act = st.fineActive, T = TERRAIN_CELL, R = Math.min(30, +req.query.r || 14);
+  const spots = [];
+  if (req.query.x) spots.push([+req.query.x, +req.query.y]);
+  else { const rs = roomSim[room]; if (rs && rs.avatars) for (const id in rs.avatars) { const a = rs.avatars[id]; if (a && isFinite(a.x)) spots.push([a.x, a.y]); } }
+  const out = spots.map(([x, y]) => { const cx = Math.floor(x / T), cy = Math.floor(y / T), rows = [];
+    for (let r = cy - R; r <= cy + 6; r++) { let l = r + '\t'; for (let c = cx - R; c <= cx + R; c++) { const i = c * ROWS + r, v = peekCellAt(grid, i);
+      const p = grid.pageOfCell(i), b = slopeWedgePage(room, st, p), g = grid.geom, w = b ? b[g.K >= 0 ? (((i & 63) << 6) | ((i >>> g.K) & 63)) : g.offOf[i]] : 0, L = tot ? tot.g(i) : 0;
+      l += (c === cx && r === cy ? '@' : '') + (v < 0 ? '?' : L > 0 ? L + (w ? 'W' : '') + (act && act.has(i) ? '*' : '') : w ? 'w' : (v !== 0 && !isFluidId(v)) ? '#' : '.') + ' '; } rows.push(l); }
+    return { x, y, col: cx, row: cy, rows }; });
+  res.type('text').send(out.map(o => `at ${o.x},${o.y} (col ${o.col} row ${o.row}) slopeWedges=${liquidCfg.slopeWedges}\n` + o.rows.join('\n')).join('\n\n') + `\ncounters: slant ${liqSlant} ledge ${liqLedge} trickle ${liqTrickle} wedgeOut ${liqWedgeOut} pages ${slopeWPages}\n`);
+});
 app.get('/debug/fire', (req, res) => {
   const out = {}, W = Math.max(1, liquidCfg.secW | 0);
   for (const [room, st] of roomCells) {
@@ -9054,6 +9070,10 @@ const LEVEL_VISC = [1.5, 0.8, 0.4, 0.2, 0.1, 0];     // by rank: lava 1.5 · qui
 const liquidCfg = {
   // (2026-11-08, liquid on slopes) THE SLOPE WEDGES, a rule of the world (server/slope.js, shared with the client as MWSlope): drawn by every client, and — next — solid to liquid, which runs down them. Sent to clients with the rest (`cfgWire`).
   slopeWedges: 1,
+  // (2026-11-08, the user: "the small bits of liquid not settle on edges and rather trickle off them") a cell holding at most this many units (of LIQUID_MAX) on
+  //   ground, beside an open cell with a drop under it, moves over the edge whatever the levelling says (it moves only a difference of 2 or more, so a unit or
+  //   two on a step's edge never went). 0 = off.
+  edgeTrickle: 4,
   densitySort: true,     // steps 2/2b: heavier liquids sink below lighter → the vertical density layering within a cell. off = liquids mix, never separate
   // (ledgeSpill — step 1b, the DIAGONAL spill over a ledge — went with the fall tag on 2026-07-29; see the tombstone
   //  below. Its only consumer was the fine 1b block, so the dial had nothing left to gate.)
@@ -9689,7 +9709,7 @@ const ACID_K = 1.5;          // water soaked (consumed) to saturate + convert 1 
 const ACID_SOAK_TICKS = 2;   // soak 1 water into dilution every N ticks (rate ≈ 1/N ≈ 0.5/tick)
 const ACID_CONVERT_TICKS = 2;// convert 1 acid → water every N ticks once saturated (rate ≈ 0.5/tick)
 let liquidTickCount = 0;
-let liqSlant = 0, liqLedge = 0, liqWedgeOut = 0;          // (2026-11-08, liquid on slopes) moves down a slant, off a corner's top onto a slope, out of a wedge cell — since start
+let liqSlant = 0, liqLedge = 0, liqWedgeOut = 0, liqTrickle = 0;          // (2026-11-08, liquid on slopes) moves down a slant, off a corner's top onto a slope, out of a wedge cell — since start
 let liquidQuiet = false;                              // when true, the sim runs but suppresses broadcasts (used to pre-settle at gen time)
 // ⭐ `roomLevelAcc` / `ensureLevelAcc` DELETED 2026-07-31. The coarse per-cell LEVELING carry: the sub-unit remainder
 // of each throttled levelling move, phase-seeded so the invisible 1-unit steps did not all align. Its only consumer
@@ -10416,13 +10436,16 @@ function fineLiquidTickRoom(room, SUB) {
     liqWedgeOut++; };
   // down the slant from cell `i` (column `c`, `L` in it, ground under it): the wedge under it runs down to side `d` — on to the cell beside and below; or
   //   the cell beside-below is a wedge running down AWAY from this one (this is the corner's flat top) — on to the cell beside. Returns what is left.
+  const TRICKLE = liquidCfg.edgeTrickle | 0;
   const slopeSlide = (i, c, L) => {
     const wb = wedgeCode(i + 1);
     if (wb !== 0) { const d = (wb >> 6) & 1 ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) return L; const j = i + d * FROWS + 1;
       if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); liqSlant++; return L - t; }
     for (let s = 0; s < 2 && L > 0; s++) { const d = ((liquidTickCount + c + s) & 1) ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) continue;
-      const w2 = wedgeCode(i + d * FROWS + 1); if (w2 === 0 || ((w2 >> 6) & 1 ? -1 : 1) !== d) continue;
-      const j = i + d * FROWS; if (isSolid(j) || lavaBlk(i, j)) continue; const rm = cap - tot.g(j); if (rm <= 0) continue; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); liqLedge++; L -= t; }
+      const jb = i + d * FROWS + 1, w2 = wedgeCode(jb), onto = w2 !== 0 && ((w2 >> 6) & 1 ? -1 : 1) === d;
+      // (edgeTrickle) …or a small amount, beside an open cell with room under it (a drop)
+      if (!onto && !(L <= TRICKLE && (jb + 1) % FROWS !== 0 && !isSolid(jb) && tot.g(jb) < cap)) continue;
+      const j = i + d * FROWS; if (isSolid(j) || lavaBlk(i, j)) continue; const rm = cap - tot.g(j); if (rm <= 0) continue; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); if (onto) liqLedge++; else liqTrickle++; L -= t; }
     return L; };
   const ceilRank = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = T - 1; rk >= 0; rk--) if (p[b + rk] > 0) return rk; return -1; };
   // ── LAVA IS NEVER MIXED WITH ANOTHER LIQUID ──────────────────────────────────────────────────────────────────────
@@ -10774,8 +10797,8 @@ function fineLiquidTickRoom(room, SUB) {
     if (doFall && canDown) { const j = i + 1; const room2 = cap - tot.g(j); if (!solidBelow && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
     // ⭐ (2026-11-08, liquid on slopes) (1e) DOWN THE SLANT: resting on a wedge, the liquid moves on diagonally down it, whatever the amount (the fall's
     //   rate) — and on the flat top of a corner whose next column is a slope going down away from it (the user: "it should also move"), sideways onto
-    //   it. Nothing is left in a film on either.
-    if (WEDGE && doFall && canDown && solidBelow && L > 0) L = slopeSlide(i, c, L);
+    //   it. Nothing is left in a film on either. …and a SMALL amount (`edgeTrickle`) on any edge with a drop beside it trickles off.
+    if ((WEDGE || TRICKLE > 0) && doFall && canDown && solidBelow && L > 0) L = slopeSlide(i, c, L);
     // density throttle (viscosity off by default → lf=1 → reduce is a pass-through)
     const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;
     let pend = false;
@@ -23559,6 +23582,7 @@ io.on('connection', (socket) => {
     // …objects and powder (`powderPushApply` / `powderSplashApply` / `coverUpdate`)
     if ('powderBury' in patch) powderBuryCfg.on = patch.powderBury ? 1 : 0;
     if ('slopeWedges' in patch) liquidCfg.slopeWedges = patch.slopeWedges ? 1 : 0;
+    if ('edgeTrickle' in patch) liquidCfg.edgeTrickle = Math.max(0, Math.min(24, patch.edgeTrickle | 0));
     if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
     if ('powderCover' in patch) { powderCoverCfg.on = patch.powderCover ? 1 : 0; if (!powderCoverCfg.on) for (const r in roomCover) delete roomCover[r]; }
     if ('powderPushK' in patch) powderPushCfg.k = Math.max(0.1, Math.min(100, +patch.powderPushK || 2));
