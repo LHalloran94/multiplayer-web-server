@@ -9108,7 +9108,9 @@ const liquidCfg = {
   // Do not treat 8 as robustly safe THERE; it is chosen for SUB=1, and being clean at SUB=3 is what keeps TEST B
   // passing unmodified rather than being loosened to accommodate a new default.
   // ⇒ 8 takes ~90% of the available speed-up (151 → 137 against 127 uncapped) at no correctness cost.
-  fineFlatSteps: 8,
+  // (2026-11-08, liquid on the card round 4 — the user, having tried it: "lower does seem to help with the spreading … it should be set to 2 for now";
+  //   a little crawling as it moves, hard to balance with whole cells) 8 → 2
+  fineFlatSteps: 2,
   // (1d) SURFACE FLAT-SETTLE REACH, in cells. How far 1d looks along the row for a spot at least 2 units lower
   // before nudging 1 unit toward it. 0 = LIQUID_LEVEL_SCAN (28), which is what has always shipped.
   // 🟥 28 HAS NO RECORDED DERIVATION. `git log -S` reaches its introduction (ee6f4ba, 2026-07-17) with no
@@ -9553,6 +9555,10 @@ const liquidCfg = {
   // while levelling + density sort still get the full K passes. OFF = fall follows K (original). Behind a toggle to A/B.
   fineConstFall: true,
   fineFallSteps: 1,
+  // (2026-11-08, the user: "a slider for changing the liquid's fall speed") cells a tick, FRACTIONAL: > 0 replaces fineFallSteps — 0.5 falls on every
+  //   other tick (by the tick count, so every strip of a room agrees). A cell with room to fall stays active on a tick without a fall (`keepFalling`).
+  //   0 = off (fineFallSteps, 1 cell a tick = 200 px/s).
+  fallRate: 0,
   // MINIMUM LIQUID UNIT (fine, experimental): quantise the DOWN-fall so liquid only descends in multiples of this many
   // units — the remainder stays put (mass conserved, a thin film left on the way). Bigger unit ⇒ bigger, chunkier falling
   // slices (they connect up more) at the cost of a more stepped/periodic trickle. 1 = off (exact fall, current). Fall only
@@ -10529,7 +10535,8 @@ function fineLiquidTickRoom(room, SUB) {
   // fineConstFall: run the DOWN-fall (1a/1b) a FIXED number of times/tick, independent of the levelling sub-steps, so a
   // higher K speeds levelling/sort WITHOUT speeding descent. OFF ⇒ FALLSTEPS = FSTEPS ⇒ doFall = doLevel every step ⇒
   // byte-identical to the original single-loop behaviour.
-  const FALLSTEPS = liquidCfg.fineConstFall ? Math.max(1, Math.min(16, liquidCfg.fineFallSteps | 0)) : FSTEPS;
+  const FR = +liquidCfg.fallRate || 0, FALLSTEPS = !liquidCfg.fineConstFall ? FSTEPS : FR > 0 ? Math.min(16, Math.floor((liquidTickCount + 1) * FR + 1e-9) - Math.floor(liquidTickCount * FR + 1e-9))
+    : Math.max(1, Math.min(16, liquidCfg.fineFallSteps | 0));
   // ⭐⭐ A FALL-ONLY TURN. When a strip runs out of the tick's budget it currently gets NO tick at all, so
   // anything DESCENDING in it stops dead in mid-air until its turn comes round — the user's report, and
   // measured at 11–30% of strip-turns under a heavy pour. Falling is the cheap part of the tick and the
@@ -23621,6 +23628,7 @@ io.on('connection', (socket) => {
     if ('fineQuiesceTicks' in patch) liquidCfg.fineQuiesceTicks = Math.max(2, Math.min(60, patch.fineQuiesceTicks | 0));
     if ('fineAdaptPct' in patch) liquidCfg.fineAdaptPct = Math.max(1, Math.min(50, patch.fineAdaptPct | 0));
     if ('fineFallSteps' in patch) liquidCfg.fineFallSteps = Math.max(1, Math.min(16, patch.fineFallSteps | 0));
+    if ('fallRate' in patch) liquidCfg.fallRate = Math.max(0, Math.min(8, +patch.fallRate || 0));
     if ('fineMinUnit' in patch) liquidCfg.fineMinUnit = Math.max(1, Math.min(64, patch.fineMinUnit | 0));
     if ('fineSortSteps' in patch) liquidCfg.fineSortSteps = Math.max(0, Math.min(16, patch.fineSortSteps | 0));
     if ('fineSortDiagSteps' in patch) liquidCfg.fineSortDiagSteps = Math.max(0, Math.min(16, patch.fineSortDiagSteps | 0));
