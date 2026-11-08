@@ -10450,7 +10450,8 @@ function fineLiquidTickRoom(room, SUB) {
       if (w2 !== 0) { if (((w2 >> 6) & 1 ? -1 : 1) === d) { bD = d; bK = 0; onto = true; break; } continue; }
       if (L > TRICKLE) continue;
       for (let k = 1; k <= TREACH && k < bK; k++) { const ck = c + k * d; if (ck < 0 || ck >= COLS) break; const jk = i + k * d * FROWS; if (isSolid(jk)) break;
-        if (!isSolid(jk + 1)) { if (tot.g(jk + 1) < cap) { bK = k; bD = d; } break; } } }
+        if (!isSolid(jk + 1)) { if (tot.g(jk + 1) < cap) { bK = k; bD = d; } break; }
+        const wk = wedgeCode(jk + 1); if (wk !== 0) { if (((wk >> 6) & 1 ? -1 : 1) === d) { bK = k; bD = d; } break; } } }   // (…a slope going away counts as the drop)
     if (bD === 0) return L;
     const j = i + bD * FROWS; if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; if (!go) return L - 1;
     const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); if (onto) liqLedge++; else liqTrickle++; L -= t;
