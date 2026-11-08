@@ -9075,10 +9075,11 @@ const liquidCfg = {
   //   two on a step's edge never went). 0 = off.
   edgeTrickle: 4,
   // (2026-11-08, the user's idea) a thin film is DRAGGED off an edge: when a thin cell trickles off, the thin cell behind it on the same row follows into the
-  //   space it left, and the one behind that — at most this many cells a trickle (a tick); the chain stops at a dry gap or a cell over `edgeTrickle` (a pool). 0 = off.
-  //   ⚠️ A film LONGER than this is left beyond it: the last cell dragged leaves a dry gap, where the next tick's chain stops. Each cell dragged is one move.
+  //   space it left, and the one behind that; the chain stops at a dry gap or a cell over `edgeTrickle` (a pool). 1 = on, 0 = off.
+  //   (NO CAP — the user, 2026-11-08: a cap (64 at first) strands every film longer than it: the last cell dragged leaves a dry gap where the next tick's chain
+  //   stops. The film's own length bounds it: only thin cells on ground, one small move each, and only while it drains.)
   //   (Replaced `edgeTrickleReach`, which only made films stop further from an edge — the user.)
-  edgeDrag: 64,
+  edgeDrag: 1,
   densitySort: true,     // steps 2/2b: heavier liquids sink below lighter → the vertical density layering within a cell. off = liquids mix, never separate
   // (ledgeSpill — step 1b, the DIAGONAL spill over a ledge — went with the fall tag on 2026-07-29; see the tombstone
   //  below. Its only consumer was the fine 1b block, so the dial had nothing left to gate.)
@@ -10457,11 +10458,11 @@ function fineLiquidTickRoom(room, SUB) {
     const j = i + bD * FROWS; if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; if (!go) return L - 1;
     const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); if (onto) liqLedge++; else liqTrickle++; L -= t;
     // ⭐ (2026-11-08, the user's idea) THE FILM IS DRAGGED: the cell emptied, the thin cell behind it on the same row (on ground) follows into it, and the
-    //   one behind that, up to DRAG cells — each moves into an EMPTY cell, so all of it fits. Stops at a dry gap, a pool (over TRICKLE: levelling's job), a
+    //   one behind that, the whole film (no cap) — each moves into an EMPTY cell, so all of it fits. Stops at a dry gap, a pool (over TRICKLE: levelling's job), a
     //   drop under it, or rock. Every cell moved is marked (moveBottom) and so stays awake; the edge cell keeps the chain going next tick. `L` stays 0 for
     //   the caller (what moved into `i` waits for the next tick).
     if (L === 0 && DRAG > 0) { let to = i;
-      for (let n = 1; n <= DRAG; n++) { const cb = c - bD * n; if (cb < 0 || cb >= COLS) break; const b = to - bD * FROWS;
+      for (let n = 1; n <= COLS; n++) { const cb = c - bD * n; if (cb < 0 || cb >= COLS) break; const b = to - bD * FROWS;
         if (isSolid(b)) break; const tb = tot.g(b); if (tb <= 0 || tb > TRICKLE || !isSolid(b + 1) || lavaBlk(b, to)) break;
         moveBottom(b, to, tb); liqDrag++; to = b; } }
     return L; };
@@ -23605,7 +23606,7 @@ io.on('connection', (socket) => {
     if ('powderBury' in patch) powderBuryCfg.on = patch.powderBury ? 1 : 0;
     if ('slopeWedges' in patch) liquidCfg.slopeWedges = patch.slopeWedges ? 1 : 0;
     if ('edgeTrickle' in patch) liquidCfg.edgeTrickle = Math.max(0, Math.min(24, patch.edgeTrickle | 0));
-    if ('edgeDrag' in patch) liquidCfg.edgeDrag = Math.max(0, Math.min(256, patch.edgeDrag | 0));
+    if ('edgeDrag' in patch) liquidCfg.edgeDrag = (patch.edgeDrag ? 1 : 0);
     if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
     if ('powderCover' in patch) { powderCoverCfg.on = patch.powderCover ? 1 : 0; if (!powderCoverCfg.on) for (const r in roomCover) delete roomCover[r]; }
     if ('powderPushK' in patch) powderPushCfg.k = Math.max(0.1, Math.min(100, +patch.powderPushK || 2));
