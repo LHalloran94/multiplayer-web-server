@@ -89,6 +89,10 @@
         if (r2 > r1 && whole(c + o, r1, r2) && !(wet && wet(c + 2 * o, r1, r2))) for (let j = 0, k = r2 - r1; j < k; j++) put(c + 2 * o, r1 + j, 128 | sd | (k << 3) | j); } }
   }
 
+  // the cells a wedge may stand in: AIR, and a cell holding liquid — the liquid writes its own id into the grid (server `fineSyncGrid`), so the
+  //   cells it flows through read 9–15, not 0; counting only air, a wedge would come and go as the liquid moved through it (round 20 hid wedges under
+  //   water for that reason). Water, quicksand, lava, acid, brine, oil — the server's LIQUID_IDS; 16d's card passes test the same ids.
+  const OPEN = new Uint8Array(256); for (const v of [0, 9, 10, 11, 12, 14, 15]) OPEN[v] = 1;
   // a code's parts: the riser on the right (1) or left (0), the height in cells k, which cell j
   const right = (v) => (v >> 6) & 1, height = (v) => (v >> 3) & 7, which = (v) => v & 7;
   // the slanted line in cell units within the cell: its depth below the cell's top at `qx` (0..1 across); a point is INSIDE the wedge below it
@@ -100,5 +104,5 @@
   // the way down the slant: −1 (to the left) when the riser is on the right
   const downDir = (v) => ((v >> 6) & 1) ? -1 : 1;
 
-  return { kindOfDef, BUILTIN_KIND, block, topNear, steepDown, steepUp, code, scan, right, height, which, lineQ, inside, src, downDir };
+  return { OPEN, kindOfDef, BUILTIN_KIND, block, topNear, steepDown, steepUp, code, scan, right, height, which, lineQ, inside, src, downDir };
 });

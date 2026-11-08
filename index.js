@@ -9689,6 +9689,7 @@ const ACID_K = 1.5;          // water soaked (consumed) to saturate + convert 1 
 const ACID_SOAK_TICKS = 2;   // soak 1 water into dilution every N ticks (rate ≈ 1/N ≈ 0.5/tick)
 const ACID_CONVERT_TICKS = 2;// convert 1 acid → water every N ticks once saturated (rate ≈ 0.5/tick)
 let liquidTickCount = 0;
+let liqSlant = 0, liqLedge = 0, liqWedgeOut = 0;          // (2026-11-08, liquid on slopes) moves down a slant, off a corner's top onto a slope, out of a wedge cell — since start
 let liquidQuiet = false;                              // when true, the sim runs but suppresses broadcasts (used to pre-settle at gen time)
 // ⭐ `roomLevelAcc` / `ensureLevelAcc` DELETED 2026-07-31. The coarse per-cell LEVELING carry: the sub-unit remainder
 // of each throttled levelling move, phase-seeded so the invisible 1-unit steps did not all align. Its only consumer
@@ -10149,6 +10150,70 @@ function soilTickRoom(room) {
 // REACTIONS, SINKS, the secondary lane and flux levelling are OMITTED (inc 1 = pipeline; reactions come next). Honours the
 // same liquidCfg flags so behaviour matches. PROVEN faithful by the harness SUB=1 identity test (fineLiquidTickRoom(room,1)
 // == liquidTickRoom with droplets+reactions off, on reaction-free scenes).
+// ⭐⭐ (2026-11-08, liquid on slopes — the user: "liquid treats the slope wedges as solid and slides down slopes, which also stops small amounts of liquid
+// collecting on cells it flows over") THE SLOPE WEDGES, AS THE LIQUID SEES THEM. server/slope.js is the rule the clients draw by (MWSlope); here each
+// 64×64 page gets a byte a cell — the wedge's code, 0 none — worked out only when the GROUND of the page or one of its eight neighbours has
+// changed (`slopeKindVer`), checked at most once a tick.
+// 🟥 NOT the page's revision alone: the liquid writes its own id into the grid for every cell it changes (`fineSyncGrid`), so the revisions of
+//    every page with moving liquid change every tick — the first version worked every such page out again every tick (2× the tick on a flat
+//    pool with no slope in it). A changed revision now only re-reads the page's KINDS (one table lookup a cell); the version moves when they differ. A wedge cell is OPEN
+// ground in the grid (air, or a liquid's id) in front of a steep riser; the liquid step treats it as solid (`isSolid`) and runs down its slant.
+// ⚠️ The kinds come from the same table the client's collision reads (slope.js `kindOfDef`, the built-ins written out there); custom materials from
+//    the room's own definitions. Unbuilt ground is ground, sky is air — as `isSolid`.
+// ⚠️ PROCESSOR, decided up front: the server must agree with every client, and it is sparse (only pages the liquid reads).
+const _SLOPE = typeof SLOPE !== 'undefined' ? SLOPE : null;
+const SLOPE_KIND = (() => { const t = new Uint8Array(256); if (!_SLOPE) return t;
+  for (let v = 1; v < _SLOPE.BUILTIN_KIND.length; v++) t[v] = _SLOPE.BUILTIN_KIND[v];
+  if (typeof MATGEN !== 'undefined') { for (let id = MATGEN.GEN_MAT_MIN; id <= MATGEN.GEN_MAT_MAX; id++) t[id] = _SLOPE.kindOfDef(MATGEN.DEFS[id]); for (const id of (MATGEN.EXTRA_IDS || [])) t[id] = _SLOPE.kindOfDef(MATGEN.DEFS[id]); }
+  for (let v = 1; v < 256; v++) if (LIQUID_LUT[v]) t[v] = 0;
+  return t; })();
+// the kinds for one room: the table above, and the room's custom materials as the built-in each was made from (the client clones its base)
+const _slopeKindRoom = new Map();
+function slopeKindOf(room) {
+  const M = roomMats[room]; if (!M) return SLOPE_KIND;
+  const c = _slopeKindRoom.get(room); if (c && c.M === M && c.n === Object.keys(M).length) return c.t;
+  const t = SLOPE_KIND.slice(); _slopeKindRoom.set(room, { M, n: Object.keys(M).length, t }); for (const id in M) { const d = M[id], v = id | 0; if (!d || v <= 0 || v > 255) continue;
+    t[v] = d.behavior === 'powder' ? 2 : d.behavior === 'solid' ? (SLOPE_KIND[d.base | 0] || 1) : 0; }
+  return t;
+}
+let slopeWPages = 0;                                     // (perf) pages worked out, since start
+// the version of page `p`'s ground for the slope rule (kinds 0/1/2 a cell): moves only when a kind changes. Absent pages: −2 unbuilt, −3 sky, −4 empty.
+function slopeKindVer(st, p, KIND, genRoom) {
+  const grid = st.terrain, page = grid.pageAt(p);
+  if (page === null) return !genRoom ? -4 : grid.skyAt(slopePageCell(grid, p)) ? -3 : -2;
+  const M = st.slopeK || (st.slopeK = new Map()); let e = M.get(p); const rv = grid.revAt(p);
+  if (e !== undefined && e.rv === rv) return e.kv;
+  if (e === undefined) { if (M.size >= 16384) M.clear(); e = { rv, kv: 0, k: new Uint8Array(CHUNK_CELLS) }; M.set(p, e); }
+  const k = e.k; let diff = e.kv === 0;
+  for (let o = 0; o < CHUNK_CELLS; o++) { const v = KIND[page[o]]; if (k[o] !== v) { k[o] = v; diff = true; } }
+  e.rv = rv; if (diff) e.kv++;
+  return e.kv;
+}
+const slopePageCell = (grid, p) => { const g = grid.geom, pc = (p / g.cy) | 0; return pc * CHUNK_SIDE * g.rows + (p - pc * g.cy) * CHUNK_SIDE; };
+function slopeWedgePage(room, st, p) {
+  const grid = st.terrain, g = grid.geom, cy = g.cy, cx = g.cx;
+  const C = st.slopeW || (st.slopeW = new Map());
+  let e = C.get(p);
+  if (e !== undefined && e.tick === liquidTickCount) return e.b;
+  const pc = (p / cy) | 0, pr = p - pc * cy, genRoom = !!grid.seedFn, KIND = slopeKindOf(room);
+  let same = e !== undefined; const rv = same ? e.rv : new Float64Array(9);
+  for (let dc = -1, k = 0; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++, k++) { const qc = pc + dc, qr = pr + dr; const v = (qc < 0 || qc >= cx || qr < 0 || qr >= cy) ? -1 : slopeKindVer(st, qc * cy + qr, KIND, genRoom); if (rv[k] !== v) { same = false; rv[k] = v; } }
+  if (e === undefined) { if (C.size >= 8192) C.clear(); e = { b: null, rv, tick: 0 }; C.set(p, e); }
+  e.tick = liquidTickCount;
+  if (same) return e.b;
+  slopeWPages++;
+  const ROWS = st.rows, COLS = st.cols, c0 = pc * CHUNK_SIDE, r0 = pr * CHUNK_SIDE;
+  const kind = (c, r) => { if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return 0; const i = c * ROWS + r, v = peekCellAt(grid, i); if (v < 0) return genRoom ? (grid.skyAt(i) ? 0 : 1) : 0; return KIND[v]; };
+  const B = (c, r) => _SLOPE.block(kind, c, r);
+  let b = null;
+  const put = (c, r, code) => { if (c < c0 || c >= c0 + CHUNK_SIDE || r < r0 || r >= r0 + CHUNK_SIDE || c >= COLS || r >= ROWS) return; const v0 = peekCellAt(grid, c * ROWS + r), v = v0 < 0 && !genRoom ? 0 : v0; if (v < 0 || !_SLOPE.OPEN[v]) return;
+    const o = (r - r0) * CHUNK_SIDE + (c - c0); if (b === null) b = new Uint8Array(CHUNK_CELLS); if (!b[o]) b[o] = code; };
+  _SLOPE.scan(B, c0 - 2, c0 + CHUNK_SIDE + 1, r0, r0 + CHUNK_SIDE - 1, TERRAIN_CELL, put);
+  e.b = b;
+  // …liquid already in a cell that has become a wedge is woken, so the step moves it out (nothing made or lost)
+  if (b !== null && st.fineTotal && st.fineActive) for (let o = 0; o < CHUNK_CELLS; o++) if (b[o]) { const i = (c0 + (o & 63)) * ROWS + r0 + (o >> 6); if (st.fineTotal.g(i) > 0) st.fineActive.add(i); }
+  return b;
+}
 function fineLiquidTickRoom(room, SUB) {
   const st = cellsOf(room);
   SUB = SUB || st.fineSub || 1;
@@ -10187,11 +10252,28 @@ function fineLiquidTickRoom(room, SUB) {
   // ⚠️ A room with NO generator is untouched, byte for byte: absent there really does mean empty, and `.g()` is
   // the right read. That is what keeps `probe_fine_identity` bit-identical and every page room unchanged.
   const genRoom = !!grid.seedFn;
-  const isSolid = genRoom
+  const isSolidT = genRoom
     ? (k) => { if (k < 0 || k >= NCELL) return true; const ci = coarseOf(k); const v = peekCellAt(grid, ci);
                if (v >= 0) return v !== 0 && !isFluidId(v);
                return !grid.skyAt(ci); }                                                    // unbuilt ⇒ solid; sky ⇒ air
     : (k) => { if (k < 0 || k >= NCELL) return true; const v = grid.g(coarseOf(k)); return v !== 0 && !isFluidId(v); };
+  // ⭐ (2026-11-08, liquid on slopes) …AND A SLOPE WEDGE IS SOLID TO LIQUID (`slopeWedgePage`). `isSolidT` is the terrain alone (a wedge cell
+  //   holding liquid is emptied, below). SUB = 1 only (the only ratio that ships). The last page's bytes are kept (the step walks a page at a time).
+  //   The Overworld (a generated, power-of-two-row geometry) has the fast form: the page and offset worked out once, for the terrain and the wedge.
+  //   🟥 Page rooms are 405 rows — TABLE addressing (`pageOf`/`offOf`): the first version needed the arithmetic form and so had no wedges there at all.
+  const GG = grid.geom || {}, WEDGE = SUB === 1 && !!_SLOPE && !!liquidCfg.slopeWedges && GG.cy > 0 && grid.T === 1, ARITH = GG.K >= 0;
+  const GK = GG.K, GK6 = GG.K6, GCY = GG.cy, GPGM = GG.PGM, GPO = GG.pageOf, GOO = GG.offOf;
+  const wPage = ARITH ? (k) => (k >>> GK6) * GCY + ((k >>> 6) & GPGM) : (k) => GPO[k], wOff = ARITH ? (k) => ((k & 63) << 6) | ((k >>> GK) & 63) : (k) => GOO[k];
+  let _wP = -1, _wB = null;
+  const wedgeCode = (k) => { if (!WEDGE || k < 0 || k >= NCELL) return 0; const p = wPage(k); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB === null ? 0 : _wB[wOff(k)]; };
+  const isSolid = !WEDGE ? isSolidT : (genRoom && ARITH)
+    ? (k) => { if (k < 0 || k >= NCELL) return true; const p = (k >>> GK6) * GCY + ((k >>> 6) & GPGM), page = grid.pageAt(p);
+               if (page === null) return !grid.skyAt(k);
+               const o = ((k & 63) << 6) | ((k >>> GK) & 63), v = page[o]; if (v !== 0 && !isFluidId(v)) return true;
+               if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB !== null && _wB[o] !== 0; }
+    : (k) => { if (isSolidT(k)) return true; const p = wPage(k); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB !== null && _wB[wOff(k)] !== 0; };
+  // the bytes of the page holding `j`, for the row scans' page runs (null: none, or wedges off)
+  const wedgeRun = (j) => { if (!WEDGE) return null; const p = wPage(j); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB; };
   const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; const v = genRoom ? peekCellAt(grid, coarseOf(k)) : grid.g(coarseOf(k)); return v >= 0 && isSinkId(v); };   // a fine cell whose coarse cell is a DRAIN block
   // ⭐⭐ A ROW SCAN IS A CONTIGUOUS TYPED-ARRAY WALK, AND THE PAGE LAYOUT HAS ALWAYS ALLOWED IT.
   // The two levelling scans (1d below and 2c) look up to LIQUID_LEVEL_SCAN = 28 cells along the row in EACH
@@ -10223,7 +10305,7 @@ function fineLiquidTickRoom(room, SUB) {
       if (n > edge) n = edge;
       if (n > reach - d + 1) n = reach - d + 1;
       const pT = tot.rp(j), oT = tot.o(j);
-      const gp = grid.pageAt(grid.pageOfCell(j)), oG = gp ? grid.o(j) : 0;
+      const gp = grid.pageAt(grid.pageOfCell(j)), oG = gp ? grid.o(j) : 0, wb = gp ? wedgeRun(j) : null;
       // ⭐ THE PRESENT-PAGE RUN IS ITS OWN LOOP. `gp` is decided ONCE per page, not re-tested per step, and the
       // two offsets walk by `sdir` instead of being recomputed as `o + sdir * k` (two multiplies a step). The
       // absent-page case keeps the original per-cell form — it means unproduced world beside moving liquid, it
@@ -10233,7 +10315,7 @@ function fineLiquidTickRoom(room, SUB) {
       const L2 = L - 2;
       if (gp) {
         for (let k = 0, kg = oG, kt = oT; k < n; k++, kg += sdir, kt += sdir) {
-          if (SOLID_LUT[gp[kg]]) { liqLvlSteps += k + 1; return 0; }
+          if (SOLID_LUT[gp[kg]] || (wb !== null && wb[kg] !== 0)) { liqLvlSteps += k + 1; return 0; }
           const jl = pT[kt];
           if (jl > L) { liqLvlSteps += k + 1; return 0; }
           if (jl <= L2) { liqLvlSteps += k + 1; return d + k; }
@@ -10265,11 +10347,11 @@ function fineLiquidTickRoom(room, SUB) {
       if (n > edge) n = edge;
       if (n > reach - d + 1) n = reach - d + 1;
       const pA = amt.rp(j), oA = amt.o(j);
-      const gp = grid.pageAt(grid.pageOfCell(j)), oG = gp ? grid.o(j) : 0;
+      const gp = grid.pageAt(grid.pageOfCell(j)), oG = gp ? grid.o(j) : 0, wb = gp ? wedgeRun(j) : null;
       const Ci2 = Ci - 2, stepA = sdir * T;         // one column is T rank slots, so the walk strides by T
       if (gp) {
         for (let k = 0, kg = oG, b = oA; k < n; k++, kg += sdir, b += stepA) {
-          if (SOLID_LUT[gp[kg]]) { liqPlSteps += k + 1; return 0; }
+          if (SOLID_LUT[gp[kg]] || (wb !== null && wb[kg] !== 0)) { liqPlSteps += k + 1; return 0; }
           // ⭐ THE PREFIX SUM IS MONOTONE — amounts are never negative — so once it has passed `Ci` the answer
           // is already "stop", and the remaining ranks cannot bring it back down. Exactly the same verdict, up
           // to T-1 fewer reads at an interface. The full sum is still needed for the `<= Ci-2` test, which is
@@ -10326,6 +10408,22 @@ function fineLiquidTickRoom(room, SUB) {
     for (let rk = 0; rk < T && need > 0; rk++) { const a = pa[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; pa[ba + rk] -= mv; pb[bb + rk] += mv; need -= mv; moved += mv; }
     if (moved) { tot.s(A, tot.g(A) - moved); tot.s(B, tot.g(B) + moved); mark(A); mark(B); } return moved; };
   const floorRank = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) return rk; return -1; };
+  // (2026-11-08, liquid on slopes) liquid in a cell that is now a wedge goes UP, as much as fits a cell at a time (top layer first), up to 8 cells — nothing
+  //   made or lost; it passes over wedge cells above it (the upper cell of a two-cell wedge) to the first open one; what cannot go (sealed above) stays and
+  //   is tried again when woken
+  const wedgeOut = (i) => { let j = i - 1;
+    for (let n = 0; n < 10 && tot.g(i) > 0; n++, j--) { if (j < 0 || (j + 1) % FROWS === 0 || isSolidT(j)) break; if (wedgeCode(j) !== 0) continue; if (lavaBlk(i, j)) break; const rm = cap - tot.g(j); if (rm > 0) { moveTop(i, j, Math.min(rm, tot.g(i))); wakeN(j); } }
+    liqWedgeOut++; };
+  // down the slant from cell `i` (column `c`, `L` in it, ground under it): the wedge under it runs down to side `d` — on to the cell beside and below; or
+  //   the cell beside-below is a wedge running down AWAY from this one (this is the corner's flat top) — on to the cell beside. Returns what is left.
+  const slopeSlide = (i, c, L) => {
+    const wb = wedgeCode(i + 1);
+    if (wb !== 0) { const d = (wb >> 6) & 1 ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) return L; const j = i + d * FROWS + 1;
+      if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); liqSlant++; return L - t; }
+    for (let s = 0; s < 2 && L > 0; s++) { const d = ((liquidTickCount + c + s) & 1) ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) continue;
+      const w2 = wedgeCode(i + d * FROWS + 1); if (w2 === 0 || ((w2 >> 6) & 1 ? -1 : 1) !== d) continue;
+      const j = i + d * FROWS; if (isSolid(j) || lavaBlk(i, j)) continue; const rm = cap - tot.g(j); if (rm <= 0) continue; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); liqLedge++; L -= t; }
+    return L; };
   const ceilRank = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = T - 1; rk >= 0; rk--) if (p[b + rk] > 0) return rk; return -1; };
   // ── LAVA IS NEVER MIXED WITH ANOTHER LIQUID ──────────────────────────────────────────────────────────────────────
   // Lava reacts on contact with every other liquid (fineReactTickRoom), so the two must never end up sharing a cell in
@@ -10614,7 +10712,7 @@ function fineLiquidTickRoom(room, SUB) {
     const _key = list[_start + _k < _n ? _start + _k : _start + _k - _n];
     const _low = _key % SORT_TOT_MUL, i = _flip ? SORT_IDX_MAX - _low : _low;
     if (processed >= LIQUID_MAX_PER_TICK) { active.add(i); liqQCapped++; continue; }
-    if (isSolid(i)) continue;
+    if (isSolid(i)) { if (WEDGE && !isSolidT(i) && tot.g(i) > 0) wedgeOut(i); continue; }
     const c = (i / FROWS) | 0, r = i - c * FROWS, canDown = r + 1 < LIQUID_FLOOR_ROW;
     let L = tot.g(i); if (L <= 0) continue;
     processed++; liqQProcessed++;
@@ -10674,6 +10772,10 @@ function fineLiquidTickRoom(room, SUB) {
     // (1a) straight down. Gated on doFall so the fall rate can be held constant regardless of the levelling sub-step
     // count (fineConstFall).
     if (doFall && canDown) { const j = i + 1; const room2 = cap - tot.g(j); if (!solidBelow && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
+    // ⭐ (2026-11-08, liquid on slopes) (1e) DOWN THE SLANT: resting on a wedge, the liquid moves on diagonally down it, whatever the amount (the fall's
+    //   rate) — and on the flat top of a corner whose next column is a slope going down away from it (the user: "it should also move"), sideways onto
+    //   it. Nothing is left in a film on either.
+    if (WEDGE && doFall && canDown && solidBelow && L > 0) L = slopeSlide(i, c, L);
     // density throttle (viscosity off by default → lf=1 → reduce is a pass-through)
     const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;
     let pend = false;
