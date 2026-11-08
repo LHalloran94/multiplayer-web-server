@@ -9074,6 +9074,7 @@ const liquidCfg = {
   //   ground, beside an open cell with a drop under it, moves over the edge whatever the levelling says (it moves only a difference of 2 or more, so a unit or
   //   two on a step's edge never went). 0 = off.
   edgeTrickle: 4,
+  edgeTrickleReach: 4,                                  // …toward the nearest drop along flat ground within this many cells (1 = only a cell right at the edge)
   densitySort: true,     // steps 2/2b: heavier liquids sink below lighter → the vertical density layering within a cell. off = liquids mix, never separate
   // (ledgeSpill — step 1b, the DIAGONAL spill over a ledge — went with the fall tag on 2026-07-29; see the tombstone
   //  below. Its only consumer was the fine 1b block, so the dial had nothing left to gate.)
@@ -10436,16 +10437,23 @@ function fineLiquidTickRoom(room, SUB) {
     liqWedgeOut++; };
   // down the slant from cell `i` (column `c`, `L` in it, ground under it): the wedge under it runs down to side `d` — on to the cell beside and below; or
   //   the cell beside-below is a wedge running down AWAY from this one (this is the corner's flat top) — on to the cell beside. Returns what is left.
-  const TRICKLE = liquidCfg.edgeTrickle | 0;
-  const slopeSlide = (i, c, L) => {
+  const TRICKLE = liquidCfg.edgeTrickle | 0, TREACH = Math.max(1, liquidCfg.edgeTrickleReach | 0);
+  const slopeSlide = (i, c, L, go) => {   // (go false: only whether anything WOULD move — less than L back if so)
     const wb = wedgeCode(i + 1);
     if (wb !== 0) { const d = (wb >> 6) & 1 ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) return L; const j = i + d * FROWS + 1;
-      if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); liqSlant++; return L - t; }
-    for (let s = 0; s < 2 && L > 0; s++) { const d = ((liquidTickCount + c + s) & 1) ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) continue;
-      const jb = i + d * FROWS + 1, w2 = wedgeCode(jb), onto = w2 !== 0 && ((w2 >> 6) & 1 ? -1 : 1) === d;
-      // (edgeTrickle) …or a small amount, beside an open cell with room under it (a drop)
-      if (!onto && !(L <= TRICKLE && (jb + 1) % FROWS !== 0 && !isSolid(jb) && tot.g(jb) < cap)) continue;
-      const j = i + d * FROWS; if (isSolid(j) || lavaBlk(i, j)) continue; const rm = cap - tot.g(j); if (rm <= 0) continue; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); if (onto) liqLedge++; else liqTrickle++; L -= t; }
+      if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; if (!go) return L - 1; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); liqSlant++; return L - t; }
+    // (onto a slope going away: any amount · `edgeTrickle`: a small amount toward the NEAREST drop along flat ground, within `edgeTrickleReach` cells —
+    //   the user: bits stopped on random steps; on a step two wide the cell behind the edge kept its unit)
+    let bD = 0, bK = 99, onto = false;
+    for (let s = 0; s < 2; s++) { const d = ((liquidTickCount + c + s) & 1) ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) continue;
+      const jb = i + d * FROWS + 1, w2 = wedgeCode(jb);
+      if (w2 !== 0) { if (((w2 >> 6) & 1 ? -1 : 1) === d) { bD = d; bK = 0; onto = true; break; } continue; }
+      if (L > TRICKLE) continue;
+      for (let k = 1; k <= TREACH && k < bK; k++) { const ck = c + k * d; if (ck < 0 || ck >= COLS) break; const jk = i + k * d * FROWS; if (isSolid(jk)) break;
+        if (!isSolid(jk + 1)) { if (tot.g(jk + 1) < cap) { bK = k; bD = d; } break; } } }
+    if (bD === 0) return L;
+    const j = i + bD * FROWS; if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; if (!go) return L - 1;
+    const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); if (onto) liqLedge++; else liqTrickle++; L -= t;
     return L; };
   const ceilRank = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = T - 1; rk >= 0; rk--) if (p[b + rk] > 0) return rk; return -1; };
   // ── LAVA IS NEVER MIXED WITH ANOTHER LIQUID ──────────────────────────────────────────────────────────────────────
@@ -10798,7 +10806,11 @@ function fineLiquidTickRoom(room, SUB) {
     // ⭐ (2026-11-08, liquid on slopes) (1e) DOWN THE SLANT: resting on a wedge, the liquid moves on diagonally down it, whatever the amount (the fall's
     //   rate) — and on the flat top of a corner whose next column is a slope going down away from it (the user: "it should also move"), sideways onto
     //   it. Nothing is left in a film on either. …and a SMALL amount (`edgeTrickle`) on any edge with a drop beside it trickles off.
-    if ((WEDGE || TRICKLE > 0) && doFall && canDown && solidBelow && L > 0) L = slopeSlide(i, c, L);
+    // 🟥 (2026-11-08, the user's slope: 1-unit amounts asleep on the wedge tops; the trickle "stops on random steps") …AND A CELL THAT COULD SLIDE OR TRICKLE NEVER LEAVES
+    //   THE ACTIVE SET. The fall runs in sub-step 0 only (`fineConstFall`); liquid arriving on a wedge top or an edge in a later sub-step found nothing moving it
+    //   there, nothing marked it, and it slept for ever — the same trap as the airborne parcel and the inverted pair below. (The offline bench pinned the fall
+    //   into every sub-step and could not show it.)
+    if ((WEDGE || TRICKLE > 0) && canDown && solidBelow && L > 0) { if (doFall) L = slopeSlide(i, c, L, true); else if (slopeSlide(i, c, L, false) < L) active.add(i); }
     // density throttle (viscosity off by default → lf=1 → reduce is a pass-through)
     const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;
     let pend = false;
@@ -23583,6 +23595,7 @@ io.on('connection', (socket) => {
     if ('powderBury' in patch) powderBuryCfg.on = patch.powderBury ? 1 : 0;
     if ('slopeWedges' in patch) liquidCfg.slopeWedges = patch.slopeWedges ? 1 : 0;
     if ('edgeTrickle' in patch) liquidCfg.edgeTrickle = Math.max(0, Math.min(24, patch.edgeTrickle | 0));
+    if ('edgeTrickleReach' in patch) liquidCfg.edgeTrickleReach = Math.max(1, Math.min(16, patch.edgeTrickleReach | 0));
     if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
     if ('powderCover' in patch) { powderCoverCfg.on = patch.powderCover ? 1 : 0; if (!powderCoverCfg.on) for (const r in roomCover) delete roomCover[r]; }
     if ('powderPushK' in patch) powderPushCfg.k = Math.max(0.1, Math.min(100, +patch.powderPushK || 2));
