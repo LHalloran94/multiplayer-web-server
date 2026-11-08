@@ -21,6 +21,7 @@ const WORLDGEN2 = require('./worldgen2'); // the PORTED world redesign (port inc
 const DOMAINS = require('./domains');   // Phase 6 inc 6: which column of the Overworld a site spawns at
 const LEDGER = require('./ledger');     // the Prima economy: what each player carries, held HERE and not in a browser
 const ITEMS = require('./items');       // what an item IS (a kind + a count, like a material) — the only copy of the table
+const SLOPE = require('./slope');       // (2026-11-08, liquid on slopes) the slope rule — shared with the client as MWSlope
 const WOOD = require('./wood');         // (2026-10-31, the notch round 3) the axe's line rule — shared with the client as MWWood
 const HELD = require('./held');         // what each thing you can hold in your hand is and does, by its look (shared with the client as MWHeld)
 const MATGEN = require('./materials');  // Phase 6 world-redesign port inc 1: the generator's materials, ids 18..89
@@ -9051,6 +9052,8 @@ const LEVEL_VISC = [1.5, 0.8, 0.4, 0.2, 0.1, 0];     // by rank: lava 1.5 · qui
 // (affects every room/player) — it's a comparison/diagnosis tool. Each flag gates ONE feature so behaviours can be A/B'd
 // to pin down bugs. Defaults below = the shipping behaviour. Mirrored to clients (for the menu) via the 'liquid-cfg' event.
 const liquidCfg = {
+  // (2026-11-08, liquid on slopes) THE SLOPE WEDGES, a rule of the world (server/slope.js, shared with the client as MWSlope): drawn by every client, and — next — solid to liquid, which runs down them. Sent to clients with the rest (`cfgWire`).
+  slopeWedges: 1,
   densitySort: true,     // steps 2/2b: heavier liquids sink below lighter → the vertical density layering within a cell. off = liquids mix, never separate
   // (ledgeSpill — step 1b, the DIAGONAL spill over a ledge — went with the fall tag on 2026-07-29; see the tombstone
   //  below. Its only consumer was the fine 1b block, so the dial had nothing left to gate.)
@@ -23453,6 +23456,7 @@ io.on('connection', (socket) => {
     if ('crumbleCellMs' in patch) crumbleCfg.cellMs = Math.max(0, Math.min(2000, patch.crumbleCellMs | 0));
     // …objects and powder (`powderPushApply` / `powderSplashApply` / `coverUpdate`)
     if ('powderBury' in patch) powderBuryCfg.on = patch.powderBury ? 1 : 0;
+    if ('slopeWedges' in patch) liquidCfg.slopeWedges = patch.slopeWedges ? 1 : 0;
     if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
     if ('powderCover' in patch) { powderCoverCfg.on = patch.powderCover ? 1 : 0; if (!powderCoverCfg.on) for (const r in roomCover) delete roomCover[r]; }
     if ('powderPushK' in patch) powderPushCfg.k = Math.max(0.1, Math.min(100, +patch.powderPushK || 2));
