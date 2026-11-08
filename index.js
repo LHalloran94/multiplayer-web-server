@@ -4609,7 +4609,7 @@ function bodyYieldFlush(room, buried) {
 // ⭐⭐ OBJECTS PUSHING POWDER, AND THROWING IT UP WHEN THEY LAND (2026-09-28 — the user asked for both: *"if I stand at the
 // edge of a pile and push a crate into it…"*, and a splash). The physics runs in the browser that drives a thing; it says
 // what the thing did (`powder-push`, `powder-splash`, 16b `lbPowderFx`) and this end decides what powder moves.
-//   PUSH — a pressed cell moves out of the way (ahead-and-up, up, or ahead: the first that is open air) only if the push
+//   PUSH — a pressed cell moves out of the way (ahead-and-up or ahead — never straight up, 2026-11-08: the first that is open air) only if the push
 //     beats its LOAD — `k` per cell of powder stacked on it, plus one for the cell itself. So a thing ploughs the loose top
 //     of a pile and is stopped by its base, and the bottom of a big heap is never shoved out the far side (the user's point).
 //   SPLASH — surface grains round the impact are lifted out and FLOWN (a ballistic arc worked out whole at launch, as an
@@ -4643,7 +4643,9 @@ function powderPushApply(room, list) {
     let load = 0; while (load < powderPushCfg.loadMax && r - load - 1 >= 0 && isPowderId(peekCellAt(grid, i - load - 1))) load++;
     if (S < powderPushCfg.k * (1 + load)) { cWhy('push:load'); continue; }
     const ahead = i + dir * ROWS, cc = c + dir;
-    const dest = (cc >= 0 && cc < COLS && air(ahead - 1)) ? ahead - 1 : air(i - 1) ? i - 1 : (cc >= 0 && cc < COLS && air(ahead)) ? ahead : -1;
+    // (2026-11-08, the user's flashing slope) no STRAIGHT-UP move: a grain with ground ahead of it was lifted a cell, fell back the next tick, and the next push lifted it
+    //   again (12 times in 1.5 s pressing into a slope's foot) — each move rebuilt the slope wedges round it and the foot on the slant jumped. Boxed ahead, it stays put.
+    const dest = (cc >= 0 && cc < COLS && air(ahead - 1)) ? ahead - 1 : (cc >= 0 && cc < COLS && air(ahead)) ? ahead : -1;
     if (dest < 0) { cWhy('push:boxed'); continue; }
     powderMoveCell(room, st, i, dest, out); cWhy('push:moved');
     if (c < c0) c0 = c; if (c > c1) c1 = c; if (r < r0) r0 = r; if (r > r1) r1 = r;
