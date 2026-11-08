@@ -9559,6 +9559,11 @@ const liquidCfg = {
   //   other tick (by the tick count, so every strip of a room agrees). A cell with room to fall stays active on a tick without a fall (`keepFalling`).
   //   0 = off (fineFallSteps, 1 cell a tick = 200 px/s).
   fallRate: 0,
+  // (2026-11-08, liquid on the card — the user: slow motion "freezes the liquid in place for some time before moving") THE LIQUID'S OWN SLOW MOTION: the tick's
+  //   interval is stretched by 1/slowK (0.25 = a tick every 160 ms), everything on the tick slowing with it. Set by a client whose game is in slow motion (16b,
+  //   `mwClock.on`) and put back to 1 when that client disconnects. A debug tool: on this server it slows the liquid for everyone. (The client used to replay a
+  //   full-speed server slowly: with liquid still levelling anywhere, the backlog only grew, and new liquid waited behind it.)
+  slowK: 1,
   // MINIMUM LIQUID UNIT (fine, experimental): quantise the DOWN-fall so liquid only descends in multiples of this many
   // units — the remainder stays put (mass conserved, a thin film left on the way). Bigger unit ⇒ bigger, chunkier falling
   // slices (they connect up more) at the cost of a more stepped/periodic trickle. 1 = off (exact fall, current). Fall only
@@ -13302,7 +13307,8 @@ const runLiquidTick = () => {
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
   } finally { simNoGen(false); }   // a throw must never leave the world un-buildable
 };
-function restartLiquidLoop() { if (liquidTimer) clearInterval(liquidTimer); liquidTimer = setInterval(runLiquidTick, Math.max(8, Math.min(500, liquidCfg.tickMs | 0))); }
+function restartLiquidLoop() { if (liquidTimer) clearInterval(liquidTimer); const k = Math.max(0.05, Math.min(1, +liquidCfg.slowK || 1)); liquidTimer = setInterval(runLiquidTick, Math.round(Math.max(8, Math.min(500, liquidCfg.tickMs | 0)) / k)); }
+let liquidSlowBy = null;   // (slowK) the socket that slowed it
 restartLiquidLoop();
 // ==LIQUID_TICK_BLOCK_END== (probe_budget.js slices to HERE — it needs runLiquidTick itself, which the
 //  narrower ==LIQUID_SIM_BLOCK_END== above deliberately excludes. Stub setInterval when slicing this far.)
@@ -23589,6 +23595,7 @@ io.on('connection', (socket) => {
       cfg: { densitySort: liquidCfg.densitySort, sortRate: liquidCfg.sortRate, K: liquidCfg.fineLevelSteps,
              sortSteps: liquidCfg.fineSortSteps, reactions: liquidCfg.reactions, minUnit: liquidCfg.fineMinUnit } });
   });
+  socket.on('disconnect', () => { if (liquidSlowBy === socket.id) { liquidSlowBy = null; liquidCfg.slowK = 1; restartLiquidLoop(); io.emit('liquid-cfg', cfgWire()); } });   // (slowK) back to full speed
   socket.on('liquid-cfg', (patch) => {
     // 🟥 THIS IS AN ALLOWLIST AND A KEY IT DOES NOT NAME IS SILENTLY DROPPED — so a NEW DIAL NEEDS THREE EDITS,
     // NOT TWO: the default in `liquidCfg`, the control in the panel, and a line here. Miss this one and the
@@ -23649,6 +23656,7 @@ io.on('connection', (socket) => {
     if ('srcRate' in patch) liquidCfg.srcRate = Math.max(0, Math.min(64, patch.srcRate | 0));
     if ('sinkRate' in patch) liquidCfg.sinkRate = Math.max(0, Math.min(64, patch.sinkRate | 0));
     if ('tickMs' in patch) { const v = Math.max(8, Math.min(500, patch.tickMs | 0)); if (v !== liquidCfg.tickMs) { liquidCfg.tickMs = v; restartLiquidLoop(); } }
+    if ('slowK' in patch) { const v = Math.max(0.05, Math.min(1, +patch.slowK || 1)); if (v !== liquidCfg.slowK) { liquidCfg.slowK = v; liquidSlowBy = v < 1 ? socket.id : null; restartLiquidLoop(); } }
     if ('simBudgetPct' in patch) liquidCfg.simBudgetPct = Math.max(0, Math.min(100, patch.simBudgetPct | 0));
     // The two §7(b) budget fixes ride the same wire as the budget itself, for the same reason chunkEvict does:
     // they have to be A/B-able live, because "is the liquid slow because of tier 3 or because it is 8px?" is
