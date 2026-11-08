@@ -960,7 +960,7 @@ app.get('/debug/slope-cells', (req, res) => {
       const p = grid.pageOfCell(i), b = slopeWedgePage(room, st, p), g = grid.geom, w = b ? b[g.K >= 0 ? (((i & 63) << 6) | ((i >>> g.K) & 63)) : g.offOf[i]] : 0, L = tot ? tot.g(i) : 0;
       l += (c === cx && r === cy ? '@' : '') + (v < 0 ? '?' : L > 0 ? L + (w ? 'W' : '') + (act && act.has(i) ? '*' : '') : w ? 'w' : (v !== 0 && !isFluidId(v)) ? '#' : '.') + ' '; } rows.push(l); }
     return { x, y, col: cx, row: cy, rows }; });
-  res.type('text').send(out.map(o => `at ${o.x},${o.y} (col ${o.col} row ${o.row}) slopeWedges=${liquidCfg.slopeWedges}\n` + o.rows.join('\n')).join('\n\n') + `\ncounters: slant ${liqSlant} ledge ${liqLedge} trickle ${liqTrickle} wedgeOut ${liqWedgeOut} pages ${slopeWPages}\n`);
+  res.type('text').send(out.map(o => `at ${o.x},${o.y} (col ${o.col} row ${o.row}) slopeWedges=${liquidCfg.slopeWedges}\n` + o.rows.join('\n')).join('\n\n') + `\ncounters: slant ${liqSlant} ledge ${liqLedge} trickle ${liqTrickle} drag ${liqDrag} wedgeOut ${liqWedgeOut} pages ${slopeWPages}\n`);
 });
 app.get('/debug/fire', (req, res) => {
   const out = {}, W = Math.max(1, liquidCfg.secW | 0);
@@ -9074,7 +9074,11 @@ const liquidCfg = {
   //   ground, beside an open cell with a drop under it, moves over the edge whatever the levelling says (it moves only a difference of 2 or more, so a unit or
   //   two on a step's edge never went). 0 = off.
   edgeTrickle: 4,
-  edgeTrickleReach: 4,                                  // …toward the nearest drop along flat ground within this many cells (1 = only a cell right at the edge)
+  // (2026-11-08, the user's idea) a thin film is DRAGGED off an edge: when a thin cell trickles off, the thin cell behind it on the same row follows into the
+  //   space it left, and the one behind that — at most this many cells a trickle (a tick); the chain stops at a dry gap or a cell over `edgeTrickle` (a pool). 0 = off.
+  //   ⚠️ A film LONGER than this is left beyond it: the last cell dragged leaves a dry gap, where the next tick's chain stops. Each cell dragged is one move.
+  //   (Replaced `edgeTrickleReach`, which only made films stop further from an edge — the user.)
+  edgeDrag: 64,
   densitySort: true,     // steps 2/2b: heavier liquids sink below lighter → the vertical density layering within a cell. off = liquids mix, never separate
   // (ledgeSpill — step 1b, the DIAGONAL spill over a ledge — went with the fall tag on 2026-07-29; see the tombstone
   //  below. Its only consumer was the fine 1b block, so the dial had nothing left to gate.)
@@ -9710,7 +9714,7 @@ const ACID_K = 1.5;          // water soaked (consumed) to saturate + convert 1 
 const ACID_SOAK_TICKS = 2;   // soak 1 water into dilution every N ticks (rate ≈ 1/N ≈ 0.5/tick)
 const ACID_CONVERT_TICKS = 2;// convert 1 acid → water every N ticks once saturated (rate ≈ 0.5/tick)
 let liquidTickCount = 0;
-let liqSlant = 0, liqLedge = 0, liqWedgeOut = 0, liqTrickle = 0;          // (2026-11-08, liquid on slopes) moves down a slant, off a corner's top onto a slope, out of a wedge cell — since start
+let liqSlant = 0, liqLedge = 0, liqWedgeOut = 0, liqTrickle = 0, liqDrag = 0;          // (2026-11-08, liquid on slopes) moves down a slant, off a corner's top onto a slope, out of a wedge cell — since start
 let liquidQuiet = false;                              // when true, the sim runs but suppresses broadcasts (used to pre-settle at gen time)
 // ⭐ `roomLevelAcc` / `ensureLevelAcc` DELETED 2026-07-31. The coarse per-cell LEVELING carry: the sub-unit remainder
 // of each throttled levelling move, phase-seeded so the invisible 1-unit steps did not all align. Its only consumer
@@ -10437,24 +10441,29 @@ function fineLiquidTickRoom(room, SUB) {
     liqWedgeOut++; };
   // down the slant from cell `i` (column `c`, `L` in it, ground under it): the wedge under it runs down to side `d` — on to the cell beside and below; or
   //   the cell beside-below is a wedge running down AWAY from this one (this is the corner's flat top) — on to the cell beside. Returns what is left.
-  const TRICKLE = liquidCfg.edgeTrickle | 0, TREACH = Math.max(1, liquidCfg.edgeTrickleReach | 0);
+  const TRICKLE = liquidCfg.edgeTrickle | 0, DRAG = Math.max(0, liquidCfg.edgeDrag | 0);
   const slopeSlide = (i, c, L, go) => {   // (go false: only whether anything WOULD move — less than L back if so)
     const wb = wedgeCode(i + 1);
     if (wb !== 0) { const d = (wb >> 6) & 1 ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) return L; const j = i + d * FROWS + 1;
       if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; if (!go) return L - 1; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); liqSlant++; return L - t; }
-    // (onto a slope going away: any amount · `edgeTrickle`: a small amount toward the NEAREST drop along flat ground, within `edgeTrickleReach` cells —
-    //   the user: bits stopped on random steps; on a step two wide the cell behind the edge kept its unit)
-    let bD = 0, bK = 99, onto = false;
-    for (let s = 0; s < 2; s++) { const d = ((liquidTickCount + c + s) & 1) ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) continue;
+    // (onto a slope going away: any amount · `edgeTrickle`: a small amount beside an open cell with a drop under it (or a slope going away under it))
+    let bD = 0, onto = false;
+    for (let s = 0; s < 2 && bD === 0; s++) { const d = ((liquidTickCount + c + s) & 1) ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) continue;
       const jb = i + d * FROWS + 1, w2 = wedgeCode(jb);
-      if (w2 !== 0) { if (((w2 >> 6) & 1 ? -1 : 1) === d) { bD = d; bK = 0; onto = true; break; } continue; }
-      if (L > TRICKLE) continue;
-      for (let k = 1; k <= TREACH && k < bK; k++) { const ck = c + k * d; if (ck < 0 || ck >= COLS) break; const jk = i + k * d * FROWS; if (isSolid(jk)) break;
-        if (!isSolid(jk + 1)) { if (tot.g(jk + 1) < cap) { bK = k; bD = d; } break; }
-        const wk = wedgeCode(jk + 1); if (wk !== 0) { if (((wk >> 6) & 1 ? -1 : 1) === d) { bK = k; bD = d; } break; } } }   // (…a slope going away counts as the drop)
+      if (w2 !== 0) { if (((w2 >> 6) & 1 ? -1 : 1) === d) { bD = d; onto = true; } continue; }
+      if (L > TRICKLE || isSolid(jb - 1)) continue;
+      if (!isSolid(jb)) { if (tot.g(jb) < cap) bD = d; } }
     if (bD === 0) return L;
     const j = i + bD * FROWS; if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; if (!go) return L - 1;
     const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); if (onto) liqLedge++; else liqTrickle++; L -= t;
+    // ⭐ (2026-11-08, the user's idea) THE FILM IS DRAGGED: the cell emptied, the thin cell behind it on the same row (on ground) follows into it, and the
+    //   one behind that, up to DRAG cells — each moves into an EMPTY cell, so all of it fits. Stops at a dry gap, a pool (over TRICKLE: levelling's job), a
+    //   drop under it, or rock. Every cell moved is marked (moveBottom) and so stays awake; the edge cell keeps the chain going next tick. `L` stays 0 for
+    //   the caller (what moved into `i` waits for the next tick).
+    if (L === 0 && DRAG > 0) { let to = i;
+      for (let n = 1; n <= DRAG; n++) { const cb = c - bD * n; if (cb < 0 || cb >= COLS) break; const b = to - bD * FROWS;
+        if (isSolid(b)) break; const tb = tot.g(b); if (tb <= 0 || tb > TRICKLE || !isSolid(b + 1) || lavaBlk(b, to)) break;
+        moveBottom(b, to, tb); liqDrag++; to = b; } }
     return L; };
   const ceilRank = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = T - 1; rk >= 0; rk--) if (p[b + rk] > 0) return rk; return -1; };
   // ── LAVA IS NEVER MIXED WITH ANOTHER LIQUID ──────────────────────────────────────────────────────────────────────
@@ -23596,7 +23605,7 @@ io.on('connection', (socket) => {
     if ('powderBury' in patch) powderBuryCfg.on = patch.powderBury ? 1 : 0;
     if ('slopeWedges' in patch) liquidCfg.slopeWedges = patch.slopeWedges ? 1 : 0;
     if ('edgeTrickle' in patch) liquidCfg.edgeTrickle = Math.max(0, Math.min(24, patch.edgeTrickle | 0));
-    if ('edgeTrickleReach' in patch) liquidCfg.edgeTrickleReach = Math.max(1, Math.min(16, patch.edgeTrickleReach | 0));
+    if ('edgeDrag' in patch) liquidCfg.edgeDrag = Math.max(0, Math.min(256, patch.edgeDrag | 0));
     if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
     if ('powderCover' in patch) { powderCoverCfg.on = patch.powderCover ? 1 : 0; if (!powderCoverCfg.on) for (const r in roomCover) delete roomCover[r]; }
     if ('powderPushK' in patch) powderPushCfg.k = Math.max(0.1, Math.min(100, +patch.powderPushK || 2));
