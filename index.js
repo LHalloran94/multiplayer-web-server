@@ -9075,6 +9075,14 @@ const liquidCfg = {
   //   neighbours level by their LEVELS (amount + raised floor), so liquid runs down a slope by the same levelling as anywhere else — no slide rule, no
   //   'wedge out'. 0 = the old rule (a wedge cell solid to liquid, liquid slid diagonally down the slant — `slopeSlide`).
   slopeHold: 1,
+  // ⭐ (2026-11-10, the user: 'only spreads out if it has something to spread out on') LIQUID STANDING ON LIQUID SPREADS ONLY ONTO SOMETHING. A sideways move
+  //   (levelling 1c, surface settle 1d) from a cell held up by LIQUID goes into the cell beside only if what is under that cell is rock or full; where it is
+  //   liquid with room (or a slope cell with room), the liquid joins it there, diagonally down; over air it does not go (it waits, awake). A cell standing on
+  //   rock or a slope is unchanged, so liquid still steps off an edge into the cell beside the lip and falls. The old diagonal ledge spill (1b, deleted
+  //   2026-07-29 as dead code — it shipped off) had this check for its own move ('the target must be supported when the blocker is liquid' — LIQUID_AUDIT.md);
+  //   the sideways levelling never did, so a pour backing up into a part-full pool shed thin layers into mid-air beside the column, three rows high, at
+  //   every one of the 9 levelling passes a tick (scratchpad: pour_tower). 0 = the old way.
+  spreadOnSupport: 0,
   // (2026-11-08, the user: "the small bits of liquid not settle on edges and rather trickle off them") a cell holding at most this many units (of LIQUID_MAX) on
   //   ground, beside an open cell with a drop under it, moves over the edge whatever the levelling says (it moves only a difference of 2 or more, so a unit or
   //   two on a step's edge never went). 0 = off.
@@ -10600,6 +10608,14 @@ function fineLiquidTickRoom(room, SUB) {
   // ⚠️ `reduce` CANNOT come with them — it captures the cell's own `lf` and writes the cell's `pend`.
   const roomAt = (j) => !isSolid(j) && tot.g(j) < capOf(j);
   const cumAt = (jj, tt) => { const pp = amt.rp(jj), bb = amt.o(jj); let s = 0; for (let k = 0; k <= tt; k++) s += pp[bb + k]; return s; };
+  // (spreadOnSupport) where a sideways move from `i` into the cell beside it, `j`, really goes: `j`, the cell under `j` (joining the liquid there), or -1 (not at all)
+  const SUPP = !!liquidCfg.spreadOnSupport;
+  const sideTo = (i, j) => { if (!SUPP) return j; const r = i % FROWS; if (r + 1 >= FROWS || r + 1 >= LIQUID_FLOOR_ROW) return j;
+    if (isSolid(i + 1) || wedgeCode(i + 1) !== 0 || tot.g(i + 1) <= 0) return j;   // standing on rock or a slope (or on nothing — a falling cell is not levelled anyway): as before
+    const jb = j + 1; if (isSolid(jb)) return j; const tb = tot.g(jb), cb = capOf(jb);
+    if (tb >= cb) return j; if (tb > 0 || wedgeCode(jb) !== 0) return jb; return -1; };
+  // …moving `m` that way: what moved (0 if it could not — the cell is kept awake, so it spreads when the liquid under its neighbour arrives)
+  const sideMove = (mv, i, j, m) => { const k = sideTo(i, j); if (k < 0) { active.add(i); return 0; } if (k !== j) { const rm = capOf(k) - tot.g(k); if (m > rm) m = rm; if (m <= 0) { active.add(i); return 0; } } return mv(i, k, m); };
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
     const doFall = FALLONLY || step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
@@ -11008,11 +11024,11 @@ function fineLiquidTickRoom(room, SUB) {
             if (total > shedCap) total = shedCap;
             if (total > 0 && denom > 0) {
               let mvL = Math.round(total * shedL / denom); if (mvL > total) mvL = total; const mvR = total - mvL;
-              if (mvL > 0) { lvlMove(i, jL, mvL); L -= mvL; wakeN(i); }
-              if (mvR > 0) { lvlMove(i, jR, mvR); L -= mvR; wakeN(i); }
+              if (mvL > 0) { L -= sideMove(lvlMove, i, jL, mvL); wakeN(i); }
+              if (mvR > 0) { L -= sideMove(lvlMove, i, jR, mvR); wakeN(i); }
             }
           }
-        } else for (const dc of (((tick + c) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc * FROWS; if ((dc < 0 ? solidL : solidR) || lavaBlk(i, j)) continue; const nl = tot.g(j) + flrOf(j), room2 = capOf(j) - tot.g(j), Li = L + flrOf(i); if (Li - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((Li - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); L -= mv; wakeN(i); } } }
+        } else for (const dc of (((tick + c) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc * FROWS; if ((dc < 0 ? solidL : solidR) || lavaBlk(i, j)) continue; const nl = tot.g(j) + flrOf(j), room2 = capOf(j) - tot.g(j), Li = L + flrOf(i); if (Li - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((Li - nl) >> 1, room2)), shedCap); if (mv > 0) { L -= sideMove(lvlMove, i, j, mv); wakeN(i); } } }
       }
       // (1d) surface flat-settle — capped to FLATSTEPS of the K sub-steps (see the budget above). Uncapped it runs
       // every sub-step, and because an EMPTY neighbour always counts as "lower", the leading edge of a puddle sheds
@@ -11053,7 +11069,7 @@ function fineLiquidTickRoom(room, SUB) {
           }
           if (hit && hit < best) { best = hit; dir = sdir; }
         }
-        if (dir !== 0 && shedCap >= 1) { const j = i + dir * FROWS; if (tot.g(j) + flrOf(j) < L + flrOf(i) && tot.g(j) < capOf(j) && !lavaBlk(i, j) && reduce(1) > 0) { lvlMove(i, j, 1); L -= 1; wakeN(i); } }
+        if (dir !== 0 && shedCap >= 1) { const j = i + dir * FROWS; if (tot.g(j) + flrOf(j) < L + flrOf(i) && tot.g(j) < capOf(j) && !lavaBlk(i, j) && reduce(1) > 0) { L -= sideMove(lvlMove, i, j, 1); wakeN(i); } }
       }
     }
     if (pend) active.add(i);
@@ -23645,6 +23661,7 @@ io.on('connection', (socket) => {
     if ('powderBury' in patch) powderBuryCfg.on = patch.powderBury ? 1 : 0;
     if ('slopeWedges' in patch) liquidCfg.slopeWedges = patch.slopeWedges ? 1 : 0;
     if ('slopeHold' in patch) liquidCfg.slopeHold = patch.slopeHold ? 1 : 0;
+    if ('spreadOnSupport' in patch) liquidCfg.spreadOnSupport = patch.spreadOnSupport ? 1 : 0;
     if ('edgeTrickle' in patch) liquidCfg.edgeTrickle = Math.max(0, Math.min(24, patch.edgeTrickle | 0));
     if ('edgeDrag' in patch) liquidCfg.edgeDrag = (patch.edgeDrag ? 1 : 0);
     if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
