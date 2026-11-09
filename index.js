@@ -9070,6 +9070,11 @@ const LEVEL_VISC = [1.5, 0.8, 0.4, 0.2, 0.1, 0];     // by rank: lava 1.5 · qui
 const liquidCfg = {
   // (2026-11-08, liquid on slopes) THE SLOPE WEDGES, a rule of the world (server/slope.js, shared with the client as MWSlope): drawn by every client, and — next — solid to liquid, which runs down them. Sent to clients with the rest (`cfgWire`).
   slopeWedges: 1,
+  // ⭐⭐ (2026-11-09, liquid round 8 — A, the user: "something we should have already been doing") SLOPE CELLS HOLD LIQUID. A wedge cell is an ordinary open
+  //   cell whose CAPACITY is its open part (above the slant) and whose FLOOR is raised by the rest: room is asked of each cell's own capacity, and
+  //   neighbours level by their LEVELS (amount + raised floor), so liquid runs down a slope by the same levelling as anywhere else — no slide rule, no
+  //   'wedge out'. 0 = the old rule (a wedge cell solid to liquid, liquid slid diagonally down the slant — `slopeSlide`).
+  slopeHold: 1,
   // (2026-11-08, the user: "the small bits of liquid not settle on edges and rather trickle off them") a cell holding at most this many units (of LIQUID_MAX) on
   //   ground, beside an open cell with a drop under it, moves over the edge whatever the levelling says (it moves only a difference of 2 or more, so a unit or
   //   two on a step's edge never went). 0 = off.
@@ -10227,6 +10232,10 @@ function slopeKindVer(st, p, KIND, genRoom) {
   return e.kv;
 }
 const slopePageCell = (grid, p) => { const g = grid.geom, pc = (p / g.cy) | 0; return pc * CHUNK_SIDE * g.rows + (p - pc * g.cy) * CHUNK_SIDE; };
+// (2026-11-09, slope cells hold liquid) the OPEN fraction of a wedge cell by its code: the part above its slant — ∫ clamp(k·x − j, 0, 1) dx over the cell
+//   (which side the riser is on does not change the area). 1 for a code that is not a wedge.
+const WEDGE_OPEN = (() => { const t = new Float64Array(256).fill(1); for (let v = 128; v < 256; v++) { const k = (v >> 3) & 7, j = v & 7; if (!k) continue; let a = 0; const N = 2048;
+  for (let q = 0; q < N; q++) { const x = (q + 0.5) / N, h = k * x - j; a += h <= 0 ? 0 : h >= 1 ? 1 : h; } t[v] = a / N; } return t; })();
 function slopeWedgePage(room, st, p) {
   const grid = st.terrain, g = grid.geom, cy = g.cy, cx = g.cx;
   const C = st.slopeW || (st.slopeW = new Map());
@@ -10299,16 +10308,21 @@ function fineLiquidTickRoom(room, SUB) {
   //   The Overworld (a generated, power-of-two-row geometry) has the fast form: the page and offset worked out once, for the terrain and the wedge.
   //   🟥 Page rooms are 405 rows — TABLE addressing (`pageOf`/`offOf`): the first version needed the arithmetic form and so had no wedges there at all.
   const GG = grid.geom || {}, WEDGE = SUB === 1 && !!_SLOPE && !!liquidCfg.slopeWedges && GG.cy > 0 && grid.T === 1, ARITH = GG.K >= 0;
+  // (2026-11-09) SLOPE CELLS HOLD LIQUID (`slopeHold`): a wedge cell is open; its capacity `WCAP[code]` (at least 1 unit) and raised floor `WFLR[code]` in units
+  const HOLD = WEDGE && !!liquidCfg.slopeHold, WCAP = new Uint16Array(256), WFLR = new Uint16Array(256);
+  for (let v = 0; v < 256; v++) { const o = v >= 128 ? WEDGE_OPEN[v] : 1, cw = Math.max(1, Math.min(cap, Math.round(cap * o))); WCAP[v] = cw; WFLR[v] = cap - cw; }
   const GK = GG.K, GK6 = GG.K6, GCY = GG.cy, GPGM = GG.PGM, GPO = GG.pageOf, GOO = GG.offOf;
   const wPage = ARITH ? (k) => (k >>> GK6) * GCY + ((k >>> 6) & GPGM) : (k) => GPO[k], wOff = ARITH ? (k) => ((k & 63) << 6) | ((k >>> GK) & 63) : (k) => GOO[k];
   let _wP = -1, _wB = null;
   const wedgeCode = (k) => { if (!WEDGE || k < 0 || k >= NCELL) return 0; const p = wPage(k); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB === null ? 0 : _wB[wOff(k)]; };
-  const isSolid = !WEDGE ? isSolidT : (genRoom && ARITH)
+  const isSolid = (!WEDGE || HOLD) ? isSolidT : (genRoom && ARITH)
     ? (k) => { if (k < 0 || k >= NCELL) return true; const p = (k >>> GK6) * GCY + ((k >>> 6) & GPGM), page = grid.pageAt(p);
                if (page === null) return !grid.skyAt(k);
                const o = ((k & 63) << 6) | ((k >>> GK) & 63), v = page[o]; if (v !== 0 && !isFluidId(v)) return true;
                if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB !== null && _wB[o] !== 0; }
     : (k) => { if (isSolidT(k)) return true; const p = wPage(k); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB !== null && _wB[wOff(k)] !== 0; };
+  // (slopeHold) a cell's capacity and raised floor (units) — `cap` and 0 for every cell that is not a wedge
+  const capOf = HOLD ? (j) => WCAP[wedgeCode(j)] : () => cap, flrOf = HOLD ? (j) => WFLR[wedgeCode(j)] : () => 0;
   // the bytes of the page holding `j`, for the row scans' page runs (null: none, or wedges off)
   const wedgeRun = (j) => { if (!WEDGE) return null; const p = wPage(j); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB; };
   const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; const v = genRoom ? peekCellAt(grid, coarseOf(k)) : grid.g(coarseOf(k)); return v >= 0 && isSinkId(v); };   // a fine cell whose coarse cell is a DRAIN block
@@ -10352,8 +10366,8 @@ function fineLiquidTickRoom(room, SUB) {
       const L2 = L - 2;
       if (gp) {
         for (let k = 0, kg = oG, kt = oT; k < n; k++, kg += sdir, kt += sdir) {
-          if (SOLID_LUT[gp[kg]] || (wb !== null && wb[kg] !== 0)) { liqLvlSteps += k + 1; return 0; }
-          const jl = pT[kt];
+          if (SOLID_LUT[gp[kg]] || (!HOLD && wb !== null && wb[kg] !== 0)) { liqLvlSteps += k + 1; return 0; }
+          const jl = HOLD && wb !== null ? pT[kt] + WFLR[wb[kg]] : pT[kt];
           if (jl > L) { liqLvlSteps += k + 1; return 0; }
           if (jl <= L2) { liqLvlSteps += k + 1; return d + k; }
         }
@@ -10362,7 +10376,7 @@ function fineLiquidTickRoom(room, SUB) {
         for (let k = 0; k < n; k++) {
           liqLvlSteps++;
           if (isSolid(j + sdir * k * FROWS)) return 0;
-          const jl = pT[oT + sdir * k];
+          const jl = pT[oT + sdir * k] + flrOf(j + sdir * k * FROWS);
           if (jl > L) return 0;
           if (jl <= L2) return d + k;
         }
@@ -10388,12 +10402,12 @@ function fineLiquidTickRoom(room, SUB) {
       const Ci2 = Ci - 2, stepA = sdir * T;         // one column is T rank slots, so the walk strides by T
       if (gp) {
         for (let k = 0, kg = oG, b = oA; k < n; k++, kg += sdir, b += stepA) {
-          if (SOLID_LUT[gp[kg]] || (wb !== null && wb[kg] !== 0)) { liqPlSteps += k + 1; return 0; }
+          if (SOLID_LUT[gp[kg]] || (!HOLD && wb !== null && wb[kg] !== 0)) { liqPlSteps += k + 1; return 0; }
           // ⭐ THE PREFIX SUM IS MONOTONE — amounts are never negative — so once it has passed `Ci` the answer
           // is already "stop", and the remaining ranks cannot bring it back down. Exactly the same verdict, up
           // to T-1 fewer reads at an interface. The full sum is still needed for the `<= Ci-2` test, which is
           // why the break is only taken on the over case.
-          let Cj = 0, over = false;
+          let Cj = HOLD && wb !== null ? WFLR[wb[kg]] : 0, over = false;
           for (let q = 0; q <= t; q++) { Cj += pA[b + q]; if (Cj > Ci) { over = true; break; } }
           if (over) { liqPlSteps += k + 1; return 0; }
           if (Cj <= Ci2) { liqPlSteps += k + 1; return d + k; }
@@ -10404,7 +10418,7 @@ function fineLiquidTickRoom(room, SUB) {
           liqPlSteps++;
           if (isSolid(j + sdir * k * FROWS)) return 0;
           const b = oA + sdir * k * T;
-          let Cj = 0; for (let q = 0; q <= t; q++) Cj += pA[b + q];
+          let Cj = flrOf(j + sdir * k * FROWS); for (let q = 0; q <= t; q++) Cj += pA[b + q];
           if (Cj > Ci) return 0;
           if (Cj <= Ci2) return d + k;
         }
@@ -10455,18 +10469,18 @@ function fineLiquidTickRoom(room, SUB) {
   //   the cell beside-below is a wedge running down AWAY from this one (this is the corner's flat top) — on to the cell beside. Returns what is left.
   const TRICKLE = liquidCfg.edgeTrickle | 0, DRAG = Math.max(0, liquidCfg.edgeDrag | 0);
   const slopeSlide = (i, c, L, go) => {   // (go false: only whether anything WOULD move — less than L back if so)
-    const wb = wedgeCode(i + 1);
+    const wb = HOLD ? 0 : wedgeCode(i + 1);
     if (wb !== 0) { const d = (wb >> 6) & 1 ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) return L; const j = i + d * FROWS + 1;
       if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; if (!go) return L - 1; const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); liqSlant++; return L - t; }
     // (onto a slope going away: any amount · `edgeTrickle`: a small amount beside an open cell with a drop under it (or a slope going away under it))
     let bD = 0, onto = false;
     for (let s = 0; s < 2 && bD === 0; s++) { const d = ((liquidTickCount + c + s) & 1) ? -1 : 1, cc = c + d; if (cc < 0 || cc >= COLS) continue;
-      const jb = i + d * FROWS + 1, w2 = wedgeCode(jb);
+      const jb = i + d * FROWS + 1, w2 = HOLD ? 0 : wedgeCode(jb);
       if (w2 !== 0) { if (((w2 >> 6) & 1 ? -1 : 1) === d) { bD = d; onto = true; } continue; }
       if (L > TRICKLE || isSolid(jb - 1)) continue;
-      if (!isSolid(jb)) { if (tot.g(jb) < cap) bD = d; } }
+      if (!isSolid(jb)) { if (tot.g(jb) < capOf(jb)) bD = d; } }
     if (bD === 0) return L;
-    const j = i + bD * FROWS; if (isSolid(j) || lavaBlk(i, j)) return L; const rm = cap - tot.g(j); if (rm <= 0) return L; if (!go) return L - 1;
+    const j = i + bD * FROWS; if (isSolid(j) || lavaBlk(i, j)) return L; const rm = capOf(j) - tot.g(j); if (rm <= 0) return L; if (!go) return L - 1;
     const t = L < rm ? L : rm; moveBottom(i, j, t); wakeN(i); if (onto) liqLedge++; else liqTrickle++; L -= t;
     // ⭐ (2026-11-08, the user's idea) THE FILM IS DRAGGED: the cell emptied, the thin cell behind it on the same row (on ground) follows into it, and the
     //   one behind that, the whole film (no cap) — each moves into an EMPTY cell, so all of it fits. Stops at a dry gap, a pool (over TRICKLE: levelling's job), a
@@ -10475,7 +10489,7 @@ function fineLiquidTickRoom(room, SUB) {
     if (L === 0 && DRAG > 0) { let to = i;
       for (let n = 1; n <= COLS; n++) { const cb = c - bD * n; if (cb < 0 || cb >= COLS) break; const b = to - bD * FROWS;
         if (isSolid(b)) break; const tb = tot.g(b); if (tb <= 0 || tb > TRICKLE || !isSolid(b + 1) || lavaBlk(b, to)) break;
-        moveBottom(b, to, tb); liqDrag++; to = b; } }
+        const mvD = HOLD ? Math.min(tb, capOf(to) - tot.g(to)) : tb; if (mvD <= 0) break; moveBottom(b, to, mvD); liqDrag++; if (mvD < tb) break; to = b; } }
     return L; };
   const ceilRank = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = T - 1; rk >= 0; rk--) if (p[b + rk] > 0) return rk; return -1; };
   // ── LAVA IS NEVER MIXED WITH ANOTHER LIQUID ──────────────────────────────────────────────────────────────────────
@@ -10579,7 +10593,7 @@ function fineLiquidTickRoom(room, SUB) {
   // declaration line alone at 4.2% of the tick body (a line that does no work at all: it is the allocation).
   // Both capture only tick-invariant state (`isSolid`, `tot`, `amt`, `cap`), so hoisting is a pure move.
   // ⚠️ `reduce` CANNOT come with them — it captures the cell's own `lf` and writes the cell's `pend`.
-  const roomAt = (j) => !isSolid(j) && tot.g(j) < cap;
+  const roomAt = (j) => !isSolid(j) && tot.g(j) < capOf(j);
   const cumAt = (jj, tt) => { const pp = amt.rp(jj), bb = amt.o(jj); let s = 0; for (let k = 0; k <= tt; k++) s += pp[bb + k]; return s; };
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
@@ -10769,6 +10783,9 @@ function fineLiquidTickRoom(room, SUB) {
     if (isSolid(i)) { if (WEDGE && !isSolidT(i) && tot.g(i) > 0) wedgeOut(i); continue; }
     const c = (i / FROWS) | 0, r = i - c * FROWS, canDown = r + 1 < LIQUID_FLOOR_ROW;
     let L = tot.g(i); if (L <= 0) continue;
+    // (slopeHold) more than this cell holds (it has just become a wedge, or was painted full): the extra goes UP, top layer first, as much as fits there
+    if (HOLD && L > capOf(i)) { const u = i - 1; if (r > 0 && !isSolid(u) && !lavaBlk(i, u)) { const mv = Math.min(L - capOf(i), capOf(u) - tot.g(u)); if (mv > 0) { moveTop(i, u, mv); wakeN(i); liqWedgeOut++; } }
+      L = tot.g(i); if (L > capOf(i)) active.add(i); if (L <= 0) continue; }
     processed++; liqQProcessed++;
     // ⭐⭐ ONE TERRAIN READ FOR THE CELL BELOW, NOT SIX. `isSolid(i + 1)` was recomputed by (2), (1a), wouldSort,
     // roomAt (up to three times, via canFall/airborne/isStream) and belowRoom — six paged reads of a byte that
@@ -10825,7 +10842,7 @@ function fineLiquidTickRoom(room, SUB) {
     if (!FALLONLY && !doSort && wouldSort(i, r, c, solidBelow)) active.add(i);   // a fall-only turn re-adds everything anyway
     // (1a) straight down. Gated on doFall so the fall rate can be held constant regardless of the levelling sub-step
     // count (fineConstFall).
-    if (doFall && canDown) { const j = i + 1; const room2 = cap - tot.g(j); if (!solidBelow && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
+    if (doFall && canDown) { const j = i + 1; const room2 = capOf(j) - tot.g(j); if (!solidBelow && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
     // ⭐ (2026-11-08, liquid on slopes) (1e) DOWN THE SLANT: resting on a wedge, the liquid moves on diagonally down it, whatever the amount (the fall's
     //   rate) — and on the flat top of a corner whose next column is a slope going down away from it (the user: "it should also move"), sideways onto
     //   it. Nothing is left in a film on either. …and a SMALL amount (`edgeTrickle`) on any edge with a drop beside it trickles off.
@@ -10833,7 +10850,7 @@ function fineLiquidTickRoom(room, SUB) {
     //   THE ACTIVE SET. The fall runs in sub-step 0 only (`fineConstFall`); liquid arriving on a wedge top or an edge in a later sub-step found nothing moving it
     //   there, nothing marked it, and it slept for ever — the same trap as the airborne parcel and the inverted pair below. (The offline bench pinned the fall
     //   into every sub-step and could not show it.)
-    if ((WEDGE || TRICKLE > 0) && canDown && solidBelow && L > 0) { if (doFall) L = slopeSlide(i, c, L, true); else if (slopeSlide(i, c, L, false) < L) active.add(i); }
+    if (((WEDGE && !HOLD) || TRICKLE > 0) && canDown && solidBelow && L > 0) { if (doFall) L = slopeSlide(i, c, L, true); else if (slopeSlide(i, c, L, false) < L) active.add(i); }
     // density throttle (viscosity off by default → lf=1 → reduce is a pass-through)
     const cr = ceilRank(i), lf = (liquidCfg.viscosity && cr >= 0) ? 1 / (1 + LEVEL_VISC[cr]) : 1;
     let pend = false;
@@ -10859,7 +10876,7 @@ function fineLiquidTickRoom(room, SUB) {
     // half a fourth time by `belowRoom` — and nothing between these lines moves any liquid, so all four readings
     // were guaranteed equal. `tot` is still read here rather than hoisted further up, because it DOES change:
     // (1a) has just run and may have emptied the cell below.
-    const rBelow = canDown && !solidBelow && tot.g(i + 1) < cap;
+    const rBelow = canDown && !solidBelow && tot.g(i + 1) < capOf(i + 1);
     const canFall = canDown && (rBelow || fell.has(i + 1) || (c > 0 && roomAt(i + 1 - FROWS)) || (c < COLS - 1 && roomAt(i + 1 + FROWS)));
     if (canFall) fell.add(i);
     const airborne = canDown && (rBelow || fellDown.has(i + 1));
@@ -10870,7 +10887,7 @@ function fineLiquidTickRoom(room, SUB) {
     // re-wakes it every tick. Self-limiting: once it lands, roomAt(below) is false ⇒ not airborne ⇒ it settles normally.
     // ...but only while a fall is genuinely still possible. fineMinUnit quantises the descent, so a sub-unit remainder
     // can never move; keeping THAT active spins forever (it never settles, which the mitigations probe caught).
-    const belowRoom = (canDown && !solidBelow) ? cap - tot.g(i + 1) : 0;
+    const belowRoom = (canDown && !solidBelow) ? capOf(i + 1) - tot.g(i + 1) : 0;
     const keepFalling = belowRoom > 0 && L > 0 && (MINU <= 1 || (L < belowRoom ? L : belowRoom) >= MINU);
     if (airborne) { fellDown.add(i); airborneWire.add(i); if (keepFalling) active.add(i); }
     // LEVELLING GATE (see liquidCfg.levelGate): 0 = canFall (counts diagonal room too) · 1 = own straight-down room ·
@@ -10917,15 +10934,15 @@ function fineLiquidTickRoom(room, SUB) {
       }
       if (plOn) for (let t = 0; t < T - 1; t++) {
         if (amt.rp(i)[bI2 + t] <= 0) continue;
-        const Ci = cumAt(i, t);
+        const Ci = cumAt(i, t) + flrOf(i);
         // ⭐ THE SAME NECESSARY CONDITION AS (1d). This exchange also only ever moves into an IMMEDIATE
         // neighbour, and only when that neighbour's cumulative depth of THIS liquid is lower (`Cj >= Ci` bails
         // below). Two cumulative sums against up to 56 scanned columns.
         // ⚠️ Weaker here than for (1d): 45% of 2c's scans genuinely find a target, so this fires less often and
         // costs 2×(t+1) reads when it does not. Measured separately from `flatSkip` for exactly that reason.
         if (liquidCfg.plSkip) {
-          const okL = jLh >= 0 && !solidL && cumAt(jLh, t) < Ci;
-          const okR = jRh >= 0 && !solidR && cumAt(jRh, t) < Ci;
+          const okL = jLh >= 0 && !solidL && cumAt(jLh, t) + flrOf(jLh) < Ci;
+          const okR = jRh >= 0 && !solidR && cumAt(jRh, t) + flrOf(jRh) < Ci;
           if (!okL && !okR) continue;
         }
         let dir = 0, best = Infinity;
@@ -10935,7 +10952,7 @@ function fineLiquidTickRoom(room, SUB) {
           if (ROWFAST) hit = scanPerLiq(i, c, Ci, t, sdir, PLSCAN);
           if (!ROWFAST || liquidCfg.scanVerify) {
             let slow = 0;
-            for (let d = 1; d <= PLSCAN; d++) { if (!ROWFAST) liqPlSteps++; const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d * FROWS; if (isSolid(j2)) break; const Cj = cumAt(j2, t); if (Cj > Ci) break; if (Cj <= Ci - 2) { slow = d; break; } }
+            for (let d = 1; d <= PLSCAN; d++) { if (!ROWFAST) liqPlSteps++; const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j2 = i + sdir * d * FROWS; if (isSolid(j2)) break; const Cj = cumAt(j2, t) + flrOf(j2); if (Cj > Ci) break; if (Cj <= Ci - 2) { slow = d; break; } }
             if (!ROWFAST) hit = slow; else if (slow !== hit) liqScanMismatch++;
           }
           if (hit && hit < best) { best = hit; dir = sdir; }
@@ -10954,7 +10971,7 @@ function fineLiquidTickRoom(room, SUB) {
         // exactly the combination worth having (the blanket rule freezes a still-sorting column out of levelling
         // entirely, which leaves unnatural terraced mounds standing until it finishes).
         if (liquidCfg.finePerLiquidSortGate && liquidCfg.densitySort && colStillSorting(c + dir, r)) continue;
-        const Cj = cumAt(j, t);
+        const Cj = cumAt(j, t) + flrOf(j);
         if (Cj >= Ci) continue;
         const pi = amt.wp(i), bi = amt.o(i), pj = amt.wp(j), bj = amt.o(j);
         let avail = 0; for (let k = t + 1; k < T; k++) avail += pj[bj + k];
@@ -10973,14 +10990,14 @@ function fineLiquidTickRoom(room, SUB) {
       // (1c) lateral equalise (symmetric)
       if (liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 1) {
         if (liquidCfg.symLevel) {
-          const jL = jLh, jR = jRh;
-          const okL = jL >= 0 && !solidL && L - tot.g(jL) > 1 && !lavaBlk(i, jL);
-          const okR = jR >= 0 && !solidR && L - tot.g(jR) > 1 && !lavaBlk(i, jR);
-          let sum = L, cnt = 1; if (okL) { sum += tot.g(jL); cnt++; } if (okR) { sum += tot.g(jR); cnt++; }
+          const jL = jLh, jR = jRh, fI = flrOf(i), Li = L + fI, lvL = jL >= 0 && !solidL ? tot.g(jL) + flrOf(jL) : 0, lvR = jR >= 0 && !solidR ? tot.g(jR) + flrOf(jR) : 0;
+          const okL = jL >= 0 && !solidL && Li - lvL > 1 && !lavaBlk(i, jL);
+          const okR = jR >= 0 && !solidR && Li - lvR > 1 && !lavaBlk(i, jR);
+          let sum = Li, cnt = 1; if (okL) { sum += lvL; cnt++; } if (okR) { sum += lvR; cnt++; }
           if (cnt > 1) {
             const avg = sum / cnt;
-            let shedL = okL ? Math.min(avg - tot.g(jL), cap - tot.g(jL)) : 0;
-            let shedR = okR ? Math.min(avg - tot.g(jR), cap - tot.g(jR)) : 0;
+            let shedL = okL ? Math.min(avg - lvL, capOf(jL) - tot.g(jL)) : 0;
+            let shedR = okR ? Math.min(avg - lvR, capOf(jR) - tot.g(jR)) : 0;
             if (shedL < 0) shedL = 0; if (shedR < 0) shedR = 0;
             const denom = shedL + shedR; let total = reduce(Math.floor(denom));
             if (total > shedCap) total = shedCap;
@@ -10990,7 +11007,7 @@ function fineLiquidTickRoom(room, SUB) {
               if (mvR > 0) { lvlMove(i, jR, mvR); L -= mvR; wakeN(i); }
             }
           }
-        } else for (const dc of (((tick + c) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc * FROWS; if ((dc < 0 ? solidL : solidR) || lavaBlk(i, j)) continue; const nl = tot.g(j), room2 = cap - nl; if (L - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((L - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); L -= mv; wakeN(i); } } }
+        } else for (const dc of (((tick + c) & 1) ? [-1, 1] : [1, -1])) { const cc = c + dc; if (cc < 0 || cc >= COLS) continue; const j = i + dc * FROWS; if ((dc < 0 ? solidL : solidR) || lavaBlk(i, j)) continue; const nl = tot.g(j) + flrOf(j), room2 = capOf(j) - tot.g(j), Li = L + flrOf(i); if (Li - nl > 1 && room2 > 0) { const mv = Math.min(reduce(Math.min((Li - nl) >> 1, room2)), shedCap); if (mv > 0) { lvlMove(i, j, mv); L -= mv; wakeN(i); } } }
       }
       // (1d) surface flat-settle — capped to FLATSTEPS of the K sub-steps (see the budget above). Uncapped it runs
       // every sub-step, and because an EMPTY neighbour always counts as "lower", the leading edge of a puddle sheds
@@ -11012,25 +11029,26 @@ function fineLiquidTickRoom(room, SUB) {
       // so for free. Getting that wrong would only ever cost a scan the old code also ran, never a wrong move.
       let flatOn = liquidCfg.lateralLevel && !liquidCfg.fluxLevel && L > 0 && step < FLATSTEPS;
       if (flatOn && liquidCfg.flatSkip) {
-        const vL = (jLh >= 0 && !solidL) ? tot.g(jLh) : cap, vR = (jRh >= 0 && !solidR) ? tot.g(jRh) : cap;
-        if (!((vL < L && vL < cap) || (vR < L && vR < cap))) flatOn = false;
+        const fI = flrOf(i), vL = (jLh >= 0 && !solidL) ? tot.g(jLh) : cap, vR = (jRh >= 0 && !solidR) ? tot.g(jRh) : cap;
+        const gL = (jLh >= 0 && !solidL) ? flrOf(jLh) : 0, gR = (jRh >= 0 && !solidR) ? flrOf(jRh) : 0;
+        if (!((vL + gL < L + fI && vL < (jLh >= 0 && !solidL ? capOf(jLh) : cap)) || (vR + gR < L + fI && vR < (jRh >= 0 && !solidR ? capOf(jRh) : cap)))) flatOn = false;
       }
       if (flatOn) {
         let dir = 0, best = Infinity;
         for (let _si = 0; _si < 2; _si++) {
           const sdir = _si ? 1 : -1; liqLvlRuns++;
           let hit = 0;
-          if (ROWFAST) hit = scanLevel(i, c, L, sdir, FLATSCAN);
+          if (ROWFAST) hit = scanLevel(i, c, L + flrOf(i), sdir, FLATSCAN);
           if (!ROWFAST || liquidCfg.scanVerify) {
             let slow = 0;
             // ⚠️ The verify loop takes FLATSCAN too, or `scanVerify` would report a disagreement on every
             // shortened scan and stop being able to see a real one.
-            for (let d = 1; d <= FLATSCAN; d++) { if (!ROWFAST) liqLvlSteps++; const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d * FROWS; if (isSolid(j)) break; const jl = tot.g(j); if (jl > L) break; if (jl <= L - 2) { slow = d; break; } }
+            for (let d = 1; d <= FLATSCAN; d++) { if (!ROWFAST) liqLvlSteps++; const cc = c + sdir * d; if (cc < 0 || cc >= COLS) break; const j = i + sdir * d * FROWS; if (isSolid(j)) break; const jl = tot.g(j) + flrOf(j), Lv = L + flrOf(i); if (jl > Lv) break; if (jl <= Lv - 2) { slow = d; break; } }
             if (!ROWFAST) hit = slow; else if (slow !== hit) liqScanMismatch++;
           }
           if (hit && hit < best) { best = hit; dir = sdir; }
         }
-        if (dir !== 0 && shedCap >= 1) { const j = i + dir * FROWS; if (tot.g(j) < L && tot.g(j) < cap && !lavaBlk(i, j) && reduce(1) > 0) { lvlMove(i, j, 1); L -= 1; wakeN(i); } }
+        if (dir !== 0 && shedCap >= 1) { const j = i + dir * FROWS; if (tot.g(j) + flrOf(j) < L + flrOf(i) && tot.g(j) < capOf(j) && !lavaBlk(i, j) && reduce(1) > 0) { lvlMove(i, j, 1); L -= 1; wakeN(i); } }
       }
     }
     if (pend) active.add(i);
@@ -23619,6 +23637,7 @@ io.on('connection', (socket) => {
     // …objects and powder (`powderPushApply` / `powderSplashApply` / `coverUpdate`)
     if ('powderBury' in patch) powderBuryCfg.on = patch.powderBury ? 1 : 0;
     if ('slopeWedges' in patch) liquidCfg.slopeWedges = patch.slopeWedges ? 1 : 0;
+    if ('slopeHold' in patch) liquidCfg.slopeHold = patch.slopeHold ? 1 : 0;
     if ('edgeTrickle' in patch) liquidCfg.edgeTrickle = Math.max(0, Math.min(24, patch.edgeTrickle | 0));
     if ('edgeDrag' in patch) liquidCfg.edgeDrag = (patch.edgeDrag ? 1 : 0);
     if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
