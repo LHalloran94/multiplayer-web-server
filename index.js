@@ -10438,6 +10438,11 @@ function fineLiquidTickRoom(room, SUB) {
   // one case the auto-arm cannot see: a drain restored from a database written before this existed.
   const sinkOn = liquidCfg.sinks && sinkRate > 0;
   const changedSet = new Set(), airborneWire = new Set();   // accumulate across the physics sub-steps below; broadcast once
+  // ⭐ (2026-11-10, the user: proposal A) THE FLOW THROUGH EACH CELL'S FLOOR this tick, net, summed over every sub-step: + down into the cell under it, − up out of it.
+  //   Sent with the cell (flag 0x20 + one number after its amounts) so the card draws what really moved down instead of guessing it from the column's sums —
+  //   which sideways levelling in the pool below polluted (slices in a falling body). Only vertical moves through the three move helpers below count; the
+  //   sort's swaps net nothing, levelling is sideways, slant moves go to the next column.
+  const flowDn = new Map(), flowAdd = (A, B, m) => { if (B === A + 1) flowDn.set(A, (flowDn.get(A) || 0) + m); else if (B === A - 1) flowDn.set(B, (flowDn.get(B) || 0) - m); };
   // QUIESCENCE scratch (only when enabled): per-fine-cell counter of consecutive ticks the cell did NOT move. Reallocated if NCELL changed (sub switch).
   const quiesce = liquidCfg.fineQuiesce ? ((st.fineStill && st.fineStill.length === NCELL) ? st.fineStill : (st.fineStill = newPagedField('fineStill', chunkGeom(COLS, FROWS), room))) : null;
   let stepMoves = 0;   // cell-changes in the current sub-step (adaptive-K activity proxy)
@@ -10452,12 +10457,12 @@ function fineLiquidTickRoom(room, SUB) {
   // so a rank loop costs what it always did plus one table lookup. `rp` reads through an unallocated page as zeros;
   // `wp` faults one in. When A and B share a page these are the same typed array, which is exactly as before.
   const recomp = (j) => { const p = amt.rp(j), b = amt.o(j); let s = 0; for (let k = 0; k < T; k++) s += p[b + k]; tot.s(j, s); };
-  const moveBottom = (A, B, t) => { let need = t; const pa = amt.wp(A), ba = amt.o(A), pb = amt.wp(B), bb = amt.o(B); for (let rk = 0; rk < T && need > 0; rk++) { const a = pa[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; pa[ba + rk] = a - mv; pb[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot.s(A, tot.g(A) - moved); tot.s(B, tot.g(B) + moved); mark(A); mark(B); } return moved; };
-  const moveTop = (A, B, t) => { let need = t; const pa = amt.wp(A), ba = amt.o(A), pb = amt.wp(B), bb = amt.o(B); for (let rk = T - 1; rk >= 0 && need > 0; rk--) { const a = pa[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; pa[ba + rk] = a - mv; pb[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot.s(A, tot.g(A) - moved); tot.s(B, tot.g(B) + moved); mark(A); mark(B); } return moved; };
+  const moveBottom = (A, B, t) => { let need = t; const pa = amt.wp(A), ba = amt.o(A), pb = amt.wp(B), bb = amt.o(B); for (let rk = 0; rk < T && need > 0; rk++) { const a = pa[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; pa[ba + rk] = a - mv; pb[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot.s(A, tot.g(A) - moved); tot.s(B, tot.g(B) + moved); mark(A); mark(B); flowAdd(A, B, moved); } return moved; };
+  const moveTop = (A, B, t) => { let need = t; const pa = amt.wp(A), ba = amt.o(A), pb = amt.wp(B), bb = amt.o(B); for (let rk = T - 1; rk >= 0 && need > 0; rk--) { const a = pa[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; pa[ba + rk] = a - mv; pb[bb + rk] += mv; need -= mv; } const moved = t - need; if (moved) { tot.s(A, tot.g(A) - moved); tot.s(B, tot.g(B) + moved); mark(A); mark(B); flowAdd(A, B, moved); } return moved; };
   const moveProp = (A, B, t) => { const pa = amt.wp(A), ba = amt.o(A), pb = amt.wp(B), bb = amt.o(B), TA = tot.g(A); if (TA <= 0 || t <= 0) return 0; let need = t, moved = 0;
     for (let rk = 0; rk < T && need > 0; rk++) { const a = pa[ba + rk]; if (a <= 0) continue; let mv = Math.round(t * a / TA); if (mv > a) mv = a; if (mv > need) mv = need; if (mv <= 0) continue; pa[ba + rk] -= mv; pb[bb + rk] += mv; need -= mv; moved += mv; }
     for (let rk = 0; rk < T && need > 0; rk++) { const a = pa[ba + rk]; if (a <= 0) continue; const mv = a < need ? a : need; pa[ba + rk] -= mv; pb[bb + rk] += mv; need -= mv; moved += mv; }
-    if (moved) { tot.s(A, tot.g(A) - moved); tot.s(B, tot.g(B) + moved); mark(A); mark(B); } return moved; };
+    if (moved) { tot.s(A, tot.g(A) - moved); tot.s(B, tot.g(B) + moved); mark(A); mark(B); flowAdd(A, B, moved); } return moved; };
   const floorRank = (j) => { const p = amt.rp(j), b = amt.o(j); for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) return rk; return -1; };
   // (2026-11-08, liquid on slopes) liquid in a cell that is now a wedge goes UP, as much as fits a cell at a time (top layer first), up to 8 cells — nothing
   //   made or lost; it passes over wedge cells above it (the upper cell of a two-cell wedge) to the first open one; what cannot go (sealed above) stays and
@@ -11144,7 +11149,7 @@ function fineLiquidTickRoom(room, SUB) {
   if (changedSet.size && !liquidQuiet) {
     if (liquidCfg.perfLog) liqPerf.fineChanged += changedSet.size;
     // WIRE (liquid-fine-cells): sub + cols so the client can decode fine indices, then per changed cell
-    // [index, repId, flags(0x40 = AIRBORNE), mask] followed by one amt per set rank bit.
+    // [index, repId, flags(0x40 = AIRBORNE, 0x20 = a floor flow follows), mask] followed by one amt per set rank bit (+ the floor flow, −127..127, with 0x20).
     // The flags byte used to carry the fallSide tag in its low 2 bits as well; that went on 2026-07-29, and the
     // AIRBORNE bit is a different thing entirely — it comes from `airborneWire`, which the sim fills from its own
     // levelling gate, and the client's fine ribbon render + the Inspect airborne overlay both read it.
@@ -11152,8 +11157,10 @@ function fineLiquidTickRoom(room, SUB) {
     const emitFine = () => { if (liquidCfg.perfLog && arr.length) liqPerf.fineBytes += JSON.stringify(arr).length + 24; wireFanout(room, 'liquid-fine-cells', { sub: SUB, cols: COLS, cells: arr }); };
     for (const j of changedSet) {
       const p = amt.rp(j), b = amt.o(j); let mask = 0; for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) mask |= (1 << rk);
-      arr.push(j, liqRepId(amt, j), airborneWire.has(j) ? 0x40 : 0, mask);
+      let fd = flowDn.get(j) | 0; if (fd > 127) fd = 127; else if (fd < -127) fd = -127;
+      arr.push(j, liqRepId(amt, j), (airborneWire.has(j) ? 0x40 : 0) | (fd ? 0x20 : 0), mask);
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(p[b + rk]);
+      if (fd) arr.push(fd);
       if (++cells >= 8192) { emitFine(); arr = []; cells = 0; }
     }
     if (cells) emitFine();
@@ -13900,7 +13907,7 @@ const CELL_WIRE = {
   'terrain-set':       () => 2,
   'liquid-fx':         () => 2,
   // [i, repId, flags, mask, ...one amount per set rank bit] — see the WIRE comment in fineLiquidTickRoom.
-  'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n; },
+  'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n + ((a[k + 2] & 0x20) ? 1 : 0); },   // (0x20: + the floor flow)
   'fire-cells':        () => 2,     // [cell, 1 = alight | 0 = out, …]
   'fire-embers':       () => 7,     // [launch cell, vx×100, vy×100, flight ticks, landing cell | -1, smoulder ticks, phase, …]
 };
