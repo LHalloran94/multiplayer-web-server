@@ -9083,6 +9083,24 @@ const liquidCfg = {
   //   the sideways levelling never did, so a pour backing up into a part-full pool shed thin layers into mid-air beside the column, three rows high, at
   //   every one of the 9 levelling passes a tick (scratchpad: pour_tower). 0 = the old way.
   spreadOnSupport: 0,
+  // ⭐ (2026-11-10, the user: 'the displacement idea is a good idea definitely' — and agreed it may move liquid THROUGH FULL LIQUID in one go, the one exception
+  //   to 'never teleport', 2026-07-24) DISPLACEMENT: a full cell cannot push into a full cell, so a pool took a pour only at its surface next to the landing and
+  //   the pour backed up into a tower (measured: 9 → 16 levelling passes changed nothing). Now, in the fall pass, a cell with liquid standing on it that rests on
+  //   FULL liquid hands liquid through the full liquid under and beside it (searched outward, at most `displaceReach` cells) to the nearest open, supported cell
+  //   at its own row or lower whose level is more than `displaceMin` cells below the top of the liquid standing on it — half the difference at most, a cell at
+  //   most (`displaceRate`), once per column a tick. The room it leaves is filled by the liquid above falling (bottom-up, the same pass), so the jammed column
+  //   moves again instead of spreading sideways at every height. Liquid never goes UP through it, and never out into the air (the cell it reaches stands on
+  //   rock or full liquid). 0 = the old way.
+  displace: 0,
+  displaceMin: 1,
+  displaceReach: 256,
+  displaceDeep: 2,
+  displaceRate: 0,
+  // ⭐ (2026-11-10, the user: 'falling liquid … should always have space below it to fall into, because the liquid below it is falling at exactly the same rate')
+  //   FALLING BY WHAT MOVED: a cell that passed liquid down through its floor this tick is falling, whatever is under it now, and is not levelled sideways (the
+  //   gate below otherwise asks only whether there is room under it, propagated up the column). A column moving down into room the pool makes for it
+  //   (displacement) then stays a column instead of spreading out at every height. 0 = the old way.
+  fallByFlow: 0,
   // (2026-11-08, the user: "the small bits of liquid not settle on edges and rather trickle off them") a cell holding at most this many units (of LIQUID_MAX) on
   //   ground, beside an open cell with a drop under it, moves over the edge whatever the levelling says (it moves only a difference of 2 or more, so a unit or
   //   two on a step's edge never went). 0 = off.
@@ -10450,7 +10468,10 @@ function fineLiquidTickRoom(room, SUB) {
   //   Sent with the cell (flag 0x20 + one number after its amounts) so the card draws what really moved down instead of guessing it from the column's sums —
   //   which sideways levelling in the pool below polluted (slices in a falling body). Only vertical moves through the three move helpers below count; the
   //   sort's swaps net nothing, levelling is sideways, slant moves go to the next column.
-  const flowDn = new Map(), flowAdd = (A, B, m) => { if (B === A + 1) flowDn.set(A, (flowDn.get(A) || 0) + m); else if (B === A - 1) flowDn.set(B, (flowDn.get(B) || 0) - m); };
+  //   (2026-11-10, the strips) …and what came into each cell SIDEWAYS this tick, net: + from the cell on its left, − from the right (flag 0x10 + one number after the
+  //   floor flow) — the card draws liquid that came in sideways over open air against the side it came from (16b `lqStripStep`)
+  const flowDn = new Map(), sideIn = new Map(), flowAdd = (A, B, m) => { if (B === A + 1) flowDn.set(A, (flowDn.get(A) || 0) + m); else if (B === A - 1) flowDn.set(B, (flowDn.get(B) || 0) - m);
+    else if (B === A + FROWS) sideIn.set(B, (sideIn.get(B) || 0) + m); else if (B === A - FROWS) sideIn.set(B, (sideIn.get(B) || 0) - m); };
   // QUIESCENCE scratch (only when enabled): per-fine-cell counter of consecutive ticks the cell did NOT move. Reallocated if NCELL changed (sub switch).
   const quiesce = liquidCfg.fineQuiesce ? ((st.fineStill && st.fineStill.length === NCELL) ? st.fineStill : (st.fineStill = newPagedField('fineStill', chunkGeom(COLS, FROWS), room))) : null;
   let stepMoves = 0;   // cell-changes in the current sub-step (adaptive-K activity proxy)
@@ -10615,6 +10636,36 @@ function fineLiquidTickRoom(room, SUB) {
     const jb = j + 1; if (isSolid(jb)) return j; const tb = tot.g(jb), cb = capOf(jb);
     if (tb >= cb) return j; if (tb > 0 || wedgeCode(jb) !== 0) return jb; return -1; };
   // …moving `m` that way: what moved (0 if it could not — the cell is kept awake, so it spreads when the liquid under its neighbour arrives)
+  // (displace) see liquidCfg.displace. `dspBudget` bounds the search's cells over the whole tick.
+  const FBF = !!liquidCfg.fallByFlow, DISP = !!liquidCfg.displace, DMIN = Math.max(0, +liquidCfg.displaceMin || 0) * cap, DREACH = Math.max(4, Math.min(512, liquidCfg.displaceReach | 0 || 256)), DDEEP = Math.max(1, Math.min(16, liquidCfg.displaceDeep | 0 || 2));
+  const DRATE = liquidCfg.displaceRate > 0 ? Math.min(cap, liquidCfg.displaceRate | 0) : cap;
+  const dspSeen = DISP ? new Set() : null, dspQ = [], dspCol = DISP ? new Set() : null; let dspBudget = 32768;
+  const hOf = (x) => (FROWS - 1 - (x % FROWS)) * cap + tot.g(x) + flrOf(x);
+  const supAt = (x) => { const rr = x % FROWS; if (rr + 1 >= FROWS || rr + 1 >= LIQUID_FLOOR_ROW) return true; return isSolid(x + 1) || tot.g(x + 1) >= capOf(x + 1); };
+  const displaceFrom = (i, r, L) => {
+    liqDspCalls++;
+    let t = i, n = 0; while (n < 256 && (t % FROWS) > 0 && !isSolid(t - 1) && tot.g(t - 1) > 0) { t--; n++; }
+    const Hs = hOf(t); dspSeen.clear(); dspQ.length = 0; dspQ.push(i + 1); dspSeen.add(i + 1); dspSeen.add(i);
+    let left = Math.min(L, DRATE), got = 0;
+    for (let q = 0; q < dspQ.length && q < DREACH && left > 0 && dspBudget > 0; q++) {
+      const x = dspQ[q], xc = (x / FROWS) | 0, xr = x - xc * FROWS; dspBudget--; liqDspNodes++;
+      for (let d = 0; d < 4; d++) {
+        let y;
+        if (d === 0) { if (xr + 1 >= FROWS || xr + 1 >= LIQUID_FLOOR_ROW) continue; y = x + 1; } else if (d === 1) { if (xr === 0) continue; y = x - 1; }
+        else if (d === 2) { if (xc === 0) continue; y = x - FROWS; } else { if (xc + 1 >= COLS) continue; y = x + FROWS; }
+        if (dspSeen.has(y)) continue; dspSeen.add(y);
+        if ((y % FROWS) > r + DDEEP) continue;   // (the search keeps to a band DDEEP rows under the cell: under a mound to the pool's surface beside it)
+        if (isSolid(y)) continue;
+        if (tot.g(y) >= capOf(y)) { dspQ.push(y); continue; }
+        if ((y % FROWS) < r || !supAt(y) || lavaBlk(i, y)) continue;
+        const hy = hOf(y); if (Hs - hy <= DMIN) continue;
+        // (nearest first: each open surface cell the search meets takes what it has room for, up to half the difference, until the rate is used)
+        const mv = Math.min(left, capOf(y) - tot.g(y), (Hs - hy) >> 1); if (mv <= 0) continue;
+        const m = moveTop(i, y, mv); if (m > 0) { left -= m; got += m; wakeN(y); if (left <= 0) break; }
+      }
+    }
+    if (got > 0) wakeN(i); return got;
+  };
   const sideMove = (mv, i, j, m) => { const k = sideTo(i, j); if (k < 0) { active.add(i); return 0; } if (k !== j) { const rm = capOf(k) - tot.g(k); if (m > rm) m = rm; if (m <= 0) { active.add(i); return 0; } } return mv(i, k, m); };
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
@@ -10864,6 +10915,9 @@ function fineLiquidTickRoom(room, SUB) {
     // (1a) straight down. Gated on doFall so the fall rate can be held constant regardless of the levelling sub-step
     // count (fineConstFall).
     if (doFall && canDown) { const j = i + 1; const room2 = capOf(j) - tot.g(j); if (!solidBelow && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
+    // (displace) resting on FULL liquid with liquid standing on it: hand some through the full liquid to the nearest lower open surface — once per column a tick
+    if (DISP && doFall && !FALLONLY && canDown && L > 0 && r > 0 && !solidBelow && tot.g(i + 1) >= capOf(i + 1) && !isSolid(i - 1) && tot.g(i - 1) > 0 && !dspCol.has(c)) {
+      const m = displaceFrom(i, r, L); if (m > 0) { L -= m; dspCol.add(c); } }
     // ⭐ (2026-11-08, liquid on slopes) (1e) DOWN THE SLANT: resting on a wedge, the liquid moves on diagonally down it, whatever the amount (the fall's
     //   rate) — and on the flat top of a corner whose next column is a slope going down away from it (the user: "it should also move"), sideways onto
     //   it. Nothing is left in a film on either. …and a SMALL amount (`edgeTrickle`) on any edge with a drop beside it trickles off.
@@ -10917,8 +10971,10 @@ function fineLiquidTickRoom(room, SUB) {
     const isStream = liquidCfg.levelGate === 0 ? canFall
                    : liquidCfg.levelGate === 1 ? rBelow
                    : airborne;
+    // (fallByFlow) …or it moved liquid down through its floor this tick
+    const isFalling = isStream || (FBF && (flowDn.get(i) | 0) > 0);
     const shedCap = L;
-    if (doLevel && !isStream && !sortingHere) {
+    if (doLevel && !isFalling && !sortingHere) {
       // ⭐ …and the same for the two SIDEWAYS neighbours, which (2c) and (1c) each ask about independently — read
       // once here rather than up with `solidBelow`, because a cell that never reaches this block (a stream, a
       // column still stratifying) must not pay for reads it will not use.
@@ -11165,7 +11221,7 @@ function fineLiquidTickRoom(room, SUB) {
   if (changedSet.size && !liquidQuiet) {
     if (liquidCfg.perfLog) liqPerf.fineChanged += changedSet.size;
     // WIRE (liquid-fine-cells): sub + cols so the client can decode fine indices, then per changed cell
-    // [index, repId, flags(0x40 = AIRBORNE, 0x20 = a floor flow follows), mask] followed by one amt per set rank bit (+ the floor flow, −127..127, with 0x20).
+    // [index, repId, flags(0x40 = AIRBORNE, 0x20 = a floor flow follows, 0x10 = a sideways flow in follows), mask] followed by one amt per set rank bit (+ the floor flow, −127..127, with 0x20; + the sideways flow in, + from the left, with 0x10).
     // The flags byte used to carry the fallSide tag in its low 2 bits as well; that went on 2026-07-29, and the
     // AIRBORNE bit is a different thing entirely — it comes from `airborneWire`, which the sim fills from its own
     // levelling gate, and the client's fine ribbon render + the Inspect airborne overlay both read it.
@@ -11174,9 +11230,11 @@ function fineLiquidTickRoom(room, SUB) {
     for (const j of changedSet) {
       const p = amt.rp(j), b = amt.o(j); let mask = 0; for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) mask |= (1 << rk);
       let fd = flowDn.get(j) | 0; if (fd > 127) fd = 127; else if (fd < -127) fd = -127;
-      arr.push(j, liqRepId(amt, j), (airborneWire.has(j) ? 0x40 : 0) | (fd ? 0x20 : 0), mask);
+      let sv = sideIn.get(j) | 0; if (sv > 127) sv = 127; else if (sv < -127) sv = -127;
+      arr.push(j, liqRepId(amt, j), (airborneWire.has(j) ? 0x40 : 0) | (fd ? 0x20 : 0) | (sv ? 0x10 : 0), mask);
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(p[b + rk]);
       if (fd) arr.push(fd);
+      if (sv) arr.push(sv);
       if (++cells >= 8192) { emitFine(); arr = []; cells = 0; }
     }
     if (cells) emitFine();
@@ -11423,6 +11481,7 @@ let liqReactCand = 0, liqReactSeen = 0;
 // If `woken` dominates, the sim is re-examining a huge halo around every moving cell every tick, and the fix is
 // the wake rule — not the flow, not the budget, and not anything measured so far.
 let liqQProcessed = 0, liqQMoved = 0, liqQWoken = 0, liqQCapped = 0;
+let liqDspCalls = 0, liqDspNodes = 0;   // (displace) searches and the cells they visited, for the offline rigs
 // ⭐⭐ HOW FAR THE SIDEWAYS SCANS ACTUALLY WALK. The two levelling scans (1c/1d and 2c) look up to
 // LIQUID_LEVEL_SCAN = 28 cells along the row in EACH direction, per cell, per sub-step, and the per-line
 // profile puts them at ~18% of the liquid tick between them. Whether that is worth attacking depends entirely
@@ -13923,7 +13982,7 @@ const CELL_WIRE = {
   'terrain-set':       () => 2,
   'liquid-fx':         () => 2,
   // [i, repId, flags, mask, ...one amount per set rank bit] — see the WIRE comment in fineLiquidTickRoom.
-  'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n + ((a[k + 2] & 0x20) ? 1 : 0); },   // (0x20: + the floor flow)
+  'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n + ((a[k + 2] & 0x20) ? 1 : 0) + ((a[k + 2] & 0x10) ? 1 : 0); },   // (0x20: + the floor flow · 0x10: + the sideways flow in)
   'fire-cells':        () => 2,     // [cell, 1 = alight | 0 = out, …]
   'fire-embers':       () => 7,     // [launch cell, vx×100, vy×100, flight ticks, landing cell | -1, smoulder ticks, phase, …]
 };
@@ -23662,6 +23721,12 @@ io.on('connection', (socket) => {
     if ('slopeWedges' in patch) liquidCfg.slopeWedges = patch.slopeWedges ? 1 : 0;
     if ('slopeHold' in patch) liquidCfg.slopeHold = patch.slopeHold ? 1 : 0;
     if ('spreadOnSupport' in patch) liquidCfg.spreadOnSupport = patch.spreadOnSupport ? 1 : 0;
+    if ('displace' in patch) liquidCfg.displace = patch.displace ? 1 : 0;
+    if ('fallByFlow' in patch) liquidCfg.fallByFlow = patch.fallByFlow ? 1 : 0;
+    if ('displaceMin' in patch) liquidCfg.displaceMin = Math.max(0, Math.min(8, +patch.displaceMin || 0));
+    if ('displaceReach' in patch) liquidCfg.displaceReach = Math.max(4, Math.min(512, patch.displaceReach | 0));
+    if ('displaceDeep' in patch) liquidCfg.displaceDeep = Math.max(1, Math.min(16, patch.displaceDeep | 0));
+    if ('displaceRate' in patch) liquidCfg.displaceRate = Math.max(0, Math.min(255, patch.displaceRate | 0));
     if ('edgeTrickle' in patch) liquidCfg.edgeTrickle = Math.max(0, Math.min(24, patch.edgeTrickle | 0));
     if ('edgeDrag' in patch) liquidCfg.edgeDrag = (patch.edgeDrag ? 1 : 0);
     if ('powderPush' in patch) powderPushCfg.on = patch.powderPush ? 1 : 0; if ('powderSplash' in patch) powderSplashCfg.on = patch.powderSplash ? 1 : 0;
