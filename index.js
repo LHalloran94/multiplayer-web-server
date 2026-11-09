@@ -9096,6 +9096,10 @@ const liquidCfg = {
   displaceReach: 256,
   displaceDeep: 2,
   displaceRate: 0,
+  //   (2026-11-10, the user: 'give some sliders … it could probably be made more significant') how many cells of one column may hand liquid on in a tick, and in how
+  //   many of the tick's levelling passes it runs (1 = the fall pass only; in a later pass the room it makes is filled from above at the next fall)
+  displacePerCol: 4,
+  displaceSteps: 3,
   // ⭐ (2026-11-10, the user: 'falling liquid … should always have space below it to fall into, because the liquid below it is falling at exactly the same rate')
   //   FALLING BY WHAT MOVED: a cell that passed liquid down through its floor this tick is falling, whatever is under it now, and is not levelled sideways (the
   //   gate below otherwise asks only whether there is room under it, propagated up the column). A column moving down into room the pool makes for it
@@ -10639,7 +10643,8 @@ function fineLiquidTickRoom(room, SUB) {
   // (displace) see liquidCfg.displace. `dspBudget` bounds the search's cells over the whole tick.
   const FBF = !!liquidCfg.fallByFlow, DISP = !!liquidCfg.displace, DMIN = Math.max(0, +liquidCfg.displaceMin || 0) * cap, DREACH = Math.max(4, Math.min(512, liquidCfg.displaceReach | 0 || 256)), DDEEP = Math.max(1, Math.min(16, liquidCfg.displaceDeep | 0 || 2));
   const DRATE = liquidCfg.displaceRate > 0 ? Math.min(cap, liquidCfg.displaceRate | 0) : cap;
-  const dspSeen = DISP ? new Set() : null, dspQ = [], dspCol = DISP ? new Set() : null; let dspBudget = 32768;
+  const DPERCOL = Math.max(1, Math.min(64, liquidCfg.displacePerCol | 0 || 4)), DSTEPS = Math.max(1, Math.min(16, liquidCfg.displaceSteps | 0 || 3));
+  const dspSeen = DISP ? new Set() : null, dspQ = [], dspCol = DISP ? new Map() : null; let dspBudget = 32768 * DSTEPS;
   const hOf = (x) => (FROWS - 1 - (x % FROWS)) * cap + tot.g(x) + flrOf(x);
   const supAt = (x) => { const rr = x % FROWS; if (rr + 1 >= FROWS || rr + 1 >= LIQUID_FLOOR_ROW) return true; return isSolid(x + 1) || tot.g(x + 1) >= capOf(x + 1); };
   const displaceFrom = (i, r, L) => {
@@ -10916,8 +10921,8 @@ function fineLiquidTickRoom(room, SUB) {
     // count (fineConstFall).
     if (doFall && canDown) { const j = i + 1; const room2 = capOf(j) - tot.g(j); if (!solidBelow && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
     // (displace) resting on FULL liquid with liquid standing on it: hand some through the full liquid to the nearest lower open surface — once per column a tick
-    if (DISP && doFall && !FALLONLY && canDown && L > 0 && r > 0 && !solidBelow && tot.g(i + 1) >= capOf(i + 1) && !isSolid(i - 1) && tot.g(i - 1) > 0 && !dspCol.has(c)) {
-      const m = displaceFrom(i, r, L); if (m > 0) { L -= m; dspCol.add(c); } }
+    if (DISP && step < DSTEPS && !FALLONLY && canDown && L > 0 && r > 0 && !solidBelow && tot.g(i + 1) >= capOf(i + 1) && !isSolid(i - 1) && tot.g(i - 1) > 0 && (dspCol.get(c) | 0) < DPERCOL) {
+      const m = displaceFrom(i, r, L); if (m > 0) { L -= m; dspCol.set(c, (dspCol.get(c) | 0) + 1); } }
     // ⭐ (2026-11-08, liquid on slopes) (1e) DOWN THE SLANT: resting on a wedge, the liquid moves on diagonally down it, whatever the amount (the fall's
     //   rate) — and on the flat top of a corner whose next column is a slope going down away from it (the user: "it should also move"), sideways onto
     //   it. Nothing is left in a film on either. …and a SMALL amount (`edgeTrickle`) on any edge with a drop beside it trickles off.
@@ -23726,6 +23731,8 @@ io.on('connection', (socket) => {
     if ('displaceMin' in patch) liquidCfg.displaceMin = Math.max(0, Math.min(8, +patch.displaceMin || 0));
     if ('displaceReach' in patch) liquidCfg.displaceReach = Math.max(4, Math.min(512, patch.displaceReach | 0));
     if ('displaceDeep' in patch) liquidCfg.displaceDeep = Math.max(1, Math.min(16, patch.displaceDeep | 0));
+    if ('displacePerCol' in patch) liquidCfg.displacePerCol = Math.max(1, Math.min(64, patch.displacePerCol | 0));
+    if ('displaceSteps' in patch) liquidCfg.displaceSteps = Math.max(1, Math.min(16, patch.displaceSteps | 0));
     if ('displaceRate' in patch) liquidCfg.displaceRate = Math.max(0, Math.min(255, patch.displaceRate | 0));
     if ('edgeTrickle' in patch) liquidCfg.edgeTrickle = Math.max(0, Math.min(24, patch.edgeTrickle | 0));
     if ('edgeDrag' in patch) liquidCfg.edgeDrag = (patch.edgeDrag ? 1 : 0);
