@@ -10647,6 +10647,9 @@ function fineLiquidTickRoom(room, SUB) {
   const dspSeen = DISP ? new Set() : null, dspQ = [], dspCol = DISP ? new Map() : null; let dspBudget = 32768 * DSTEPS;
   const hOf = (x) => (FROWS - 1 - (x % FROWS)) * cap + tot.g(x) + flrOf(x);
   const supAt = (x) => { const rr = x % FROWS; if (rr + 1 >= FROWS || rr + 1 >= LIQUID_FLOOR_ROW) return true; return isSolid(x + 1) || tot.g(x + 1) >= capOf(x + 1); };
+  // (2026-11-10, round 6 — the user: liquid painted in the air broke into holes with displacement on; a falling 3×3 block lost its middle row on meeting a pool)
+  //   the full liquid under a cell RESTS: down through full cells to rock or the bottom, never to room (then it is falling, and nothing is pushed through it)
+  const restsOn = (x) => { for (let n = 0; n < 128; n++) { const rr = x % FROWS; if (rr >= FROWS || rr >= LIQUID_FLOOR_ROW || isSolid(x)) return true; if (tot.g(x) < capOf(x)) return false; if (rr + 1 >= FROWS || rr + 1 >= LIQUID_FLOOR_ROW) return true; x++; } return true; };
   const displaceFrom = (i, r, L) => {
     liqDspCalls++;
     let t = i, n = 0; while (n < 256 && (t % FROWS) > 0 && !isSolid(t - 1) && tot.g(t - 1) > 0) { t--; n++; }
@@ -10669,7 +10672,10 @@ function fineLiquidTickRoom(room, SUB) {
         const m = moveTop(i, y, mv); if (m > 0) { left -= m; got += m; wakeN(y); if (left <= 0) break; }
       }
     }
-    if (got > 0) wakeN(i); return got;
+    // (round 6) …and the column standing on `i` comes down after it, cell by cell to its top — the whole column sinks (the top is what gets shorter), so no row
+    //   in its middle goes missing
+    if (got > 0) { let need = got; for (let x = i; x > t && need > 0; x--) { const mv = moveBottom(x - 1, x, Math.min(need, capOf(x) - tot.g(x))); if (mv <= 0) break; need = mv; } wakeN(i); }
+    return got;
   };
   const sideMove = (mv, i, j, m) => { const k = sideTo(i, j); if (k < 0) { active.add(i); return 0; } if (k !== j) { const rm = capOf(k) - tot.g(k); if (m > rm) m = rm; if (m <= 0) { active.add(i); return 0; } } return mv(i, k, m); };
   for (let step = 0; step < NSTEPS; step++) {
@@ -10921,8 +10927,8 @@ function fineLiquidTickRoom(room, SUB) {
     // count (fineConstFall).
     if (doFall && canDown) { const j = i + 1; const room2 = capOf(j) - tot.g(j); if (!solidBelow && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
     // (displace) resting on FULL liquid with liquid standing on it: hand some through the full liquid to the nearest lower open surface — once per column a tick
-    if (DISP && step < DSTEPS && !FALLONLY && canDown && L > 0 && r > 0 && !solidBelow && tot.g(i + 1) >= capOf(i + 1) && !isSolid(i - 1) && tot.g(i - 1) > 0 && (dspCol.get(c) | 0) < DPERCOL) {
-      const m = displaceFrom(i, r, L); if (m > 0) { L -= m; dspCol.set(c, (dspCol.get(c) | 0) + 1); } }
+    if (DISP && step < DSTEPS && !FALLONLY && canDown && L > 0 && r > 0 && !solidBelow && tot.g(i + 1) >= capOf(i + 1) && !isSolid(i - 1) && tot.g(i - 1) > 0 && (dspCol.get(c) | 0) < DPERCOL && restsOn(i + 1)) {
+      const m = displaceFrom(i, r, L); if (m > 0) { L = tot.g(i); dspCol.set(c, (dspCol.get(c) | 0) + 1); } }
     // ⭐ (2026-11-08, liquid on slopes) (1e) DOWN THE SLANT: resting on a wedge, the liquid moves on diagonally down it, whatever the amount (the fall's
     //   rate) — and on the flat top of a corner whose next column is a slope going down away from it (the user: "it should also move"), sideways onto
     //   it. Nothing is left in a film on either. …and a SMALL amount (`edgeTrickle`) on any edge with a drop beside it trickles off.
