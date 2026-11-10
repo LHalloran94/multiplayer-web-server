@@ -9091,9 +9091,9 @@ const liquidCfg = {
   //   most (`displaceRate`), once per column a tick. The room it leaves is filled by the liquid above falling (bottom-up, the same pass), so the jammed column
   //   moves again instead of spreading sideways at every height. Liquid never goes UP through it, and never out into the air (the cell it reaches stands on
   //   rock or full liquid). 0 = the old way.
-  displace: 0,
+  displace: 1,   // (2026-11-10, the user: their settings the defaults) ON
   displaceMin: 1,
-  displaceReach: 256,
+  displaceReach: 4,   // (2026-11-10, the user's value)
   displaceDeep: 2,
   displaceRate: 0,
   //   (2026-11-10, the user: 'give some sliders … it could probably be made more significant') how many cells of one column may hand liquid on in a tick, and in how
