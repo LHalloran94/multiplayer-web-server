@@ -9436,9 +9436,10 @@ const liquidCfg = {
   tension: 0, tensionMin: 6,
   // (2026-11-11, the user's idea) DISPLACEMENT BY BODIES (`liqOccOf`): on; a player takes this share of the depth of the cells it fills
   bodyDisplace: 1, dispPlayer: 0.5, dispStep: 0.04,
-  // (2026-11-11, the liquid effects plan, piece 5) WAVES — `liqWavesTick`: OFF until the user has looked (rigs: the sandbox switch, 'liquid-drops-here' `waves`).
+  // (2026-11-11, the liquid effects plan, piece 5) WAVES — `liqWavesTick`: ON by default since 2026-11-12 (the user) (rigs: the sandbox switch, 'liquid-drops-here' `waves`).
   //   waveSpeed cells a second at waveDepth cells deep (shallower is slower) · waveDamp × each liquid's own damping · waveKick × every push · waveRestMs: quiet this long = handed back
-  waves: 0, waveSpeed: 40,   // (2026-11-12, the user: 20, then 'might even be worth 40' — 4 sub-steps a tick)
+  waves: 1, waveSpeed: 40,   // (2026-11-12, the user: ON by default)
+    // (2026-11-12, the user: 20, then 'might even be worth 40' — 4 sub-steps a tick)
   waveDepth: 4, waveDamp: 1, waveKick: 1, waveRestMs: 500,
   dispUnder: 1,   // (2026-11-11, the user's choice) a body displaces only with its part UNDER the surface (`liqOccOf`); 0 = every point of a wet cell, as before
    // (2026-11-11) ON (the user's choice) — the first build hung the server: CELL_WIRE did not know the 0x08 field (fixed)   // (2026-11-11, the user after trying it: 'maybe not really necessary' — OFF; kept to try again)
