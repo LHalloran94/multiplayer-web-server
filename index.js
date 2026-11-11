@@ -4998,7 +4998,7 @@ setInterval(liqDropStep, 50);
 const roomWaves = {}, roomWaveTry = new Set(); let liqWaveErr = 0;
 const liqWaveStat = { kicks: 0, moved: 0, steps: 0, peak: 0, umax: 0, dmax: 0, movedStep: 0 };   // (umax / dmax / movedStep: the LAST step's largest speed, largest level step between neighbours, units moved)
 const wavesOn = (room) => !!liquidCfg.waves || roomWaveTry.has(room);
-const WAVE_DAMP = [0.4, 0.35, 0.07, 0.06, 0.05, 0.09];   // by rank: lava · quicksand · brine · acid · water · oil (a tick) — (round 2: water 0.03 kept a wave 5 s and more)
+const WAVE_DAMP = [0.4, 0.35, 0.05, 0.045, 0.035, 0.07];   // by rank: lava · quicksand · brine · acid · water · oil (a tick) — (round 2: water 0.03 kept a wave 5 s and more)
 const WAVE_VISC = 0.15;   // (round 2) the speeds smoothed along the surface a little each tick: the shortest wiggles (alternate columns up and down) die fast, long waves keep going
 function waveOpenC(grid, i) { const v = peekCellAt(grid, i); return v >= 0 && (v === 0 || isFluidId(v)); }
 function waveCapOf(st, i) { const s = st.liqOcc ? (st.liqOcc.get(i) || 0) : 0; return s > 0 ? Math.max(1, Math.round(LIQUID_MAX * (1 - s))) : LIQUID_MAX; }
@@ -5057,11 +5057,12 @@ function liqWaveStep(room, st, W) {
   // 2. the faces' speeds, from the levels (all from the same moment)
   const cols = [...W.keys()].sort((x, y) => x - y);
   for (const c of cols) { const a = W.get(c), b = W.get(c + 1); a.op = false; if (!b) { a.u = 0; a.q = 0; continue; }
-    const open = Math.abs(a.r - b.r) <= 1 && waveOpenC(grid, (c + 1) * R + a.r) && waveOpenC(grid, c * R + b.r) && !(liquidCfg.reactions && ((a.lava && b.oth) || (b.lava && a.oth)));
+    const open = Math.abs(a.r - b.r) <= 2 && waveOpenC(grid, (c + 1) * R + a.r)   // (round 3: ≤ 1 row froze a steep wave's step in place — the user's bumps and cut-outs)
+       && waveOpenC(grid, c * R + b.r) && !(liquidCfg.reactions && ((a.lava && b.oth) || (b.lava && a.oth)));
     if (!open) { a.u = 0; a.q = 0; continue; } a.op = true;
     const dE = b.eta - a.eta, dEb = Math.abs(dE) <= 1 ? 0 : dE - Math.sign(dE);   // (round 2) a level step of a unit is level (as the levelling has it): whole units can never meet exactly
     a.u = (a.u - g * dEb / cap) * (1 - Math.min(0.9, dk * Math.max(WAVE_DAMP[a.rk] || 0.03, WAVE_DAMP[b.rk] || 0.03))); if (a.u > 0.6) a.u = 0.6; else if (a.u < -0.6) a.u = -0.6; }
-  { const us = cols.map(c => { const a = W.get(c); return a ? a.u : 0; }); for (let k = 0; k < cols.length; k++) { const a = W.get(cols[k]); if (!a || !a.op) continue; const l = k > 0 && cols[k - 1] === cols[k] - 1 ? us[k - 1] : 0, r = k + 1 < cols.length && cols[k + 1] === cols[k] + 1 && W.has(cols[k] + 2) ? us[k + 1] : 0; a.u = us[k] + WAVE_VISC * (l - 2 * us[k] + r); } }
+  { const us = cols.map(c => { const a = W.get(c); return a ? a.u : 0; }); for (let k = 0; k < cols.length; k++) { const a = W.get(cols[k]); if (!a || !a.op) continue; const l = k > 0 && cols[k - 1] === cols[k] - 1 ? us[k - 1] : 0, r = k + 1 < cols.length && cols[k + 1] === cols[k] + 1 && W.has(cols[k] + 2) ? us[k + 1] : 0; a.u = us[k] + Math.min(0.4, WAVE_VISC * dk) * (l - 2 * us[k] + r); } }   // (round 3: × the damping dial too — the user turned it and the waves still faded)
   // 3. the liquid moved: u × the giving column's depth
   const touched = new Set();
   for (const c of cols) { const a = W.get(c), b = W.get(c + 1); if (!a || !b || a.u === 0) continue;
@@ -5072,7 +5073,18 @@ function liqWaveStep(room, st, W) {
   // 4. quiet columns handed back; the cells the levelling leaves alone
   for (const c of cols) { const a = W.get(c); if (!a) continue; const l = W.get(c - 1), b = W.get(c + 1), lu = l ? l.u : 0;
     const calm = Math.abs(a.u) < 0.012 && Math.abs(lu) < 0.012 && (!b || Math.abs(b.eta - a.eta) <= 2) && (!l || Math.abs(l.eta - a.eta) <= 2);   // (round 2: about a unit a tick; whole-unit steps)
-    if (Math.abs(a.u) > liqWaveStat.peak) liqWaveStat.peak = +Math.abs(a.u).toFixed(3); a.qt = calm ? a.qt + 1 : 0; if (a.qt >= rest) { release(c, a); W.delete(c); } }
+    if (Math.abs(a.u) > liqWaveStat.peak) liqWaveStat.peak = +Math.abs(a.u).toFixed(3); a.qt = calm ? a.qt + 1 : 0; }
+  // (round 3) a STRETCH (columns side by side) is handed back only when all of it is calm — one calm column taken out of the middle put a wall in the water; and a
+  //   stretch whose end still moves takes in the column beyond it (the wave TRAVELS: it only ever had the ~13 columns round the push — the user: 'they don't travel')
+  { const cs2 = [...W.keys()].sort((x, y) => x - y); let s0 = 0;
+    for (let k = 0; k <= cs2.length; k++) { if (k < cs2.length && (k === s0 || cs2[k] === cs2[k - 1] + 1)) continue;
+      const seg = cs2.slice(s0, k); s0 = k; if (!seg.length) continue;
+      if (seg.every(c => W.get(c).qt >= rest)) { for (const c of seg) { release(c, W.get(c)); W.delete(c); } continue; }
+      if (W.size >= 800) continue;
+      for (const [e, d] of [[seg[0], -1], [seg[seg.length - 1], 1]]) { const a = W.get(e), inner = W.get(e - d), fu = d > 0 ? (inner ? inner.u : 0) : a.u;
+        if (!(Math.abs(fu) > 0.003 || (inner && Math.abs(inner.eta - a.eta) > 1))) continue;
+        const o = e + d, s = waveSurf(st, o, a.r); if (s < 0 || Math.abs(s - a.r) > 2 || !waveOpenC(grid, o * R + a.r) || !waveOpenC(grid, e * R + s)) continue;
+        W.set(o, { r: s, u: 0, q: 0, qt: 0 }); } } }
   const wc = new Set(); for (const [c, a] of W) { const i = c * R + a.r; wc.add(i); if (a.r > 0) wc.add(i - 1); } st.waveCells = wc.size ? wc : null;
   if (touched.size) { const changed = []; for (const i of touched) vesselCellDone(room, i, changed); emitFineCells(room, [...new Set(changed)]); }
 }
