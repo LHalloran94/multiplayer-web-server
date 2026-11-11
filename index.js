@@ -4861,7 +4861,7 @@ const liqDropsOn = (room) => !!liquidCfg.realDrops || roomLiqDropsTry.has(room);
 // a hit at (x, y) world px: `sp` its speed (px a 60th), `vx` its sideways speed (px a 60th), `hw` half its width (px), `want` units at most (0: by speed),
 //   `wt` its weight (a player's 4 — the loose solver's scale): (2026-11-11, the user) the splash by MOMENTUM — drops by speed × √(weight/4), a heavier hit throws
 //   them a little faster too
-function liqSplashHit(room, x, y, sp, vx, hw, want, wt) {
+function liqSplashHit(room, x, y, sp, vx, hw, want, wt, fwd) {   // `fwd` (piece 2): wading — every drop thrown ahead, the way it moves, lower
   const wk = Math.max(0.35, Math.min(3, Math.sqrt((wt > 0 ? wt : 4) / 4)));
   const st = cellsOf(room), grid = st.terrain; if (!grid || !st.fineAmt) return 0;
   const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, amt = st.fineAmt, tot = st.fineTotal, cov = roomCover[room] && roomCover[room].n;
@@ -4888,7 +4888,8 @@ function liqSplashHit(room, x, y, sp, vx, hw, want, wt) {
     took += u;
     const h1 = fireVar(i, salt, 81 + n), h2 = fireVar(i, salt, 82 + n), side = C[2] === ic ? (h1 < 0.5 ? -1 : 1) : Math.sign(C[2] - ic);
     const s0 = Math.min(liqDropCfg.vmax, sp * 60 / T * (0.8 + 0.2 * wk)) * D[2], up = liqDropCfg.up * (liquidCfg.dropUp == null ? 1 : +liquidCfg.dropUp);
-    const vx0 = side * s0 * liqDropCfg.out * (0.4 + 0.9 * h1) + vx * 60 / T * 0.3, vy0 = -s0 * up * (0.55 + 0.6 * h2);
+    const sd = fwd ? (Math.sign(vx) || side) : side;
+    const vx0 = fwd ? sd * s0 * (0.5 + 0.6 * h1) + vx * 60 / T * 0.4 : side * s0 * liqDropCfg.out * (0.4 + 0.9 * h1) + vx * 60 / T * 0.3, vy0 = -s0 * up * (fwd ? 0.3 + 0.35 * h2 : 0.55 + 0.6 * h2);
     const A = powderFlyArc(ROWS, COLS, air, C[2] + 0.5, C[3] + 0.2, vx0, vy0, i, liqDropCfg.g, 0);
     fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk, u, src: i });
     wire.push(i, rk, Math.round(vx0 * 100), Math.round(vy0 * 100), A.steps, u); made++;
@@ -4898,6 +4899,46 @@ function liqSplashHit(room, x, y, sp, vx, hw, want, wt) {
   if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g });
   return made;
 }
+
+// ⭐ (2026-11-11, the liquid effects plan, piece 2) LIQUID FLUNG BY A BLAST: the blast's owner reports it ('liquid-blast'); the liquid within its radius that open
+//   air touches (a surface, or the side of the crater) is taken — more near the middle — and thrown OUTWARD from the blast as drops, faster the nearer it was,
+//   flown and landed as every real drop is (`roomLiqFly`, 'liquid-fly'). `k` > 1 for a pressure bomb (all push). Nothing made or lost.
+function liqBlastApply(room, x, y, R, k) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid || !st.fineAmt) return 0;
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, amt = st.fineAmt, tot = st.fineTotal, cov = roomCover[room] && roomCover[room].n;
+  const floorRow = Math.floor(roomFloorTop(room) / T);
+  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  const c0 = Math.max(0, Math.floor((x - R) / T)), c1 = Math.min(COLS - 1, Math.floor((x + R) / T)), r0 = Math.max(1, Math.floor((y - R) / T)), r1 = Math.min(ROWS - 2, Math.floor((y + R) / T));
+  const cand = [];
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) {
+    const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
+    const d = Math.hypot((c + 0.5) * T - x, (r + 0.5) * T - y); if (d >= R) continue;
+    if (!air(i - 1) && !air(i - ROWS) && !air(i + ROWS)) continue;   // open air touches it — liquid deep inside a pool is pushed, not thrown
+    cand.push([d, i, c, r]);
+  }
+  if (!cand.length) return 0;
+  cand.sort((a, b) => a[0] - b[0]);
+  const fly = roomLiqFly[room] || (roomLiqFly[room] = []), wire = [], changed = [], now = Date.now(), salt = (now & 0xffff) ^ (Math.floor(x) * 31 + Math.floor(y));
+  const want = Math.min(liqBlastCfg.maxDrops, Math.round(R / 6 * k * (liquidCfg.dropPer == null ? 1 : +liquidCfg.dropPer) / 4 * 4));
+  let made = 0;
+  for (let n = 0, q = 0; n < want && fly.length < liqDropCfg.maxFly && q < cand.length * 3; q++) {
+    const C = cand[q % cand.length], i = C[1], w = 1 - C[0] / R; if (fireVar(i, salt, 51 + q) > 0.35 + 0.65 * w) continue;   // nearer the middle, more often
+    const p = amt.rp(i), b = amt.o(i); let rk = -1; for (let kk = LIQ_T - 1; kk >= 0; kk--) if (p[b + kk] > 0) { rk = kk; break; } if (rk < 0) continue;
+    const D = LIQ_DROP[LIQ_ID[rk]] || LIQ_DROP[9];
+    const u = vesselCellTake(room, i, rk, D[0] * 2, changed); if (!u) continue;
+    let dx = (C[2] + 0.5) * T - x, dy = (C[3] + 0.2) * T - y; const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+    const sp = Math.min(liqBlastCfg.vmax, (liqBlastCfg.v0 + liqBlastCfg.v1 * w) * k) * D[2] * (0.7 + 0.6 * fireVar(i, salt, 61 + q));
+    const vx0 = dx * sp, vy0 = dy * sp - sp * 0.35;
+    const A = powderFlyArc(ROWS, COLS, air, C[2] + 0.5, C[3] + 0.2, vx0, vy0, i, liqDropCfg.g, 0);
+    fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk, u, src: i });
+    wire.push(i, rk, Math.round(vx0 * 100), Math.round(vy0 * 100), A.steps, u); made++; n++;
+  }
+  if (changed.length) emitFineCells(room, [...new Set(changed)]);
+  if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g });
+  liqDropStat.blasts = (liqDropStat.blasts || 0) + 1; liqDropStat.drops += made;
+  return made;
+}
+const liqBlastCfg = { maxDrops: 120, v0: 10, v1: 30, vmax: 45 };   // drops at most a blast; speed (cells/s) at the edge + more at the middle
 // the pours that LANDED this tick (from `fineLiquidTickRoom`), queued for the splash timer: a column rests `cool` ms between splashes
 function liqPourLandings(room, flowDn, airborne, ROWS) {
   const now = Date.now(), cd = roomLiqCool[room] || (roomLiqCool[room] = new Map()), hits = roomLiqHits[room] || (roomLiqHits[room] = []);
@@ -4913,7 +4954,7 @@ function liqPourLandings(room, flowDn, airborne, ROWS) {
 // …every 50 ms: the queued hits splash; the drops that have come down are put where they landed (full: the open cells round it)
 function liqDropStep() {
   const now = Date.now();
-  for (const room in roomLiqHits) { const H = roomLiqHits[room]; delete roomLiqHits[room]; if (!liqDropsOn(room)) continue; for (const h of H) { liqDropStat.hits++; const n = liqSplashHit(room, h[0], h[1], h[2], h[3], h[4], h[5], h[6]); if (!n) liqDropStat.noSurface++; liqDropStat.drops += n; } }
+  for (const room in roomLiqHits) { const H = roomLiqHits[room]; delete roomLiqHits[room]; if (!liqDropsOn(room)) continue; for (const h of H) { liqDropStat.hits++; const n = liqSplashHit(room, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]); if (!n) liqDropStat.noSurface++; liqDropStat.drops += n; } }
   for (const room in roomLiqFly) {
     const fly = roomLiqFly[room], st = cellsOf(room); if (!st.terrain || !st.fineAmt) { delete roomLiqFly[room]; continue; }
     const ROWS = st.rows, changed = []; let keep = 0;
@@ -27488,7 +27529,14 @@ io.on('connection', (socket) => {
     const now = Date.now(); if (now - _pushAt < 25) return; _pushAt = now;
     powderPushApply(room, p);
   });
-  // (2026-11-11, effects piece 1) SOMETHING WENT INTO LIQUID — its driver says where and how hard ([x, y, speed×10, vx×10, half width, weight×10] …)
+  // (2026-11-11, effects piece 1) SOMETHING WENT INTO LIQUID — its driver says where and how hard ([x, y, speed×10, vx×10, half width, weight×10, forward (piece 2: wading)] …)
+  // (piece 2) …and a BLAST, by the one browser that owns it: { x, y, r, k }
+  let _liqBlastAt = 0;
+  socket.on('liquid-blast', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || !liqDropsOn(room) || !isFinite(m.x) || !isFinite(m.y)) return;
+    const now = Date.now(); if (now - _liqBlastAt < 120) return; _liqBlastAt = now;
+    liqBlastApply(room, +m.x, +m.y, Math.max(16, Math.min(600, +m.r || 80)), Math.max(0.5, Math.min(2, +m.k || 1)));
+  });
   let _liqSplashAt = 0;
   // (2026-11-11, displacement by bodies) what is in liquid on this browser now: { p: [x, y] | null, o: [id, x, y, a, …] } (≤ 12 things); an empty one when nothing is
   let _liqBodiesAt = 0;
@@ -27509,11 +27557,11 @@ io.on('connection', (socket) => {
     const now = Date.now(); if (now - _liqSplashAt < 60) return; _liqSplashAt = now;
     const H = roomLiqHits[room] || (roomLiqHits[room] = []), seen = roomLiqSeen[room] || (roomLiqSeen[room] = []);
     while (seen.length && now - seen[0][2] > 300) seen.shift();
-    for (let q = 0; q + 5 < s.length && q < 6 * 4 && H.length < 24; q += 6) {
+    for (let q = 0; q + 6 < s.length && q < 7 * 4 && H.length < 24; q += 7) {
       const x = +s[q], y = +s[q + 1], sp = Math.min(30, Math.max(0, +s[q + 2] / 10 || 0)), vx = Math.max(-30, Math.min(30, +s[q + 3] / 10 || 0)), hw = Math.max(4, Math.min(128, +s[q + 4] || 16)), wt = Math.max(0.5, Math.min(200, +s[q + 5] / 10 || 4));
       if (!(isFinite(x) && isFinite(y) && sp > 0)) continue;
       if (seen.some(e => Math.abs(e[0] - x) < 2 * TERRAIN_CELL && Math.abs(e[1] - y) < 2 * TERRAIN_CELL)) continue;   // the same hit, reported by another browser
-      seen.push([x, y, now]); liqDropStat.reports++; H.push([x, y, sp, vx, hw, 0, wt]);
+      seen.push([x, y, now]); liqDropStat.reports++; H.push([x, y, sp, vx, hw, 0, wt, s[q + 6] ? 1 : 0]);
     }
   });
   socket.on('powder-splash', ({ s } = {}) => {
