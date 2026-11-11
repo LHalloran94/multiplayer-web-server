@@ -5045,7 +5045,7 @@ function liqWavesTick() {
 }
 function liqWaveStep(room, st, W) {
   const R = st.rows, grid = st.terrain, amt = st.fineAmt, cap = LIQUID_MAX, tk = liquidCfg.tickMs || 40, D = Math.max(1, Math.min(12, liquidCfg.waveDepth | 0 || 4));
-  const cT = Math.min(1.6, Math.max(0.02, (+liquidCfg.waveSpeed || 20) * tk / 1000)), g = cT * cT / D, dk = Math.max(0.1, +liquidCfg.waveDamp || 1), rest = Math.max(2, Math.round((liquidCfg.waveRestMs || 500) / tk));
+  const cT = Math.min(1.6, Math.max(0.02, (+liquidCfg.waveSpeed || 40) * tk / 1000)), g = cT * cT / D, dk = Math.max(0.1, +liquidCfg.waveDamp || 1), rest = Math.max(2, Math.round((liquidCfg.waveRestMs || 500) / tk));
   liqWaveStat.steps++;
   // (round 2) a column handed back WAKES its surface: the levelling skipped those cells while they waved, they left the active set, and the last unevenness stayed
   const R0 = st.rows, release = (c, a) => { const act = fineSet(room), i = c * R0 + a.r; for (const j of [i - 1, i, i + 1, i - R0, i + R0]) if (j >= 0 && waveTot(st, j) > 0) act.add(j); };
@@ -9438,7 +9438,7 @@ const liquidCfg = {
   bodyDisplace: 1, dispPlayer: 0.5, dispStep: 0.04,
   // (2026-11-11, the liquid effects plan, piece 5) WAVES — `liqWavesTick`: OFF until the user has looked (rigs: the sandbox switch, 'liquid-drops-here' `waves`).
   //   waveSpeed cells a second at waveDepth cells deep (shallower is slower) · waveDamp × each liquid's own damping · waveKick × every push · waveRestMs: quiet this long = handed back
-  waves: 0, waveSpeed: 20,   // (2026-11-12, the user: 20)
+  waves: 0, waveSpeed: 40,   // (2026-11-12, the user: 20, then 'might even be worth 40' — 4 sub-steps a tick)
   waveDepth: 4, waveDamp: 1, waveKick: 1, waveRestMs: 500,
   dispUnder: 1,   // (2026-11-11, the user's choice) a body displaces only with its part UNDER the surface (`liqOccOf`); 0 = every point of a wet cell, as before
    // (2026-11-11) ON (the user's choice) — the first build hung the server: CELL_WIRE did not know the 0x08 field (fixed)   // (2026-11-11, the user after trying it: 'maybe not really necessary' — OFF; kept to try again)
@@ -24118,7 +24118,7 @@ io.on('connection', (socket) => {
     if ('displaceDeep' in patch) liquidCfg.displaceDeep = Math.max(1, Math.min(16, patch.displaceDeep | 0));
     if ('displacePerCol' in patch) liquidCfg.displacePerCol = Math.max(1, Math.min(8, patch.displacePerCol | 0));
     if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispUnder' in patch) liquidCfg.dispUnder = patch.dispUnder ? 1 : 0;
-    if ('waves' in patch) liquidCfg.waves = patch.waves ? 1 : 0; if ('waveSpeed' in patch) liquidCfg.waveSpeed = Math.max(1, Math.min(40, +patch.waveSpeed || 20)); if ('waveDepth' in patch) liquidCfg.waveDepth = Math.max(1, Math.min(12, patch.waveDepth | 0 || 4)); if ('waveDamp' in patch) liquidCfg.waveDamp = Math.max(0.1, Math.min(5, +patch.waveDamp || 1)); if ('waveKick' in patch) liquidCfg.waveKick = Math.max(0, Math.min(5, +patch.waveKick)); if ('waveRestMs' in patch) liquidCfg.waveRestMs = Math.max(100, Math.min(5000, patch.waveRestMs | 0)); if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
+    if ('waves' in patch) liquidCfg.waves = patch.waves ? 1 : 0; if ('waveSpeed' in patch) liquidCfg.waveSpeed = Math.max(1, Math.min(40, +patch.waveSpeed || 40)); if ('waveDepth' in patch) liquidCfg.waveDepth = Math.max(1, Math.min(12, patch.waveDepth | 0 || 4)); if ('waveDamp' in patch) liquidCfg.waveDamp = Math.max(0.1, Math.min(5, +patch.waveDamp || 1)); if ('waveKick' in patch) liquidCfg.waveKick = Math.max(0, Math.min(5, +patch.waveKick)); if ('waveRestMs' in patch) liquidCfg.waveRestMs = Math.max(100, Math.min(5000, patch.waveRestMs | 0)); if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
     if ('tension' in patch) liquidCfg.tension = patch.tension ? 1 : 0; if ('tensionMin' in patch) liquidCfg.tensionMin = Math.max(1, Math.min(24, patch.tensionMin | 0));
     if ('realDrops' in patch) liquidCfg.realDrops = patch.realDrops ? 1 : 0; if ('dropPer' in patch) liquidCfg.dropPer = Math.max(0, Math.min(4, +patch.dropPer || 0)); if ('dropUp' in patch) liquidCfg.dropUp = Math.max(0, Math.min(3, +patch.dropUp || 0));
     if ('displaceSteps' in patch) liquidCfg.displaceSteps = Math.max(1, Math.min(16, patch.displaceSteps | 0));
