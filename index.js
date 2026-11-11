@@ -4999,6 +4999,7 @@ const roomWaves = {}, roomWaveTry = new Set(); let liqWaveErr = 0;
 const liqWaveStat = { kicks: 0, moved: 0, steps: 0, peak: 0, umax: 0, dmax: 0, movedStep: 0 };   // (umax / dmax / movedStep: the LAST step's largest speed, largest level step between neighbours, units moved)
 const wavesOn = (room) => !!liquidCfg.waves || roomWaveTry.has(room);
 const WAVE_DAMP = [0.4, 0.35, 0.05, 0.045, 0.035, 0.07];   // by rank: lava · quicksand · brine · acid · water · oil (a tick) — (round 2: water 0.03 kept a wave 5 s and more)
+const WAVE_LEVEL = 0.12;   // (round 4) the levelling inside a wave: of each neighbour step (units), moved a tick
 const WAVE_VISC = 0.15;   // (round 2) the speeds smoothed along the surface a little each tick: the shortest wiggles (alternate columns up and down) die fast, long waves keep going
 function waveOpenC(grid, i) { const v = peekCellAt(grid, i); return v >= 0 && (v === 0 || isFluidId(v)); }
 function waveCapOf(st, i) { const s = st.liqOcc ? (st.liqOcc.get(i) || 0) : 0; return s > 0 ? Math.max(1, Math.round(LIQUID_MAX * (1 - s))) : LIQUID_MAX; }
@@ -5044,35 +5045,43 @@ function liqWavesTick() {
 }
 function liqWaveStep(room, st, W) {
   const R = st.rows, grid = st.terrain, amt = st.fineAmt, cap = LIQUID_MAX, tk = liquidCfg.tickMs || 40, D = Math.max(1, Math.min(12, liquidCfg.waveDepth | 0 || 4));
-  const cT = Math.min(0.8, Math.max(0.02, (+liquidCfg.waveSpeed || 10) * tk / 1000)), g = cT * cT / D, dk = Math.max(0.1, +liquidCfg.waveDamp || 1), rest = Math.max(2, Math.round((liquidCfg.waveRestMs || 500) / tk));
+  const cT = Math.min(1.6, Math.max(0.02, (+liquidCfg.waveSpeed || 20) * tk / 1000)), g = cT * cT / D, dk = Math.max(0.1, +liquidCfg.waveDamp || 1), rest = Math.max(2, Math.round((liquidCfg.waveRestMs || 500) / tk));
   liqWaveStat.steps++;
   // (round 2) a column handed back WAKES its surface: the levelling skipped those cells while they waved, they left the active set, and the last unevenness stayed
   const R0 = st.rows, release = (c, a) => { const act = fineSet(room), i = c * R0 + a.r; for (const j of [i - 1, i, i + 1, i - R0, i + R0]) if (j >= 0 && waveTot(st, j) > 0) act.add(j); };
   if (Date.now() - (W.kt || 0) > 8000) { for (const [c, a] of W) release(c, a); W.clear(); return; }   // (round 2) 8 s after the last push the levelling has it back, whatever is left
+  // (round 4) in SUB-STEPS when a wave would cross more than ~half a cell a tick (the user set 20 cells/s = 0.8 a tick, the edge of what one step holds), and a direct
+  //   LEVELLING between neighbours inside the wave (`WAVE_LEVEL` of each level step a tick): the shortest shapes the grid can hold (one-column teeth, the user's comb)
+  //   go in a few ticks, long waves hardly feel it — before, nothing flattened a tooth's height: strong damping froze the comb, light damping set it wobbling
+  const nSub = Math.max(1, Math.ceil(cT / 0.45)), cS = cT / nSub, gS = cS * cS / D, touched = new Set();
+  let cols = [];
+  for (let sub = 0; sub < nSub; sub++) {
   // 1. each column's surface now, its level, how deep (cells, ≤ D), what is on top
   for (const [c, a] of W) { const r = waveSurf(st, c, a.r); if (r < 0) { W.delete(c); continue; } a.r = r; const i = c * R + r, t = waveTot(st, i);
     a.eta = (R - 1 - r) * cap + t * cap / waveCapOf(st, i); let d = Math.min(1, t / waveCapOf(st, i));
     for (let k = 1; k < D; k++) { const j = i + k; if (r + k >= R || !waveOpenC(grid, j) || !(waveTot(st, j) > 0)) break; d += Math.min(1, waveTot(st, j) / waveCapOf(st, j)); } a.d = d;
     const p = amt.rp(i), o = amt.o(i); let best = 4, bu = -1; for (let k = 0; k < LIQ_T; k++) if (p[o + k] > bu) { bu = p[o + k]; best = k; } a.rk = best; a.lava = p[o] > 0; a.oth = t - p[o] > 0; }
   // 2. the faces' speeds, from the levels (all from the same moment)
-  const cols = [...W.keys()].sort((x, y) => x - y);
+  cols = [...W.keys()].sort((x, y) => x - y);
   for (const c of cols) { const a = W.get(c), b = W.get(c + 1); a.op = false; if (!b) { a.u = 0; a.q = 0; continue; }
     const open = Math.abs(a.r - b.r) <= 2 && waveOpenC(grid, (c + 1) * R + a.r)   // (round 3: ≤ 1 row froze a steep wave's step in place — the user's bumps and cut-outs)
        && waveOpenC(grid, c * R + b.r) && !(liquidCfg.reactions && ((a.lava && b.oth) || (b.lava && a.oth)));
     if (!open) { a.u = 0; a.q = 0; continue; } a.op = true;
     const dE = b.eta - a.eta, dEb = Math.abs(dE) <= 1 ? 0 : dE - Math.sign(dE);   // (round 2) a level step of a unit is level (as the levelling has it): whole units can never meet exactly
-    a.u = (a.u - g * dEb / cap) * (1 - Math.min(0.9, dk * Math.max(WAVE_DAMP[a.rk] || 0.03, WAVE_DAMP[b.rk] || 0.03))); if (a.u > 0.6) a.u = 0.6; else if (a.u < -0.6) a.u = -0.6; }
-  { const us = cols.map(c => { const a = W.get(c); return a ? a.u : 0; }); for (let k = 0; k < cols.length; k++) { const a = W.get(cols[k]); if (!a || !a.op) continue; const l = k > 0 && cols[k - 1] === cols[k] - 1 ? us[k - 1] : 0, r = k + 1 < cols.length && cols[k + 1] === cols[k] + 1 && W.has(cols[k] + 2) ? us[k + 1] : 0; a.u = us[k] + Math.min(0.4, WAVE_VISC * dk) * (l - 2 * us[k] + r); } }   // (round 3: × the damping dial too — the user turned it and the waves still faded)
-  // 3. the liquid moved: u × the giving column's depth
-  const touched = new Set();
-  for (const c of cols) { const a = W.get(c), b = W.get(c + 1); if (!a || !b || a.u === 0) continue;
-    const fwd = a.u > 0, dn = fwd ? a : b, rc = fwd ? b : a, cd = fwd ? c : c + 1, cr = fwd ? c + 1 : c;
-    const x = a.u * Math.min(dn.d, D) * cap + a.q; let n = x > 0 ? Math.floor(x) : Math.ceil(x); a.q = x - n; n = Math.min(cap >> 1, Math.abs(n)); if (!n) continue;
+    a.dEb = dEb;
+    a.u = (a.u - gS * dEb / cap) * (1 - Math.min(0.9, dk * Math.max(WAVE_DAMP[a.rk] || 0.03, WAVE_DAMP[b.rk] || 0.03)) / nSub); if (a.u > 0.6) a.u = 0.6; else if (a.u < -0.6) a.u = -0.6; }
+  { const vs = Math.min(0.4, WAVE_VISC * dk) / nSub, us = cols.map(c => { const a = W.get(c); return a ? a.u : 0; }); for (let k = 0; k < cols.length; k++) { const a = W.get(cols[k]); if (!a || !a.op) continue; const l = k > 0 && cols[k - 1] === cols[k] - 1 ? us[k - 1] : 0, r = k + 1 < cols.length && cols[k + 1] === cols[k] + 1 && W.has(cols[k] + 2) ? us[k + 1] : 0; a.u = us[k] + vs * (l - 2 * us[k] + r); } }
+  // 3. the liquid moved: u × the giving column's depth, plus the levelling between the two (from the higher to the lower)
+  for (const c of cols) { const a = W.get(c), b = W.get(c + 1); if (!a || !b || !a.op) continue;
+    const uT = a.u * Math.min(a.u > 0 ? a.d : b.d, D) * cap, lv = -(WAVE_LEVEL / nSub) * (a.dEb || 0);
+    const x = uT + lv + a.q; let n = x > 0 ? Math.floor(x) : Math.ceil(x); a.q = x - n; if (!n) continue;
+    const fwd = n > 0, dn = fwd ? a : b, rc = fwd ? b : a, cd = fwd ? c : c + 1, cr = fwd ? c + 1 : c; n = Math.min(cap >> 1, Math.abs(n));
     const did = waveMoveUnits(st, cd, dn.r, cr, rc.r, n, touched); liqWaveStat.moved += did; if (did < n) { a.q = 0; if (!did) a.u = 0; } }
+  }
   { let um = 0, dm = 0; for (const c of cols) { const a = W.get(c), b = W.get(c + 1); if (!a) continue; um = Math.max(um, Math.abs(a.u)); if (b) dm = Math.max(dm, Math.abs(b.eta - a.eta)); } liqWaveStat.umax = +um.toFixed(4); liqWaveStat.dmax = Math.round(dm); liqWaveStat.movedStep = touched.size; }
   // 4. quiet columns handed back; the cells the levelling leaves alone
   for (const c of cols) { const a = W.get(c); if (!a) continue; const l = W.get(c - 1), b = W.get(c + 1), lu = l ? l.u : 0;
-    const calm = Math.abs(a.u) < 0.012 && Math.abs(lu) < 0.012 && (!b || Math.abs(b.eta - a.eta) <= 2) && (!l || Math.abs(l.eta - a.eta) <= 2);   // (round 2: about a unit a tick; whole-unit steps)
+    const calm = Math.abs(a.u) < 0.012 && Math.abs(lu) < 0.012;   // (round 4: no longer 'and level within 2 units' — strong damping stopped a wave with its shape still in it, and the shape SAT; stopped = the levelling's again)
     if (Math.abs(a.u) > liqWaveStat.peak) liqWaveStat.peak = +Math.abs(a.u).toFixed(3); a.qt = calm ? a.qt + 1 : 0; }
   // (round 3) a STRETCH (columns side by side) is handed back only when all of it is calm — one calm column taken out of the middle put a wall in the water; and a
   //   stretch whose end still moves takes in the column beyond it (the wave TRAVELS: it only ever had the ~13 columns round the push — the user: 'they don't travel')
@@ -9429,7 +9438,8 @@ const liquidCfg = {
   bodyDisplace: 1, dispPlayer: 0.5, dispStep: 0.04,
   // (2026-11-11, the liquid effects plan, piece 5) WAVES — `liqWavesTick`: OFF until the user has looked (rigs: the sandbox switch, 'liquid-drops-here' `waves`).
   //   waveSpeed cells a second at waveDepth cells deep (shallower is slower) · waveDamp × each liquid's own damping · waveKick × every push · waveRestMs: quiet this long = handed back
-  waves: 0, waveSpeed: 10, waveDepth: 4, waveDamp: 1, waveKick: 1, waveRestMs: 500,
+  waves: 0, waveSpeed: 20,   // (2026-11-12, the user: 20)
+  waveDepth: 4, waveDamp: 1, waveKick: 1, waveRestMs: 500,
   dispUnder: 1,   // (2026-11-11, the user's choice) a body displaces only with its part UNDER the surface (`liqOccOf`); 0 = every point of a wet cell, as before
    // (2026-11-11) ON (the user's choice) — the first build hung the server: CELL_WIRE did not know the 0x08 field (fixed)   // (2026-11-11, the user after trying it: 'maybe not really necessary' — OFF; kept to try again)
   displaceSteps: 1,
@@ -24108,7 +24118,7 @@ io.on('connection', (socket) => {
     if ('displaceDeep' in patch) liquidCfg.displaceDeep = Math.max(1, Math.min(16, patch.displaceDeep | 0));
     if ('displacePerCol' in patch) liquidCfg.displacePerCol = Math.max(1, Math.min(8, patch.displacePerCol | 0));
     if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispUnder' in patch) liquidCfg.dispUnder = patch.dispUnder ? 1 : 0;
-    if ('waves' in patch) liquidCfg.waves = patch.waves ? 1 : 0; if ('waveSpeed' in patch) liquidCfg.waveSpeed = Math.max(1, Math.min(20, +patch.waveSpeed || 10)); if ('waveDepth' in patch) liquidCfg.waveDepth = Math.max(1, Math.min(12, patch.waveDepth | 0 || 4)); if ('waveDamp' in patch) liquidCfg.waveDamp = Math.max(0.1, Math.min(5, +patch.waveDamp || 1)); if ('waveKick' in patch) liquidCfg.waveKick = Math.max(0, Math.min(5, +patch.waveKick)); if ('waveRestMs' in patch) liquidCfg.waveRestMs = Math.max(100, Math.min(5000, patch.waveRestMs | 0)); if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
+    if ('waves' in patch) liquidCfg.waves = patch.waves ? 1 : 0; if ('waveSpeed' in patch) liquidCfg.waveSpeed = Math.max(1, Math.min(40, +patch.waveSpeed || 20)); if ('waveDepth' in patch) liquidCfg.waveDepth = Math.max(1, Math.min(12, patch.waveDepth | 0 || 4)); if ('waveDamp' in patch) liquidCfg.waveDamp = Math.max(0.1, Math.min(5, +patch.waveDamp || 1)); if ('waveKick' in patch) liquidCfg.waveKick = Math.max(0, Math.min(5, +patch.waveKick)); if ('waveRestMs' in patch) liquidCfg.waveRestMs = Math.max(100, Math.min(5000, patch.waveRestMs | 0)); if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
     if ('tension' in patch) liquidCfg.tension = patch.tension ? 1 : 0; if ('tensionMin' in patch) liquidCfg.tensionMin = Math.max(1, Math.min(24, patch.tensionMin | 0));
     if ('realDrops' in patch) liquidCfg.realDrops = patch.realDrops ? 1 : 0; if ('dropPer' in patch) liquidCfg.dropPer = Math.max(0, Math.min(4, +patch.dropPer || 0)); if ('dropUp' in patch) liquidCfg.dropUp = Math.max(0, Math.min(3, +patch.dropUp || 0));
     if ('displaceSteps' in patch) liquidCfg.displaceSteps = Math.max(1, Math.min(16, patch.displaceSteps | 0));
