@@ -4814,11 +4814,16 @@ const roomDispTry = new Set(); const dispOn = (room) => !!liquidCfg.bodyDisplace
 function liqOccOf(room, st) {
   const T = TERRAIN_CELL, SUB = st.fineSub || 1, ROWS = st.rows * SUB, COLS = st.cols * SUB, tot = st.fineTotal, occ = new Map();
   const wet = (x, y) => { const c = Math.floor(x / T), r = Math.floor(y / T); return c >= 0 && r >= 0 && c < COLS && r < ROWS && peekCellAt(tot, c * ROWS + r) > 0; };
+  const UND = !!liquidCfg.dispUnder, OC0 = st.liqOcc;
   const fill = (x0, y0, x1, y1, inside, k) => {
     for (let c = Math.max(0, Math.floor(x0 / T)); c <= Math.min(COLS - 1, Math.floor(x1 / T)); c++) for (let r = Math.max(0, Math.floor(y0 / T)); r <= Math.min(ROWS - 1, Math.floor(y1 / T)); r++) {
-      const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
+      const i = c * ROWS + r, am = peekCellAt(tot, i); if (!(am > 0)) continue;
+      // ⭐ (2026-11-11, the user: things floating half out looked covered) ONLY THE PART UNDER THE SURFACE displaces (`dispUnder`): in the SURFACE cell (nothing
+      //   over it) only the points below its level count — the level as drawn, its amount ÷ the capacity its share (last tick's, eased) leaves. Before, every point
+      //   of a wet cell counted, the part over the water too: a floater's surface cell was drawn full and the excess handed up over it.
+      let yS = -1e9; if (UND && !(r > 0 && peekCellAt(tot, i - 1) > 0)) { const s0 = OC0 ? (OC0.get(i) || 0) : 0; yS = (r + 1 - Math.min(1, am / Math.max(1, LIQUID_MAX * (1 - s0)))) * T; }
       // (round 27 — the user: the water changed in jerks) how MUCH of the cell the body covers (3 × 3 points), not whether its middle is in it
-      let n = 0; for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) if (inside((c + (a + 0.5) / 3) * T, (r + (b + 0.5) / 3) * T)) n++;
+      let n = 0; for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) { const py = (r + (b + 0.5) / 3) * T; if (py >= yS && inside((c + (a + 0.5) / 3) * T, py)) n++; }
       const sh = k * n / 9; if (sh > 0.01 && !(occ.get(i) >= sh)) occ.set(i, sh);
     } };
   const kP = Math.max(0, Math.min(0.9, +liquidCfg.dispPlayer || 0));
@@ -9301,7 +9306,9 @@ const liquidCfg = {
   //   drops stay visible where they land); liquid joining liquid, falling, and a full pool spreading are as before. 0 = the old way.
   tension: 0, tensionMin: 6,
   // (2026-11-11, the user's idea) DISPLACEMENT BY BODIES (`liqOccOf`): on; a player takes this share of the depth of the cells it fills
-  bodyDisplace: 1, dispPlayer: 0.5, dispStep: 0.04,   // (2026-11-11) ON (the user's choice) — the first build hung the server: CELL_WIRE did not know the 0x08 field (fixed)   // (2026-11-11, the user after trying it: 'maybe not really necessary' — OFF; kept to try again)
+  bodyDisplace: 1, dispPlayer: 0.5, dispStep: 0.04,
+  dispUnder: 1,   // (2026-11-11, the user's choice) a body displaces only with its part UNDER the surface (`liqOccOf`); 0 = every point of a wet cell, as before
+   // (2026-11-11) ON (the user's choice) — the first build hung the server: CELL_WIRE did not know the 0x08 field (fixed)   // (2026-11-11, the user after trying it: 'maybe not really necessary' — OFF; kept to try again)
   displaceSteps: 1,
   // ⭐ (2026-11-10, the user: 'falling liquid … should always have space below it to fall into, because the liquid below it is falling at exactly the same rate')
   //   FALLING BY WHAT MOVED: a cell that passed liquid down through its floor this tick is falling, whatever is under it now, and is not levelled sideways (the
@@ -23974,7 +23981,7 @@ io.on('connection', (socket) => {
     if ('displaceReach' in patch) liquidCfg.displaceReach = Math.max(4, Math.min(512, patch.displaceReach | 0));
     if ('displaceDeep' in patch) liquidCfg.displaceDeep = Math.max(1, Math.min(16, patch.displaceDeep | 0));
     if ('displacePerCol' in patch) liquidCfg.displacePerCol = Math.max(1, Math.min(8, patch.displacePerCol | 0));
-    if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
+    if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispUnder' in patch) liquidCfg.dispUnder = patch.dispUnder ? 1 : 0; if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
     if ('tension' in patch) liquidCfg.tension = patch.tension ? 1 : 0; if ('tensionMin' in patch) liquidCfg.tensionMin = Math.max(1, Math.min(24, patch.tensionMin | 0));
     if ('realDrops' in patch) liquidCfg.realDrops = patch.realDrops ? 1 : 0; if ('dropPer' in patch) liquidCfg.dropPer = Math.max(0, Math.min(4, +patch.dropPer || 0)); if ('dropUp' in patch) liquidCfg.dropUp = Math.max(0, Math.min(3, +patch.dropUp || 0));
     if ('displaceSteps' in patch) liquidCfg.displaceSteps = Math.max(1, Math.min(16, patch.displaceSteps | 0));
