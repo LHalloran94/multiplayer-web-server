@@ -4853,6 +4853,7 @@ function liqOccWake() {
   for (const room of new Set([...Object.keys(roomLiqBodies), ...Object.keys(roomPos)])) { if (!dispOn(room)) continue; const st = cellsOf(room); if (!st || !st.fineTotal || !st.terrain) continue;
     const occ = liqOccOf(room, st), prev = st.liqOcc; if (!occ.size && !prev) continue; const act = fineSet(room);
     for (const [i, o] of occ) if (!prev || prev.get(i) !== o) act.add(i);
+    if (wavesOn(room)) { const R = st.rows, seenC = new Set(); for (const [i, o] of occ) if (!prev || prev.get(i) !== o) { const c = (i / R) | 0; if (!seenC.has(c)) { seenC.add(c); liqWaveKick(room, (c + 0.5) * TERRAIN_CELL, ((i % R) + 0.5) * TERRAIN_CELL, 0, 0, 0); } } }   // (piece 5) a body's displacement changing: the columns join the waves, the heights it makes travel
     if (prev) for (const i of prev.keys()) if (!occ.has(i)) act.add(i); }
 }
 setInterval(liqOccWake, 100);
@@ -4909,6 +4910,7 @@ function liqSplashHit(room, x, y, sp, vx, hw, want, wt, fwd) {   // `fwd` (piece
 //   air touches (a surface, or the side of the crater) is taken — more near the middle — and thrown OUTWARD from the blast as drops, faster the nearer it was,
 //   flown and landed as every real drop is (`roomLiqFly`, 'liquid-fly'). `k` > 1 for a pressure bomb (all push). Nothing made or lost.
 function liqBlastApply(room, x, y, R, k) {
+  if (wavesOn(room)) liqWaveKick(room, x, y, 0.25 * Math.min(2, +k || 1), 0, Math.max(2, Math.min(24, Math.round((+R || 40) / TERRAIN_CELL))));   // (piece 5) a blast pushes the surface outward
   const st = cellsOf(room), grid = st.terrain; if (!grid || !st.fineAmt) return 0;
   const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, amt = st.fineAmt, tot = st.fineTotal, cov = roomCover[room] && roomCover[room].n;
   const floorRow = Math.floor(roomFloorTop(room) / T);
@@ -4959,7 +4961,7 @@ function liqPourLandings(room, flowDn, airborne, ROWS) {
 // …every 50 ms: the queued hits splash; the drops that have come down are put where they landed (full: the open cells round it)
 function liqDropStep() {
   const now = Date.now();
-  for (const room in roomLiqHits) { const H = roomLiqHits[room]; delete roomLiqHits[room]; if (!liqDropsOn(room)) continue; for (const h of H) { liqDropStat.hits++; const n = liqSplashHit(room, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]); if (!n) liqDropStat.noSurface++; liqDropStat.drops += n; } }
+  for (const room in roomLiqHits) { const H = roomLiqHits[room]; delete roomLiqHits[room]; if (wavesOn(room)) for (const h of H) liqWaveHit(room, h); if (!liqDropsOn(room)) continue; for (const h of H) { liqDropStat.hits++; const n = liqSplashHit(room, h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]); if (!n) liqDropStat.noSurface++; liqDropStat.drops += n; } }
   for (const room in roomLiqFly) {
     const fly = roomLiqFly[room], st = cellsOf(room); if (!st.terrain || !st.fineAmt) { delete roomLiqFly[room]; continue; }
     const ROWS = st.rows, changed = []; let keep = 0;
@@ -4983,6 +4985,112 @@ function liqDropStep() {
   }
 }
 setInterval(liqDropStep, 50);
+
+// ═══ WAVES (2026-11-11, the liquid effects plan, piece 5 — scratchpad/kickoff_liquid_card.md §PIECE 5 PLAN) ═══════════════════════════════════════════════════
+//   Shallow water on the SURFACE COLUMNS that something disturbed — sparse, once a liquid tick (`runLiquidTick`, so pause and slow motion hold it too). Per
+//   active column: its surface row `r` (the top liquid cell, at least two cells deep — never a slope's corner) and, for the face to its RIGHT, a sideways speed
+//   `u` (cells a tick) and the units left over `q`. Each tick: u += −g·(η right − η here) (η the level in units, as drawn: amount ÷ what a body's share leaves),
+//   × (1 − damping by liquid); then u × the depth (≤ waveDepth cells) moves REAL units from the top of one column to the cell beside it in the next (top layer
+//   first; nothing made or lost). A face is closed by rock, by surfaces more than a row apart, or by lava meeting another liquid: speed 0 = it reflects.
+//   The levelling (1c/1d/2c) leaves these cells alone while they wave (`st.waveCells`), or it would flatten a wave in a tick or two; falling is untouched.
+//   Started by `liqWaveKick` (splashes and pours landing — `liqDropStep`'s hits; blasts; a body's displacement changing); a column quiet for waveRestMs is
+//   handed back to the levelling. Speed c = √(g·depth) cells a tick (≤ 0.8: stable).
+const roomWaves = {}, roomWaveTry = new Set(); let liqWaveErr = 0;
+const liqWaveStat = { kicks: 0, moved: 0, steps: 0, peak: 0, umax: 0, dmax: 0, movedStep: 0 };   // (umax / dmax / movedStep: the LAST step's largest speed, largest level step between neighbours, units moved)
+const wavesOn = (room) => !!liquidCfg.waves || roomWaveTry.has(room);
+const WAVE_DAMP = [0.4, 0.35, 0.07, 0.06, 0.05, 0.09];   // by rank: lava · quicksand · brine · acid · water · oil (a tick) — (round 2: water 0.03 kept a wave 5 s and more)
+const WAVE_VISC = 0.15;   // (round 2) the speeds smoothed along the surface a little each tick: the shortest wiggles (alternate columns up and down) die fast, long waves keep going
+function waveOpenC(grid, i) { const v = peekCellAt(grid, i); return v >= 0 && (v === 0 || isFluidId(v)); }
+function waveCapOf(st, i) { const s = st.liqOcc ? (st.liqOcc.get(i) || 0) : 0; return s > 0 ? Math.max(1, Math.round(LIQUID_MAX * (1 - s))) : LIQUID_MAX; }
+function waveTot(st, i) { const v = peekCellAt(st.fineTotal, i); return v > 0 ? v : 0; }
+// the surface row of column c near row r, or -1
+function waveSurf(st, c, r) {
+  const R = st.rows, grid = st.terrain; if (c < 0 || c >= st.cols || r < 0 || r >= R) return -1; const b = c * R; let rr = r;
+  for (let k = 0; k < 4; k++) { const u = rr - 1; if (u >= 0 && waveOpenC(grid, b + u) && waveTot(st, b + u) > 0) rr = u; else break; }
+  for (let k = 0; k < 4; k++) { if (waveTot(st, b + rr) > 0) break; const d = rr + 1; if (d < R && waveOpenC(grid, b + d)) rr = d; else break; }
+  if (!waveOpenC(grid, b + rr) || !(waveTot(st, b + rr) > 0)) return -1;
+  if (rr + 1 >= R || !waveOpenC(grid, b + rr + 1) || !(waveTot(st, b + rr + 1) > 0)) return -1;
+  return rr;
+}
+// the columns along the surface either side of c0 (surface row r) — up to `reach` each way, stopping at rock or a surface more than a row away
+function waveJoin(st, W, c0, r, reach) {
+  const R = st.rows, grid = st.terrain; let n = 0;
+  if (!W.has(c0)) { W.set(c0, { r, u: 0, q: 0, qt: 0 }); n++; }
+  for (const d of [-1, 1]) { let pr = r;
+    for (let k = 1; k <= reach; k++) { const c = c0 + d * k, s = waveSurf(st, c, pr); if (s < 0 || Math.abs(s - pr) > 1 || !waveOpenC(grid, c * R + pr) || !waveOpenC(grid, (c - d) * R + s)) break;
+      if (!W.has(c)) { W.set(c, { r: s, u: 0, q: 0, qt: 0 }); n++; } pr = s; } }
+  return n;
+}
+// a push at (x, y): `k` cells a tick added to the faces within `spread` columns — outward from x (dir 0: an impact, a blast) or all one way (dir ±1: a body moving).
+//   k 0: the columns only join (their heights do the rest)
+function liqWaveKick(room, x, y, k, dir, spread) {
+  if (!wavesOn(room)) return 0; const st = cellsOf(room); if (!st.terrain || !st.fineTotal || !st.fineAmt) return 0;
+  const T = TERRAIN_CELL, c0 = Math.floor(x / T), r0 = Math.floor(y / T); let r = waveSurf(st, c0, r0); if (r < 0) r = waveSurf(st, c0, r0 + 1); if (r < 0) return 0;
+  const W = roomWaves[room] || (roomWaves[room] = new Map()), sp = Math.max(0, spread | 0); waveJoin(st, W, c0, r, sp + 6); W.kt = Date.now();
+  const kk = Math.max(0, +k || 0) * (+liquidCfg.waveKick || 0); if (kk > 0) { liqWaveStat.kicks++;
+    for (let c = c0 - sp - 1; c <= c0 + sp; c++) { const a = W.get(c); if (!a || !W.has(c + 1)) continue; const dc = c + 0.5 - c0, f = 1 - Math.min(1, Math.abs(dc) / (sp + 1.5));
+      if (f <= 0) continue; a.u = Math.max(-0.6, Math.min(0.6, a.u + (dir ? Math.sign(dir) : (c < c0 ? -1 : 1)) * kk * f)); } }
+  return 1;
+}
+// a queued hit (`liqDropStep`): [x, y, speed, vx, half-width, want, weight×, forward]
+function liqWaveHit(room, h) {
+  const sp = Math.abs(+h[2] || 0), wt = Math.max(0.25, +h[6] || 4), hw = Math.max(0, Math.round((+h[4] || 8) / TERRAIN_CELL)), k = Math.min(0.4, 0.035 * sp * Math.sqrt(wt / 4));
+  if (h[7]) liqWaveKick(room, h[0], h[1], k * 0.8, Math.sign(+h[3] || 0) || 1, hw + 1); else liqWaveKick(room, h[0], h[1], k, 0, hw);
+}
+function liqWavesTick() {
+  for (const room in roomWaves) { const W = roomWaves[room], st = cellsOf(room);
+    if (!wavesOn(room) || !W.size || !st || !st.terrain || !st.fineTotal || !st.fineAmt) { delete roomWaves[room]; if (st) st.waveCells = null; continue; }
+    liqWaveStep(room, st, W); if (!W.size) { delete roomWaves[room]; st.waveCells = null; } }
+}
+function liqWaveStep(room, st, W) {
+  const R = st.rows, grid = st.terrain, amt = st.fineAmt, cap = LIQUID_MAX, tk = liquidCfg.tickMs || 40, D = Math.max(1, Math.min(12, liquidCfg.waveDepth | 0 || 4));
+  const cT = Math.min(0.8, Math.max(0.02, (+liquidCfg.waveSpeed || 10) * tk / 1000)), g = cT * cT / D, dk = Math.max(0.1, +liquidCfg.waveDamp || 1), rest = Math.max(2, Math.round((liquidCfg.waveRestMs || 500) / tk));
+  liqWaveStat.steps++;
+  // (round 2) a column handed back WAKES its surface: the levelling skipped those cells while they waved, they left the active set, and the last unevenness stayed
+  const R0 = st.rows, release = (c, a) => { const act = fineSet(room), i = c * R0 + a.r; for (const j of [i - 1, i, i + 1, i - R0, i + R0]) if (j >= 0 && waveTot(st, j) > 0) act.add(j); };
+  if (Date.now() - (W.kt || 0) > 8000) { for (const [c, a] of W) release(c, a); W.clear(); return; }   // (round 2) 8 s after the last push the levelling has it back, whatever is left
+  // 1. each column's surface now, its level, how deep (cells, ≤ D), what is on top
+  for (const [c, a] of W) { const r = waveSurf(st, c, a.r); if (r < 0) { W.delete(c); continue; } a.r = r; const i = c * R + r, t = waveTot(st, i);
+    a.eta = (R - 1 - r) * cap + t * cap / waveCapOf(st, i); let d = Math.min(1, t / waveCapOf(st, i));
+    for (let k = 1; k < D; k++) { const j = i + k; if (r + k >= R || !waveOpenC(grid, j) || !(waveTot(st, j) > 0)) break; d += Math.min(1, waveTot(st, j) / waveCapOf(st, j)); } a.d = d;
+    const p = amt.rp(i), o = amt.o(i); let best = 4, bu = -1; for (let k = 0; k < LIQ_T; k++) if (p[o + k] > bu) { bu = p[o + k]; best = k; } a.rk = best; a.lava = p[o] > 0; a.oth = t - p[o] > 0; }
+  // 2. the faces' speeds, from the levels (all from the same moment)
+  const cols = [...W.keys()].sort((x, y) => x - y);
+  for (const c of cols) { const a = W.get(c), b = W.get(c + 1); a.op = false; if (!b) { a.u = 0; a.q = 0; continue; }
+    const open = Math.abs(a.r - b.r) <= 1 && waveOpenC(grid, (c + 1) * R + a.r) && waveOpenC(grid, c * R + b.r) && !(liquidCfg.reactions && ((a.lava && b.oth) || (b.lava && a.oth)));
+    if (!open) { a.u = 0; a.q = 0; continue; } a.op = true;
+    const dE = b.eta - a.eta, dEb = Math.abs(dE) <= 1 ? 0 : dE - Math.sign(dE);   // (round 2) a level step of a unit is level (as the levelling has it): whole units can never meet exactly
+    a.u = (a.u - g * dEb / cap) * (1 - Math.min(0.9, dk * Math.max(WAVE_DAMP[a.rk] || 0.03, WAVE_DAMP[b.rk] || 0.03))); if (a.u > 0.6) a.u = 0.6; else if (a.u < -0.6) a.u = -0.6; }
+  { const us = cols.map(c => { const a = W.get(c); return a ? a.u : 0; }); for (let k = 0; k < cols.length; k++) { const a = W.get(cols[k]); if (!a || !a.op) continue; const l = k > 0 && cols[k - 1] === cols[k] - 1 ? us[k - 1] : 0, r = k + 1 < cols.length && cols[k + 1] === cols[k] + 1 && W.has(cols[k] + 2) ? us[k + 1] : 0; a.u = us[k] + WAVE_VISC * (l - 2 * us[k] + r); } }
+  // 3. the liquid moved: u × the giving column's depth
+  const touched = new Set();
+  for (const c of cols) { const a = W.get(c), b = W.get(c + 1); if (!a || !b || a.u === 0) continue;
+    const fwd = a.u > 0, dn = fwd ? a : b, rc = fwd ? b : a, cd = fwd ? c : c + 1, cr = fwd ? c + 1 : c;
+    const x = a.u * Math.min(dn.d, D) * cap + a.q; let n = x > 0 ? Math.floor(x) : Math.ceil(x); a.q = x - n; n = Math.min(cap >> 1, Math.abs(n)); if (!n) continue;
+    const did = waveMoveUnits(st, cd, dn.r, cr, rc.r, n, touched); liqWaveStat.moved += did; if (did < n) { a.q = 0; if (!did) a.u = 0; } }
+  { let um = 0, dm = 0; for (const c of cols) { const a = W.get(c), b = W.get(c + 1); if (!a) continue; um = Math.max(um, Math.abs(a.u)); if (b) dm = Math.max(dm, Math.abs(b.eta - a.eta)); } liqWaveStat.umax = +um.toFixed(4); liqWaveStat.dmax = Math.round(dm); liqWaveStat.movedStep = touched.size; }
+  // 4. quiet columns handed back; the cells the levelling leaves alone
+  for (const c of cols) { const a = W.get(c); if (!a) continue; const l = W.get(c - 1), b = W.get(c + 1), lu = l ? l.u : 0;
+    const calm = Math.abs(a.u) < 0.012 && Math.abs(lu) < 0.012 && (!b || Math.abs(b.eta - a.eta) <= 2) && (!l || Math.abs(l.eta - a.eta) <= 2);   // (round 2: about a unit a tick; whole-unit steps)
+    if (Math.abs(a.u) > liqWaveStat.peak) liqWaveStat.peak = +Math.abs(a.u).toFixed(3); a.qt = calm ? a.qt + 1 : 0; if (a.qt >= rest) { release(c, a); W.delete(c); } }
+  const wc = new Set(); for (const [c, a] of W) { const i = c * R + a.r; wc.add(i); if (a.r > 0) wc.add(i - 1); } st.waveCells = wc.size ? wc : null;
+  if (touched.size) { const changed = []; for (const i of touched) vesselCellDone(room, i, changed); emitFineCells(room, [...new Set(changed)]); }
+}
+// n units from the top of column cA (surface row rA: that cell, then the one under it down to half full) to column cB: its surface cell if it lies beside or one
+//   under, then the cell beside the giver's top, then the one over that — top layer first, each kind into its own layer. Returns the units moved.
+function waveMoveUnits(st, cA, rA, cB, rB, n, touched) {
+  const R = st.rows, grid = st.terrain, amt = st.fineAmt, tot = st.fineTotal, src = [cA * R + rA], dst = [];   // (only the surface cell: taking from the one under it left a hole the surface fell into, every tick)
+  if (rB === rA || rB === rA + 1) dst.push(cB * R + rB); for (const rr of [rA, rA - 1]) { const j = cB * R + rr; if (rr >= 0 && !dst.includes(j) && waveOpenC(grid, j)) dst.push(j); }
+  let left = n, si = 0, di = 0;
+  for (let it = 0; it < 16 && left > 0 && si < src.length && di < dst.length; it++) {
+    const A = src[si], B = dst[di], ta = waveTot(st, A), keep = si === 1 ? waveCapOf(st, A) >> 1 : 0; if (ta <= keep) { si++; continue; }
+    const room2 = waveCapOf(st, B) - waveTot(st, B); if (room2 <= 0) { di++; continue; }
+    const pa = amt.wp(A), oa = amt.o(A); let rk = LIQ_T - 1; while (rk > 0 && !(pa[oa + rk] > 0)) rk--; const have = pa[oa + rk] | 0; if (have <= 0) { si++; continue; }
+    const m = Math.min(left, have, room2, ta - keep); if (m <= 0) { si++; continue; }
+    const pb = amt.wp(B), ob = amt.o(B); pa[oa + rk] = have - m; tot.s(A, waveTot(st, A) - m); pb[ob + rk] += m; tot.s(B, waveTot(st, B) + m); touched.add(A); touched.add(B); left -= m;
+  }
+  return n - left;
+}
 
 // The removal seam (`objUnindex` → `objLinkDrop`): an object that is erased, smashed or burnt takes its cells with it.
 function bodyDrop(room, o) {
@@ -9307,6 +9415,9 @@ const liquidCfg = {
   tension: 0, tensionMin: 6,
   // (2026-11-11, the user's idea) DISPLACEMENT BY BODIES (`liqOccOf`): on; a player takes this share of the depth of the cells it fills
   bodyDisplace: 1, dispPlayer: 0.5, dispStep: 0.04,
+  // (2026-11-11, the liquid effects plan, piece 5) WAVES — `liqWavesTick`: OFF until the user has looked (rigs: the sandbox switch, 'liquid-drops-here' `waves`).
+  //   waveSpeed cells a second at waveDepth cells deep (shallower is slower) · waveDamp × each liquid's own damping · waveKick × every push · waveRestMs: quiet this long = handed back
+  waves: 0, waveSpeed: 10, waveDepth: 4, waveDamp: 1, waveKick: 1, waveRestMs: 500,
   dispUnder: 1,   // (2026-11-11, the user's choice) a body displaces only with its part UNDER the surface (`liqOccOf`); 0 = every point of a wet cell, as before
    // (2026-11-11) ON (the user's choice) — the first build hung the server: CELL_WIRE did not know the 0x08 field (fixed)   // (2026-11-11, the user after trying it: 'maybe not really necessary' — OFF; kept to try again)
   displaceSteps: 1,
@@ -10883,6 +10994,7 @@ function fineLiquidTickRoom(room, SUB) {
         if (dspSeen.has(y)) continue; dspSeen.add(y);
         if ((y % FROWS) > r + DDEEP) continue;   // (the search keeps to a band DDEEP rows under the cell: under a mound to the pool's surface beside it)
         if (isSolid(y)) continue;
+        if (WVC && WVC.has(y)) continue;   // (piece 5) never into a wave's surface: handing a crest through to a trough levelled the pool from under the waves
         if (tot.g(y) >= capOf(y)) { dspQ.push(y); continue; }
         if ((y % FROWS) < r || !supAt(y) || lavaBlk(i, y)) continue;
         const hy = hOf(y); if (Hs - hy <= DMIN) continue;
@@ -10898,7 +11010,8 @@ function fineLiquidTickRoom(room, SUB) {
   };
   // (tension — liquidCfg.tension) into an EMPTY cell only from a cell holding ≥ 2·TMIN, and at least TMIN at once; else nothing moves and the cell may rest
   const TENS = !!liquidCfg.tension, TMIN = Math.max(1, Math.min(cap, liquidCfg.tensionMin | 0 || 6));
-  const sideMove = (mv, i, j, m) => { const k = sideTo(i, j); if (k < 0) { active.add(i); return 0; } if (k !== j) { const rm = capOf(k) - tot.g(k); if (m > rm) m = rm; if (m <= 0) { active.add(i); return 0; } }
+  const WVC = st.waveCells || null;   // (piece 5) the cells waves are moving (`liqWavesTick`)
+  const sideMove = (mv, i, j, m) => { if (WVC && WVC.has(j)) return 0; const k = sideTo(i, j); if (k < 0) { active.add(i); return 0; } if (k !== j) { const rm = capOf(k) - tot.g(k); if (m > rm) m = rm; if (m <= 0) { active.add(i); return 0; } }
     if (TENS && tot.g(k) <= 0) { const ti = tot.g(i), tm = Math.min(TMIN, capOf(k)); if (ti < 2 * tm) return 0; if (m < tm) m = tm; if (m > ti - tm) m = ti - tm; }   // (a slope cell holding less than TMIN: its own capacity)
     return mv(i, k, m); };
   // (2026-11-11, displacement by bodies) a cell holding more than a body leaves room for hands the rest UP through the liquid to the nearest cell with room at or
@@ -11167,7 +11280,7 @@ function fineLiquidTickRoom(room, SUB) {
     // count (fineConstFall).
     if (doFall && canDown) { const j = i + 1; const room2 = capOf(j) - tot.g(j); if (!solidBelow && room2 > 0 && !lavaBlk(i, j)) { let t = Math.min(L, room2); if (MINU > 1) t -= t % MINU; if (t > 0) { moveBottom(i, j, t); L -= t; wakeN(i); } } }
     // (displace) resting on FULL liquid with liquid standing on it: hand some through the full liquid to the nearest lower open surface — once per column a tick
-    if (DISP && step < DSTEPS && !FALLONLY && canDown && L > 0 && r > 0 && !solidBelow && tot.g(i + 1) >= capOf(i + 1) && !isSolid(i - 1) && tot.g(i - 1) > 0 && (dspCol.get(c) | 0) < DPERCOL && restsOn(i + 1)) {
+    if (DISP && step < DSTEPS && !FALLONLY && canDown && L > 0 && r > 0 && !solidBelow && !(WVC && (WVC.has(i) || WVC.has(i - 1))) && tot.g(i + 1) >= capOf(i + 1) && !isSolid(i - 1) && tot.g(i - 1) > 0 && (dspCol.get(c) | 0) < DPERCOL && restsOn(i + 1)) {
       const used = dspCol.get(c) | 0, m = displaceFrom(i, r, Math.min(L, DPERCOL - used)); if (m > 0) { L = tot.g(i); dspCol.set(c, used + m); } }
     // ⭐ (2026-11-08, liquid on slopes) (1e) DOWN THE SLANT: resting on a wedge, the liquid moves on diagonally down it, whatever the amount (the fall's
     //   rate) — and on the flat top of a corner whose next column is a slope going down away from it (the user: "it should also move"), sideways onto
@@ -11225,13 +11338,13 @@ function fineLiquidTickRoom(room, SUB) {
     // (fallByFlow) …or it moved liquid down through its floor this tick
     const isFalling = isStream || (FBF && (flowDn.get(i) | 0) > 0);
     const shedCap = L;
-    if (doLevel && !isFalling && !sortingHere) {
+    if (doLevel && !isFalling && !sortingHere && !(WVC && WVC.has(i))) {   // (piece 5) a wave's surface cells: the wave moves them sideways, not the levelling
       // ⭐ …and the same for the two SIDEWAYS neighbours, which (2c) and (1c) each ask about independently — read
       // once here rather than up with `solidBelow`, because a cell that never reaches this block (a stream, a
       // column still stratifying) must not pay for reads it will not use.
       // ⚠️ Out of range stays `true`: that is what `isSolid(-1)` already answered, and both callers rely on it.
       const jLh = c > 0 ? i - FROWS : -1, jRh = c < COLS - 1 ? i + FROWS : -1;
-      const solidL = jLh >= 0 ? isSolid(jLh) : true, solidR = jRh >= 0 ? isSolid(jRh) : true;
+      const solidL = jLh >= 0 ? isSolid(jLh) || !!(WVC && WVC.has(jLh)) : true, solidR = jRh >= 0 ? isSolid(jRh) || !!(WVC && WVC.has(jRh)) : true;   // (...nor into them)
       // (2c) per-liquid horizontal levelling (pools only). MEASURED to be what spreads a parcel sideways: it runs on
       // every sub-step and looks SCAN cells along the row, so a 3-column blob films across a whole pool in one tick.
       // PLSTEPS caps how many sub-steps it may run in (= its spread speed) and PLSCAN how far it looks; both default
@@ -13658,6 +13771,7 @@ const runLiquidTick = () => {
       liqLvlSteps = 0; liqLvlRuns = 0; liqPlSteps = 0; liqPlRuns = 0;
     }
   }
+  try { liqWavesTick(); } catch (e) { if (!liqWaveErr) { liqWaveErr = 1; console.error('[waves]', e); } }   // (piece 5) once a tick, every room with waves — in this tick's packet
   endWireBatch();   // ⇑ one packet per client for the whole tick. AFTER the perf block so its own emit is not batched.
   } finally { simNoGen(false); }   // a throw must never leave the world un-buildable
 };
@@ -23981,7 +24095,8 @@ io.on('connection', (socket) => {
     if ('displaceReach' in patch) liquidCfg.displaceReach = Math.max(4, Math.min(512, patch.displaceReach | 0));
     if ('displaceDeep' in patch) liquidCfg.displaceDeep = Math.max(1, Math.min(16, patch.displaceDeep | 0));
     if ('displacePerCol' in patch) liquidCfg.displacePerCol = Math.max(1, Math.min(8, patch.displacePerCol | 0));
-    if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispUnder' in patch) liquidCfg.dispUnder = patch.dispUnder ? 1 : 0; if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
+    if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispUnder' in patch) liquidCfg.dispUnder = patch.dispUnder ? 1 : 0;
+    if ('waves' in patch) liquidCfg.waves = patch.waves ? 1 : 0; if ('waveSpeed' in patch) liquidCfg.waveSpeed = Math.max(1, Math.min(20, +patch.waveSpeed || 10)); if ('waveDepth' in patch) liquidCfg.waveDepth = Math.max(1, Math.min(12, patch.waveDepth | 0 || 4)); if ('waveDamp' in patch) liquidCfg.waveDamp = Math.max(0.1, Math.min(5, +patch.waveDamp || 1)); if ('waveKick' in patch) liquidCfg.waveKick = Math.max(0, Math.min(5, +patch.waveKick)); if ('waveRestMs' in patch) liquidCfg.waveRestMs = Math.max(100, Math.min(5000, patch.waveRestMs | 0)); if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
     if ('tension' in patch) liquidCfg.tension = patch.tension ? 1 : 0; if ('tensionMin' in patch) liquidCfg.tensionMin = Math.max(1, Math.min(24, patch.tensionMin | 0));
     if ('realDrops' in patch) liquidCfg.realDrops = patch.realDrops ? 1 : 0; if ('dropPer' in patch) liquidCfg.dropPer = Math.max(0, Math.min(4, +patch.dropPer || 0)); if ('dropUp' in patch) liquidCfg.dropUp = Math.max(0, Math.min(3, +patch.dropUp || 0));
     if ('displaceSteps' in patch) liquidCfg.displaceSteps = Math.max(1, Math.min(16, patch.displaceSteps | 0));
@@ -27556,10 +27671,12 @@ io.on('connection', (socket) => {
     if (!p && !o.length) { BB.delete(socket.id); if (!BB.size) delete roomLiqBodies[room]; return; }
     BB.set(socket.id, { p, o, t: now });
   });
-  socket.on('liquid-drops-here', ({ on, box, disp } = {}) => { const room = currentAvatarRoom; if (!room || room === OVERWORLD_ROOM || room === OVERWORLD_TEST_ROOM) return;
+  socket.on('liquid-drops-here', ({ on, box, disp, waves, kick } = {}) => { const room = currentAvatarRoom; if (!room || room === OVERWORLD_ROOM || room === OVERWORLD_TEST_ROOM) return;
+    if (waves != null) { if (waves) roomWaveTry.add(room); else roomWaveTry.delete(room); }   // (rigs, waves in THIS sandbox room only)
+    if (Array.isArray(kick) && kick.length >= 3) liqWaveKick(room, +kick[0], +kick[1], +kick[2], kick[3] | 0, kick[4] != null ? kick[4] | 0 : 2);   // (rigs) [x, y, speed, dir, spread]
     if (on) roomLiqDropsTry.add(room); else roomLiqDropsTry.delete(room); if (disp != null) { if (disp) roomDispTry.add(room); else roomDispTry.delete(room); } const st = cellsOf(room), BB = roomLiqBodies[room]; let sum = null;
     if (Array.isArray(box) && box.length === 4 && st && st.fineTotal) { sum = 0; const R = st.rows; for (let c = box[0] | 0; c <= (box[2] | 0); c++) for (let r = box[1] | 0; r <= (box[3] | 0); r++) { const v = peekCellAt(st.fineTotal, c * R + r); if (v > 0) sum += v; } }   // (rigs) the server's own units in a box
-    socket.emit('liquid-drops-here', { room, sum, on: roomLiqDropsTry.has(room), stat: liqDropStat, occ: st && st.liqOcc ? st.liqOcc.size : 0, active: st && st.fineActive ? st.fineActive.size : 0, bodies: BB ? [...BB].map(([s, B]) => [s.slice(0, 4), !!B.p, B.o.length / 4, Date.now() - B.t]) : null }); });
+    socket.emit('liquid-drops-here', { room, sum, on: roomLiqDropsTry.has(room), stat: liqDropStat, waves: Object.assign({ on: wavesOn(room), live: roomWaves[room] ? roomWaves[room].size : 0 }, liqWaveStat), occ: st && st.liqOcc ? st.liqOcc.size : 0, active: st && st.fineActive ? st.fineActive.size : 0, bodies: BB ? [...BB].map(([s, B]) => [s.slice(0, 4), !!B.p, B.o.length / 4, Date.now() - B.t]) : null }); });
   socket.on('liquid-splash', ({ s } = {}) => {
     const room = currentAvatarRoom; if (!room || !Array.isArray(s) || !liqDropsOn(room)) return;
     const now = Date.now(); if (now - _liqSplashAt < 60) return; _liqSplashAt = now;
