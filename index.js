@@ -4816,8 +4816,10 @@ function liqOccOf(room, st) {
   const wet = (x, y) => { const c = Math.floor(x / T), r = Math.floor(y / T); return c >= 0 && r >= 0 && c < COLS && r < ROWS && peekCellAt(tot, c * ROWS + r) > 0; };
   const fill = (x0, y0, x1, y1, inside, k) => {
     for (let c = Math.max(0, Math.floor(x0 / T)); c <= Math.min(COLS - 1, Math.floor(x1 / T)); c++) for (let r = Math.max(0, Math.floor(y0 / T)); r <= Math.min(ROWS - 1, Math.floor(y1 / T)); r++) {
-      const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0) || !inside((c + 0.5) * T, (r + 0.5) * T)) continue;
-      if (!(occ.get(i) >= k)) occ.set(i, k);
+      const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
+      // (round 27 — the user: the water changed in jerks) how MUCH of the cell the body covers (3 × 3 points), not whether its middle is in it
+      let n = 0; for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) if (inside((c + (a + 0.5) / 3) * T, (r + (b + 0.5) / 3) * T)) n++;
+      const sh = k * n / 9; if (sh > 0.01 && !(occ.get(i) >= sh)) occ.set(i, sh);
     } };
   const kP = Math.max(0, Math.min(0.9, +liquidCfg.dispPlayer || 0));
   const poses = new Map(), LP = roomLoosePose[room]; if (LP) for (const [id, p] of LP) poses.set(id, p);
@@ -9251,13 +9253,13 @@ const liquidCfg = {
   //   counted, default 1 = the speed liquid falls), whatever the passes
   displacePerCol: 1,
   // (2026-11-11, effects piece 1) SPLASHES CARRY REAL LIQUID (`liqSplashHit`) — OFF until the user has looked; how many drops a splash throws (×) and how high (×)
-  realDrops: 0, dropPer: 4, dropUp: 1.3,   // (2026-11-11, the user: 4× as many; higher)
+  realDrops: 1, dropPer: 4, dropUp: 1.3,   // (2026-11-11, the user: 4× as many; higher · ON by default — a restart put it back to off)
   // ⭐ (2026-11-11, the user: 'worth a try') SURFACE TENSION: a sideways move into an EMPTY cell happens only when the cell it comes from holds at least twice
   //   `tensionMin` units, and then moves at least `tensionMin` — so a thin puddle stops at its edge instead of levelling out to an invisible film (a splash's
   //   drops stay visible where they land); liquid joining liquid, falling, and a full pool spreading are as before. 0 = the old way.
   tension: 0, tensionMin: 6,
   // (2026-11-11, the user's idea) DISPLACEMENT BY BODIES (`liqOccOf`): on; a player takes this share of the depth of the cells it fills
-  bodyDisplace: 1, dispPlayer: 0.5,   // (2026-11-11) ON (the user's choice) — the first build hung the server: CELL_WIRE did not know the 0x08 field (fixed)   // (2026-11-11, the user after trying it: 'maybe not really necessary' — OFF; kept to try again)
+  bodyDisplace: 1, dispPlayer: 0.5, dispStep: 0.04,   // (2026-11-11) ON (the user's choice) — the first build hung the server: CELL_WIRE did not know the 0x08 field (fixed)   // (2026-11-11, the user after trying it: 'maybe not really necessary' — OFF; kept to try again)
   displaceSteps: 1,
   // ⭐ (2026-11-10, the user: 'falling liquid … should always have space below it to fall into, because the liquid below it is falling at exactly the same rate')
   //   FALLING BY WHAT MOVED: a cell that passed liquid down through its floor this tick is falling, whatever is under it now, and is not levelled sideways (the
@@ -10513,7 +10515,13 @@ function fineLiquidTickRoom(room, SUB) {
   // (slopeHold) a cell's capacity and raised floor (units) — `cap` and 0 for every cell that is not a wedge
   const capOf0 = HOLD ? (j) => WCAP[wedgeCode(j)] : () => cap, flrOf = HOLD ? (j) => WFLR[wedgeCode(j)] : () => 0;
   // (2026-11-11, displacement by bodies) …less the share of its depth a body takes (`liqOccOf`); `OCC0` last tick's, for what changed
-  const OCC = dispOn(room) ? liqOccOf(room, st) : null, OCC0 = st.liqOcc || null; st.liqOcc = OCC && OCC.size ? OCC : null;
+  // (round 27 — the user: the water changed in jerks) each cell's share EASES toward the body's (`dispStep` a tick, 25 a second), so the capacity — and the level —
+  //   changes a little each tick; a share easing is sent and kept awake each tick until it arrives
+  const OCCT = dispOn(room) ? liqOccOf(room, st) : null, OCC0 = st.liqOcc || null; let OCC = null;
+  if ((OCCT && OCCT.size) || OCC0) { OCC = new Map(); const D = Math.max(0.005, Math.min(1, +liquidCfg.dispStep || 0.04));
+    if (OCCT) for (const [i, t] of OCCT) { const c = OCC0 ? (OCC0.get(i) || 0) : 0, n = t > c ? Math.min(t, c + D) : Math.max(t, c - D); if (n > 0.005) OCC.set(i, n); }
+    if (OCC0) for (const [i, c] of OCC0) if (!OCCT || !OCCT.has(i)) { const n = c - D; if (n > 0.005) OCC.set(i, n); } }
+  st.liqOcc = OCC && OCC.size ? OCC : null;
   const capOf = OCC && OCC.size ? (j) => { const c = capOf0(j), o = OCC.get(j); return o ? Math.max(1, Math.round(c * (1 - o))) : c; } : capOf0;
   // the bytes of the page holding `j`, for the row scans' page runs (null: none, or wedges off)
   const wedgeRun = (j) => { if (!WEDGE) return null; const p = wPage(j); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB; };
@@ -10851,13 +10859,16 @@ function fineLiquidTickRoom(room, SUB) {
     for (const [i, o] of OCC) {
       if (!OCC0 || OCC0.get(i) !== o) { changedSet.add(i); active.add(i); }
       let ex = tot.g(i) - capOf(i); if (ex <= 0) continue;
-      const r0 = i % FROWS, seen = new Set([i]), q = [i - 1, i - FROWS, i + FROWS];
+      // (round 27) …into liquid that has room (the pool's surface beside it) before an EMPTY cell: the nearest empty cell over a floating thing is the one ON it, and
+      //   liquid piled there ran off and came back each tick (the surface jittered, the thing never settled); an empty cell only when no wet one is in reach
+      const r0 = i % FROWS, seen = new Set([i]), q = [i - 1, i - FROWS, i + FROWS]; let dry = -1;
       for (let n = 0; n < q.length && ex > 0 && n < 96 && budget > 0; n++, budget--) {
         const j = q[n]; if (j < 0 || j >= NCELL || seen.has(j)) continue; seen.add(j);
         if (j % FROWS > r0 || isSolid(j)) continue;
-        const rm = capOf(j) - tot.g(j); if (rm > 0) ex -= moveTop(i, j, Math.min(ex, rm));
-        if (tot.g(j) > 0 || OCC.has(j)) q.push(j - 1, j - FROWS, j + FROWS);
-      } } }
+        const tj = tot.g(j), rm = capOf(j) - tj; if (rm > 0) { if (tj > 0) ex -= moveTop(i, j, Math.min(ex, rm)); else if (dry < 0) dry = j; }
+        if (tj > 0 || OCC.has(j)) q.push(j - 1, j - FROWS, j + FROWS);
+      }
+      if (ex > 0 && dry >= 0) moveTop(i, dry, Math.min(ex, capOf(dry) - tot.g(dry))); } }
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
     const doFall = FALLONLY || step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
@@ -11386,10 +11397,10 @@ function fineLiquidTickRoom(room, SUB) {
           while (need > 0) {
             while (sr < cFloor[src] && (isSolid(src * ROWS + sr) || tot.g(src * ROWS + sr) <= 0)) sr++;
             if (sr >= cFloor[src]) break;
-            while (dr >= cTop[dst] && (isSolid(dst * ROWS + dr) || cap - tot.g(dst * ROWS + dr) <= 0)) dr--;
+            while (dr >= cTop[dst] && (isSolid(dst * ROWS + dr) || capOf(dst * ROWS + dr) - tot.g(dst * ROWS + dr) <= 0)) dr--;   // (round 27: capOf — it overfilled a body's cells, pushed out again next tick)
             if (dr < cTop[dst] || dr < sr) break;
             const A = src * ROWS + sr, B = dst * ROWS + dr; if (A === B || lavaBlk(A, B)) break;
-            const mv = Math.min(tot.g(A), cap - tot.g(B), need); if (mv <= 0) break;
+            const mv = Math.min(tot.g(A), capOf(B) - tot.g(B), need); if (mv <= 0) break;
             const did = lvlMove(A, B, mv); if (did <= 0) break;
             need -= did; wakeN(A); wakeN(B);
           }
@@ -23921,7 +23932,7 @@ io.on('connection', (socket) => {
     if ('displaceReach' in patch) liquidCfg.displaceReach = Math.max(4, Math.min(512, patch.displaceReach | 0));
     if ('displaceDeep' in patch) liquidCfg.displaceDeep = Math.max(1, Math.min(16, patch.displaceDeep | 0));
     if ('displacePerCol' in patch) liquidCfg.displacePerCol = Math.max(1, Math.min(8, patch.displacePerCol | 0));
-    if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0));
+    if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
     if ('tension' in patch) liquidCfg.tension = patch.tension ? 1 : 0; if ('tensionMin' in patch) liquidCfg.tensionMin = Math.max(1, Math.min(24, patch.tensionMin | 0));
     if ('realDrops' in patch) liquidCfg.realDrops = patch.realDrops ? 1 : 0; if ('dropPer' in patch) liquidCfg.dropPer = Math.max(0, Math.min(4, +patch.dropPer || 0)); if ('dropUp' in patch) liquidCfg.dropUp = Math.max(0, Math.min(3, +patch.dropUp || 0));
     if ('displaceSteps' in patch) liquidCfg.displaceSteps = Math.max(1, Math.min(16, patch.displaceSteps | 0));
