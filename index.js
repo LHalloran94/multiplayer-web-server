@@ -4797,6 +4797,58 @@ setInterval(powderFlyLand, 50);
 //   and something GOING IN (its driver's report, 'liquid-splash'). Per liquid (`LIQ_DROP`, by material id): units a drop, drops for a hit, speed — water many
 //   small, oil fewer bigger, lava a few heavy slow ones (its look: the client's splash C). `liquidCfg.realDrops` (OFF until the user has looked).
 //   Processor (server): taking, the arcs, landing. Client: the drops drawn as particles.
+
+// ⭐⭐ (2026-11-11, the user's idea — the effects plan's piece 3) DISPLACEMENT BY BODIES. A body in liquid takes a SHARE OF THE DEPTH (front to back) of the cells
+//   it fills, so those cells hold less: their capacity × (1 − share) — as a slope cell holds only its open part (`capOf`). What they can no longer hold is
+//   pushed up through the liquid to the nearest room at or above its row (`fineLiquidTickRoom`), so the level rises by the body's volume and spills over
+//   edges; when the body leaves, the cells hold their full amount again and the liquid above falls back in. The occupied cells are sent with their share
+//   (wire flag 0x08), and every browser draws them by amount ÷ their capacity — full: the liquid is in front of and behind the body (the user).
+//   Bodies: players (a ball of BLOB_R round their middle, `dispPlayer` of the depth) and loose things (their turned box; a share by their size).
+//   Only cells already holding liquid count (a body above the surface displaces nothing there). Processor (server): sparse, per body in liquid.
+const PLAYER_R = 20;   // avatar-sim BLOB_R
+// what each browser says is in liquid now ('liq-bodies', ≤ 10× a second while there is any): its player [x, y (feet)] and the loose things it moves [id, x, y, a …]
+//   — the relay is off by default (positions go browser to browser) and the beacon is every 500 ms; an entry older than a second is gone
+const roomLiqBodies = {};   // room → Map(sid → { p, o, t })
+// (rigs) displacement in ONE sandbox room while the switch is off ('liquid-drops-here' `disp`; never the Overworld)
+const roomDispTry = new Set(); const dispOn = (room) => !!liquidCfg.bodyDisplace || roomDispTry.has(room);
+function liqOccOf(room, st) {
+  const T = TERRAIN_CELL, SUB = st.fineSub || 1, ROWS = st.rows * SUB, COLS = st.cols * SUB, tot = st.fineTotal, occ = new Map();
+  const wet = (x, y) => { const c = Math.floor(x / T), r = Math.floor(y / T); return c >= 0 && r >= 0 && c < COLS && r < ROWS && peekCellAt(tot, c * ROWS + r) > 0; };
+  const fill = (x0, y0, x1, y1, inside, k) => {
+    for (let c = Math.max(0, Math.floor(x0 / T)); c <= Math.min(COLS - 1, Math.floor(x1 / T)); c++) for (let r = Math.max(0, Math.floor(y0 / T)); r <= Math.min(ROWS - 1, Math.floor(y1 / T)); r++) {
+      const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0) || !inside((c + 0.5) * T, (r + 0.5) * T)) continue;
+      if (!(occ.get(i) >= k)) occ.set(i, k);
+    } };
+  const kP = Math.max(0, Math.min(0.9, +liquidCfg.dispPlayer || 0));
+  const poses = new Map(), LP = roomLoosePose[room]; if (LP) for (const [id, p] of LP) poses.set(id, p);
+  const BB = roomLiqBodies[room], now = Date.now();
+  if (BB) for (const [sid, B] of BB) {
+    if (now - B.t > 1000) { BB.delete(sid); continue; }
+    // …the loose things this browser is moving, as they are now
+    for (let q = 0; q + 3 < B.o.length; q += 4) poses.set(B.o[q], { x: B.o[q + 1], y: B.o[q + 2], a: B.o[q + 3] });
+    const p = B.p; if (!p || !kP) continue;
+    const cx = p[0], cy = p[1] - PLAYER_R, R2 = PLAYER_R * PLAYER_R;
+    if (!wet(cx, cy) && !wet(cx, p[1] - 2)) continue;
+    fill(cx - PLAYER_R, cy - PLAYER_R, cx + PLAYER_R, cy + PLAYER_R, (x, y) => (x - cx) * (x - cx) + (y - cy) * (y - cy) <= R2, kP);
+  }
+  const objs = roomObjects[room];
+  if (objs) for (const [id, p] of poses) {
+    const o = objs.get(id); if (!o || !o.loose || !isFinite(p.x) || !isFinite(p.y)) continue;
+    const w = Math.max(4, +o.w || 32), h = Math.max(4, +o.h || 32); if (!wet(p.x, p.y) && !wet(p.x, p.y + h / 2 - 2)) continue;
+    const k = Math.max(0.15, Math.min(0.6, 0.15 + Math.min(w, h) / 64)), ca = Math.cos(p.a || 0), sa = Math.sin(p.a || 0), e = Math.hypot(w, h) / 2;
+    fill(p.x - e, p.y - e, p.x + e, p.y + e, (x, y) => { const dx = x - p.x, dy = y - p.y, u = dx * ca + dy * sa, v = -dx * sa + dy * ca; return Math.abs(u) <= w / 2 && Math.abs(v) <= h / 2; }, k);
+  }
+  return occ;
+}
+// …and a room whose liquid is asleep must still notice a body coming in or leaving: 10× a second, a cell whose share changed is woken (the tick then does the rest)
+function liqOccWake() {
+  if (!liquidCfg.bodyDisplace && !roomDispTry.size) return;
+  for (const room of new Set([...Object.keys(roomLiqBodies), ...Object.keys(roomPos)])) { if (!dispOn(room)) continue; const st = cellsOf(room); if (!st || !st.fineTotal || !st.terrain) continue;
+    const occ = liqOccOf(room, st), prev = st.liqOcc; if (!occ.size && !prev) continue; const act = fineSet(room);
+    for (const [i, o] of occ) if (!prev || prev.get(i) !== o) act.add(i);
+    if (prev) for (const i of prev.keys()) if (!occ.has(i)) act.add(i); }
+}
+setInterval(liqOccWake, 100);
 const LIQ_DROP = { 9: [2, 0.9, 1], 14: [2, 0.9, 1], 12: [2, 0.9, 1], 15: [4, 0.45, 0.8], 10: [6, 0.2, 0.45], 11: [6, 0.3, 0.5] };   // id → [units a drop, drops per speed, speed ×]
 const liqDropCfg = { g: 70, up: 0.6, out: 0.35, vmax: 30, maxFly: 500, maxHit: 28, cool: 350 };
 const roomLiqFly = {}, roomLiqHits = {}, roomLiqCool = {};
@@ -9203,7 +9255,9 @@ const liquidCfg = {
   // ⭐ (2026-11-11, the user: 'worth a try') SURFACE TENSION: a sideways move into an EMPTY cell happens only when the cell it comes from holds at least twice
   //   `tensionMin` units, and then moves at least `tensionMin` — so a thin puddle stops at its edge instead of levelling out to an invisible film (a splash's
   //   drops stay visible where they land); liquid joining liquid, falling, and a full pool spreading are as before. 0 = the old way.
-  tension: 1, tensionMin: 6,
+  tension: 0, tensionMin: 6,
+  // (2026-11-11, the user's idea) DISPLACEMENT BY BODIES (`liqOccOf`): on; a player takes this share of the depth of the cells it fills
+  bodyDisplace: 1, dispPlayer: 0.5,   // (2026-11-11) ON (the user's choice) — the first build hung the server: CELL_WIRE did not know the 0x08 field (fixed)   // (2026-11-11, the user after trying it: 'maybe not really necessary' — OFF; kept to try again)
   displaceSteps: 1,
   // ⭐ (2026-11-10, the user: 'falling liquid … should always have space below it to fall into, because the liquid below it is falling at exactly the same rate')
   //   FALLING BY WHAT MOVED: a cell that passed liquid down through its floor this tick is falling, whatever is under it now, and is not levelled sideways (the
@@ -10457,7 +10511,10 @@ function fineLiquidTickRoom(room, SUB) {
                if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB !== null && _wB[o] !== 0; }
     : (k) => { if (isSolidT(k)) return true; const p = wPage(k); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB !== null && _wB[wOff(k)] !== 0; };
   // (slopeHold) a cell's capacity and raised floor (units) — `cap` and 0 for every cell that is not a wedge
-  const capOf = HOLD ? (j) => WCAP[wedgeCode(j)] : () => cap, flrOf = HOLD ? (j) => WFLR[wedgeCode(j)] : () => 0;
+  const capOf0 = HOLD ? (j) => WCAP[wedgeCode(j)] : () => cap, flrOf = HOLD ? (j) => WFLR[wedgeCode(j)] : () => 0;
+  // (2026-11-11, displacement by bodies) …less the share of its depth a body takes (`liqOccOf`); `OCC0` last tick's, for what changed
+  const OCC = dispOn(room) ? liqOccOf(room, st) : null, OCC0 = st.liqOcc || null; st.liqOcc = OCC && OCC.size ? OCC : null;
+  const capOf = OCC && OCC.size ? (j) => { const c = capOf0(j), o = OCC.get(j); return o ? Math.max(1, Math.round(c * (1 - o))) : c; } : capOf0;
   // the bytes of the page holding `j`, for the row scans' page runs (null: none, or wedges off)
   const wedgeRun = (j) => { if (!WEDGE) return null; const p = wPage(j); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB; };
   const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; const v = genRoom ? peekCellAt(grid, coarseOf(k)) : grid.g(coarseOf(k)); return v >= 0 && isSinkId(v); };   // a fine cell whose coarse cell is a DRAIN block
@@ -10787,6 +10844,20 @@ function fineLiquidTickRoom(room, SUB) {
   const sideMove = (mv, i, j, m) => { const k = sideTo(i, j); if (k < 0) { active.add(i); return 0; } if (k !== j) { const rm = capOf(k) - tot.g(k); if (m > rm) m = rm; if (m <= 0) { active.add(i); return 0; } }
     if (TENS && tot.g(k) <= 0) { const ti = tot.g(i), tm = Math.min(TMIN, capOf(k)); if (ti < 2 * tm) return 0; if (m < tm) m = tm; if (m > ti - tm) m = ti - tm; }   // (a slope cell holding less than TMIN: its own capacity)
     return mv(i, k, m); };
+  // (2026-11-11, displacement by bodies) a cell holding more than a body leaves room for hands the rest UP through the liquid to the nearest cell with room at or
+  //   above its row (never down; ≤ 96 cells searched a cell); a cell whose share changed is sent again (with it, 0x08) and woken
+  if (OCC0) for (const [j, o] of OCC0) if (!OCC || OCC.get(j) !== o) { changedSet.add(j); active.add(j); }
+  if (OCC && OCC.size) { let budget = 8192;
+    for (const [i, o] of OCC) {
+      if (!OCC0 || OCC0.get(i) !== o) { changedSet.add(i); active.add(i); }
+      let ex = tot.g(i) - capOf(i); if (ex <= 0) continue;
+      const r0 = i % FROWS, seen = new Set([i]), q = [i - 1, i - FROWS, i + FROWS];
+      for (let n = 0; n < q.length && ex > 0 && n < 96 && budget > 0; n++, budget--) {
+        const j = q[n]; if (j < 0 || j >= NCELL || seen.has(j)) continue; seen.add(j);
+        if (j % FROWS > r0 || isSolid(j)) continue;
+        const rm = capOf(j) - tot.g(j); if (rm > 0) ex -= moveTop(i, j, Math.min(ex, rm));
+        if (tot.g(j) > 0 || OCC.has(j)) q.push(j - 1, j - FROWS, j + FROWS);
+      } } }
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
     const doFall = FALLONLY || step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
@@ -11352,10 +11423,12 @@ function fineLiquidTickRoom(room, SUB) {
       const p = amt.rp(j), b = amt.o(j); let mask = 0; for (let rk = 0; rk < T; rk++) if (p[b + rk] > 0) mask |= (1 << rk);
       let fd = flowDn.get(j) | 0; if (fd > 127) fd = 127; else if (fd < -127) fd = -127;
       let sv = sideIn.get(j) | 0; if (sv > 127) sv = 127; else if (sv < -127) sv = -127;
-      arr.push(j, liqRepId(amt, j), (airborneWire.has(j) ? 0x40 : 0) | (fd ? 0x20 : 0) | (sv ? 0x10 : 0), mask);
+      const oc = OCC ? Math.round((OCC.get(j) || 0) * 100) : 0;   // (displacement by bodies) the share of its depth a body takes, % (0x08)
+      arr.push(j, liqRepId(amt, j), (airborneWire.has(j) ? 0x40 : 0) | (fd ? 0x20 : 0) | (sv ? 0x10 : 0) | (oc ? 0x08 : 0), mask);
       for (let rk = 0; rk < T; rk++) if (mask & (1 << rk)) arr.push(p[b + rk]);
       if (fd) arr.push(fd);
       if (sv) arr.push(sv);
+      if (oc) arr.push(oc);
       if (++cells >= 8192) { emitFine(); arr = []; cells = 0; }
     }
     if (cells) emitFine();
@@ -14103,7 +14176,7 @@ const CELL_WIRE = {
   'terrain-set':       () => 2,
   'liquid-fx':         () => 2,
   // [i, repId, flags, mask, ...one amount per set rank bit] — see the WIRE comment in fineLiquidTickRoom.
-  'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n + ((a[k + 2] & 0x20) ? 1 : 0) + ((a[k + 2] & 0x10) ? 1 : 0); },   // (0x20: + the floor flow · 0x10: + the sideways flow in)
+  'liquid-fine-cells': (a, k) => { let n = 0, m = a[k + 3]; while (m) { n += m & 1; m >>= 1; } return 4 + n + ((a[k + 2] & 0x20) ? 1 : 0) + ((a[k + 2] & 0x10) ? 1 : 0) + ((a[k + 2] & 0x08) ? 1 : 0); },   // (0x20: + the floor flow · 0x10: + the sideways flow in · 0x08: + a body's share, 2026-11-11 — 🟥 left out at first, the walk misread every record after it and the server HUNG)
   'fire-cells':        () => 2,     // [cell, 1 = alight | 0 = out, …]
   'fire-embers':       () => 7,     // [launch cell, vx×100, vy×100, flight ticks, landing cell | -1, smoulder ticks, phase, …]
 };
@@ -23848,6 +23921,7 @@ io.on('connection', (socket) => {
     if ('displaceReach' in patch) liquidCfg.displaceReach = Math.max(4, Math.min(512, patch.displaceReach | 0));
     if ('displaceDeep' in patch) liquidCfg.displaceDeep = Math.max(1, Math.min(16, patch.displaceDeep | 0));
     if ('displacePerCol' in patch) liquidCfg.displacePerCol = Math.max(1, Math.min(8, patch.displacePerCol | 0));
+    if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0));
     if ('tension' in patch) liquidCfg.tension = patch.tension ? 1 : 0; if ('tensionMin' in patch) liquidCfg.tensionMin = Math.max(1, Math.min(24, patch.tensionMin | 0));
     if ('realDrops' in patch) liquidCfg.realDrops = patch.realDrops ? 1 : 0; if ('dropPer' in patch) liquidCfg.dropPer = Math.max(0, Math.min(4, +patch.dropPer || 0)); if ('dropUp' in patch) liquidCfg.dropUp = Math.max(0, Math.min(3, +patch.dropUp || 0));
     if ('displaceSteps' in patch) liquidCfg.displaceSteps = Math.max(1, Math.min(16, patch.displaceSteps | 0));
@@ -27405,8 +27479,20 @@ io.on('connection', (socket) => {
   });
   // (2026-11-11, effects piece 1) SOMETHING WENT INTO LIQUID — its driver says where and how hard ([x, y, speed×10, vx×10, half width, weight×10] …)
   let _liqSplashAt = 0;
-  socket.on('liquid-drops-here', ({ on } = {}) => { const room = currentAvatarRoom; if (!room || room === OVERWORLD_ROOM || room === OVERWORLD_TEST_ROOM) return;
-    if (on) roomLiqDropsTry.add(room); else roomLiqDropsTry.delete(room); socket.emit('liquid-drops-here', { room, on: roomLiqDropsTry.has(room), stat: liqDropStat }); });
+  // (2026-11-11, displacement by bodies) what is in liquid on this browser now: { p: [x, y] | null, o: [id, x, y, a, …] } (≤ 12 things); an empty one when nothing is
+  let _liqBodiesAt = 0;
+  socket.on('liq-bodies', (m) => {
+    const room = currentAvatarRoom; if (!room || !m) return; const now = Date.now(); if (now - _liqBodiesAt < 80) return; _liqBodiesAt = now;
+    const BB = roomLiqBodies[room] || (roomLiqBodies[room] = new Map());
+    const p = Array.isArray(m.p) && isFinite(m.p[0]) && isFinite(m.p[1]) ? [+m.p[0], +m.p[1]] : null, o = [];
+    if (Array.isArray(m.o)) for (let q = 0; q + 3 < m.o.length && q < 48; q += 4) { const id = m.o[q]; if (typeof id === 'string' && id.length <= 64 && isFinite(m.o[q + 1]) && isFinite(m.o[q + 2]) && isFinite(m.o[q + 3])) o.push(id, +m.o[q + 1], +m.o[q + 2], +m.o[q + 3]); }
+    if (!p && !o.length) { BB.delete(socket.id); if (!BB.size) delete roomLiqBodies[room]; return; }
+    BB.set(socket.id, { p, o, t: now });
+  });
+  socket.on('liquid-drops-here', ({ on, box, disp } = {}) => { const room = currentAvatarRoom; if (!room || room === OVERWORLD_ROOM || room === OVERWORLD_TEST_ROOM) return;
+    if (on) roomLiqDropsTry.add(room); else roomLiqDropsTry.delete(room); if (disp != null) { if (disp) roomDispTry.add(room); else roomDispTry.delete(room); } const st = cellsOf(room), BB = roomLiqBodies[room]; let sum = null;
+    if (Array.isArray(box) && box.length === 4 && st && st.fineTotal) { sum = 0; const R = st.rows; for (let c = box[0] | 0; c <= (box[2] | 0); c++) for (let r = box[1] | 0; r <= (box[3] | 0); r++) { const v = peekCellAt(st.fineTotal, c * R + r); if (v > 0) sum += v; } }   // (rigs) the server's own units in a box
+    socket.emit('liquid-drops-here', { room, sum, on: roomLiqDropsTry.has(room), stat: liqDropStat, occ: st && st.liqOcc ? st.liqOcc.size : 0, active: st && st.fineActive ? st.fineActive.size : 0, bodies: BB ? [...BB].map(([s, B]) => [s.slice(0, 4), !!B.p, B.o.length / 4, Date.now() - B.t]) : null }); });
   socket.on('liquid-splash', ({ s } = {}) => {
     const room = currentAvatarRoom; if (!room || !Array.isArray(s) || !liqDropsOn(room)) return;
     const now = Date.now(); if (now - _liqSplashAt < 60) return; _liqSplashAt = now;
