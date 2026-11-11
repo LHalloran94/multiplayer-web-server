@@ -9105,7 +9105,23 @@ function levelDarkUnder(rinfo, levelIndex, isOver) {
 // Sockets that have already been sent the item table. ⚠️ A WeakSet keyed on the socket, so a reconnect (a new
 // socket) is sent it again and nothing has to be cleaned up when one goes.
 const _itemDefsSent = new WeakSet();
+// ⭐⭐ WORN GEAR (2026-11-12, `scratchpad/kickoff_worn_gear.md`): five slots, each pointing at an item you carry (ledger `worn`). What a player wears
+//   is told to the room as its own message when it changes (`avt-worn`), and to a joiner for everyone there (`avt-worn-all`) — NOT on the position
+//   stream, which is at its field cap and goes out many times a second for something that changes a few times an hour.
+// `wornWire(key)`: { slot: itemId } with only the slots in use, or null when nothing is worn
+function wornWire(key) { const w = ledger.worn(key), o = {}; let any = false; for (const k of ITEMS.WORN_SLOTS) if (w[k]) { o[k] = w[k]; any = true; } return any ? o : null; }
+function wornTell(socket, room) { if (room) socket.to(room).emit('avt-worn', { id: socket.id, w: wornWire(playerKeyFor(socket.id)) }); }
+// …a slot pointing at something you no longer have is emptied — a death, a drop, a make that spent it — wherever things are carried at all
+//   (a sandbox lends every item, so nothing there is checked). Run on every sync, which every one of those ends with. true = something changed.
+function wornPrune(socket, room) {
+  if (!invGatedRoom(room)) return false;
+  const key = playerKeyFor(socket.id), w = ledger.worn(key); let ch = false;
+  for (const k of Object.keys(w)) if (!ITEMS.wornSlotOf(w[k]) || ITEMS.wornSlotOf(w[k]) !== k || ledger.itemCount(key, w[k]) < 1) { ledger.setWorn(key, k, null); ch = true; }
+  if (ch) wornTell(socket, room);
+  return ch;
+}
 function sendInvSync(socket, room) {
+  wornPrune(socket, room);
   const snap = ledger.snapshot(playerKeyFor(socket.id));
   let itemDefs;
   if (!_itemDefsSent.has(socket)) { _itemDefsSent.add(socket); itemDefs = ITEMS.itemDefsWire(); }
@@ -9120,6 +9136,7 @@ function sendInvSync(socket, room) {
     // ⭐ WHICH NUMBER HOLDS WHAT. null = this player has never sent one, which tells the client to push up the
     // bar it already has in its browser rather than starting from nothing.
     hotbar: snap.hotbar,
+    worn: snap.worn,   // (worn gear) { slot: itemId }
     // The hopper and its progress. ⚠️ `headWorth` comes from the SERVER's worth table rather than being looked
     // up client-side: the client has a copy of that table, but a progress bar drawn against a different number
     // from the one the digest is counting to is a bar that never reaches its end.
@@ -25279,6 +25296,10 @@ io.on('connection', (socket) => {
     // browser-local until the Prima economy, so a client arrived believing whatever its own storage said; now it
     // is TOLD, on every join, and its own copy is a display of this one rather than a second source of truth.
     sendInvSync(socket, avRoom);
+    // ⭐ WORN GEAR (2026-11-12): what everyone here wears, to the joiner; what the joiner wears, to everyone here
+    { const all = {}; let any = false; for (const sid of roomAvt[avRoom] || []) { if (sid === socket.id) continue; const w = wornWire(playerKeyFor(sid)); if (w) { all[sid] = w; any = true; } }
+      if (any) socket.emit('avt-worn-all', all);
+      const mine = wornWire(playerKeyFor(socket.id)); if (mine) socket.to(avRoom).emit('avt-worn', { id: socket.id, w: mine }); }
     // ⭐ THE GROUND UNDER THE SPAWN, ASKED FOR BEFORE THE CLIENT CAN ASK FOR IT. The client holds its body still
     // until the chunks around its spawn have arrived (see the spawn gate in 16e), so how long that hold lasts is
     // decided entirely by how soon those chunks are queued. Waiting for the first beacon costs a round trip plus
@@ -26751,6 +26772,17 @@ io.on('connection', (socket) => {
     // of the build menu, not a thing you hold).
     const o = cleanSlot(off);
     ledger.setHotbar(playerKeyFor(socket.id), clean, n >= 0 && n < 9 ? n : -1, o && o.k !== 'tool' ? o : 0);
+  });
+  // ⭐ WORN GEAR (2026-11-12): put a piece on (`id`: it must be worn in `slot`, and carried where things are carried) or take it off (`id` empty).
+  //   Whatever was in the slot comes off (it stays in the pouch). Everyone in the room is told.
+  socket.on('worn-set', (p) => {
+    if (!currentAvatarRoom || !p || !ITEMS.WORN_SLOTS.includes(p.slot)) return;
+    const key = playerKeyFor(socket.id), id = p.id ? String(p.id) : '';
+    if (id && (ITEMS.wornSlotOf(id) !== p.slot || (invGatedRoom(currentAvatarRoom) && ledger.itemCount(key, id) < 1))) { sendInvSync(socket, currentAvatarRoom); return; }
+    if ((ledger.worn(key)[p.slot] || '') === id) return;
+    ledger.setWorn(key, p.slot, id || null);
+    wornTell(socket, currentAvatarRoom);
+    sendInvSync(socket, currentAvatarRoom);
   });
   // ⭐ MAKE AN ITEM (2026-10-08, the torch: "made from wood with Prima"). The recipe is the server's (`ITEMS[id].make`); the
   // client only names what it wants. All-or-nothing: every cost is checked BEFORE anything is taken.

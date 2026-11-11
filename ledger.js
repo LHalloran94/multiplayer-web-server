@@ -163,13 +163,15 @@ class Ledger {
     // `hotbar`: the nine numbers' contents + which one is selected, or null if this player has never sent one.
     // ⚠️ null is a real answer, not "empty": it is what tells the client to push up the bar it already had in
     // its browser, so nobody's arrangement is wiped by the move from browser storage to here.
-    h = { prima: 0, mats: new Map(), items: new Map(), refine: [], paid: 0, hotbar: null };
+    h = { prima: 0, mats: new Map(), items: new Map(), refine: [], paid: 0, hotbar: null, worn: {} };
     if (this._persisted(key)) {
       try {
         for (const row of this._selItems.all(key)) if (row.n > 0) h.items.set(String(row.item_id), row.n | 0);
         const hb = this._selHot.get(key);
         // (a TENTH entry, when present, is the OFF HAND — stored in the same column so no schema change; older rows have nine)
-        if (hb) { try { const s = JSON.parse(hb.slots); if (Array.isArray(s)) h.hotbar = { slots: s.slice(0, 9), sel: hb.sel | 0, off: s[9] || 0 }; } catch (e) {} }
+        if (hb) { try { const s = JSON.parse(hb.slots); if (Array.isArray(s)) { h.hotbar = { slots: s.slice(0, 9), sel: hb.sel | 0, off: s[9] || 0 };
+          // (worn gear, 2026-11-12) an ELEVENTH entry, when present, is what you WEAR: { slot: itemId } — the same column, no schema change
+          if (s[10] && typeof s[10] === 'object') for (const k of Object.keys(s[10])) if (typeof s[10][k] === 'string' && s[10][k]) h.worn[k] = s[10][k]; } } catch (e) {} }
         for (const row of this._selMats.all(key)) if (row.n > 0) h.mats.set(row.mat_id | 0, row.n | 0);
         const p = this._selPrima.get(key);
         h.prima = p ? (p.amount | 0) : 0;
@@ -216,6 +218,7 @@ class Ledger {
     return {
       prima: this._unl(key) ? UNLIMITED_PRIMA : h.prima, mats, items,
       hotbar: h.hotbar,
+      worn: Object.assign({}, h.worn),
       refine: h.refine.map(e => [e.m, e.n]),
       paid: head ? h.paid : 0,
       headWorth: head ? this.worthOf(head.m) : 0,
@@ -325,6 +328,16 @@ class Ledger {
     h.hotbar = { slots, sel: sel | 0, off: off || 0 };
     this._touch(key);
   }
+
+  // ── WORN GEAR (2026-11-12): which item each slot points at ({ head: 'iron_helmet', … }; a missing slot is empty). Like the bar, a POINTER:
+  // the item's count stays in `items` and leaves with it on a death. The caller checks the item fits the slot and that you have it.
+  worn(key) { return this._rec(key).worn; }
+  setWorn(key, slot, id) {
+    const h = this._rec(key);
+    if (id) h.worn[slot] = id; else delete h.worn[slot];
+    this._touch(key);
+  }
+  itemCount(key, id) { return this._rec(key).items.get(id) || 0; }
 
   grantPrima(key, amount, opts) {
     const a = amount | 0;
@@ -441,7 +454,7 @@ class Ledger {
         for (const [m, n] of h.mats) if (n > 0) this._insMat.run(key, m, n);
         this._delItems.run(key);
         for (const [id, n] of h.items) if (n > 0) this._insItem.run(key, id, n);
-        if (h.hotbar) this._upHot.run(key, JSON.stringify(h.hotbar.slots.slice(0, 9).concat([h.hotbar.off || 0])), h.hotbar.sel | 0);
+        if (h.hotbar) this._upHot.run(key, JSON.stringify(h.hotbar.slots.slice(0, 9).concat([h.hotbar.off || 0, h.worn || {}])), h.hotbar.sel | 0);   // (the 11th: worn gear — kept once the bar has been sent, as every client sends it on its first sync)
         this._upPrima.run(key, h.prima);
         // Same delete-then-insert, for the same reason: an UPSERT would leave rows for entries that have
         // finished refining, and a stale row here is ore that comes back from the dead.

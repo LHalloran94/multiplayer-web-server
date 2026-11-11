@@ -204,17 +204,35 @@ SVG.bottleflask = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><
 ITEMS.steel_pail = { name: 'Steel pail', kind: 'tool', tier: 0, svg: SVG.steelpail, obj: HELD.objOf('steelpail'), make: { mats: [], prima: 30 } };
 ITEMS.round_flask = { name: 'Round flask', kind: 'throwable', tier: 0, svg: SVG.roundflask, obj: HELD.objOf('roundflask'), make: { mats: [], prima: 8 } };
 ITEMS.glass_bottle = { name: 'Glass bottle', kind: 'throwable', tier: 0, svg: SVG.bottleflask, obj: HELD.objOf('bottleflask'), make: { mats: [], prima: 10 } };
+// ⭐⭐ WORN GEAR (2026-11-12, `scratchpad/kickoff_worn_gear.md`): FIVE SLOTS — head, body, hands, feet, back (capes) (the user). A piece of gear is an
+//   ordinary item (a kind plus a count, it drops on death like everything else) with `slot` = where it is worn. Wearing one points a slot at it;
+//   the count stays in the pouch (server `worn-set`, ledger `worn`). No `obj`: gear is never held, and dropped it lies in a pile.
+//   These five are the first set, to try the slots: their pictures here only; how each looks on the body comes next (drawn in 3D, from scratch).
+const WORN_SLOTS = ['head', 'body', 'hands', 'feet', 'back'];
+const MET = 'fill="#b8c0cc" stroke="#5b6472" stroke-width=".8"';
+SVG.ironhelmet = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 16c0-5.6 3.6-10 8-10s8 4.4 8 10v3H4z" ' + MET + '/><rect x="6" y="12.6" width="12" height="1.8" rx=".5" fill="#2a2e36"/><path d="M12 6.2v5.6M12 15v4" stroke="#8f98a5" stroke-width=".8"/></svg>';
+SVG.ironbreastplate = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 4h3c.6 1.6 1.7 2.4 3 2.4S14.4 5.6 15 4h3l2.4 4-2.4 2v8c-1.8 1.6-3.8 2.4-6 2.4S7.8 19.6 6 18v-8L3.6 8z" ' + MET + '/><path d="M12 7.2v12.6" stroke="#8f98a5" stroke-width=".8"/></svg>';
+SVG.irongauntlets = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7.4 18.4v-4.6l-1.9-3.4c-.5-1 .9-1.8 1.6-.9L9 12V5.6c0-1.2 1.8-1.2 1.8 0V11V4.6c0-1.2 1.8-1.2 1.8 0V11V5.2c0-1.2 1.8-1.2 1.8 0V11.2V7.2c0-1.2 1.8-1.2 1.8 0v7.4c0 2.2-1.4 3.8-3.6 3.8z" ' + MET + '/><rect x="6.6" y="18" width="9.8" height="3.4" rx=".8" fill="#8f98a5" stroke="#5b6472" stroke-width=".8"/></svg>';
+SVG.ironboots = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7 3h6.4v9.6l5.8 2.4c1 .4 1.6 1.4 1.6 2.5V20H4.6v-6.6L7 12z" ' + MET + '/><path d="M4.6 17.6h16.2M7 8h6.4" stroke="#5b6472" stroke-width=".9"/></svg>';
+SVG.clothcape = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8 3h8l1.2 2.2C19.4 10.4 20.4 15 20.6 21H3.4C3.6 15 4.6 10.4 6.8 5.2z" fill="#8a2a2a" stroke="#4a1414" stroke-width=".8"/><path d="M9.6 9l-1.4 11M14.4 9l1.4 11" stroke="#6e1f1f" stroke-width=".8"/><path d="M8 3.2c1 1.4 2.4 2 4 2s3-.6 4-2" fill="none" stroke="#d4a537" stroke-width="1.3"/></svg>';
+ITEMS.iron_helmet = { name: 'Iron helmet', kind: 'worn', slot: 'head', tier: 0, svg: SVG.ironhelmet, make: { mats: [], prima: 60 } };
+ITEMS.iron_breastplate = { name: 'Iron breastplate', kind: 'worn', slot: 'body', tier: 0, svg: SVG.ironbreastplate, make: { mats: [], prima: 120 } };
+ITEMS.iron_gauntlets = { name: 'Iron gauntlets', kind: 'worn', slot: 'hands', tier: 0, svg: SVG.irongauntlets, make: { mats: [], prima: 50 } };
+ITEMS.iron_boots = { name: 'Iron boots', kind: 'worn', slot: 'feet', tier: 0, svg: SVG.ironboots, make: { mats: [], prima: 50 } };
+ITEMS.cloth_cape = { name: 'Cloth cape', kind: 'worn', slot: 'back', tier: 0, svg: SVG.clothcape, make: { mats: [], prima: 40 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
 // The wire shape of the table: [[id, { name, kind, tier, svg }], …]. Sent once per socket.
 function itemDefsWire() {
   return Object.keys(ITEMS).map(id => [id, { name: ITEMS[id].name, kind: ITEMS[id].kind, tier: ITEMS[id].tier | 0, svg: ITEMS[id].svg,
-    make: ITEMS[id].make || null, obj: ITEMS[id].obj || null, pair: ITEMS[id].pair || null, stack: ITEMS[id].stack ? 1 : 0 }]);
+    make: ITEMS[id].make || null, obj: ITEMS[id].obj || null, pair: ITEMS[id].pair || null, stack: ITEMS[id].stack ? 1 : 0, slot: ITEMS[id].slot || null }]);
 }
+// (worn gear) the slot an item is worn in, or null
+const wornSlotOf = (id) => isItem(id) && ITEMS[id].kind === 'worn' && WORN_SLOTS.includes(ITEMS[id].slot) ? ITEMS[id].slot : null;
 // is this item a real object out of the pouch (never a pile, never a stack)?
 const isObjItem = (id) => isItem(id) && !!ITEMS[id].obj;
 // …and one that never stacks: a torch, a sword — dropped or scattered it lies as ITSELF, one object each. A throwable (`stack`) goes into a pile.
 const isLoneItem = (id) => isObjItem(id) && !ITEMS[id].stack;
 
-module.exports = { ITEMS, isItem, isObjItem, isLoneItem, itemDefsWire };
+module.exports = { ITEMS, isItem, isObjItem, isLoneItem, itemDefsWire, WORN_SLOTS, wornSlotOf };
