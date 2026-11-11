@@ -4884,12 +4884,14 @@ function liqSplashHit(room, x, y, sp, vx, hw, want, wt, fwd) {   // `fwd` (piece
     if (rk < 0) { if (q > cand.length * 2) break; continue; }
     const D = LIQ_DROP[LIQ_ID[rk]] || LIQ_DROP[9];
     if (n >= Math.max(1, Math.round(sp * wk * D[1] * (liquidCfg.dropPer == null ? 1 : +liquidCfg.dropPer)))) break;
-    const u = vesselCellTake(room, i, rk, Math.min(D[0], want ? want - took : D[0]), changed); if (!u) continue;
+    const FR = flyRealOn(room); if (FR && n % 2) continue;   // (flyReal) half as many, bigger
+    const u = vesselCellTake(room, i, rk, Math.min(FR ? Math.max(6, D[0] * 3) : D[0], want ? want - took : 99), changed); if (!u) continue;
     took += u;
     const h1 = fireVar(i, salt, 81 + n), h2 = fireVar(i, salt, 82 + n), side = C[2] === ic ? (h1 < 0.5 ? -1 : 1) : Math.sign(C[2] - ic);
     const s0 = Math.min(liqDropCfg.vmax, sp * 60 / T * (0.8 + 0.2 * wk)) * D[2], up = liqDropCfg.up * (liquidCfg.dropUp == null ? 1 : +liquidCfg.dropUp);
     const sd = fwd ? (Math.sign(vx) || side) : side;
     const vx0 = fwd ? sd * s0 * (0.5 + 0.6 * h1) + vx * 60 / T * 0.4 : side * s0 * liqDropCfg.out * (0.4 + 0.9 * h1) + vx * 60 / T * 0.3, vy0 = -s0 * up * (fwd ? 0.3 + 0.35 * h2 : 0.55 + 0.6 * h2);
+    if (FR) { if (liqParcelLaunch(room, st, i, rk, u, C[2] + 0.5, C[3] + 0.2, vx0, vy0, changed)) made++; if (want && took >= want) break; continue; }
     const A = powderFlyArc(ROWS, COLS, air, C[2] + 0.5, C[3] + 0.2, vx0, vy0, i, liqDropCfg.g, 0);
     fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk, u, src: i });
     wire.push(i, rk, Math.round(vx0 * 100), Math.round(vy0 * 100), A.steps, u); made++;
@@ -4925,10 +4927,12 @@ function liqBlastApply(room, x, y, R, k) {
     const C = cand[q % cand.length], i = C[1], w = 1 - C[0] / R; if (fireVar(i, salt, 51 + q) > 0.35 + 0.65 * w) continue;   // nearer the middle, more often
     const p = amt.rp(i), b = amt.o(i); let rk = -1; for (let kk = LIQ_T - 1; kk >= 0; kk--) if (p[b + kk] > 0) { rk = kk; break; } if (rk < 0) continue;
     const D = LIQ_DROP[LIQ_ID[rk]] || LIQ_DROP[9];
-    const u = vesselCellTake(room, i, rk, D[0] * 2, changed); if (!u) continue;
+    const FR = flyRealOn(room); if (FR && q % 2) continue;
+    const u = vesselCellTake(room, i, rk, FR ? Math.max(6, D[0] * 3) : D[0] * 2, changed); if (!u) continue;
     let dx = (C[2] + 0.5) * T - x, dy = (C[3] + 0.2) * T - y; const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
     const sp = Math.min(liqBlastCfg.vmax, (liqBlastCfg.v0 + liqBlastCfg.v1 * w) * k) * D[2] * (0.7 + 0.6 * fireVar(i, salt, 61 + q));
     const vx0 = dx * sp, vy0 = dy * sp - sp * 0.35;
+    if (FR) { if (liqParcelLaunch(room, st, i, rk, u, C[2] + 0.5, C[3] + 0.2, vx0, vy0, changed)) { made++; n++; } continue; }
     const A = powderFlyArc(ROWS, COLS, air, C[2] + 0.5, C[3] + 0.2, vx0, vy0, i, liqDropCfg.g, 0);
     fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk, u, src: i });
     wire.push(i, rk, Math.round(vx0 * 100), Math.round(vy0 * 100), A.steps, u); made++; n++;
@@ -4978,6 +4982,50 @@ function liqDropStep() {
   }
 }
 setInterval(liqDropStep, 50);
+
+// ⭐ (2026-11-11, the user: 'try both' — B is drawn on the card, this is A) REAL LIQUID IN FLIGHT (`liquidCfg.flyReal`, OFF): a splash's or a blast's liquid flies
+//   AS LIQUID IN CELLS — a parcel (its rank and units) moved cell by cell along its arc every 50 ms (`liqParcelStep`), into the next cell when that is open and dry,
+//   else it LANDS there and is ordinary liquid again. The sim leaves a parcel's cell alone (no room in it — `capOf`; not in its per-cell list); it is sent with the
+//   AIRBORNE flag (moving liquid on the card). Bigger lumps than drops (in cells a small amount is a sliver): ≥ 6 units, half as many.
+const roomLiqParcels = {};   // room → [{ x, y, vx, vy, rk, u, i }] (cells, cells/s, the cell it is in)
+const roomFlyTry = new Set(); const flyRealOn = (room) => !!liquidCfg.flyReal || roomFlyTry.has(room);   // (rigs: one sandbox room, never the Overworld)
+function liqParcelLaunch(room, st, src, rk, u, fx, fy, vx, vy, changed) {
+  const ROWS = st.rows, up = src - 1;
+  // …into the open dry cell over where it was taken (its own cell still holds the rest of the pool); none: back where it came from
+  if (!vesselCellOpen(room, up) || peekCellAt(st.fineTotal, up) > 0 || (st.liqFly && st.liqFly.has(up))) { vesselCellPut(room, src, rk, u, changed); return false; }
+  const n = vesselCellPut(room, up, rk, u, changed); if (n < u) vesselCellPut(room, src, rk, u - n, changed);
+  const L = roomLiqParcels[room] || (roomLiqParcels[room] = []); L.push({ x: fx, y: Math.min(fy, (up % ROWS) + 0.9), vx, vy, rk, u: n, i: up });
+  (st.liqFly || (st.liqFly = new Set())).add(up);
+  return true;
+}
+function liqParcelStep() {
+  const dt = 0.05;
+  for (const room in roomLiqParcels) {
+    const L = roomLiqParcels[room], st = cellsOf(room); if (!st.terrain || !st.fineAmt) { delete roomLiqParcels[room]; continue; }
+    const ROWS = st.rows, COLS = st.cols, N = st.terrain.length, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / TERRAIN_CELL), changed = [], F = st.liqFly || (st.liqFly = new Set());
+    let keep = 0;
+    for (const p of L) {
+      p.vy += liqDropCfg.g * dt; const nx = p.x + p.vx * dt, ny = p.y + p.vy * dt, steps = Math.max(1, Math.ceil(Math.max(Math.abs(nx - p.x), Math.abs(ny - p.y)) / 0.4));
+      let landed = false;
+      for (let k = 1; k <= steps && !landed; k++) {
+        const qx = p.x + (nx - p.x) * k / steps, qy = p.y + (ny - p.y) * k / steps, c = Math.floor(qx), r = Math.floor(qy);
+        if (c < 0 || r < 0 || c >= COLS || r >= ROWS || r >= floorRow) { landed = true; break; }
+        const j = c * ROWS + r; if (j === p.i) continue;
+        if (!vesselCellOpen(room, j) || peekCellAt(st.fineTotal, j) > 0 || F.has(j) || (cov && cov.has(j))) { landed = true; break; }   // it meets something: lands where it is
+        const got = vesselCellTake(room, p.i, p.rk, p.u, changed); F.delete(p.i);
+        const put = got ? vesselCellPut(room, j, p.rk, got, changed) : 0; if (put < got) vesselCellPut(room, p.i, p.rk, got - put, changed);
+        if (!put) { landed = true; break; }
+        p.i = j; p.u = put; F.add(j);
+      }
+      if (landed) { F.delete(p.i); changed.push(p.i); continue; }
+      p.x = nx; p.y = ny; L[keep++] = p;
+    }
+    L.length = keep;
+    if (changed.length) emitFineCells(room, [...new Set(changed)]);
+    if (!keep) { delete roomLiqParcels[room]; if (!F.size) st.liqFly = null; }
+  }
+}
+setInterval(liqParcelStep, 50);
 // The removal seam (`objUnindex` → `objLinkDrop`): an object that is erased, smashed or burnt takes its cells with it.
 function bodyDrop(room, o) {
   if (o) { bodyLastPose.delete(room + '|' + o.id); coverDrop(room, o.id); }
@@ -9294,7 +9342,8 @@ const liquidCfg = {
   //   counted, default 1 = the speed liquid falls), whatever the passes
   displacePerCol: 1,
   // (2026-11-11, effects piece 1) SPLASHES CARRY REAL LIQUID (`liqSplashHit`) — OFF until the user has looked; how many drops a splash throws (×) and how high (×)
-  realDrops: 1, dropPer: 4, dropUp: 1.3,   // (2026-11-11, the user: 4× as many; higher · ON by default — a restart put it back to off)
+  realDrops: 1, dropPer: 4, dropUp: 1.3, flyReal: 0,   // flyReal (2026-11-11, the user: 'try both'): the flying liquid AS LIQUID in cells — OFF
+    // (2026-11-11, the user: 4× as many; higher · ON by default — a restart put it back to off)
   // ⭐ (2026-11-11, the user: 'worth a try') SURFACE TENSION: a sideways move into an EMPTY cell happens only when the cell it comes from holds at least twice
   //   `tensionMin` units, and then moves at least `tensionMin` — so a thin puddle stops at its edge instead of levelling out to an invisible film (a splash's
   //   drops stay visible where they land); liquid joining liquid, falling, and a full pool spreading are as before. 0 = the old way.
@@ -10563,7 +10612,9 @@ function fineLiquidTickRoom(room, SUB) {
     if (OCCT) for (const [i, t] of OCCT) { const c = OCC0 ? (OCC0.get(i) || 0) : 0, n = t > c ? Math.min(t, c + D) : Math.max(t, c - D); if (n > 0.005) OCC.set(i, n); }
     if (OCC0) for (const [i, c] of OCC0) if (!OCCT || !OCCT.has(i)) { const n = c - D; if (n > 0.005) OCC.set(i, n); } }
   st.liqOcc = OCC && OCC.size ? OCC : null;
-  const capOf = OCC && OCC.size ? (j) => { const c = capOf0(j), o = OCC.get(j); return o ? Math.max(1, Math.round(c * (1 - o))) : c; } : capOf0;
+  const capOcc = OCC && OCC.size ? (j) => { const c = capOf0(j), o = OCC.get(j); return o ? Math.max(1, Math.round(c * (1 - o))) : c; } : capOf0;
+  const FLY = st.liqFly && st.liqFly.size ? st.liqFly : null;   // (flyReal) liquid in flight: no room in its cell, and the sim does not move it
+  const capOf = FLY ? (j) => FLY.has(j) ? tot.g(j) : capOcc(j) : capOcc;
   // the bytes of the page holding `j`, for the row scans' page runs (null: none, or wedges off)
   const wedgeRun = (j) => { if (!WEDGE) return null; const p = wPage(j); if (p !== _wP) { _wP = p; _wB = slopeWedgePage(room, st, p); } return _wB; };
   const isSinkF = (k) => { if (k < 0 || k >= NCELL) return false; const v = genRoom ? peekCellAt(grid, coarseOf(k)) : grid.g(coarseOf(k)); return v >= 0 && isSinkId(v); };   // a fine cell whose coarse cell is a DRAIN block
@@ -10941,7 +10992,7 @@ function fineLiquidTickRoom(room, SUB) {
     let _flip = !(tick & 1);
     if (FROWS <= SORT_ROW_MAX && cap < SORT_TOT_MAX && NCELL <= SORT_IDX_MAX) {
       let n = 0;
-      for (const i of active) { const r = i % FROWS; list[n++] = (FROWS - 1 - r) * SORT_ROW_MUL + tot.g(i) * SORT_TOT_MUL + (_flip ? SORT_IDX_MAX - i : i); }
+      for (const i of active) { if (FLY && FLY.has(i)) continue; const r = i % FROWS; list[n++] = (FROWS - 1 - r) * SORT_ROW_MUL + tot.g(i) * SORT_TOT_MUL + (_flip ? SORT_IDX_MAX - i : i); }
       active.clear();
       list.subarray(0, _n0).sort();
     } else {
@@ -12740,7 +12791,7 @@ function fineReactTickRoom(room, SUB, phase) {
 // per-tick observation the sim only makes while it is running. A cell mid-flight picks its bit back up on the next tick.
 function fineWirePush(room, idxList, cells) {   // append [i, repId, flags, mask, amts…] for each fine cell in idxList
   const amt = cellsOf(room).fineAmt;
-  for (const i of idxList) { const p = amt.rp(i), b = amt.o(i); let mask = 0; for (let rk = 0; rk < LIQ_T; rk++) if (p[b + rk] > 0) mask |= (1 << rk); cells.push(i, liqRepId(amt, i), 0, mask); for (let rk = 0; rk < LIQ_T; rk++) if (mask & (1 << rk)) cells.push(p[b + rk]); }
+  for (const i of idxList) { const p = amt.rp(i), b = amt.o(i); let mask = 0; for (let rk = 0; rk < LIQ_T; rk++) if (p[b + rk] > 0) mask |= (1 << rk); const fl = cellsOf(room).liqFly; cells.push(i, liqRepId(amt, i), fl && fl.has(i) ? 0x40 : 0, mask); for (let rk = 0; rk < LIQ_T; rk++) if (mask & (1 << rk)) cells.push(p[b + rk]); }
 }
 function emitFineCells(room, idxList) {   // broadcast a set of fine cells immediately (used by placement — the tick only broadcasts what MOVED)
   const st = cellsOf(room);
@@ -23975,7 +24026,7 @@ io.on('connection', (socket) => {
     if ('displacePerCol' in patch) liquidCfg.displacePerCol = Math.max(1, Math.min(8, patch.displacePerCol | 0));
     if ('bodyDisplace' in patch) liquidCfg.bodyDisplace = patch.bodyDisplace ? 1 : 0; if ('dispPlayer' in patch) liquidCfg.dispPlayer = Math.max(0, Math.min(0.9, +patch.dispPlayer || 0)); if ('dispStep' in patch) liquidCfg.dispStep = Math.max(0.005, Math.min(1, +patch.dispStep || 0.04));
     if ('tension' in patch) liquidCfg.tension = patch.tension ? 1 : 0; if ('tensionMin' in patch) liquidCfg.tensionMin = Math.max(1, Math.min(24, patch.tensionMin | 0));
-    if ('realDrops' in patch) liquidCfg.realDrops = patch.realDrops ? 1 : 0; if ('dropPer' in patch) liquidCfg.dropPer = Math.max(0, Math.min(4, +patch.dropPer || 0)); if ('dropUp' in patch) liquidCfg.dropUp = Math.max(0, Math.min(3, +patch.dropUp || 0));
+    if ('realDrops' in patch) liquidCfg.realDrops = patch.realDrops ? 1 : 0; if ('flyReal' in patch) liquidCfg.flyReal = patch.flyReal ? 1 : 0; if ('dropPer' in patch) liquidCfg.dropPer = Math.max(0, Math.min(4, +patch.dropPer || 0)); if ('dropUp' in patch) liquidCfg.dropUp = Math.max(0, Math.min(3, +patch.dropUp || 0));
     if ('displaceSteps' in patch) liquidCfg.displaceSteps = Math.max(1, Math.min(16, patch.displaceSteps | 0));
     if ('displaceRate' in patch) liquidCfg.displaceRate = Math.max(0, Math.min(255, patch.displaceRate | 0));
     if ('edgeTrickle' in patch) liquidCfg.edgeTrickle = Math.max(0, Math.min(24, patch.edgeTrickle | 0));
@@ -27548,8 +27599,8 @@ io.on('connection', (socket) => {
     if (!p && !o.length) { BB.delete(socket.id); if (!BB.size) delete roomLiqBodies[room]; return; }
     BB.set(socket.id, { p, o, t: now });
   });
-  socket.on('liquid-drops-here', ({ on, box, disp } = {}) => { const room = currentAvatarRoom; if (!room || room === OVERWORLD_ROOM || room === OVERWORLD_TEST_ROOM) return;
-    if (on) roomLiqDropsTry.add(room); else roomLiqDropsTry.delete(room); if (disp != null) { if (disp) roomDispTry.add(room); else roomDispTry.delete(room); } const st = cellsOf(room), BB = roomLiqBodies[room]; let sum = null;
+  socket.on('liquid-drops-here', ({ on, box, disp, fly } = {}) => { const room = currentAvatarRoom; if (!room || room === OVERWORLD_ROOM || room === OVERWORLD_TEST_ROOM) return;
+    if (on) roomLiqDropsTry.add(room); else roomLiqDropsTry.delete(room); if (disp != null) { if (disp) roomDispTry.add(room); else roomDispTry.delete(room); } if (fly != null) { if (fly) roomFlyTry.add(room); else roomFlyTry.delete(room); } const st = cellsOf(room), BB = roomLiqBodies[room]; let sum = null;
     if (Array.isArray(box) && box.length === 4 && st && st.fineTotal) { sum = 0; const R = st.rows; for (let c = box[0] | 0; c <= (box[2] | 0); c++) for (let r = box[1] | 0; r <= (box[3] | 0); r++) { const v = peekCellAt(st.fineTotal, c * R + r); if (v > 0) sum += v; } }   // (rigs) the server's own units in a box
     socket.emit('liquid-drops-here', { room, sum, on: roomLiqDropsTry.has(room), stat: liqDropStat, occ: st && st.liqOcc ? st.liqOcc.size : 0, active: st && st.fineActive ? st.fineActive.size : 0, bodies: BB ? [...BB].map(([s, B]) => [s.slice(0, 4), !!B.p, B.o.length / 4, Date.now() - B.t]) : null }); });
   socket.on('liquid-splash', ({ s } = {}) => {
