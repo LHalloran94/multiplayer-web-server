@@ -4798,14 +4798,17 @@ setInterval(powderFlyLand, 50);
 //   small, oil fewer bigger, lava a few heavy slow ones (its look: the client's splash C). `liquidCfg.realDrops` (OFF until the user has looked).
 //   Processor (server): taking, the arcs, landing. Client: the drops drawn as particles.
 const LIQ_DROP = { 9: [2, 0.9, 1], 14: [2, 0.9, 1], 12: [2, 0.9, 1], 15: [4, 0.45, 0.8], 10: [6, 0.2, 0.45], 11: [6, 0.3, 0.5] };   // id → [units a drop, drops per speed, speed ×]
-const liqDropCfg = { g: 70, up: 0.6, out: 0.35, vmax: 30, maxFly: 400, maxHit: 14, cool: 350 };
+const liqDropCfg = { g: 70, up: 0.6, out: 0.35, vmax: 30, maxFly: 500, maxHit: 28, cool: 350 };
 const roomLiqFly = {}, roomLiqHits = {}, roomLiqCool = {};
 // (rigs) real drops in ONE room while the switch is off — the asking player's room, never the Overworld (`liquid-drops-here`); a test must not change the user's world
 const roomLiqDropsTry = new Set(), roomLiqSeen = {};
 const liqDropStat = { landings: 0, reports: 0, hits: 0, noSurface: 0, drops: 0, landed: 0 };   // (rigs: with the 'liquid-drops-here' reply)
 const liqDropsOn = (room) => !!liquidCfg.realDrops || roomLiqDropsTry.has(room);
-// a hit at (x, y) world px: `sp` its speed (px a 60th), `vx` its sideways speed (px a 60th), `hw` half its width (px), `want` units at most (0: by speed)
-function liqSplashHit(room, x, y, sp, vx, hw, want) {
+// a hit at (x, y) world px: `sp` its speed (px a 60th), `vx` its sideways speed (px a 60th), `hw` half its width (px), `want` units at most (0: by speed),
+//   `wt` its weight (a player's 4 — the loose solver's scale): (2026-11-11, the user) the splash by MOMENTUM — drops by speed × √(weight/4), a heavier hit throws
+//   them a little faster too
+function liqSplashHit(room, x, y, sp, vx, hw, want, wt) {
+  const wk = Math.max(0.35, Math.min(3, Math.sqrt((wt > 0 ? wt : 4) / 4)));
   const st = cellsOf(room), grid = st.terrain; if (!grid || !st.fineAmt) return 0;
   const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, amt = st.fineAmt, tot = st.fineTotal, cov = roomCover[room] && roomCover[room].n;
   const floorRow = Math.floor(roomFloorTop(room) / T);
@@ -4826,11 +4829,11 @@ function liqSplashHit(room, x, y, sp, vx, hw, want) {
     let rk = -1; for (let k = LIQ_T - 1; k >= 0; k--) if (p[b + k] > 0) { rk = k; break; }
     if (rk < 0) { if (q > cand.length * 2) break; continue; }
     const D = LIQ_DROP[LIQ_ID[rk]] || LIQ_DROP[9];
-    if (n >= Math.max(1, Math.round(sp * D[1] * (liquidCfg.dropPer == null ? 1 : +liquidCfg.dropPer)))) break;
+    if (n >= Math.max(1, Math.round(sp * wk * D[1] * (liquidCfg.dropPer == null ? 1 : +liquidCfg.dropPer)))) break;
     const u = vesselCellTake(room, i, rk, Math.min(D[0], want ? want - took : D[0]), changed); if (!u) continue;
     took += u;
     const h1 = fireVar(i, salt, 81 + n), h2 = fireVar(i, salt, 82 + n), side = C[2] === ic ? (h1 < 0.5 ? -1 : 1) : Math.sign(C[2] - ic);
-    const s0 = Math.min(liqDropCfg.vmax, sp * 60 / T) * D[2], up = liqDropCfg.up * (liquidCfg.dropUp == null ? 1 : +liquidCfg.dropUp);
+    const s0 = Math.min(liqDropCfg.vmax, sp * 60 / T * (0.8 + 0.2 * wk)) * D[2], up = liqDropCfg.up * (liquidCfg.dropUp == null ? 1 : +liquidCfg.dropUp);
     const vx0 = side * s0 * liqDropCfg.out * (0.4 + 0.9 * h1) + vx * 60 / T * 0.3, vy0 = -s0 * up * (0.55 + 0.6 * h2);
     const A = powderFlyArc(ROWS, COLS, air, C[2] + 0.5, C[3] + 0.2, vx0, vy0, i, liqDropCfg.g, 0);
     fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk, u, src: i });
@@ -4850,13 +4853,13 @@ function liqPourLandings(room, flowDn, airborne, ROWS) {
     let h = 0, k = A; while (h < 48 && airborne.has(k)) { h++; k--; } if (h < 2) continue;
     const c = Math.floor(j / ROWS); if (now - (cd.get(c) || 0) < liqDropCfg.cool) continue; cd.set(c, now);
     // a pour falls a cell a tick (~3.3 px a 60th); more landing at once = a bigger splash
-    liqDropStat.landings++; hits.push([(c + 0.5) * TERRAIN_CELL, (j % ROWS + 0.5) * TERRAIN_CELL, 3.3 * Math.min(2, 0.6 + m / LIQUID_MAX), 0, TERRAIN_CELL / 2, 0]);
+    liqDropStat.landings++; hits.push([(c + 0.5) * TERRAIN_CELL, (j % ROWS + 0.5) * TERRAIN_CELL, 3.3 * Math.min(2, 0.6 + m / LIQUID_MAX) * (1 + Math.min(1, h / 16)), 0, TERRAIN_CELL / 2, 0, 4]);   // (a longer fall, a bigger splash)
   }
 }
 // …every 50 ms: the queued hits splash; the drops that have come down are put where they landed (full: the open cells round it)
 function liqDropStep() {
   const now = Date.now();
-  for (const room in roomLiqHits) { const H = roomLiqHits[room]; delete roomLiqHits[room]; if (!liqDropsOn(room)) continue; for (const h of H) { liqDropStat.hits++; const n = liqSplashHit(room, h[0], h[1], h[2], h[3], h[4], h[5]); if (!n) liqDropStat.noSurface++; liqDropStat.drops += n; } }
+  for (const room in roomLiqHits) { const H = roomLiqHits[room]; delete roomLiqHits[room]; if (!liqDropsOn(room)) continue; for (const h of H) { liqDropStat.hits++; const n = liqSplashHit(room, h[0], h[1], h[2], h[3], h[4], h[5], h[6]); if (!n) liqDropStat.noSurface++; liqDropStat.drops += n; } }
   for (const room in roomLiqFly) {
     const fly = roomLiqFly[room], st = cellsOf(room); if (!st.terrain || !st.fineAmt) { delete roomLiqFly[room]; continue; }
     const ROWS = st.rows, changed = []; let keep = 0;
@@ -9196,7 +9199,11 @@ const liquidCfg = {
   //   counted, default 1 = the speed liquid falls), whatever the passes
   displacePerCol: 1,
   // (2026-11-11, effects piece 1) SPLASHES CARRY REAL LIQUID (`liqSplashHit`) — OFF until the user has looked; how many drops a splash throws (×) and how high (×)
-  realDrops: 0, dropPer: 1, dropUp: 1,
+  realDrops: 0, dropPer: 4, dropUp: 1.3,   // (2026-11-11, the user: 4× as many; higher)
+  // ⭐ (2026-11-11, the user: 'worth a try') SURFACE TENSION: a sideways move into an EMPTY cell happens only when the cell it comes from holds at least twice
+  //   `tensionMin` units, and then moves at least `tensionMin` — so a thin puddle stops at its edge instead of levelling out to an invisible film (a splash's
+  //   drops stay visible where they land); liquid joining liquid, falling, and a full pool spreading are as before. 0 = the old way.
+  tension: 1, tensionMin: 6,
   displaceSteps: 1,
   // ⭐ (2026-11-10, the user: 'falling liquid … should always have space below it to fall into, because the liquid below it is falling at exactly the same rate')
   //   FALLING BY WHAT MOVED: a cell that passed liquid down through its floor this tick is falling, whatever is under it now, and is not levelled sideways (the
@@ -10775,7 +10782,11 @@ function fineLiquidTickRoom(room, SUB) {
     if (got > 0) { let need = got; for (let x = i; x > t && need > 0; x--) { const mv = moveBottom(x - 1, x, Math.min(need, capOf(x) - tot.g(x))); if (mv <= 0) break; need = mv; } wakeN(i); }
     return got;
   };
-  const sideMove = (mv, i, j, m) => { const k = sideTo(i, j); if (k < 0) { active.add(i); return 0; } if (k !== j) { const rm = capOf(k) - tot.g(k); if (m > rm) m = rm; if (m <= 0) { active.add(i); return 0; } } return mv(i, k, m); };
+  // (tension — liquidCfg.tension) into an EMPTY cell only from a cell holding ≥ 2·TMIN, and at least TMIN at once; else nothing moves and the cell may rest
+  const TENS = !!liquidCfg.tension, TMIN = Math.max(1, Math.min(cap, liquidCfg.tensionMin | 0 || 6));
+  const sideMove = (mv, i, j, m) => { const k = sideTo(i, j); if (k < 0) { active.add(i); return 0; } if (k !== j) { const rm = capOf(k) - tot.g(k); if (m > rm) m = rm; if (m <= 0) { active.add(i); return 0; } }
+    if (TENS && tot.g(k) <= 0) { const ti = tot.g(i), tm = Math.min(TMIN, capOf(k)); if (ti < 2 * tm) return 0; if (m < tm) m = tm; if (m > ti - tm) m = ti - tm; }   // (a slope cell holding less than TMIN: its own capacity)
+    return mv(i, k, m); };
   for (let step = 0; step < NSTEPS; step++) {
     if (!active.size) break;
     const doFall = FALLONLY || step < FALLSTEPS;    // this sub-step runs the vertical descent (1a straight-down, 1b ledge spill)
@@ -23837,6 +23848,7 @@ io.on('connection', (socket) => {
     if ('displaceReach' in patch) liquidCfg.displaceReach = Math.max(4, Math.min(512, patch.displaceReach | 0));
     if ('displaceDeep' in patch) liquidCfg.displaceDeep = Math.max(1, Math.min(16, patch.displaceDeep | 0));
     if ('displacePerCol' in patch) liquidCfg.displacePerCol = Math.max(1, Math.min(8, patch.displacePerCol | 0));
+    if ('tension' in patch) liquidCfg.tension = patch.tension ? 1 : 0; if ('tensionMin' in patch) liquidCfg.tensionMin = Math.max(1, Math.min(24, patch.tensionMin | 0));
     if ('realDrops' in patch) liquidCfg.realDrops = patch.realDrops ? 1 : 0; if ('dropPer' in patch) liquidCfg.dropPer = Math.max(0, Math.min(4, +patch.dropPer || 0)); if ('dropUp' in patch) liquidCfg.dropUp = Math.max(0, Math.min(3, +patch.dropUp || 0));
     if ('displaceSteps' in patch) liquidCfg.displaceSteps = Math.max(1, Math.min(16, patch.displaceSteps | 0));
     if ('displaceRate' in patch) liquidCfg.displaceRate = Math.max(0, Math.min(255, patch.displaceRate | 0));
@@ -27391,7 +27403,7 @@ io.on('connection', (socket) => {
     const now = Date.now(); if (now - _pushAt < 25) return; _pushAt = now;
     powderPushApply(room, p);
   });
-  // (2026-11-11, effects piece 1) SOMETHING WENT INTO LIQUID — its driver says where and how hard ([x, y, speed×10, vx×10, half width] …, as 'powder-splash')
+  // (2026-11-11, effects piece 1) SOMETHING WENT INTO LIQUID — its driver says where and how hard ([x, y, speed×10, vx×10, half width, weight×10] …)
   let _liqSplashAt = 0;
   socket.on('liquid-drops-here', ({ on } = {}) => { const room = currentAvatarRoom; if (!room || room === OVERWORLD_ROOM || room === OVERWORLD_TEST_ROOM) return;
     if (on) roomLiqDropsTry.add(room); else roomLiqDropsTry.delete(room); socket.emit('liquid-drops-here', { room, on: roomLiqDropsTry.has(room), stat: liqDropStat }); });
@@ -27400,11 +27412,11 @@ io.on('connection', (socket) => {
     const now = Date.now(); if (now - _liqSplashAt < 60) return; _liqSplashAt = now;
     const H = roomLiqHits[room] || (roomLiqHits[room] = []), seen = roomLiqSeen[room] || (roomLiqSeen[room] = []);
     while (seen.length && now - seen[0][2] > 300) seen.shift();
-    for (let q = 0; q + 4 < s.length && q < 5 * 4 && H.length < 24; q += 5) {
-      const x = +s[q], y = +s[q + 1], sp = Math.min(30, Math.max(0, +s[q + 2] / 10 || 0)), vx = Math.max(-30, Math.min(30, +s[q + 3] / 10 || 0)), hw = Math.max(4, Math.min(128, +s[q + 4] || 16));
+    for (let q = 0; q + 5 < s.length && q < 6 * 4 && H.length < 24; q += 6) {
+      const x = +s[q], y = +s[q + 1], sp = Math.min(30, Math.max(0, +s[q + 2] / 10 || 0)), vx = Math.max(-30, Math.min(30, +s[q + 3] / 10 || 0)), hw = Math.max(4, Math.min(128, +s[q + 4] || 16)), wt = Math.max(0.5, Math.min(200, +s[q + 5] / 10 || 4));
       if (!(isFinite(x) && isFinite(y) && sp > 0)) continue;
       if (seen.some(e => Math.abs(e[0] - x) < 2 * TERRAIN_CELL && Math.abs(e[1] - y) < 2 * TERRAIN_CELL)) continue;   // the same hit, reported by another browser
-      seen.push([x, y, now]); liqDropStat.reports++; H.push([x, y, sp, vx, hw, 0]);
+      seen.push([x, y, now]); liqDropStat.reports++; H.push([x, y, sp, vx, hw, 0, wt]);
     }
   });
   socket.on('powder-splash', ({ s } = {}) => {
