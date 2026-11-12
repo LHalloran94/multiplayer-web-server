@@ -220,6 +220,18 @@ ITEMS.iron_breastplate = { name: 'Iron breastplate', kind: 'worn', slot: 'body',
 ITEMS.iron_gauntlets = { name: 'Iron gauntlets', kind: 'worn', slot: 'hands', tier: 0, svg: SVG.irongauntlets, make: { mats: [], prima: 50 } };
 ITEMS.iron_boots = { name: 'Iron boots', kind: 'worn', slot: 'feet', tier: 0, svg: SVG.ironboots, make: { mats: [], prima: 50 } };
 ITEMS.cloth_cape = { name: 'Cloth cape', kind: 'worn', slot: 'back', tier: 0, svg: SVG.clothcape, make: { mats: [], prima: 40 } };
+// (2026-11-12, `scratchpad/kickoff_worn_build.md`) the first clothes: drawn on the body in 3D (client 16zf `WORN_LOOK`), every top on the same lowest neckline
+const LINEN = 'fill="#c9b48a" stroke="#6f5c3c" stroke-width=".8"';
+SVG.linenshirt = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8.6 3.6c.8 1.8 2 2.6 3.4 2.6s2.6-.8 3.4-2.6l4.4 2.6-1.6 4.4-1.8-.6V20.4H7.6V10l-1.8.6-1.6-4.4z" ' + LINEN + '/><path d="M11 7.4l2 1.4M13 7.4l-2 1.4M11 9.4l2 1.4M13 9.4l-2 1.4" stroke="#b39462" stroke-width=".7"/><path d="M7.6 15.4h8.8" stroke="#b39462" stroke-width="1.2"/></svg>';
+SVG.linentunic = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8.6 3.2c.8 1.8 2 2.6 3.4 2.6s2.6-.8 3.4-2.6l4.4 2.6-1.6 4.4-1.8-.6v3.8l2.2 7.4H5.4l2.2-7.4V9.6l-1.8.6-1.6-4.4z" ' + LINEN + '/><path d="M7.6 13.4h8.8" stroke="#b39462" stroke-width="1.3"/><path d="M10 14l-.8 6.6M14 14l.8 6.6" stroke="#8f7a55" stroke-width=".6"/></svg>';
+SVG.blueroberobe = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8.6 2.8c.8 1.8 2 2.6 3.4 2.6s2.6-.8 3.4-2.6l4 2.4-1.4 4-1.6-.5L18.8 21.2H5.2L7.6 8.7 6 9.2l-1.4-4z" fill="#2f3f8f" stroke="#d6ab45" stroke-width=".8"/><path d="M11 5.6h2l.9 15.6h-3.8z" fill="#e6dcc0" stroke="#d6ab45" stroke-width=".6"/><path d="M8 12.6h8" stroke="#d6ab45" stroke-width="1"/></svg>';
+SVG.wizardhat = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9 15.6c.4-4.2 1.6-8 3.6-10.4 1.6-1.8 4-2.4 6-1.2-2.2.2-3.6 1.6-4.4 3.8-.8 2.4-1.2 5-1.2 7.8z" fill="#2f3f8f" stroke="#1a2458" stroke-width=".8"/><ellipse cx="12" cy="16.8" rx="9.6" ry="2.6" fill="#2f3f8f" stroke="#1a2458" stroke-width=".8"/><path d="M8.8 15.4c2 .8 4.4.8 6.4 0" stroke="#d6ab45" stroke-width="1.3" fill="none"/></svg>';
+SVG.leathershoes = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3.6 16.2c0-3.2 2.4-5.6 6-6.2l3.4 2.8 4.4.8c2.2.4 3.4 1.6 3.4 3v1.2H3.6z" fill="#6b4528" stroke="#3f2817" stroke-width=".8"/><path d="M3.2 17.8h17.6v1.6H3.2z" fill="#2c2119"/><path d="M9.6 10.4l1.4 4.6" stroke="#3f2817" stroke-width="1.1"/><circle cx="11.2" cy="15.2" r=".7" fill="#d6ab45"/></svg>';
+ITEMS.linen_shirt = { name: 'Linen shirt', kind: 'worn', slot: 'body', tier: 0, svg: SVG.linenshirt, make: { mats: [], prima: 20 } };
+ITEMS.linen_tunic = { name: 'Linen tunic', kind: 'worn', slot: 'body', tier: 0, svg: SVG.linentunic, make: { mats: [], prima: 25 } };
+ITEMS.blue_robe = { name: 'Blue robe', kind: 'worn', slot: 'body', tier: 0, svg: SVG.blueroberobe, make: { mats: [], prima: 40 } };
+ITEMS.wizard_hat = { name: 'Wizard hat', kind: 'worn', slot: 'head', tier: 0, svg: SVG.wizardhat, make: { mats: [], prima: 30 } };
+ITEMS.leather_shoes = { name: 'Leather shoes', kind: 'worn', slot: 'feet', tier: 0, svg: SVG.leathershoes, make: { mats: [], prima: 15 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
