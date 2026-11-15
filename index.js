@@ -26779,8 +26779,12 @@ io.on('connection', (socket) => {
     if (!currentAvatarRoom || !p || !ITEMS.WORN_SLOTS.includes(p.slot)) return;
     const key = playerKeyFor(socket.id), id = p.id ? String(p.id) : '';
     if (id && (ITEMS.wornSlotOf(id) !== p.slot || (invGatedRoom(currentAvatarRoom) && ledger.itemCount(key, id) < 1))) { sendInvSync(socket, currentAvatarRoom); return; }
-    if ((ledger.worn(key)[p.slot] || '') === id) return;
+    const W0 = ledger.worn(key);
+    if ((W0[p.slot] || '') === id) return;
+    // (2026-11-15) a piece something else worn BARS (eyewear under the iron helmet) is refused; a piece that bars a slot takes what is in it off (it stays in the pouch)
+    if (id && ITEMS.WORN_SLOTS.some(s => s !== p.slot && W0[s] && ITEMS.wornBars(W0[s]).includes(p.slot))) { sendInvSync(socket, currentAvatarRoom); return; }
     ledger.setWorn(key, p.slot, id || null);
+    if (id) for (const s of ITEMS.wornBars(id)) if (W0[s]) ledger.setWorn(key, s, null);
     wornTell(socket, currentAvatarRoom);
     sendInvSync(socket, currentAvatarRoom);
   });

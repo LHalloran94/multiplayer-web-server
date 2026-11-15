@@ -208,14 +208,15 @@ ITEMS.glass_bottle = { name: 'Glass bottle', kind: 'throwable', tier: 0, svg: SV
 //   ordinary item (a kind plus a count, it drops on death like everything else) with `slot` = where it is worn. Wearing one points a slot at it;
 //   the count stays in the pouch (server `worn-set`, ledger `worn`). No `obj`: gear is never held, and dropped it lies in a pile.
 //   These five are the first set, to try the slots: their pictures here only; how each looks on the body comes next (drawn in 3D, from scratch).
-const WORN_SLOTS = ['head', 'body', 'hands', 'feet', 'back'];
+// (2026-11-15, kickoff_gear_function.md step 3) a SIXTH slot, the EYES: glasses, sunglasses, a monocle, goggles — in the list after the head (the strip's order).
+const WORN_SLOTS = ['head', 'eyes', 'body', 'hands', 'feet', 'back'];
 const MET = 'fill="#b8c0cc" stroke="#5b6472" stroke-width=".8"';
 SVG.ironhelmet = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 16c0-5.6 3.6-10 8-10s8 4.4 8 10v3H4z" ' + MET + '/><rect x="6" y="12.6" width="12" height="1.8" rx=".5" fill="#2a2e36"/><path d="M12 6.2v5.6M12 15v4" stroke="#8f98a5" stroke-width=".8"/></svg>';
 SVG.ironbreastplate = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 4h3c.6 1.6 1.7 2.4 3 2.4S14.4 5.6 15 4h3l2.4 4-2.4 2v8c-1.8 1.6-3.8 2.4-6 2.4S7.8 19.6 6 18v-8L3.6 8z" ' + MET + '/><path d="M12 7.2v12.6" stroke="#8f98a5" stroke-width=".8"/></svg>';
 SVG.irongauntlets = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7.4 18.4v-4.6l-1.9-3.4c-.5-1 .9-1.8 1.6-.9L9 12V5.6c0-1.2 1.8-1.2 1.8 0V11V4.6c0-1.2 1.8-1.2 1.8 0V11V5.2c0-1.2 1.8-1.2 1.8 0V11.2V7.2c0-1.2 1.8-1.2 1.8 0v7.4c0 2.2-1.4 3.8-3.6 3.8z" ' + MET + '/><rect x="6.6" y="18" width="9.8" height="3.4" rx=".8" fill="#8f98a5" stroke="#5b6472" stroke-width=".8"/></svg>';
 SVG.ironboots = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7 3h6.4v9.6l5.8 2.4c1 .4 1.6 1.4 1.6 2.5V20H4.6v-6.6L7 12z" ' + MET + '/><path d="M4.6 17.6h16.2M7 8h6.4" stroke="#5b6472" stroke-width=".9"/></svg>';
 SVG.clothcape = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8 3h8l1.2 2.2C19.4 10.4 20.4 15 20.6 21H3.4C3.6 15 4.6 10.4 6.8 5.2z" fill="#8a2a2a" stroke="#4a1414" stroke-width=".8"/><path d="M9.6 9l-1.4 11M14.4 9l1.4 11" stroke="#6e1f1f" stroke-width=".8"/><path d="M8 3.2c1 1.4 2.4 2 4 2s3-.6 4-2" fill="none" stroke="#d4a537" stroke-width="1.3"/></svg>';
-ITEMS.iron_helmet = { name: 'Iron helmet', kind: 'worn', slot: 'head', mat: 'plate', wt: 4, tier: 0, svg: SVG.ironhelmet, make: { mats: [], prima: 60 } };
+ITEMS.iron_helmet = { name: 'Iron helmet', kind: 'worn', slot: 'head', mat: 'plate', wt: 4, tier: 0, svg: SVG.ironhelmet, bars: ['eyes'], make: { mats: [], prima: 60 } };   // (bars: no eyewear under a closed helmet — the user, 2026-11-15)
 ITEMS.iron_breastplate = { name: 'Iron breastplate', kind: 'worn', slot: 'body', mat: 'plate', wt: 10, tier: 0, svg: SVG.ironbreastplate, make: { mats: [], prima: 120 } };
 ITEMS.iron_gauntlets = { name: 'Iron gauntlets', kind: 'worn', slot: 'hands', mat: 'plate', wt: 2, tier: 0, svg: SVG.irongauntlets, make: { mats: [], prima: 50 } };
 ITEMS.iron_boots = { name: 'Iron boots', kind: 'worn', slot: 'feet', mat: 'plate', wt: 3, tier: 0, svg: SVG.ironboots, make: { mats: [], prima: 50 } };
@@ -232,21 +233,44 @@ ITEMS.linen_tunic = { name: 'Linen tunic', kind: 'worn', slot: 'body', mat: 'lin
 ITEMS.blue_robe = { name: 'Blue robe', kind: 'worn', slot: 'body', mat: 'linen', wt: 2, tier: 0, svg: SVG.blueroberobe, make: { mats: [], prima: 40 } };
 ITEMS.wizard_hat = { name: 'Wizard hat', kind: 'worn', slot: 'head', mat: 'linen', wt: 0.5, tier: 0, svg: SVG.wizardhat, make: { mats: [], prima: 30 } };
 ITEMS.leather_shoes = { name: 'Leather shoes', kind: 'worn', slot: 'feet', mat: 'leather', wt: 1, tier: 0, svg: SVG.leathershoes, make: { mats: [], prima: 15 } };
+// ⭐ THE EYES SLOT (2026-11-15, the user's picks off `scratchpad/look/gear/eyes_styles/options.html` — all seven). `mat: 'glass'`; `eyes`: which eyes it covers
+//   (the body's −1 / +1 side; a monocle one); `prot` (optional, any piece): the item's OWN protection in % by kind of hit, over its material's (the user: kinds of armour
+//   may have their own stats). An edged hit on a covered eye never goes in: it lands as a weaker blow and cracks the lens (client 16zi). Drawn: client 16zf `WORN_LOOK`.
+const GLS = (frame, lens, extra) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' + (extra || '') + frame + lens + '</svg>';
+SVG.roundspectacles = GLS('<path d="M2.4 10.6l2-1.2M21.6 10.6l-2-1.2M10.2 12.2c1-1 2.6-1 3.6 0" fill="none" stroke="#3c3e46" stroke-width="1"/>', '<circle cx="7" cy="13" r="3.6" fill="#dbe9f5" fill-opacity=".45" stroke="#3c3e46" stroke-width="1"/><circle cx="17" cy="13" r="3.6" fill="#dbe9f5" fill-opacity=".45" stroke="#3c3e46" stroke-width="1"/>');
+SVG.squareglasses = GLS('<path d="M2 10.4l1.6-.6M22 10.4l-1.6-.6M10.4 11.8c1-.7 2.2-.7 3.2 0" fill="none" stroke="#5c341e" stroke-width="1.4"/>', '<rect x="2.6" y="9.6" width="7.8" height="6.4" rx="1.4" fill="#dbe9f5" fill-opacity=".45" stroke="#5c341e" stroke-width="1.6"/><rect x="13.6" y="9.6" width="7.8" height="6.4" rx="1.4" fill="#dbe9f5" fill-opacity=".45" stroke="#5c341e" stroke-width="1.6"/>');
+SVG.sunglasses = GLS('<path d="M10.4 11.4c1-.6 2.2-.6 3.2 0" fill="none" stroke="#18181c" stroke-width="1.6"/>', '<path d="M2.2 9.4h8.4v3.2c0 2.2-1.6 3.6-4 3.6s-4.4-1.6-4.4-4z" fill="#1e2228" stroke="#18181c" stroke-width="1.4"/><path d="M13.4 9.4h8.4v2.8c0 2.4-2 4-4.4 4s-4-1.4-4-3.6z" fill="#1e2228" stroke="#18181c" stroke-width="1.4"/><path d="M4 10.8l2.6 0" stroke="#7f8a99" stroke-width=".8"/>');
+SVG.monocle = GLS('<path d="M15.6 15.4c-1 3-3.8 4.6-6.6 5.2" fill="none" stroke="#c8a046" stroke-width=".9" stroke-dasharray="1 .8"/>', '<circle cx="14" cy="10" r="5.2" fill="#dbe9f5" fill-opacity=".45" stroke="#c8a046" stroke-width="1.4"/>');
+SVG.brassgoggles = GLS('<path d="M10.6 12.6h2.8" stroke="#c8a046" stroke-width="1.4"/>', '<circle cx="6.6" cy="12.6" r="4.2" fill="#e6aa50" fill-opacity=".7" stroke="#c8a046" stroke-width="1.8"/><circle cx="17.4" cy="12.6" r="4.2" fill="#e6aa50" fill-opacity=".7" stroke="#c8a046" stroke-width="1.8"/>', '<path d="M1 11.4h3M20 11.4h3" stroke="#70482a" stroke-width="2.6"/>');
+SVG.divinggoggles = GLS('', '<rect x="3.2" y="8.4" width="17.6" height="8" rx="3.6" fill="#78c8c8" fill-opacity=".6" stroke="#28241f" stroke-width="1.8"/>', '<path d="M1 12.4h3M20 12.4h3" stroke="#28241f" stroke-width="2.4"/>');
+SVG.snowgoggles = GLS('<path d="M5 12h4.2M14.8 12H19" stroke="#2a221a" stroke-width="1.2" stroke-linecap="round"/>', '', '<path d="M1 12h2.6M20.4 12H23" stroke="#43291a" stroke-width="1"/><path d="M3 9.6c6-1.6 12-1.6 18 0v4.6c-6 1.6-12 1.6-18 0z" fill="#e2d6ba" stroke="#9c8f74" stroke-width=".9"/>');
+const EYEWEAR = { mat: 'glass', kind: 'worn', slot: 'eyes', tier: 0 };
+const GOGGLE_PROT = { cut: 40, pierce: 30, blunt: 25 };   // (goggles: thick glass in a cup, as leather)
+ITEMS.round_spectacles = Object.assign({ name: 'Round spectacles', wt: 0.05, eyes: [-1, 1], svg: SVG.roundspectacles, make: { mats: [], prima: 15 } }, EYEWEAR);
+ITEMS.square_glasses = Object.assign({ name: 'Square glasses', wt: 0.1, eyes: [-1, 1], svg: SVG.squareglasses, make: { mats: [], prima: 15 } }, EYEWEAR);
+ITEMS.sunglasses = Object.assign({ name: 'Sunglasses', wt: 0.1, eyes: [-1, 1], svg: SVG.sunglasses, make: { mats: [], prima: 20 } }, EYEWEAR);
+ITEMS.monocle = Object.assign({ name: 'Monocle', wt: 0.05, eyes: [1], svg: SVG.monocle, make: { mats: [], prima: 25 } }, EYEWEAR);
+ITEMS.brass_goggles = Object.assign({ name: 'Brass goggles', wt: 0.4, eyes: [-1, 1], prot: GOGGLE_PROT, svg: SVG.brassgoggles, make: { mats: [], prima: 30 } }, EYEWEAR);
+ITEMS.diving_goggles = Object.assign({ name: 'Diving goggles', wt: 0.4, eyes: [-1, 1], prot: GOGGLE_PROT, svg: SVG.divinggoggles, make: { mats: [], prima: 30 } }, EYEWEAR);
+ITEMS.snow_goggles = Object.assign({ name: 'Snow goggles', wt: 0.2, eyes: [-1, 1], prot: GOGGLE_PROT, svg: SVG.snowgoggles, make: { mats: [], prima: 20 } }, EYEWEAR);
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
 // The wire shape of the table: [[id, { name, kind, tier, svg }], …]. Sent once per socket.
 function itemDefsWire() {
   return Object.keys(ITEMS).map(id => [id, { name: ITEMS[id].name, kind: ITEMS[id].kind, tier: ITEMS[id].tier | 0, svg: ITEMS[id].svg,
-    make: ITEMS[id].make || null, obj: ITEMS[id].obj || null, pair: ITEMS[id].pair || null, stack: ITEMS[id].stack ? 1 : 0, slot: ITEMS[id].slot || null, mat: ITEMS[id].mat || null, wt: ITEMS[id].wt || 0 }]);
+    make: ITEMS[id].make || null, obj: ITEMS[id].obj || null, pair: ITEMS[id].pair || null, stack: ITEMS[id].stack ? 1 : 0, slot: ITEMS[id].slot || null, mat: ITEMS[id].mat || null, wt: ITEMS[id].wt || 0,
+    bars: ITEMS[id].bars || null, eyes: ITEMS[id].eyes || null, prot: ITEMS[id].prot || null }]);
 }
 // (worn gear, 2026-11-13 — client 16zi) `mat`: what a piece is made of ('plate' | 'leather' | 'padded' | 'linen' — what it stops is the client's dials,
 //   Avatar › 'Worn gear: what it does'); `wt`: its weight (only what you WEAR counts: the full iron set ≈ 19)
 // (worn gear) the slot an item is worn in, or null
+// (worn gear, 2026-11-15) the slots an item keeps empty while it is worn (the iron helmet: no eyewear) — [] for most
+const wornBars = (id) => (isItem(id) && Array.isArray(ITEMS[id].bars) ? ITEMS[id].bars : []);
 const wornSlotOf = (id) => isItem(id) && ITEMS[id].kind === 'worn' && WORN_SLOTS.includes(ITEMS[id].slot) ? ITEMS[id].slot : null;
 // is this item a real object out of the pouch (never a pile, never a stack)?
 const isObjItem = (id) => isItem(id) && !!ITEMS[id].obj;
 // …and one that never stacks: a torch, a sword — dropped or scattered it lies as ITSELF, one object each. A throwable (`stack`) goes into a pile.
 const isLoneItem = (id) => isObjItem(id) && !ITEMS[id].stack;
 
-module.exports = { ITEMS, isItem, isObjItem, isLoneItem, itemDefsWire, WORN_SLOTS, wornSlotOf };
+module.exports = { ITEMS, isItem, isObjItem, isLoneItem, itemDefsWire, WORN_SLOTS, wornSlotOf, wornBars };
