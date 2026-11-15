@@ -211,7 +211,7 @@ ITEMS.glass_bottle = { name: 'Glass bottle', kind: 'throwable', tier: 0, svg: SV
 // (2026-11-15, kickoff_gear_function.md step 3) a SIXTH slot, the EYES: glasses, sunglasses, a monocle, goggles — in the list after the head (the strip's order).
 // (2026-11-15, the user: "we should probably just separate the hat slot from the head, so that players can wear hats with head stuff if appropriate") a SEVENTH slot,
 //   the HAT: hats and the circlet sit OVER what the head slot holds (a coif, a hood, a cap) and are drawn to fit it (16zf `wornHatFit`); the closed helmets bar it.
-const WORN_SLOTS = ['head', 'hat', 'eyes', 'body', 'hands', 'feet', 'back'];
+const WORN_SLOTS = ['hat', 'head', 'eyes', 'body', 'hands', 'feet', 'back'];   // (the user: the hat slot above the head)
 const MET = 'fill="#b8c0cc" stroke="#5b6472" stroke-width=".8"';
 SVG.ironhelmet = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 16c0-5.6 3.6-10 8-10s8 4.4 8 10v3H4z" ' + MET + '/><rect x="6" y="12.6" width="12" height="1.8" rx=".5" fill="#2a2e36"/><path d="M12 6.2v5.6M12 15v4" stroke="#8f98a5" stroke-width=".8"/></svg>';
 SVG.ironbreastplate = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 4h3c.6 1.6 1.7 2.4 3 2.4S14.4 5.6 15 4h3l2.4 4-2.4 2v8c-1.8 1.6-3.8 2.4-6 2.4S7.8 19.6 6 18v-8L3.6 8z" ' + MET + '/><path d="M12 7.2v12.6" stroke="#8f98a5" stroke-width=".8"/></svg>';
