@@ -244,6 +244,60 @@ SVG.monocle = GLS('<path d="M15.6 15.4c-1 3-3.8 4.6-6.6 5.2" fill="none" stroke=
 SVG.brassgoggles = GLS('<path d="M10.6 12.6h2.8" stroke="#c8a046" stroke-width="1.4"/>', '<circle cx="6.6" cy="12.6" r="4.2" fill="#e6aa50" fill-opacity=".7" stroke="#c8a046" stroke-width="1.8"/><circle cx="17.4" cy="12.6" r="4.2" fill="#e6aa50" fill-opacity=".7" stroke="#c8a046" stroke-width="1.8"/>', '<path d="M1 11.4h3M20 11.4h3" stroke="#70482a" stroke-width="2.6"/>');
 SVG.divinggoggles = GLS('', '<rect x="3.2" y="8.4" width="17.6" height="8" rx="3.6" fill="#78c8c8" fill-opacity=".6" stroke="#28241f" stroke-width="1.8"/>', '<path d="M1 12.4h3M20 12.4h3" stroke="#28241f" stroke-width="2.4"/>');
 SVG.snowgoggles = GLS('<path d="M5 12h4.2M14.8 12H19" stroke="#2a221a" stroke-width="1.2" stroke-linecap="round"/>', '', '<path d="M1 12h2.6M20.4 12H23" stroke="#43291a" stroke-width="1"/><path d="M3 9.6c6-1.6 12-1.6 18 0v4.6c-6 1.6-12 1.6-18 0z" fill="#e2d6ba" stroke="#9c8f74" stroke-width=".9"/>');
+// ⭐⭐ MANY STYLES (2026-11-15, the user's picks off `scratchpad/look/gear/eyes_styles/options.html`: everything but the hoods, re-rendered first). Drawn by client 16zf
+//   `WORN_LOOK` (a colour or tier VARIANT is its base piece's name + '~variant', recoloured); skirts and capes by 16zg. `tier: 1` = tier 2 (better made: client 16zi
+//   `gearProtOf` +15% protection, 30% slower wear). `mat: 'mail'` a new material (16zi's dials). `deco: 1` protects nothing and stops no blade (the circlet).
+const RC = (svg, map) => { let o = svg; for (const [a, b] of Object.entries(map)) o = o.split(a).join(b); return o; };
+const SV = (inner) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">' + inner + '</svg>';
+const LEA = 'fill="#70482a" stroke="#43291a" stroke-width=".8"', POL = 'fill="#dfe5ee" stroke="#8a6a2a" stroke-width=".8"';
+const DYE = { red: ['#a3302f', '#641d1d'], green: ['#41703c', '#274524'], white: ['#e6e1d6', '#9c988e'], black: ['#2a2a30', '#111114'], brown: ['#7a5638', '#4f3824'], purple: ['#603480', '#3a1e50'], blue: ['#2f3f8f', '#1a2458'] };
+SVG.leathercap = SV('<path d="M4 17c0-6 3.6-11 8-11s8 5 8 11v1.6H4z" ' + LEA + '/><path d="M12 6.2v11.6M4.4 15.6h15.2" stroke="#43291a" stroke-width=".9" fill="none"/>');
+SVG.kettlehat = SV('<path d="M6.4 13.6c0-4.4 2.5-7.6 5.6-7.6s5.6 3.2 5.6 7.6z" fill="#b8c0cc" stroke="#5b6472" stroke-width=".8"/><path d="M1.6 15.4c2.8-2 17.6-2 20.8 0-3.4 2-17.6 2-20.8 0z" fill="#9aa3b0" stroke="#5b6472" stroke-width=".8"/><path d="M12 6.2v7.2" stroke="#e8ecf2" stroke-width=".8"/>');
+SVG.strawhat = SV('<path d="M7 13.4c0-4 2.2-6.8 5-6.8s5 2.8 5 6.8z" fill="#d6b86c" stroke="#8f7436" stroke-width=".8"/><path d="M1 15.2c3-2.2 19-2.2 22 0-3.4 2.2-18.6 2.2-22 0z" fill="#d6b86c" stroke="#8f7436" stroke-width=".8"/><path d="M7.2 12.4c3 .8 6.6.8 9.6 0" stroke="#a3302f" stroke-width="1.4" fill="none"/>');
+SVG.goldcirclet = SV('<ellipse cx="12" cy="13" rx="9" ry="3.6" fill="none" stroke="#d6ab45" stroke-width="1.8"/><path d="M12 7.6l1.6 2.6-1.6 2.2-1.6-2.2z" fill="#b41e32" stroke="#d6ab45" stroke-width=".7"/>');
+SVG.steelhelmet = RC(SVG.ironhelmet, { '#b8c0cc': '#dfe5ee', '#5b6472': '#8a6a2a', '#8f98a5': '#c8a046' }).replace('</svg>', '<path d="M12 6c2-3.4 5-4 7-3.2-2.6.4-4.6 1.8-5.6 4.2" fill="#b02c34" stroke="#701c22" stroke-width=".6"/></svg>');
+SVG.leatherjerkin = SV('<path d="M8.6 3.6c.8 1.8 2 2.6 3.4 2.6s2.6-.8 3.4-2.6l4.4 2.6-1.6 4.4-1.8-.6V20.4H7.6V10l-1.8.6-1.6-4.4z" ' + LEA + '/><path d="M11 7.4l2 1.4M13 7.4l-2 1.4M11 9.4l2 1.4M13 9.4l-2 1.4" stroke="#43291a" stroke-width=".7"/><path d="M7.6 15.4h8.8" stroke="#43291a" stroke-width="1.4"/><rect x="11" y="14.6" width="2" height="1.6" fill="#c8a046"/>');
+SVG.studdedleather = SVG.leatherjerkin.replace('</svg>', [[9, 12], [15, 12], [9, 18], [15, 18], [12, 18.6], [9.4, 9], [14.6, 9]].map(([x, y]) => '<circle cx="' + x + '" cy="' + y + '" r=".75" fill="#d9dee6"/>').join('') + '</svg>');
+SVG.paddedgambeson = SV('<path d="M8.4 3.4c.8 1.8 2.2 2.6 3.6 2.6s2.8-.8 3.6-2.6l4.4 2.6-1.6 4.4-1.8-.6V20.6H7.4V10l-1.8.6-1.6-4.4z" fill="#c8b894" stroke="#7c6c4c" stroke-width=".8"/><path d="M9.4 7.6v13M12 7v13.6M14.6 7.6v13" stroke="#97845f" stroke-width=".8"/><path d="M8.6 3.6c1 2.2 2.2 3 3.4 3s2.4-.8 3.4-3" stroke="#97845f" stroke-width="1.4" fill="none"/>');
+SVG.mailshirt = SV('<path d="M8.6 3.6c.8 1.8 2 2.6 3.4 2.6s2.6-.8 3.4-2.6l4.4 2.6-1.6 4.4-1.8-.6V20.4H7.6V10l-1.8.6-1.6-4.4z" fill="#959ba6" stroke="#4d525a" stroke-width=".8"/>' + [8, 10.4, 12.8, 15.2, 17.6].map((y, j) => [8.6, 10.6, 12.6, 14.6].map(x => '<circle cx="' + (x + (j % 2) * 1) + '" cy="' + y + '" r=".75" fill="none" stroke="#d2d7de" stroke-width=".45"/>').join('')).join(''));
+SVG.steelbreastplate = RC(SVG.ironbreastplate, { '#b8c0cc': '#dfe5ee', '#5b6472': '#8a6a2a', '#8f98a5': '#c8a046' });
+const shirtOf = (c) => RC(SVG.linenshirt, { '#c9b48a': DYE[c][0], '#6f5c3c': DYE[c][1] }), tunicOf = (c) => RC(SVG.linentunic, { '#c9b48a': DYE[c][0], '#6f5c3c': DYE[c][1], '#8f7a55': DYE[c][1] });
+const robeOf = (c) => RC(SVG.blueroberobe, { '#2f3f8f': DYE[c][0] }), hatOf = (c) => RC(SVG.wizardhat, { '#2f3f8f': DYE[c][0], '#1a2458': DYE[c][1] }), capeOf = (c) => RC(SVG.clothcape, { '#8a2a2a': DYE[c][0], '#4a1414': DYE[c][1], '#6e1f1f': DYE[c][1] });
+const glovesOf = (f, st) => RC(SVG.irongauntlets, { '#b8c0cc': f, '#5b6472': st, '#8f98a5': st });
+SVG.leathergloves = glovesOf('#6b4528', '#3f2817'); SVG.woolgloves = glovesOf('#ddd4c2', '#9c9282'); SVG.steelgauntlets = glovesOf('#dfe5ee', '#8a6a2a');
+SVG.leatherboots = RC(SVG.ironboots, { '#b8c0cc': '#70482a', '#5b6472': '#43291a' });
+SVG.furboots = RC(SVG.ironboots, { '#b8c0cc': '#7a5638', '#5b6472': '#4f3824' }).replace('</svg>', '<rect x="6" y="2.4" width="8.4" height="3.6" rx="1.6" fill="#d8d0bf" stroke="#9c9282" stroke-width=".6"/></svg>');
+SVG.slippers = RC(SVG.leathershoes, { '#6b4528': '#a3302f', '#3f2817': '#641d1d', '#2c2119': '#d6ab45' });
+SVG.steelboots = RC(SVG.ironboots, { '#b8c0cc': '#dfe5ee', '#5b6472': '#8a6a2a' });
+SVG.shortmantle = SV('<path d="M5 6.6C7 4.2 9.4 3.4 12 3.4s5 .8 7 3.2l1.4 7.4c-2.6 1.4-5.4 2-8.4 2s-5.8-.6-8.4-2z" fill="#8a2a2a" stroke="#4a1414" stroke-width=".8"/><path d="M8 4.4c1 1.2 2.4 1.8 4 1.8s3-.6 4-1.8" fill="none" stroke="#d4a537" stroke-width="1.2"/>');
+SVG.furcloak = RC(SVG.clothcape, { '#8a2a2a': '#4f3824', '#4a1414': '#2e2015', '#6e1f1f': '#3c2a1b', '#d4a537': '#d8d0bf' }).replace('stroke-width="1.3"', 'stroke-width="2.6"');
+const W_ = (slot, mat, wt, tier, name, svg, prima, extra) => Object.assign({ name, kind: 'worn', slot, mat, wt, tier, svg, make: { mats: [], prima } }, extra || {});
+Object.assign(ITEMS, {
+  leather_cap: W_('head', 'leather', 1, 0, 'Leather cap', SVG.leathercap, 25),
+  kettle_hat: W_('head', 'plate', 3, 0, 'Kettle hat', SVG.kettlehat, 50),
+  straw_hat: W_('head', 'linen', 0.3, 0, 'Straw hat', SVG.strawhat, 10),
+  gold_circlet: W_('head', 'plate', 0.2, 0, 'Gold circlet', SVG.goldcirclet, 120, { deco: 1 }),
+  steel_helmet: W_('head', 'plate', 4, 1, 'Steel helmet', SVG.steelhelmet, 110, { bars: ['eyes'] }),
+  red_wizard_hat: W_('head', 'linen', 0.5, 0, 'Red wizard hat', hatOf('red'), 30),
+  black_wizard_hat: W_('head', 'linen', 0.5, 0, 'Black wizard hat', hatOf('black'), 30),
+  leather_jerkin: W_('body', 'leather', 4, 0, 'Leather jerkin', SVG.leatherjerkin, 60),
+  studded_leather: W_('body', 'leather', 5, 1, 'Studded leather', SVG.studdedleather, 95),
+  padded_gambeson: W_('body', 'padded', 4, 0, 'Padded gambeson', SVG.paddedgambeson, 60),
+  mail_shirt: W_('body', 'mail', 8, 0, 'Mail shirt', SVG.mailshirt, 100),
+  steel_breastplate: W_('body', 'plate', 10, 1, 'Steel breastplate', SVG.steelbreastplate, 200),
+  red_shirt: W_('body', 'linen', 0.5, 0, 'Red shirt', shirtOf('red'), 20), green_shirt: W_('body', 'linen', 0.5, 0, 'Green shirt', shirtOf('green'), 20),
+  white_shirt: W_('body', 'linen', 0.5, 0, 'White shirt', shirtOf('white'), 20), black_shirt: W_('body', 'linen', 0.5, 0, 'Black shirt', shirtOf('black'), 20),
+  green_tunic: W_('body', 'linen', 1, 0, 'Green tunic', tunicOf('green'), 25), brown_tunic: W_('body', 'linen', 1, 0, 'Brown tunic', tunicOf('brown'), 25), red_tunic: W_('body', 'linen', 1, 0, 'Red tunic', tunicOf('red'), 25),
+  red_robe: W_('body', 'linen', 2, 0, 'Red robe', robeOf('red'), 40), white_robe: W_('body', 'linen', 2, 0, 'White robe', robeOf('white'), 40),
+  black_robe: W_('body', 'linen', 2, 0, 'Black robe', robeOf('black'), 40), purple_robe: W_('body', 'linen', 2, 0, 'Purple robe', robeOf('purple'), 40),
+  leather_gloves: W_('hands', 'leather', 0.5, 0, 'Leather gloves', SVG.leathergloves, 15), wool_gloves: W_('hands', 'linen', 0.3, 0, 'Wool gloves', SVG.woolgloves, 10),
+  steel_gauntlets: W_('hands', 'plate', 2, 1, 'Steel gauntlets', SVG.steelgauntlets, 90),
+  leather_boots: W_('feet', 'leather', 1.5, 0, 'Leather boots', SVG.leatherboots, 25), fur_boots: W_('feet', 'padded', 1.5, 0, 'Fur boots', SVG.furboots, 30),
+  slippers: W_('feet', 'linen', 0.3, 0, 'Slippers', SVG.slippers, 10), steel_boots: W_('feet', 'plate', 3, 1, 'Steel boots', SVG.steelboots, 90),
+  green_cape: W_('back', 'linen', 1, 0, 'Green cape', capeOf('green'), 40), blue_cape: W_('back', 'linen', 1, 0, 'Blue cape', capeOf('blue'), 40),
+  black_cape: W_('back', 'linen', 1, 0, 'Black cape', capeOf('black'), 40), white_cape: W_('back', 'linen', 1, 0, 'White cape', capeOf('white'), 40),
+  short_mantle: W_('back', 'linen', 0.6, 0, 'Short mantle', SVG.shortmantle, 30), fur_cloak: W_('back', 'padded', 2.5, 0, 'Fur cloak', SVG.furcloak, 70),
+});
 const EYEWEAR = { mat: 'glass', kind: 'worn', slot: 'eyes', tier: 0 };
 const GOGGLE_PROT = { cut: 40, pierce: 30, blunt: 25 };   // (goggles: thick glass in a cup, as leather)
 ITEMS.round_spectacles = Object.assign({ name: 'Round spectacles', wt: 0.05, eyes: [-1, 1], svg: SVG.roundspectacles, make: { mats: [], prima: 15 } }, EYEWEAR);
@@ -260,9 +314,9 @@ const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty
 function itemDefsWire() {
   return Object.keys(ITEMS).map(id => [id, { name: ITEMS[id].name, kind: ITEMS[id].kind, tier: ITEMS[id].tier | 0, svg: ITEMS[id].svg,
     make: ITEMS[id].make || null, obj: ITEMS[id].obj || null, pair: ITEMS[id].pair || null, stack: ITEMS[id].stack ? 1 : 0, slot: ITEMS[id].slot || null, mat: ITEMS[id].mat || null, wt: ITEMS[id].wt || 0,
-    bars: ITEMS[id].bars || null, eyes: ITEMS[id].eyes || null, prot: ITEMS[id].prot || null }]);
+    bars: ITEMS[id].bars || null, eyes: ITEMS[id].eyes || null, prot: ITEMS[id].prot || null, deco: ITEMS[id].deco ? 1 : 0 }]);
 }
-// (worn gear, 2026-11-13 — client 16zi) `mat`: what a piece is made of ('plate' | 'leather' | 'padded' | 'linen' — what it stops is the client's dials,
+// (worn gear, 2026-11-13 — client 16zi) `mat`: what a piece is made of ('plate' | 'mail' | 'leather' | 'padded' | 'linen' | 'glass' — what it stops is the client's dials,
 //   Avatar › 'Worn gear: what it does'); `wt`: its weight (only what you WEAR counts: the full iron set ≈ 19)
 // (worn gear) the slot an item is worn in, or null
 // (worn gear, 2026-11-15) the slots an item keeps empty while it is worn (the iron helmet: no eyewear) — [] for most
