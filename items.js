@@ -209,14 +209,16 @@ ITEMS.glass_bottle = { name: 'Glass bottle', kind: 'throwable', tier: 0, svg: SV
 //   the count stays in the pouch (server `worn-set`, ledger `worn`). No `obj`: gear is never held, and dropped it lies in a pile.
 //   These five are the first set, to try the slots: their pictures here only; how each looks on the body comes next (drawn in 3D, from scratch).
 // (2026-11-15, kickoff_gear_function.md step 3) a SIXTH slot, the EYES: glasses, sunglasses, a monocle, goggles — in the list after the head (the strip's order).
-const WORN_SLOTS = ['head', 'eyes', 'body', 'hands', 'feet', 'back'];
+// (2026-11-15, the user: "we should probably just separate the hat slot from the head, so that players can wear hats with head stuff if appropriate") a SEVENTH slot,
+//   the HAT: hats and the circlet sit OVER what the head slot holds (a coif, a hood, a cap) and are drawn to fit it (16zf `wornHatFit`); the closed helmets bar it.
+const WORN_SLOTS = ['head', 'hat', 'eyes', 'body', 'hands', 'feet', 'back'];
 const MET = 'fill="#b8c0cc" stroke="#5b6472" stroke-width=".8"';
 SVG.ironhelmet = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 16c0-5.6 3.6-10 8-10s8 4.4 8 10v3H4z" ' + MET + '/><rect x="6" y="12.6" width="12" height="1.8" rx=".5" fill="#2a2e36"/><path d="M12 6.2v5.6M12 15v4" stroke="#8f98a5" stroke-width=".8"/></svg>';
 SVG.ironbreastplate = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 4h3c.6 1.6 1.7 2.4 3 2.4S14.4 5.6 15 4h3l2.4 4-2.4 2v8c-1.8 1.6-3.8 2.4-6 2.4S7.8 19.6 6 18v-8L3.6 8z" ' + MET + '/><path d="M12 7.2v12.6" stroke="#8f98a5" stroke-width=".8"/></svg>';
 SVG.irongauntlets = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7.4 18.4v-4.6l-1.9-3.4c-.5-1 .9-1.8 1.6-.9L9 12V5.6c0-1.2 1.8-1.2 1.8 0V11V4.6c0-1.2 1.8-1.2 1.8 0V11V5.2c0-1.2 1.8-1.2 1.8 0V11.2V7.2c0-1.2 1.8-1.2 1.8 0v7.4c0 2.2-1.4 3.8-3.6 3.8z" ' + MET + '/><rect x="6.6" y="18" width="9.8" height="3.4" rx=".8" fill="#8f98a5" stroke="#5b6472" stroke-width=".8"/></svg>';
 SVG.ironboots = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M7 3h6.4v9.6l5.8 2.4c1 .4 1.6 1.4 1.6 2.5V20H4.6v-6.6L7 12z" ' + MET + '/><path d="M4.6 17.6h16.2M7 8h6.4" stroke="#5b6472" stroke-width=".9"/></svg>';
 SVG.clothcape = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M8 3h8l1.2 2.2C19.4 10.4 20.4 15 20.6 21H3.4C3.6 15 4.6 10.4 6.8 5.2z" fill="#8a2a2a" stroke="#4a1414" stroke-width=".8"/><path d="M9.6 9l-1.4 11M14.4 9l1.4 11" stroke="#6e1f1f" stroke-width=".8"/><path d="M8 3.2c1 1.4 2.4 2 4 2s3-.6 4-2" fill="none" stroke="#d4a537" stroke-width="1.3"/></svg>';
-ITEMS.iron_helmet = { name: 'Iron helmet', kind: 'worn', slot: 'head', mat: 'plate', wt: 4, tier: 0, svg: SVG.ironhelmet, bars: ['eyes'], make: { mats: [], prima: 60 } };   // (bars: no eyewear under a closed helmet — the user, 2026-11-15)
+ITEMS.iron_helmet = { name: 'Iron helmet', kind: 'worn', slot: 'head', mat: 'plate', wt: 4, tier: 0, svg: SVG.ironhelmet, bars: ['eyes', 'hat'], make: { mats: [], prima: 60 } };   // (bars: no eyewear under a closed helmet — the user, 2026-11-15)
 ITEMS.iron_breastplate = { name: 'Iron breastplate', kind: 'worn', slot: 'body', mat: 'plate', wt: 10, tier: 0, svg: SVG.ironbreastplate, make: { mats: [], prima: 120 } };
 ITEMS.iron_gauntlets = { name: 'Iron gauntlets', kind: 'worn', slot: 'hands', mat: 'plate', wt: 2, tier: 0, svg: SVG.irongauntlets, make: { mats: [], prima: 50 } };
 ITEMS.iron_boots = { name: 'Iron boots', kind: 'worn', slot: 'feet', mat: 'plate', wt: 3, tier: 0, svg: SVG.ironboots, make: { mats: [], prima: 50 } };
@@ -231,7 +233,7 @@ SVG.leathershoes = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
 ITEMS.linen_shirt = { name: 'Linen shirt', kind: 'worn', slot: 'body', mat: 'linen', wt: 0.5, tier: 0, svg: SVG.linenshirt, make: { mats: [], prima: 20 } };
 ITEMS.linen_tunic = { name: 'Linen tunic', kind: 'worn', slot: 'body', mat: 'linen', wt: 1, tier: 0, svg: SVG.linentunic, make: { mats: [], prima: 25 } };
 ITEMS.blue_robe = { name: 'Blue robe', kind: 'worn', slot: 'body', mat: 'linen', wt: 2, tier: 0, svg: SVG.blueroberobe, make: { mats: [], prima: 40 } };
-ITEMS.wizard_hat = { name: 'Wizard hat', kind: 'worn', slot: 'head', mat: 'linen', wt: 0.5, tier: 0, svg: SVG.wizardhat, make: { mats: [], prima: 30 } };
+ITEMS.wizard_hat = { name: 'Wizard hat', kind: 'worn', slot: 'hat', mat: 'linen', wt: 0.5, tier: 0, svg: SVG.wizardhat, make: { mats: [], prima: 30 } };
 ITEMS.leather_shoes = { name: 'Leather shoes', kind: 'worn', slot: 'feet', mat: 'leather', wt: 1, tier: 0, svg: SVG.leathershoes, make: { mats: [], prima: 15 } };
 // ⭐ THE EYES SLOT (2026-11-15, the user's picks off `scratchpad/look/gear/eyes_styles/options.html` — all seven). `mat: 'glass'`; `eyes`: which eyes it covers
 //   (the body's −1 / +1 side; a monocle one); `prot` (optional, any piece): the item's OWN protection in % by kind of hit, over its material's (the user: kinds of armour
@@ -271,15 +273,20 @@ SVG.slippers = RC(SVG.leathershoes, { '#6b4528': '#a3302f', '#3f2817': '#641d1d'
 SVG.steelboots = RC(SVG.ironboots, { '#b8c0cc': '#dfe5ee', '#5b6472': '#8a6a2a' });
 SVG.shortmantle = SV('<path d="M5 6.6C7 4.2 9.4 3.4 12 3.4s5 .8 7 3.2l1.4 7.4c-2.6 1.4-5.4 2-8.4 2s-5.8-.6-8.4-2z" fill="#8a2a2a" stroke="#4a1414" stroke-width=".8"/><path d="M8 4.4c1 1.2 2.4 1.8 4 1.8s3-.6 4-1.8" fill="none" stroke="#d4a537" stroke-width="1.2"/>');
 SVG.furcloak = RC(SVG.clothcape, { '#8a2a2a': '#4f3824', '#4a1414': '#2e2015', '#6e1f1f': '#3c2a1b', '#d4a537': '#d8d0bf' }).replace('stroke-width="1.3"', 'stroke-width="2.6"');
+// (2026-11-15 round 2, the user's picks: H1 the rounded hood, M1 the mail coif with a steel edge) — head slot; a hat goes over either
+const hoodOf = (c) => SV('<path d="M4.4 19.6C3.6 11.2 7 4.2 12 4.2s8.4 7 7.6 15.4c-1.6-1-2.6-1.4-3.4-1.4.4-1.2.6-2.4.6-3.8 0-3-2-5.2-4.8-5.2s-4.8 2.2-4.8 5.2c0 1.4.2 2.6.6 3.8-.8 0-1.8.4-3.4 1.4z" fill="' + DYE[c][0] + '" stroke="' + DYE[c][1] + '" stroke-width=".9"/><path d="M7.6 18.2c-.6-1.2-.8-2.6-.8-4 0-3.2 2.2-5.6 5.2-5.6s5.2 2.4 5.2 5.6c0 1.4-.2 2.8-.8 4" fill="none" stroke="' + DYE[c][1] + '" stroke-width="1.4"/>');
+SVG.mailcoif = SV('<path d="M4.4 19.6C3.6 11.2 7 4.2 12 4.2s8.4 7 7.6 15.4H16c.6-1.4.8-2.8.8-4.4 0-3-2-5.4-4.8-5.4s-4.8 2.4-4.8 5.4c0 1.6.2 3 .8 4.4z" fill="#959ba6" stroke="#4d525a" stroke-width=".8"/>' + [[8, 7.4], [12, 6.4], [16, 7.4], [6.4, 11], [17.6, 11], [5.8, 15], [18.2, 15]].map(([x, y]) => '<circle cx="' + x + '" cy="' + y + '" r=".8" fill="none" stroke="#d2d7de" stroke-width=".45"/>').join('') + '<path d="M7.2 19.4c-.6-1.4-.8-2.8-.8-4.2 0-3.2 2.4-5.6 5.6-5.6s5.6 2.4 5.6 5.6c0 1.4-.2 2.8-.8 4.2" fill="none" stroke="#3e434b" stroke-width="1.1"/>');
 const W_ = (slot, mat, wt, tier, name, svg, prima, extra) => Object.assign({ name, kind: 'worn', slot, mat, wt, tier, svg, make: { mats: [], prima } }, extra || {});
 Object.assign(ITEMS, {
   leather_cap: W_('head', 'leather', 1, 0, 'Leather cap', SVG.leathercap, 25),
-  kettle_hat: W_('head', 'plate', 3, 0, 'Kettle hat', SVG.kettlehat, 50),
-  straw_hat: W_('head', 'linen', 0.3, 0, 'Straw hat', SVG.strawhat, 10),
-  gold_circlet: W_('head', 'plate', 0.2, 0, 'Gold circlet', SVG.goldcirclet, 120, { deco: 1 }),
-  steel_helmet: W_('head', 'plate', 4, 1, 'Steel helmet', SVG.steelhelmet, 110, { bars: ['eyes'] }),
-  red_wizard_hat: W_('head', 'linen', 0.5, 0, 'Red wizard hat', hatOf('red'), 30),
-  black_wizard_hat: W_('head', 'linen', 0.5, 0, 'Black wizard hat', hatOf('black'), 30),
+  kettle_hat: W_('hat', 'plate', 3, 0, 'Kettle hat', SVG.kettlehat, 50),
+  straw_hat: W_('hat', 'linen', 0.3, 0, 'Straw hat', SVG.strawhat, 10),
+  gold_circlet: W_('hat', 'plate', 0.2, 0, 'Gold circlet', SVG.goldcirclet, 120, { deco: 1 }),
+  steel_helmet: W_('head', 'plate', 4, 1, 'Steel helmet', SVG.steelhelmet, 110, { bars: ['eyes', 'hat'] }),
+  red_wizard_hat: W_('hat', 'linen', 0.5, 0, 'Red wizard hat', hatOf('red'), 30),
+  black_wizard_hat: W_('hat', 'linen', 0.5, 0, 'Black wizard hat', hatOf('black'), 30),
+  mail_coif: W_('head', 'mail', 3, 0, 'Mail coif', SVG.mailcoif, 70),
+  green_hood: W_('head', 'linen', 0.5, 0, 'Green hood', hoodOf('green'), 15), brown_hood: W_('head', 'linen', 0.5, 0, 'Brown hood', hoodOf('brown'), 15),
   leather_jerkin: W_('body', 'leather', 4, 0, 'Leather jerkin', SVG.leatherjerkin, 60),
   studded_leather: W_('body', 'leather', 5, 1, 'Studded leather', SVG.studdedleather, 95),
   padded_gambeson: W_('body', 'padded', 4, 0, 'Padded gambeson', SVG.paddedgambeson, 60),

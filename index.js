@@ -9114,8 +9114,11 @@ function wornTell(socket, room) { if (room) socket.to(room).emit('avt-worn', { i
 // …a slot pointing at something you no longer have is emptied — a death, a drop, a make that spent it — wherever things are carried at all
 //   (a sandbox lends every item, so nothing there is checked). Run on every sync, which every one of those ends with. true = something changed.
 function wornPrune(socket, room) {
-  if (!invGatedRoom(room)) return false;
   const key = playerKeyFor(socket.id), w = ledger.worn(key); let ch = false;
+  // (2026-11-15) a piece worn in a slot it has since moved out of (the hats: head → hat) is moved to its own slot when that is free and nothing worn bars it — in every room
+  for (const k of Object.keys(w)) { const id = w[k], s = ITEMS.wornSlotOf(id); if (!s || s === k || w[s]) continue;
+    if (Object.keys(w).some(o => o !== k && w[o] && ITEMS.wornBars(w[o]).includes(s))) continue; ledger.setWorn(key, k, null); ledger.setWorn(key, s, id); ch = true; }
+  if (!invGatedRoom(room)) { if (ch) wornTell(socket, room); return ch; }
   for (const k of Object.keys(w)) if (!ITEMS.wornSlotOf(w[k]) || ITEMS.wornSlotOf(w[k]) !== k || ledger.itemCount(key, w[k]) < 1) { ledger.setWorn(key, k, null); ch = true; }
   if (ch) wornTell(socket, room);
   return ch;
