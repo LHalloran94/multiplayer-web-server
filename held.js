@@ -543,6 +543,19 @@
     bottleflask: tool(16.7, 5.8, 0.4, 0.552, 1, 'bf', { content: '🍾', hitHalf: 3, throwable: true, breaks: 'vessel', sticks: true, stickAny: true, strikes: false, pierces: false, daze: false, right: 'none', mat: 'glass', thrK: 0.8, thrGk: 0.9, rest: 'upright', aimsAtRest: true, holdUpright: true, offTilt: { beside: 0, back: 0, raised: 0 },
       vessel: { cap: 24, rate: 24, holds: [0, 2, 3, 4, 5], glass: true, pivot: 0.552, rim: 25.2 / 29, rimR: 1.25 / 29, inner: [[0.5 / 29, 0], [0.5 / 29, 3.5 / 29], [1 / 29, 3.95 / 29], [12 / 29, 3.95 / 29], [13.9 / 29, 3.15 / 29], [15.9 / 29, 1.3 / 29], [25.2 / 29, 1.25 / 29]] } }, 'blunt'),
   });
+  // ⭐ MAGIC, STEP 1 (2026-11-16, `scratchpad/kickoff_magic.md` §ROUND 3): THE CATALYSTS — client 16zj, the spells in server/spells.js. `catalyst` = its kind there (cooldown ×, strength ×,
+  //   its innate ability); `tip` = where a spell gathers on it, as a fraction of its length from the butt. Catalyst in the MAIN hand: hold LEFT, put the inputs in, RIGHT fires; in the
+  //   OFF hand the buttons are swapped. The STAFF (two hands, 64 px — the user: the first ones were "a little too tall") is also a blunt weapon: RIGHT, not casting, swings it.
+  //   The wand and the orb do not strike.
+  Object.assign(LOOKS, {
+    magestaff: weapon(64 / MELEE_K, 5, 1.4, 0.30, 0.8, 'blunt', 'ms', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', right: 'chop', noSlide: true, catalyst: 'staff', tip: 139 / 150 })),
+    magewand: tool(24, 3, 0.15, 0.1, 1, 'mw', { hitHalf: 1.5, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', catalyst: 'wand', tip: 1 }, 'blunt'),
+    // THE BOOK is ONE item with two looks (the user: "shut at rest and held properly, OPEN in the hand as if read while casting"): `magebook` shut, carried level at your side by its spine;
+    //   `magebook_open` while its holder casts (client 16zj `magicBookStep` swaps the look on each screen; the server's object stays `magebook`). Same size, same grip.
+    magebook: tool(15, 10, 0.6, 0.5, 1, 'mb', { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', rest: 'level', catalyst: 'book', tip: 0.5 }, 'blunt'),
+    magebook_open: tool(15, 10, 0.6, 0.5, 1, 'mb', { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', rest: 'level', catalyst: 'book', tip: 0.5 }, 'blunt'),
+    mageorb: tool(19, 10, 0.5, 0.2, 1, 'mo', { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'iron', catalyst: 'orb', tip: 20 / 27.5 }, 'blunt'),
+  });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it

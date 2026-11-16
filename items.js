@@ -315,6 +315,16 @@ ITEMS.brass_goggles = Object.assign({ name: 'Brass goggles', wt: 0.4, eyes: [-1,
 ITEMS.diving_goggles = Object.assign({ name: 'Diving goggles', wt: 0.4, eyes: [-1, 1], prot: GOGGLE_PROT, svg: SVG.divinggoggles, make: { mats: [], prima: 30 } }, EYEWEAR);
 ITEMS.snow_goggles = Object.assign({ name: 'Snow goggles', wt: 0.2, eyes: [-1, 1], prot: GOGGLE_PROT, svg: SVG.snowgoggles, make: { mats: [], prima: 20 } }, EYEWEAR);
 
+// ⭐ MAGIC, STEP 1 (2026-11-16): the three first CATALYSTS (server/held.js `magestaff`, `magewand`, `mageorb` — client 16zj; the spells: server/spells.js)
+SVG.magestaff = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 21 L15.6 8.6" stroke="#5c3c26" stroke-width="1.8" stroke-linecap="round"/><circle cx="17.6" cy="6.4" r="3.4" fill="none" stroke="#b27a44" stroke-width="1.3"/><circle cx="17.6" cy="6.4" r="1.2" fill="#c81e2c"/><path d="M15 9.4 V12 M20.4 8.6 V11" stroke="#96785a" stroke-width=".6"/><circle cx="15" cy="12.4" r=".7" fill="#c6a048"/><circle cx="20.4" cy="11.4" r=".7" fill="#c6a048"/></svg>';
+SVG.magewand = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 20 C7 16.4 8.6 16.6 11 13 C13 10 14.6 9.6 19 4.6" fill="none" stroke="#68503a" stroke-width="2" stroke-linecap="round"/><path d="M14.4 9.4 L17.6 9.2" stroke="#68503a" stroke-width="1.1" stroke-linecap="round"/><path d="M6.4 17.4 l1 1 M8.6 15.4 l1 1 M10.4 13 l1 1" stroke="#33261a" stroke-width=".7" stroke-linecap="round"/></svg>';
+SVG.mageorb = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 20 L10 14.6" stroke="#c6a048" stroke-width="2" stroke-linecap="round"/><circle cx="14.4" cy="9.6" r="5.6" fill="#b08cff"/><circle cx="12.6" cy="7.8" r="1.6" fill="#e6dcff"/><path d="M9.6 14.4 C8 12 8.4 8 10.4 5.6 M10 14.8 C13 16.6 17.4 15.8 19.6 13" fill="none" stroke="#c6a048" stroke-width="1"/></svg>';
+ITEMS.mage_staff = { name: 'Dark staff', kind: 'weapon', tier: 0, svg: SVG.magestaff, obj: HELD.objOf('magestaff'), make: { mats: [], prima: 80 } };
+ITEMS.mage_wand = { name: 'Branch wand', kind: 'tool', tier: 0, svg: SVG.magewand, obj: HELD.objOf('magewand'), make: { mats: [], prima: 50 } };
+SVG.magebook = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="1.4" fill="#26345f"/><rect x="6.6" y="5" width="11.6" height="15" fill="#e8dcbe"/><rect x="5" y="4" width="12.6" height="17" rx="1.2" fill="#2f4076"/><path d="M11.2 9.4 L13.6 12.4 L11.2 15.4 L8.8 12.4 Z" fill="#c6a048"/><rect x="5" y="4" width="1.6" height="17" fill="#1c2748"/></svg>';
+ITEMS.mage_book = { name: 'Spell book', kind: 'tool', tier: 0, svg: SVG.magebook, obj: HELD.objOf('magebook'), make: { mats: [], prima: 70 } };
+ITEMS.mage_orb = { name: 'Clawed orb', kind: 'tool', tier: 0, svg: SVG.mageorb, obj: HELD.objOf('mageorb'), make: { mats: [], prima: 70 } };
+
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 
 // The wire shape of the table: [[id, { name, kind, tier, svg }], …]. Sent once per socket.

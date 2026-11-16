@@ -23,6 +23,7 @@ const LEDGER = require('./ledger');     // the Prima economy: what each player c
 const ITEMS = require('./items');       // what an item IS (a kind + a count, like a material) — the only copy of the table
 const SLOPE = require('./slope');       // (2026-11-08, liquid on slopes) the slope rule — shared with the client as MWSlope
 const WOOD = require('./wood');         // (2026-10-31, the notch round 3) the axe's line rule — shared with the client as MWWood
+const SPELLS = require('./spells');     // the spell table: inputs, cooldowns, what each catalyst changes (shared with the client as MWSpells) — magic step 1
 const HELD = require('./held');         // what each thing you can hold in your hand is and does, by its look (shared with the client as MWHeld)
 const MATGEN = require('./materials');  // Phase 6 world-redesign port inc 1: the generator's materials, ids 18..89
                                         // ⚠️ ALSO INLINED INTO THE CLIENT BUNDLE by extension/build.js (as MWMats),
@@ -3811,6 +3812,7 @@ const DRV_LEASE_MS = 350;
 // which is the decided "one holder" rule — the holder's machine is the only one working its physics out. Taking it from them is
 // a TUG (`obj-tug`), which the HOLDER's machine decides and this end only carries and records.
 const roomObjHeld = {};   // room → Map<objId, socketId>
+let _magicSeq = 0; const _magicLive = new Map();   // (magic step 1) bolts in the air: cast id → { by, room, x, y, until, reach, burn } — `magic-hit` ends one
 // …and WHICH HAND (client 16p, 2026-10-14): the ids held in an OFF hand. A player may hold two things; everybody else has to be told
 // which is which to draw the right hand on each. Never trusted further than that: an id here that is not in the map above means nothing.
 const roomObjHeldOff = {};   // room → Set<objId>
@@ -27603,6 +27605,52 @@ io.on('connection', (socket) => {
   // ⭐ (2026-10-20, plan file §5z38 piece 3) AN ARROW CAUGHT — the user: "blocking arrows unarmed, it should be like the weapons where you can block the
   //   arrow if you parry it, and we could have this as the player catching the arrow". The SHOOTER's machine judges it (it flies the arrow and has the
   //   catcher's parry off their packet, as a melee striker judges a parry — 16n `wieldParried`): the arrow goes, one more in the catcher's pouch.
+  // ⭐ MAGIC, STEP 1 (2026-11-16, `scratchpad/kickoff_magic.md` §ROUND 3 — client 16zj, the table server/spells.js). EVERY CAST IS CHECKED HERE and sent to the room from here:
+  //   the caster's own game starts nothing until `magic-cast` comes back. Checked: the spell exists · a CATALYST is in this socket's own hand (`cat`, by `obj-hold`) · the spell is
+  //   LEARNT this life (step 2 fills `_magicKnow` from tomes; until then only the debug switch "know every spell" — `magic-debug` — or an innate ability passes) · its COOLDOWN
+  //   (by spell, × the catalyst's) · the caster is near where they say it leaves from. Refused: `magic-no` { spell, why, left } to the caster alone.
+  //   `magic-state` = the casting stance, the inputs' signs and the prepared spell, for the others to see (relayed, trimmed). `magic-hit` = where the caster's bolt ended: fire there.
+  socket.on('magic-debug', (m) => { socket._magicAll = !!(m && m.all); });
+  socket.on('magic-state', (m) => {
+    const room = currentAvatarRoom; if (!room || !m) return;
+    const now = Date.now(); if (now - (socket._magicStT || 0) > 1000) { socket._magicStT = now; socket._magicStN = 0; } if (++socket._magicStN > 30) return;
+    const out = { from: socket.id, on: m.on ? 1 : 0 };
+    if (m.on) {
+      if (typeof m.cat === 'string') out.cat = m.cat.slice(0, 64);
+      if (Array.isArray(m.k)) out.k = m.k.slice(0, 12).map(v => v & 3);
+      if (Array.isArray(m.r)) out.r = m.r.slice(0, 64).map(v => Math.max(-127, Math.min(127, Math.round(+v) || 0)));
+      if (SPELLS.is(m.rdy)) out.rdy = m.rdy;
+      if (m.bad) out.bad = 1;
+    } else if (typeof m.why === 'string') out.why = m.why.slice(0, 12);
+    socket.to(room).emit('magic-state', out);
+  });
+  socket.on('magic-cast', (m) => {
+    const room = currentAvatarRoom; if (!room || !m) return;
+    const no = (why, left) => socket.emit('magic-no', { spell: m.spell, why, left: left || 0 });
+    const S = SPELLS.of(m.spell); if (!S) return no('unknown');
+    const o = typeof m.cat === 'string' && roomObjects[room] ? roomObjects[room].get(m.cat) : null, H = o && o.type === 'stamp' && HELD.of(o.look);
+    const hm = roomObjHeld[room];
+    if (!H || !H.catalyst || !hm || hm.get(m.cat) !== socket.id) return no('catalyst');
+    const C = SPELLS.CATALYSTS[H.catalyst] || {};
+    if (S.innate ? C.innate !== m.spell : !(socket._magicAll || (socket._magicKnow && socket._magicKnow.has(m.spell)))) return no('unlearnt');
+    const now = Date.now(), cds = socket._magicCd || (socket._magicCd = {}), left = (cds[m.spell] || 0) - now;
+    if (left > 120) return no('cooldown', left);
+    if (!isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return no('bad');
+    const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 520) return no('far');
+    const cd = SPELLS.cdMs(m.spell, H.catalyst); cds[m.spell] = now + cd;
+    const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
+    const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: C.powK || 1 };
+    if (S.kind === 'bolt') { _magicLive.set(id, { by: socket.id, room, x: out.x, y: out.y, until: now + S.life * 1000 + 800, reach: S.speed * S.life + 64, burn: !!S.burn }); if (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
+    if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
+    io.to(room).emit('magic-cast', out);
+  });
+  socket.on('magic-hit', (m) => {
+    const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
+    _magicLive.delete(m.id);
+    if (Date.now() > L.until || Math.hypot(m.x - L.x, m.y - L.y) > L.reach) return;
+    if (L.burn && !m.air) igniteBox(L.room, +m.x, +m.y, TERRAIN_CELL);
+    io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air: m.air ? 1 : 0, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined });
+  });
   socket.on('arrow-catch', ({ id, to }) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string' || typeof to !== 'string') return;
     const map = roomObjects[room], o = map && map.get(id);
