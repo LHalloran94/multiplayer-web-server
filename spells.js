@@ -101,7 +101,7 @@
       plain: { keys: [U, D, U, D], rune: [7, 4, 1, 0] } },
     lift: { name: 'Lift and throw', school: 'force', form: 'shaping', tier: 0, cd: 3, stance: 'level', kind: 'lift', learn: 3, reach: 320, secs: 10, pull: 0.16, vmax: 11, throwV: 12,
       plain: { keys: [R, R, U, L], rune: [3, 4, 5, 2] } },
-    double: { name: 'A double of you', school: 'illusion', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'double', learn: 5, secs: 6, walk: 120,
+    double: { name: 'A double of you', school: 'illusion', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'double', learn: 5, secs: 60, secsWalk: 6, walk: 150, jump: 420,
       plain: { keys: [L, U, R, D, D], rune: [2, 0, 6, 7, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
@@ -135,7 +135,10 @@
     scroll_lightorb: { name: 'Scroll of light orb', spell: 'lightorb' },
   };
 
-  for (const id of Object.keys(SPELLS)) if (!SPELLS[id].innate && !SPELLS[id].alt) TOMES.tome_master.pages.push({ spell: id });
+  // (step 3h, the user: "add a contents page to the master tome … the tabs should probably just be for each school and the spells should be arranged by schools") its first page
+  //   is the CONTENTS (`contents`: no spell — the client lists the schools and their spells there, each a link), then the spells school by school, in the schools' order
+  TOMES.tome_master.pages.push({ contents: true });
+  for (const sc of Object.keys(SCHOOLS)) for (const id of Object.keys(SPELLS)) if (!SPELLS[id].innate && !SPELLS[id].alt && SPELLS[id].school === sc) TOMES.tome_master.pages.push({ spell: id });
   const is = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(SPELLS, id);
   const of = (id) => is(id) ? SPELLS[id] : null;
   // ⭐ YOUR OWN VERSION (step 2 — kickoff §'against copied inputs' 1): every spell's input = the shared core + ONE PART worked out from you and this life. The SERVER makes

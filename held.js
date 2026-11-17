@@ -562,7 +562,7 @@
     for (const cov of ['hearth', 'scorched', 'wayfarer', 'master']) {
       // (step 2c, the user with photos of people carrying books: "held in the middle of the spine … tucked upwards along their arm") — `rest: 'carry'` (client 16zj `magicRestPose`)
       LOOKS['tome_' + cov] = tool(14, 9.5, 0.4, 0.5, 1, 'tm', Object.assign({ tome: cov, rest: 'carry', tip: 0.5, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
-      LOOKS['tome_' + cov + '_open'] = tool(14, 9.5, 0.4, 0.3, 1, 'tm', Object.assign({ tome: cov, open: true, rest: 'read', tip: 0.55, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
+      LOOKS['tome_' + cov + '_open'] = tool(14, 9.5, 0.4, 0.3, 1, 'tm', Object.assign({ tome: cov, open: true, rest: 'read', tip: 0.55, offTilt: { beside: 0, back: 0, raised: 0 }, stateOf: 'tome_' + cov }, TOMEX), 'blunt');   // (`stateOf`: a look the item takes on, not an item — the build menu leaves it out)
     }
     const SCX = { hitHalf: 2.2, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', aimsAtRest: false, scroll: true };
     // (step 2b) one family of looks a scroll's SPELL (`scroll_<spell>`: its back shows the spell's school sign and its tier — the user: "so that other players can see"), and the plain `scroll`.
@@ -572,7 +572,7 @@
     for (const base of ['scroll', 'scroll_firebolt', 'scroll_greatbolt', 'scroll_gust', 'scroll_lightorb']) {
       LOOKS[base] = tool(14, 4.4, 0.1, 0.5, 1, 'sc', Object.assign({ rest: 'upright', tip: 1 }, SCX), 'blunt');
       // (step 2d, the user: held from the TOP rod "makes more sense") hung from its top rod in front of your face, its writing to you, its back (the spell's sign) to everybody else
-      for (const k of ['open', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'b10', 'b11', 'b12']) LOOKS[base + '_' + k] = tool(14, 4.4, 0.1, 0.03, 1, 'sc', Object.assign({ rest: 'read', open: true, tip: 0.7 }, SCX), 'blunt');
+      for (const k of ['open', 'b1', 'b2', 'b3', 'b4', 'b5', 'b6', 'b7', 'b8', 'b9', 'b10', 'b11', 'b12']) LOOKS[base + '_' + k] = tool(14, 4.4, 0.1, 0.03, 1, 'sc', Object.assign({ rest: 'read', open: true, tip: 0.7, stateOf: base }, SCX), 'blunt');
     }
   }
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;

@@ -27881,7 +27881,7 @@ io.on('connection', (socket) => {
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     if (S.kind === 'lift') out.obj = m.obj;
     if (S.kind === 'double') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); out.dv = Math.max(-400, Math.min(400, Math.round(+m.dv || 0)));
-      let D = _magicDoubles.get(room); if (!D) _magicDoubles.set(room, D = new Map()); for (const [k, q] of D) if (now > q.until) D.delete(k); D.set(id, { by: socket.id, until: now + (S.secs || 6) * 1000 * (socket._magicSecsK || 1) + 3000 }); }
+      let D = _magicDoubles.get(room); if (!D) _magicDoubles.set(room, D = new Map()); for (const [k, q] of D) if (now > q.until) D.delete(k); D.set(id, { by: socket.id, until: now + Math.max(S.secs || 60, S.secsWalk || 6) * 1000 + 3000 }); }
     // (magic step 3d) batch b: the world changed where it was aimed — a placed thing on the ground (the point moved there), water frozen, a wall raised
     if (S.kind === 'rune' || (S.kind === 'wall' && !shot)) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; }
     if (S.kind === 'freeze' && !shot) out.n = magicFreeze(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK);
@@ -27907,6 +27907,10 @@ io.on('connection', (socket) => {
   });
   socket.on('scroll-charge-off', () => { socket._magicCharge = null; });
   // (magic step 3g) a DOUBLE struck — whoever's game saw it: everybody is told it bursts (once)
+  // (magic step 3h) a double STEERED by its caster: where it is, to everybody else (only its own caster's)
+  socket.on('magic-dbl', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), q = D && D.get(m.id | 0); if (!q || q.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
+    const now = Date.now(); if (now - (socket._dblT || 0) < 40) return; socket._dblT = now;
+    socket.to(room).emit('magic-dbl', { id: m.id | 0, x: Math.round(+m.x), y: Math.round(+m.y), vx: Math.max(-600, Math.min(600, Math.round(+m.vx || 0))), f: m.f < 0 ? -1 : 1, yw: m.yw == null || !isFinite(m.yw) ? null : Math.max(-100, Math.min(100, Math.round(+m.yw))), c: m.c ? 1 : 0 }); });
   socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
   // (magic step 3d) a RUNE stepped on: the stepper's own game tells (it sees its body exactly) — believed when this socket's body was last near it
   socket.on('rune-step', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const rs = magicRunesOf(room), q = rs.find(r => r.id === (m.id | 0)); if (!q) return;
