@@ -27693,6 +27693,7 @@ io.on('connection', (socket) => {
       if (Array.isArray(m.k)) out.k = m.k.slice(0, 12).map(v => v & 3);
       if (Array.isArray(m.r)) out.r = m.r.slice(0, 64).map(v => Math.max(-127, Math.min(127, Math.round(+v) || 0)));
       if (SPELLS.is(m.rdy)) out.rdy = m.rdy;
+      if (m.ch) out.ch = 1;   // (step 2h: the spell is held in the HAND — a scroll's — not in a catalyst)
       if (m.bad) out.bad = 1;
     } else if (typeof m.why === 'string') out.why = m.why.slice(0, 12);
     socket.to(room).emit('magic-state', out);
@@ -27703,10 +27704,10 @@ io.on('connection', (socket) => {
     const S = SPELLS.of(m.spell); if (!S) return no('unknown');
     const o = typeof m.cat === 'string' && roomObjects[room] ? roomObjects[room].get(m.cat) : null, H = o && o.type === 'stamp' && HELD.of(o.look);
     const hm = roomObjHeld[room];
-    // (step 2) A SCROLL in your hand casts its own spell: no catalyst, nothing learnt, no cooldown, no reagents — it is used up (spent at once; burnt away in the hand, then gone)
-    const SC = o && SPELLS.scrollOf(o.item);
-    if (SC) { if (!hm || hm.get(m.cat) !== socket.id || o._burnt || SC.spell !== m.spell) return no('scroll'); }
-    else if (!H || !H.catalyst || !hm || hm.get(m.cat) !== socket.id) return no('catalyst');
+    // (step 2h) A SCROLL'S SPELL held in your hand (`scroll-read` gave it): no catalyst, nothing learnt, no cooldown, no reagents — the charge is spent
+    const CH = m.charge && socket._magicCharge && socket._magicCharge.spell === m.spell && Date.now() < socket._magicCharge.until ? socket._magicCharge : null, SC = CH;
+    if (m.charge && !CH) return no('charge');
+    if (!SC && (!H || !H.catalyst || !hm || hm.get(m.cat) !== socket.id)) return no('catalyst');
     const C = SC ? {} : SPELLS.CATALYSTS[H.catalyst] || {};
     // (step 2b) a staff held in ONE hand (anything else in this socket's hands) casts weaker (`powK1`) than in both
     let powK = C.powK || 1; if (!SC && H.twoFree && C.powK1 != null) { const mine = eqObjs.get(socket.id); if (mine && [...mine].some(id => id !== o.id)) powK = C.powK1; }
@@ -27718,16 +27719,28 @@ io.on('connection', (socket) => {
     // (step 2) REAGENTS: what the spell uses up, from what you carry (where things cost something), unless the panel's 'Spells need no reagents (for testing)'
     const gated = invGatedRoom(room), key = playerKeyFor(socket.id), reag = !SC && Array.isArray(S.uses) && gated && !socket._magicNoReag ? S.uses : null;
     if (reag) { for (const [it, n] of reag) if (ledger.itemCount(key, it) < n) return no('reagent:' + it); for (const [it, n] of reag) ledger.spendItem(key, it, n); sendInvSync(socket, room); }
-    if (SC) { o._burnt = 1; if (gated) { ledger.spendItem(key, o.item, 1); sendInvSync(socket, room); }
-      setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } }, 900); }
+    if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst); if (!SC) cds[m.spell] = now + cd;
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
     const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: powK };
-    if (SC) out.scroll = 1;
+    if (SC) { out.charge = 1; out.cat = ''; }
     if (S.kind === 'bolt') { _magicLive.set(id, { by: socket.id, room, x: out.x, y: out.y, until: now + S.life * 1000 + 800, reach: S.speed * S.life + 64, burn: !!S.burn, burnR: S.burnR || 1 }); if (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     io.to(room).emit('magic-cast', out);
   });
+  // ⭐ (magic step 2h, the user: "go back to scrolls being one-handed … you activate it and then it burns and is consumed and your hand glows … and you fire it from there") A SCROLL READ:
+  //   in this socket's own hand, not already burning — it is used up NOW (spent; burnt away in the hand, gone after 0.9 s, everybody shown the burn by `scroll-read`) and its spell is
+  //   HELD by its reader (`_magicCharge`) until it is cast (`magic-cast` with `charge`) or let go (`scroll-charge-off`), at most a minute.
+  socket.on('scroll-read', (m) => {
+    const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string') return;
+    const map = roomObjects[room], o = map && map.get(m.id), hm = roomObjHeld[room], SC = o && SPELLS.scrollOf(o.item);
+    if (!SC || !hm || hm.get(m.id) !== socket.id || o._burnt) return socket.emit('magic-no', { spell: SC ? SC.spell : null, why: 'scroll', left: 0 });
+    o._burnt = 1; if (invGatedRoom(room)) { ledger.spendItem(playerKeyFor(socket.id), o.item, 1); sendInvSync(socket, room); }
+    setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } }, 900);
+    socket._magicCharge = { spell: SC.spell, until: Date.now() + 60000 };
+    io.to(room).emit('scroll-read', { from: socket.id, id: o.id, spell: SC.spell });
+  });
+  socket.on('scroll-charge-off', () => { socket._magicCharge = null; });
   socket.on('magic-hit', (m) => {
     const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
     _magicLive.delete(m.id);
