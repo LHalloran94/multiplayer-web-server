@@ -27705,7 +27705,7 @@ io.on('connection', (socket) => {
     const o = typeof m.cat === 'string' && roomObjects[room] ? roomObjects[room].get(m.cat) : null, H = o && o.type === 'stamp' && HELD.of(o.look);
     const hm = roomObjHeld[room];
     // (step 2h) A SCROLL'S SPELL held in your hand (`scroll-read` gave it): no catalyst, nothing learnt, no cooldown, no reagents — the charge is spent
-    const CH = m.charge && socket._magicCharge && socket._magicCharge.spell === m.spell && Date.now() < socket._magicCharge.until ? socket._magicCharge : null, SC = CH;
+    const CH = m.charge && socket._magicCharge && socket._magicCharge.spell === m.spell && Date.now() < socket._magicCharge.until && Date.now() >= (socket._magicCharge.from || 0) ? socket._magicCharge : null, SC = CH;
     if (m.charge && !CH) return no('charge');
     if (!SC && (!H || !H.catalyst || !hm || hm.get(m.cat) !== socket.id)) return no('catalyst');
     const C = SC ? {} : SPELLS.CATALYSTS[H.catalyst] || {};
@@ -27736,9 +27736,11 @@ io.on('connection', (socket) => {
     const map = roomObjects[room], o = map && map.get(m.id), hm = roomObjHeld[room], SC = o && SPELLS.scrollOf(o.item);
     if (!SC || !hm || hm.get(m.id) !== socket.id || o._burnt) return socket.emit('magic-no', { spell: SC ? SC.spell : null, why: 'scroll', left: 0 });
     o._burnt = 1; if (invGatedRoom(room)) { ledger.spendItem(playerKeyFor(socket.id), o.item, 1); sendInvSync(socket, room); }
-    setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } }, 900);
-    socket._magicCharge = { spell: SC.spell, until: Date.now() + 60000 };
-    io.to(room).emit('scroll-read', { from: socket.id, id: o.id, spell: SC.spell });
+    // (magic step 3, the user: it burns up and primes itself, then fires) it burns for `ms` (the reader's dial, 0.3–4 s; the old way 0.7 s) and is taken from the hand after it
+    const ms = Math.max(300, Math.min(4000, +m.ms || 700));
+    setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } }, ms + 400);
+    socket._magicCharge = { spell: SC.spell, from: Date.now() + ms - 350, until: Date.now() + ms + 60000 };   // (not cast before it has burnt up — a little slack for the trip)
+    io.to(room).emit('scroll-read', { from: socket.id, id: o.id, spell: SC.spell, ms });
   });
   socket.on('scroll-charge-off', () => { socket._magicCharge = null; });
   socket.on('magic-hit', (m) => {
