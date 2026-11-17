@@ -3829,6 +3829,86 @@ function magicMindOf(pkey) {
   _magicMind.set(pkey, M); if (_magicMind.size > 4000) _magicMind.delete(_magicMind.keys().next().value); return M;
 }
 function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC_SECRET).update(pkey + '|' + life + '|' + spell).digest().readUInt32BE(0) & 0x3fffffff; }
+// ⭐ MAGIC STEP 3d (2026-11-17) — BATCH b: THE WORLD CHANGED BY A SPELL, AND PUT BACK. Each changed cell is written as the liquid reactions write theirs (`grid.s` + `hp.s`, the
+//   `terrain-set` wire; fine liquid cleared / written + `emitFineCells`) and remembered in `magicTemp` with when it goes back and what it was — also in the DATABASE (`magic_temp`), so a
+//   restart before then still puts it back (the chunk's own save would otherwise keep the ice or the wall for good). A cell changed since by something else is left as it is.
+//   PROCESSOR: a few dozen cells a cast, a sweep of the remembered ones four times a second.
+db.exec('CREATE TABLE IF NOT EXISTS magic_temp (room TEXT NOT NULL, i INTEGER NOT NULL, kind TEXT NOT NULL, mat INTEGER NOT NULL, back INTEGER NOT NULL, units INTEGER NOT NULL, until INTEGER NOT NULL, crack INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (room, i))');
+const magicTemp = new Map();   // room → Map(cell → { kind 'ice' | 'wall', mat, back (what it goes back to), units (water), until, crack (ms before `until` its cracks begin) })
+{ const rows = db.prepare('SELECT * FROM magic_temp').all(); for (const r of rows) { let M = magicTemp.get(r.room); if (!M) magicTemp.set(r.room, M = new Map()); M.set(r.i, { kind: r.kind, mat: r.mat, back: r.back, units: r.units, until: r.until, crack: r.crack }); } if (rows.length) console.log('magic: ' + rows.length + ' cell(s) a spell changed, to put back'); }
+const _magicTempIns = db.prepare('INSERT OR REPLACE INTO magic_temp (room, i, kind, mat, back, units, until, crack) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'), _magicTempDel = db.prepare('DELETE FROM magic_temp WHERE room = ? AND i = ?');
+function magicTempPut(room, i, T) { let M = magicTemp.get(room); if (!M) magicTemp.set(room, M = new Map()); M.set(i, T); try { _magicTempIns.run(room, i, T.kind, T.mat, T.back, T.units | 0, T.until, T.crack | 0); } catch (e) {} }
+const MAGIC_WATER_RK = 4, MAGIC_ICE = 4;   // (water's rank in LIQ_ID [11, 10, 14, 12, 9, 15], declared further down; ice = 4)
+const MAGIC_ROCKY = new Set([2, 19, 22, 23, 24, 25, 26]);   // stone, clay, granite, basalt, limestone, sandstone, shale: a wall is made of the ground's own rock if it is one of these, else stone
+// the ground under a point: the open cell resting on it (looking down from the point, or up out of rock) → { x, y (its top), c, r (the open cell) } or null
+function magicGroundAt(room, x, y) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, c = Math.floor(x / TERRAIN_CELL); let r = Math.floor(y / TERRAIN_CELL); if (c < 0 || c >= COLS) return null;   // (a room nobody has painted has no grid yet: made, as a brush makes it)
+  const floorRow = Math.floor(roomFloorTop(room) / TERRAIN_CELL), solid = (rr) => { if (rr >= floorRow) return true; const v = peekCellAt(grid, c * ROWS + rr); return v > 0 && isSolidCell(v); };   // (a level's floor is a line, not cells — the rig's room stands on one)
+  if (solid(r)) { let k = 0; while (k < 8 && r > 0 && solid(r)) { r--; k++; } if (solid(r)) return null; }
+  else { let k = 0; while (k < 12 && r < ROWS - 1 && !solid(r + 1)) { r++; k++; } if (!solid(r + 1)) return null; }
+  return { x: Math.round((c + 0.5) * TERRAIN_CELL), y: (r + 1) * TERRAIN_CELL, c, r };
+}
+// FREEZE: the water nearest the point (within 3 cells), then outward through touching water, ring by ring (`ringMs` apart), at most `cells` — only cells that hold water and nothing else
+function magicFreeze(room, x, y, S) {
+  const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt, tot = st.fineTotal; if (!grid || !amt || !tot || (st.fineSub || 1) !== 1 || MAGIC_WATER_RK < 0) return 0;
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, c0 = Math.floor(x / T), r0 = Math.floor(y / T);
+  const water = (i) => { if (i < 0 || i >= N) return false; const t = peekCellAt(tot, i); if (!(t > 0)) return false; const p = amt.rp(i), b = amt.o(i); return p[b + MAGIC_WATER_RK] > 0 && p[b + MAGIC_WATER_RK] === t; };
+  let start = -1, bd = 1e9; for (let dc = -3; dc <= 3; dc++) for (let dr = -3; dr <= 3; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r, d = dc * dc + dr * dr; if (d < bd && water(i)) { bd = d; start = i; } }
+  if (start < 0) return 0;
+  const most = S.cells || 90, seen = new Set([start]), rings = [[start]]; let n = 1;
+  while (n < most) { const last = rings[rings.length - 1], next = []; for (const i of last) { const r = i % ROWS; for (const j of [i - ROWS, i + ROWS, r > 0 ? i - 1 : -1, r < ROWS - 1 ? i + 1 : -1]) { if (j < 0 || seen.has(j) || !water(j)) continue; seen.add(j); next.push(j); if (++n >= most) break; } if (n >= most) break; } if (!next.length) break; rings.push(next); }
+  const until0 = Date.now() + (S.secs || 30) * 1000, mats = roomMats[room] || {};
+  rings.forEach((ring, k) => setTimeout(() => {
+    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = [];
+    for (const i of ring) { if (!water(i)) continue; const p = amt.wp(i), b = amt.o(i), units = p[b + MAGIC_WATER_RK]; for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; tot.s(i, 0); fineSet(room).delete(i);
+      grid.s(i, MAGIC_ICE); s2.terrainHp.s(i, matStrengthSrv(mats, MAGIC_ICE)); cells.push(i, MAGIC_ICE); liq.push(i);
+      magicTempPut(room, i, { kind: 'ice', mat: MAGIC_ICE, back: 0, units, until: until0 + k * (S.ringMs || 70) + Math.floor(Math.random() * 1500), crack: 0 }); }
+    if (cells.length) { wireFanout(room, 'terrain-set', { cells }); emitFineCells(room, liq); }
+  }, k * (S.ringMs || 70)));
+  return n;
+}
+// STONE WALL: `wide` columns side by side, each rising from its own ground, `high` cells, a row every `rowMs`; only into open, dry cells, stopping at the first that is not
+function magicWall(room, x, y, S) {
+  const st = cellsOf(room), grid = ensureTerrain(room), tot = st.fineTotal; ensureTerrainHp(room); const ROWS = st.rows, T = TERRAIN_CELL, W = S.wide || 2, H = S.high || 6, cL = Math.round(x / T - W / 2);
+  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS || 6) * 1000, mats = roomMats[room] || {}, cols = [];
+  for (let k = 0; k < W; k++) { const g = magicGroundAt(room, (cL + k + 0.5) * T, y - T); if (!g || Math.abs(g.y - y) > 4 * T) continue; const under = g.r + 1 < Math.floor(roomFloorTop(room) / T) ? peekCellAt(grid, g.c * ROWS + g.r + 1) : 2; cols.push({ c: g.c, r: g.r, mat: MAGIC_ROCKY.has(under) ? under : 2, stop: false }); }
+  if (!cols.length) return 0;
+  for (let h = 0; h < H; h++) setTimeout(() => {
+    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [];
+    for (const C of cols) { if (C.stop) continue; const r = C.r - h, i = C.c * ROWS + r; if (r < 1 || !peekAir(grid, i) || (tot && peekCellAt(tot, i) > 0)) { C.stop = true; continue; }   // (open: 0, or not made yet in a room that is not generated — `peekAir`)
+      grid.s(i, C.mat); s2.terrainHp.s(i, matStrengthSrv(mats, C.mat)); cells.push(i, C.mat); magicTempPut(room, i, { kind: 'wall', mat: C.mat, back: 0, units: 0, until: until + h * 40, crack }); }
+    if (cells.length) wireFanout(room, 'terrain-set', { cells });
+  }, h * (S.rowMs || 70));
+  return cols.length * H;
+}
+// four times a second: cracks coming on a wall that is about to go (its strength lowered — the same crack look as a dug cell), and every cell whose time is up put back
+setInterval(() => {
+  const now = Date.now();
+  for (const [room, M] of magicTemp) {
+    const st = roomCells.get(room); if (!st || !st.terrain) continue; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal, mats = roomMats[room] || {};
+    const cells = [], dmg = [], liq = [], gone = [];
+    for (const [i, T] of M) {
+      const v = peekCellAt(grid, i); if (v < 0) continue;   // (its chunk not here yet: later)
+      if (v !== T.mat) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }   // (dug out, or changed by something else: not ours any more)
+      if (now >= T.until) {
+        grid.s(i, 0); hp.s(i, 0); cells.push(i, 0);
+        if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); }
+        if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
+        M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {}
+      } else if (T.crack && now >= T.until - T.crack) { const s = matStrengthSrv(mats, T.mat), h = Math.max(1, Math.ceil(s * (T.until - now) / T.crack)); if (hp.g(i) > h) { hp.s(i, h); dmg.push(i, h); } }
+    }
+    if (cells.length || dmg.length) wireFanout(room, 'terrain-set', { cells, dmg });
+    if (liq.length) emitFineCells(room, liq);
+    if (gone.length) io.to(room).emit('magic-wall-end', { cells: gone });
+    if (!M.size) magicTemp.delete(room);
+  }
+  for (const [room, rs] of _magicRunes) { for (let k = rs.length - 1; k >= 0; k--) if (now >= rs[k].until) { io.to(room).emit('magic-rune-gone', { id: rs[k].id }); rs.splice(k, 1); } if (!rs.length) _magicRunes.delete(room); }
+}, 250);
+// THE RUNES lying in each room (in memory: a restart clears them) · one going off: everybody is told; each player's own game takes the blast for its own body
+const _magicRunes = new Map();
+function magicRunesOf(room) { let a = _magicRunes.get(room); if (!a) _magicRunes.set(room, a = []); return a; }
+function magicRuneOff(room, q, by) { const rs = magicRunesOf(room), k = rs.indexOf(q); if (k < 0) return; rs.splice(k, 1); const S = SPELLS.of(q.spell) || {};
+  io.to(room).emit('magic-rune-off', { id: q.id, from: q.by, by, x: q.x, y: q.y, r: S.blastR || 90, f: S.blastF || 14, dmg: S.dmg || 3, pow: q.pow || 1 }); }
 function magicKnows(socket, spell) { if (socket._magicAll) return true; const M = magicMindOf(playerKeyFor(socket.id)), b = SPELLS.baseOf(spell); return (M.n[b] | 0) >= SPELLS.learnN(b); }   // (step 3a: a variant is known with its spell)
 // what this socket is told: its counts, how many each needs, and its own numbers for the spells it knows, the pages of every tome in its hands (and every spell, knowing all)
 function magicKnowSend(socket) {
@@ -25901,6 +25981,7 @@ io.on('connection', (socket) => {
     if (!currentAvatarRoom) return;
     // (the torch, 2026-10-08) where this player's body last said it was — the torch's ignite door checks against it
     if (v && isFinite(v.ax) && isFinite(v.ay)) socket._avPos = { x: +v.ax, y: +v.ay, t: Date.now() };
+    if (socket._avPos && _magicRunes.has(currentAvatarRoom)) { const now = Date.now(), p = socket._avPos; for (const q of magicRunesOf(currentAvatarRoom)) if (q.by !== socket.id && now >= q.at && Math.abs(p.x - q.x) < 12 && Math.abs(p.y - q.y) < 14) { magicRuneOff(currentAvatarRoom, q, socket.id); break; } }   // (magic step 3d)
     const rect = noteWhere(currentAvatarRoom, socket.id, v);
     if (rect) { updateSubs(currentAvatarRoom, socket.id, rect); try { sendSkyRows(currentAvatarRoom, rect); sendRegions(currentAvatarRoom, rect); sendIsles(currentAvatarRoom); } catch (e) { /* lighting + backdrop hints only — never break the beacon */ } }
     if (!relayCfg.on) updatePeers(currentAvatarRoom, socket.id);   // Phase 4: re-select who is worth being meshed with.
@@ -27655,7 +27736,7 @@ io.on('connection', (socket) => {
   socket.on('magic-debug', (m) => { const was = [socket._magicAll, socket._magicOwn];
     socket._magicAll = !!(m && m.all); socket._magicNoCd = !!(m && m.nocd);   // (the panel's 'Know every spell' + 'No cooldowns', both for testing)
     socket._magicNoReag = !!(m && m.noreag); socket._magicOwn = !(m && m.own === 0);   // (step 2: 'Spells need no reagents (for testing)'; 'Your own version of each spell' off = the shared core only)
-    socket._magicRoom = currentAvatarRoom;
+    socket._magicRoom = currentAvatarRoom; socket._magicSecsK = Math.max(0.05, Math.min(5, isFinite(m && m.secs) ? +m.secs / 100 : 1));   // (step 3d: 'Spell changes to the world last (%)', for testing)
     if (was[0] !== socket._magicAll || was[1] !== socket._magicOwn) magicKnowSend(socket); });
   // ⭐ MAGIC, STEP 2: LEARNING. `magic-know-ask` → `magic-know` (counts, needs, own numbers). `tome-open` = which page of which tome in your hand is open (null: shut) — the others are
   //   told, so they see you reading. `magic-practice` = an input put in with the tome open: CHECKED HERE against your own version of that page's spell (keys exactly; joined points
@@ -27731,6 +27812,13 @@ io.on('connection', (socket) => {
     if (isFinite(m.tx) && isFinite(m.ty)) { const dx = m.tx - out.x, dy = m.ty - out.y, d = Math.hypot(dx, dy), lim = (S.reach || 400) + 8, k = d > lim ? lim / d : 1; out.tx = Math.round(out.x + dx * k); out.ty = Math.round(out.y + dy * k); }
     if (S.kind === 'bolt') { _magicLive.set(id, { by: socket.id, room, x: out.x, y: out.y, until: now + S.life * 1000 + 800, reach: S.speed * S.life + 64, burn: !!S.burn, burnR: S.burnR || 1 }); if (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
+    // (magic step 3d) batch b: the world changed where it was aimed — a placed thing on the ground (the point moved there), water frozen, a wall raised
+    if (S.kind === 'rune' || S.kind === 'wall') { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; }
+    const SK = socket._magicSecsK && socket._magicSecsK !== 1 && S.secs ? Object.assign({}, S, { secs: S.secs * socket._magicSecsK, crackS: (S.crackS || 0) * Math.min(1, socket._magicSecsK) }) : S;
+    if (S.kind === 'freeze') out.n = magicFreeze(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK);
+    if (S.kind === 'wall') out.n = magicWall(room, out.tx, out.ty, SK);
+    if (S.kind === 'rune') { const rs = magicRunesOf(room), mine = rs.filter(q => q.by === socket.id); while (mine.length >= (S.most || 3)) { const q = mine.shift(); rs.splice(rs.indexOf(q), 1); io.to(room).emit('magic-rune-gone', { id: q.id }); }
+      rs.push({ id, by: socket.id, x: out.tx, y: out.ty, at: now + (S.armS || 1.5) * 1000, until: now + (SK.secs || 180) * 1000, spell: m.spell, pow: powK }); }
     io.to(room).emit('magic-cast', out);
   });
   // ⭐ (magic step 2h, the user: "go back to scrolls being one-handed … you activate it and then it burns and is consumed and your hand glows … and you fire it from there") A SCROLL READ:
@@ -27749,6 +27837,11 @@ io.on('connection', (socket) => {
     io.to(room).emit('scroll-read', { from: socket.id, id: o.id, spell: SC.spell, ms });
   });
   socket.on('scroll-charge-off', () => { socket._magicCharge = null; });
+  // (magic step 3d) a RUNE stepped on: the stepper's own game tells (it sees its body exactly) — believed when this socket's body was last near it
+  socket.on('rune-step', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const rs = magicRunesOf(room), q = rs.find(r => r.id === (m.id | 0)); if (!q) return;
+    const p = socket._avPos; if (q.by === socket.id || Date.now() < q.at || (p && Date.now() - p.t < 3000 && Math.hypot(p.x - q.x, p.y - q.y) > 140)) return; magicRuneOff(room, q, socket.id); });
+  // what runes there are in your room now (asked when you arrive and now and then; drawn faint — a late arrival can still see a careful trace)
+  socket.on('magic-runes-ask', () => { const room = currentAvatarRoom; if (!room) return; const now = Date.now(); socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
   socket.on('magic-hit', (m) => {
     const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
     _magicLive.delete(m.id);
