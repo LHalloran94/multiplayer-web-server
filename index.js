@@ -3872,46 +3872,82 @@ function magicFreeze(room, x, y, S) {
 //   (step 3e, the user) …through LIQUID too (`thruLiq`): the liquid in a cell it rises into is pushed out to the nearest cells with room (`magicLiqOut` — nothing made or lost);
 //   EVERY cell cracks on one clock (`ce`: the cracks complete as the top row goes), and it CRUMBLES FROM THE TOP DOWN, `crumbleMs` a row.
 const magicOpen = (grid, j) => { const v = peekCellAt(grid, j); return peekAir(grid, j) || isFluidId(v); };   // (open to liquid: air, or a cell the liquid itself is marked in)
-function magicLiqOut(room, i, avoid, liq) {
+function magicLiqOut(room, i, avoid, liq, cells) {
   const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt, tot = st.fineTotal, ROWS = st.rows, N = grid.length; if (!amt || !tot) return 0;
   let left = peekCellAt(tot, i); if (!(left > 0)) return 0; const p0 = amt.wp(i), b0 = amt.o(i), have = []; for (let q = 0; q < LIQ_T; q++) { have.push(p0[b0 + q]); p0[b0 + q] = 0; } tot.s(i, 0); fineSet(room).delete(i); liq.push(i);
-  const seen = new Set([i]), Q = [i]; let n = 0;
+  const seen = new Set([i]), Q = [i], floorRow = Math.floor(roomFloorTop(room) / TERRAIN_CELL); let n = 0;   // (step 3f: never under a level's floor line — not cells, the void; water pushed there was lost to sight)
   while (Q.length && left > 0 && n < 600) { const k = Q.shift(); n++; const r = k % ROWS;
     for (const j of [r > 0 ? k - 1 : -1, k - ROWS, k + ROWS, r < ROWS - 1 ? k + 1 : -1]) {   // (up first, then the sides, then down)
-      if (j < 0 || j >= N || seen.has(j)) continue; seen.add(j); if (avoid.has(j) || !magicOpen(grid, j)) continue; Q.push(j);
+      if (j < 0 || j >= N || seen.has(j)) continue; seen.add(j); if (avoid.has(j) || j % ROWS >= floorRow || !magicOpen(grid, j)) continue; Q.push(j);
       const t = Math.max(0, peekCellAt(tot, j)), room1 = LIQUID_MAX - t; if (room1 <= 0) continue;
       const p = amt.wp(j), b = amt.o(j); let put = 0; for (let q = 0; q < LIQ_T && put < room1; q++) { const m = Math.min(have[q], room1 - put); if (m > 0) { p[b + q] += m; have[q] -= m; put += m; } }
-      if (put > 0) { tot.s(j, t + put); left -= put; fineSet(room).add(j); liq.push(j); } if (left <= 0) break; } }
+      if (put > 0) { tot.s(j, t + put); left -= put; fineSet(room).add(j); liq.push(j); if (fineSyncGrid(room, j) && cells) cells.push(j, grid.g(j)); } if (left <= 0) break; } }
   if (left > 0) { for (let q = 0; q < LIQ_T; q++) p0[b0 + q] = have[q]; tot.s(i, left); fineSet(room).add(i); }   // (no room for it all within reach — a pool sealed all round: what is left stays, and the wall stops here; nothing lost)
   return left;
 }
 function magicWall(room, x, y, S) {
-  const st = cellsOf(room), grid = ensureTerrain(room), tot = st.fineTotal; ensureTerrainHp(room); const ROWS = st.rows, T = TERRAIN_CELL, W = S.wide || 2, H = S.high || 12, cL = Math.round(x / T - W / 2);
-  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS || 6) * 1000, gap = S.crumbleMs || 110, mats = roomMats[room] || {}, cols = [];
-  for (let k = 0; k < W; k++) { const g = magicGroundAt(room, (cL + k + 0.5) * T, y - T); if (!g || Math.abs(g.y - y) > 4 * T) continue; const under = g.r + 1 < Math.floor(roomFloorTop(room) / T) ? peekCellAt(grid, g.c * ROWS + g.r + 1) : 2; cols.push({ c: g.c, r: g.r, mat: MAGIC_ROCKY.has(under) ? under : 2, stop: false }); }
-  if (!cols.length) return 0;
-  const avoid = new Set(); for (const C of cols) for (let h = 0; h < H; h++) avoid.add(C.c * ROWS + C.r - h);
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, T = TERRAIN_CELL, W = S.wide || 2, H = S.high || 12, cL = Math.round(x / T - W / 2), lines = [];
+  for (let k = 0; k < W; k++) { const g = magicGroundAt(room, (cL + k + 0.5) * T, y - T); if (!g || Math.abs(g.y - y) > 4 * T) continue; const under = g.r + 1 < Math.floor(roomFloorTop(room) / T) ? peekCellAt(grid, g.c * ROWS + g.r + 1) : 2;
+    const cs = []; for (let h = 0; h < H; h++) cs.push(g.r - h >= 1 ? g.c * ROWS + g.r - h : -1); lines.push({ cells: cs, mat: MAGIC_ROCKY.has(under) ? under : 2 }); }
+  return magicWallLines(room, lines, S);
+}
+// ⭐ (step 3f, the user: "the stone wall should also be able to go horizontal if you shoot it into the side of a wall") A WALL OUT OF A FACE: `wide` rows, level, `high` cells
+//   long, growing out of the rock face the stone struck (`dir` the way it was flying: the face is that way), made of that rock if it is a plain one, else stone. null = no face there.
+function magicWallSide(room, x, y, dir, S) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, W = S.wide || 2, H = S.high || 12, floorRow = Math.floor(roomFloorTop(room) / T);
+  const c0 = Math.floor(x / T), r0 = Math.floor(y / T), fc = c0 + dir; if (fc < 0 || fc >= COLS) return null;
+  const solidAt = (c, r) => { if (r >= floorRow) return true; const v = peekCellAt(grid, c * ROWS + r); return v > 0 && isSolidCell(v); };
+  if (!solidAt(fc, r0)) return null; const face = peekCellAt(grid, fc * ROWS + r0), mat = MAGIC_ROCKY.has(face) ? face : 2, rTop = r0 - Math.floor((W - 1) / 2), lines = [];
+  for (let w = 0; w < W; w++) { const r = rTop + w; if (r < 1 || r >= floorRow || !solidAt(fc, r)) continue; const cs = []; for (let k = 0; k < H; k++) { const c = c0 - dir * k; cs.push(c >= 0 && c < COLS ? c * ROWS + r : -1); } lines.push({ cells: cs, mat }); }
+  if (!lines.length) return null; return magicWallLines(room, lines, S);
+}
+// grow the lines a cell a step (`rowMs`), each only into open cells — through LIQUID too (`thruLiq`: pushed to the nearest room, `magicLiqOut`) — and stopping at the first that is
+//   not; every cell cracks on one clock (`ce`) and the far end crumbles first, `crumbleMs` a cell (step 3f: quick — the removals timed exactly, the sweep only schedules them)
+function magicWallLines(room, lines, S) {
+  const st = cellsOf(room), grid = st.terrain, H = S.high || 12; if (!lines.length) return 0;
+  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS || 6) * 1000, gap = S.crumbleMs || 30, mats = roomMats[room] || {};
+  const avoid = new Set(); for (const L of lines) for (const i of L.cells) if (i >= 0) avoid.add(i);
   for (let h = 0; h < H; h++) setTimeout(() => {
     const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = [], t2 = s2.fineTotal;
-    for (const C of cols) { if (C.stop) continue; const r = C.r - h, i = C.c * ROWS + r, wet = t2 && peekCellAt(t2, i) > 0;
-      if (r < 1 || !(wet ? magicOpen(grid, i) : peekAir(grid, i)) || (wet && !S.thruLiq)) { C.stop = true; continue; }   // (open: 0, or not made yet in a room that is not generated — `peekAir`; liquid's own cells too)
-      if (wet && magicLiqOut(room, i, avoid, liq) > 0) { C.stop = true; continue; }
-      grid.s(i, C.mat); s2.terrainHp.s(i, matStrengthSrv(mats, C.mat)); cells.push(i, C.mat);
-      const u = until + (H - 1 - h) * gap; magicTempPut(room, i, { kind: 'wall', mat: C.mat, back: 0, units: 0, until: u, crack: crack + (u - until), ce: until }); }
+    for (const L of lines) { if (L.stop) continue; const i = L.cells[h], wet = i >= 0 && t2 && peekCellAt(t2, i) > 0;
+      if (i < 0 || !(wet ? magicOpen(grid, i) : peekAir(grid, i)) || (wet && !S.thruLiq)) { L.stop = true; continue; }   // (open: 0, or not made yet in a room that is not generated — `peekAir`; liquid's own cells too)
+      if (wet && magicLiqOut(room, i, avoid, liq, cells) > 0) { L.stop = true; continue; }
+      grid.s(i, L.mat); s2.terrainHp.s(i, matStrengthSrv(mats, L.mat)); cells.push(i, L.mat);
+      const u = until + (H - 1 - h) * gap; magicTempPut(room, i, { kind: 'wall', mat: L.mat, back: 0, units: 0, until: u, crack: crack + (u - until), ce: until }); }
     if (cells.length) wireFanout(room, 'terrain-set', { cells });
     if (liq.length) emitFineCells(room, liq);
   }, h * (S.rowMs || 70));
-  return cols.length * H;
+  return lines.length * H;
+}
+// (step 3f) PUT BACK the cells whose time is up, at THEIR moment (scheduled by the sweep below — a crumble is smooth, not in quarter-second lumps): ice gives back its water, a wall's
+//   rubble falls; the liquid round each is WOKEN (`fineWakeAround`) so it flows into the space — a wall that stood under water left a hole the water never filled
+const magicCfgSrv = { wake: 1, exact: 1 };   // switches back: `wake` 0 = the liquid round a put-back cell is not woken · `exact` 0 = put back by the quarter-second sweep
+function magicTempEnd(room, list) {
+  const st = roomCells.get(room), M = magicTemp.get(room); if (!st || !st.terrain || !M) return; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal;
+  const cells = [], liq = [], gone = [], woke = [];
+  for (const i of list) { const T = M.get(i); if (!T) continue; const v = peekCellAt(grid, i); if (v < 0) { T.sch = 0; continue; }
+    if (v !== T.mat) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
+    grid.s(i, 0); hp.s(i, 0);
+    if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }
+    cells.push(i, grid.g(i)); woke.push(i);
+    if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
+    M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} }
+  if (magicCfgSrv.wake) for (const i of woke) fineWakeAround(room, i);
+  if (cells.length) wireFanout(room, 'terrain-set', { cells });
+  if (liq.length) emitFineCells(room, liq);
+  if (gone.length) io.to(room).emit('magic-wall-end', { cells: gone });
+  if (!M.size) magicTemp.delete(room);
 }
 // four times a second: cracks coming on a wall that is about to go (its strength lowered — the same crack look as a dug cell), and every cell whose time is up put back
 setInterval(() => {
   const now = Date.now();
   for (const [room, M] of magicTemp) {
     const st = roomCells.get(room); if (!st || !st.terrain) continue; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal, mats = roomMats[room] || {};
-    const cells = [], dmg = [], liq = [], gone = [];
+    const cells = [], dmg = [], liq = [], gone = [], due = new Map();
     for (const [i, T] of M) {
       const v = peekCellAt(grid, i); if (v < 0) continue;   // (its chunk not here yet: later)
       if (v !== T.mat) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }   // (dug out, or changed by something else: not ours any more)
+      if (magicCfgSrv.exact && T.until - now < 260) { if (!T.sch) { T.sch = 1; const k = T.until; let g = due.get(k); if (!g) due.set(k, g = []); g.push(i); } continue; }
       if (now >= T.until) {
         grid.s(i, 0); hp.s(i, 0); cells.push(i, 0);
         if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); }
@@ -3922,6 +3958,7 @@ setInterval(() => {
     if (cells.length || dmg.length) wireFanout(room, 'terrain-set', { cells, dmg });
     if (liq.length) emitFineCells(room, liq);
     if (gone.length) io.to(room).emit('magic-wall-end', { cells: gone });
+    for (const [k, list] of due) setTimeout(() => magicTempEnd(room, list), Math.max(0, k - now));
     if (!M.size) magicTemp.delete(room);
   }
   for (const [room, rs] of _magicRunes) { for (let k = rs.length - 1; k >= 0; k--) if (now >= rs[k].until) { io.to(room).emit('magic-rune-gone', { id: rs[k].id }); rs.splice(k, 1); } if (!rs.length) _magicRunes.delete(room); }
@@ -27874,6 +27911,7 @@ io.on('connection', (socket) => {
     // (step 3e) a shot that landed: the ice / the wall where it came down (a wall only on ground under it — else it falls apart in the air)
     let land = null, n = 0, tx = Math.round(m.x), ty = Math.round(m.y), air = m.air ? 1 : 0;
     if (L.land === 'freeze') { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); air = 0; }
+    else if (L.land === 'wall' && (m.side === 1 || m.side === -1) && (n = magicWallSide(L.room, +m.x, +m.y, m.side, L.SK)) != null) { land = 'wall'; air = 0; }   // (step 3f: out of a face, level)
     else if (L.land === 'wall') { const g = magicGroundAt(L.room, +m.x, +m.y); if (g && Math.abs(g.y - m.y) <= 3 * TERRAIN_CELL) { land = 'wall'; tx = g.x; ty = g.y; n = magicWall(L.room, g.x, g.y, L.SK); air = 0; } else air = 1; }
     io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell });
   });

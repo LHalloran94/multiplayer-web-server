@@ -89,7 +89,7 @@
     //     `blastF` its push, `dmg` health at its middle). `armS` before it can go off · at most `most` a caster.
     freeze: { name: 'Freeze', school: 'frost', form: 'burst', tier: 0, cd: 4, stance: 'level', kind: 'freeze', learn: 3, reach: 420, secs: 30, cells: 90, ringMs: 70, speed: 620, life: 1.3, grav: 0.04, r: 3.5,
       plain: { keys: [D, L, D, R], rune: [2, 4, 6, 7] } },
-    stonewall: { name: 'Stone wall', school: 'earth', form: 'placed', tier: 1, cd: 8, stance: 'level', kind: 'wall', learn: 5, reach: 360, secs: 45, crackS: 6, wide: 2, high: 12, rowMs: 55, crumbleMs: 110, thruLiq: true, speed: 560, life: 3, grav: 0.35, r: 4.5,
+    stonewall: { name: 'Stone wall', school: 'earth', form: 'placed', tier: 1, cd: 8, stance: 'level', kind: 'wall', learn: 5, reach: 360, secs: 45, crackS: 6, wide: 2, high: 12, rowMs: 55, crumbleMs: 30, thruLiq: true, speed: 560, life: 3, grav: 0.35, r: 4.5,
       plain: { keys: [D, U, U, L, D], rune: [6, 7, 8, 5, 2] } },
     rune: { name: 'Warding rune', school: 'wards', form: 'placed', tier: 1, cd: 6, stance: 'level', kind: 'rune', learn: 5, reach: 300, secs: 180, armS: 1.5, most: 3, blastR: 90, blastF: 14, dmg: 3,
       plain: { keys: [R, L, L, D, U], rune: [0, 3, 6, 7, 4] } },
