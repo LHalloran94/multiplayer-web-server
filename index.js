@@ -15016,6 +15016,10 @@ const relayCfg = {
 // avRoom → Map(sid → motion payload). The LATEST position only: this is a relay, not a queue — a
 // superseded position has no value and buffering them would just add latency.
 const roomPos = {};
+// (magic step 3i) A DOUBLE'S STREAM — its caster's packets with `dbl` (the cast's id), kept APART from the caster's own record (one per sender in `roomPos`
+//   would have been overwritten by it) and sent beside it to whoever is sent the caster: room → Map(sid → record). Only for a double that caster cast and
+//   that has not ended (`_magicDoubles`); dropped when it bursts, runs out, or its caster leaves. Never a player: nothing iterating `roomPos` sees it.
+const roomDblPos = {};
 // avRoom → Map(sid → { username, fill }). ⚠️ IDENTITY IS NOT MOTION AND MUST NOT RIDE THE POSITION
 // PACKET. The P2P sender puts `username` and `fill` (which can carry an imageUrl) in EVERY message at
 // 50Hz — free-ish peer-to-peer, but over a relay that is server egress multiplied by the cap. So it is
@@ -15072,10 +15076,15 @@ function runRelayTick() {
       // stops advancing while the playhead keeps moving, so it thrashes against INTERP_RESYNC_MS.
       // ⚠️ "Changed since last tick" alone would be bug shape #1 (absent reads as empty): a receiver who
       // has never been told about a peer must still get them. Hence per-PAIR versions — no entry ⇒ send.
+      const dpos = roomDblPos[room];
       const take = (other) => {
         const p = pos.get(other); if (!p) return;
-        if (seen.get(other) === p._q) return;      // this receiver already has this exact sample
-        seen.set(other, p._q); a.push(p);
+        if (seen.get(other) !== p._q) { seen.set(other, p._q); a.push(p); }      // (unless this receiver already has this exact sample)
+        // (magic step 3i) …and the caster's double, if one is out (its own ack key)
+        const d = dpos && dpos.get(other); if (!d) return;
+        const DQ = _magicDoubles.get(room), q = DQ && DQ.get(d.dbl);
+        if (!q || q.by !== other || Date.now() > q.until) { dpos.delete(other); if (!dpos.size) delete roomDblPos[room]; return; }
+        if (seen.get('d:' + other) !== d._q) { seen.set('d:' + other, d._q); a.push(d); }
       };
       for (const other of sel.near) take(other);
       if (sendFar) for (const other of sel.far) take(other);
@@ -15107,7 +15116,7 @@ function restartRelayLoop() {
 // go once via roomProfile — at 50Hz × the cap they would dominate egress) and a client-supplied `id`.
 const RELAY_POS_DROP = new Set(['username', 'fill', 'id']);
 let relaySeqCounter = 0;
-function relayPos(room, sid, msg) {
+function relayPos(room, sid, msg, into) {
   if (!room || !msg || typeof msg !== 'object') return;
   const rec = { id: sid };
   let n = 0;
@@ -15132,7 +15141,8 @@ function relayPos(room, sid, msg) {
   // into every entry of every batch — pure waste, and it would quietly inflate the per-player bandwidth
   // figure the visibility cap was chosen from.
   Object.defineProperty(rec, '_q', { value: ++relaySeqCounter, enumerable: false, writable: true });
-  (roomPos[room] || (roomPos[room] = new Map())).set(sid, rec);
+  const T = into || roomPos;   // (magic step 3i: a double's stream goes into `roomDblPos`)
+  (T[room] || (T[room] = new Map())).set(sid, rec);
 }
 function relayProfile(room, sid, msg) {
   if (!room || !msg) return;
@@ -15184,6 +15194,7 @@ function dropRelay(room, sid) {
   // and its first real change is silently swallowed as "no change". Same reasoning as the ack maps below.
   _wealthSent.delete(sid);
   const p = roomPos[room]; if (p) { p.delete(sid); if (!p.size) delete roomPos[room]; }
+  const pd = roomDblPos[room]; if (pd) { pd.delete(sid); if (!pd.size) delete roomDblPos[room]; }   // (magic step 3i: and their double's stream)
   const f = roomProfile[room]; if (f) { f.delete(sid); if (!f.size) delete roomProfile[room]; }
   // BOTH DIRECTIONS. The leaver's own ack map goes, and so does every mention of them in everyone
   // else's — otherwise a socket id that is later reused would inherit a stale "already sent" version
@@ -26057,6 +26068,8 @@ io.on('connection', (socket) => {
   // id is stamped server-side (see relayPos), so a client cannot relay a packet wearing someone else's id.
   socket.on('avt-pos', (msg) => {
     if (!relayCfg.on || !currentAvatarRoom) return;
+    // (magic step 3i) a DOUBLE'S packet: only for a double this socket cast that is still out
+    if (msg && msg.dbl != null) { const DQ = _magicDoubles.get(currentAvatarRoom), q = DQ && DQ.get(msg.dbl | 0); if (!q || q.by !== socket.id || Date.now() > q.until) return; msg.dbl = msg.dbl | 0; relayPos(currentAvatarRoom, socket.id, msg, roomDblPos); return; }
     relayPos(currentAvatarRoom, socket.id, msg);
   });
   socket.on('avt-profile', (msg) => {
@@ -27911,7 +27924,7 @@ io.on('connection', (socket) => {
   socket.on('magic-dbl', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), q = D && D.get(m.id | 0); if (!q || q.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - (socket._dblT || 0) < 40) return; socket._dblT = now;
     socket.to(room).emit('magic-dbl', { id: m.id | 0, x: Math.round(+m.x), y: Math.round(+m.y), vx: Math.max(-600, Math.min(600, Math.round(+m.vx || 0))), f: m.f < 0 ? -1 : 1, yw: m.yw == null || !isFinite(m.yw) ? null : Math.max(-100, Math.min(100, Math.round(+m.yw))), c: m.c ? 1 : 0 }); });
-  socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
+  socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); { const pd = roomDblPos[room], r = pd && pd.get(q.by); if (r && r.dbl === id) { pd.delete(q.by); if (!pd.size) delete roomDblPos[room]; } } io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
   // (magic step 3d) a RUNE stepped on: the stepper's own game tells (it sees its body exactly) — believed when this socket's body was last near it
   socket.on('rune-step', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const rs = magicRunesOf(room), q = rs.find(r => r.id === (m.id | 0)); if (!q) return;
     const p = socket._avPos; if ((q.by === socket.id && !m.own) || Date.now() < q.at || (p && Date.now() - p.t < 3000 && Math.hypot(p.x - q.x, p.y - q.y) > 140)) return; magicRuneOff(room, q, socket.id); });
