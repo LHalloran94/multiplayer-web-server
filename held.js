@@ -561,8 +561,8 @@
   { const TOMEX = { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', aimsAtRest: false };
     for (const cov of ['hearth', 'scorched']) {
       // (step 2c, the user with photos of people carrying books: "held in the middle of the spine … tucked upwards along their arm") — `rest: 'carry'` (client 16zj `magicRestPose`)
-      LOOKS['tome_' + cov] = tool(22, 15, 0.6, 0.5, 1, 'tm', Object.assign({ tome: cov, rest: 'carry', tip: 0.5, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
-      LOOKS['tome_' + cov + '_open'] = tool(22, 15, 0.6, 0.3, 1, 'tm', Object.assign({ tome: cov, open: true, rest: 'read', tip: 0.55, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
+      LOOKS['tome_' + cov] = tool(14, 9.5, 0.4, 0.5, 1, 'tm', Object.assign({ tome: cov, rest: 'carry', tip: 0.5, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
+      LOOKS['tome_' + cov + '_open'] = tool(14, 9.5, 0.4, 0.3, 1, 'tm', Object.assign({ tome: cov, open: true, rest: 'read', tip: 0.55, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
     }
     const SCX = { hitHalf: 2.2, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', aimsAtRest: false, scroll: true };
     // (step 2b) one family of looks a scroll's SPELL (`scroll_<spell>`: its back shows the spell's school sign and its tier — the user: "so that other players can see"), and the plain `scroll`.
