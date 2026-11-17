@@ -27708,6 +27708,8 @@ io.on('connection', (socket) => {
     if (SC) { if (!hm || hm.get(m.cat) !== socket.id || o._burnt || SC.spell !== m.spell) return no('scroll'); }
     else if (!H || !H.catalyst || !hm || hm.get(m.cat) !== socket.id) return no('catalyst');
     const C = SC ? {} : SPELLS.CATALYSTS[H.catalyst] || {};
+    // (step 2b) a staff held in ONE hand (anything else in this socket's hands) casts weaker (`powK1`) than in both
+    let powK = C.powK || 1; if (!SC && H.twoFree && C.powK1 != null) { const mine = eqObjs.get(socket.id); if (mine && [...mine].some(id => id !== o.id)) powK = C.powK1; }
     if (!SC && (S.innate ? C.innate !== m.spell : !magicKnows(socket, m.spell))) return no('unlearnt');
     const now = Date.now(), cds = socket._magicCd || (socket._magicCd = {}), left = (cds[m.spell] || 0) - now;
     if (!SC && left > 120 && !socket._magicNoCd) return no('cooldown', left);
@@ -27720,7 +27722,7 @@ io.on('connection', (socket) => {
       setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } }, 900); }
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst); if (!SC) cds[m.spell] = now + cd;
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
-    const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: C.powK || 1 };
+    const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: powK };
     if (SC) out.scroll = 1;
     if (S.kind === 'bolt') { _magicLive.set(id, { by: socket.id, room, x: out.x, y: out.y, until: now + S.life * 1000 + 800, reach: S.speed * S.life + 64, burn: !!S.burn, burnR: S.burnR || 1 }); if (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);

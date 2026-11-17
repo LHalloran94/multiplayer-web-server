@@ -72,7 +72,8 @@
   };
   //  cdK, powK   × every cooldown, × every spell's strength with it · innate = its own ability
   const CATALYSTS = {
-    staff: { cdK: 1.25, powK: 1.35, innate: 'glow' },
+    // (step 2b) the staff in ONE hand (something in the other) casts at `powK1`; in both, at `powK`
+    staff: { cdK: 1.25, powK: 1.35, powK1: 1, innate: 'glow' },
     wand:  { cdK: 0.75, powK: 0.85, innate: 'spark' },
     orb:   { cdK: 1,    powK: 1,    innate: 'glow' },
   };

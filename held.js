@@ -548,7 +548,8 @@
   //   OFF hand the buttons are swapped. The STAFF (two hands, 64 px — the user: the first ones were "a little too tall") is also a blunt weapon: RIGHT, not casting, swings it.
   //   The wand and the orb do not strike.
   Object.assign(LOOKS, {
-    magestaff: weapon(64 / MELEE_K, 5, 1.4, 0.30, 0.8, 'blunt', 'ms', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', right: 'chop', noSlide: true, catalyst: 'staff', tip: 139 / 150, aimsAtRest: false })),
+    // (step 2b, 2026-11-17, the user: "staffs can be used one-handed … two-handed if nothing is held in the offhand … perhaps stronger when used two-handed") — `twoFree` as a spear: both hands while the other is empty
+    magestaff: weapon(64 / MELEE_K, 5, 1.4, 0.30, 0.8, 'blunt', 'ms', { pole: true, rest: 'pole', twoFree: true, grip2: 0.56, hitHalf: 3, mark: 'rod', mat: 'wood', right: 'chop', noSlide: true, catalyst: 'staff', tip: 139 / 150, aimsAtRest: false }),
     magewand: tool(24, 3, 0.15, 0.1, 1, 'mw', { hitHalf: 1.5, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', catalyst: 'wand', tip: 1, aimsAtRest: false }, 'blunt'),
     mageorb: tool(19, 10, 0.5, 0.2, 1, 'mo', { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'iron', catalyst: 'orb', tip: 20 / 27.5, aimsAtRest: false }, 'blunt'),
   });
@@ -560,11 +561,17 @@
   { const TOMEX = { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', aimsAtRest: false };
     for (const cov of ['hearth', 'scorched']) {
       LOOKS['tome_' + cov] = tool(22, 15, 0.6, 0.94, 1, 'tm', Object.assign({ tome: cov, rest: 'hang', holdUpright: true, tip: 0.5, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
-      LOOKS['tome_' + cov + '_open'] = tool(22, 15, 0.6, 0.3, 1, 'tm', Object.assign({ tome: cov, open: true, rest: 'hang', holdUpright: true, tip: 0.55, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
+      LOOKS['tome_' + cov + '_open'] = tool(22, 15, 0.6, 0.3, 1, 'tm', Object.assign({ tome: cov, open: true, rest: 'read', tip: 0.55, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
     }
     const SCX = { hitHalf: 2.2, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', aimsAtRest: false, scroll: true };
-    LOOKS.scroll = tool(14, 4.4, 0.1, 0.5, 1, 'sc', Object.assign({ rest: 'upright', tip: 1 }, SCX), 'blunt');
-    for (const k of ['open', 'b1', 'b2', 'b3', 'b4']) LOOKS['scroll_' + k] = tool(14, 4.4, 0.1, 0.03, 1, 'sc', Object.assign({ rest: 'hang', holdUpright: true, open: true, tip: 0.7 }, SCX), 'blunt');
+    // (step 2b) one family of looks a scroll's SPELL (`scroll_<spell>`: its back shows the spell's school sign and its tier — the user: "so that other players can see"), and the plain `scroll`.
+    //   `rest: 'read'` = held up in front of the face (client 16zj `magicReadRest`), turned round you as any resting thing (16n / 16p). A scroll is held in the OFF hand with the other free
+    //   (it casts from that hand): client 16p `handWant`.
+    //   ⚠️ held.js is inlined in the client BEFORE spells.js, so the spells are listed here — one per spells.js `SCROLLS` entry (server/items.js refuses to start if one is missing)
+    for (const base of ['scroll', 'scroll_firebolt', 'scroll_greatbolt']) {
+      LOOKS[base] = tool(14, 4.4, 0.1, 0.5, 1, 'sc', Object.assign({ rest: 'upright', tip: 1 }, SCX), 'blunt');
+      for (const k of ['open', 'b1', 'b2', 'b3', 'b4']) LOOKS[base + '_' + k] = tool(14, 4.4, 0.1, 0.03, 1, 'sc', Object.assign({ rest: 'read', open: true, tip: 0.7 }, SCX), 'blunt');
+    }
   }
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
