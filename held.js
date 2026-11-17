@@ -571,8 +571,8 @@
     //   ⚠️ held.js is inlined in the client BEFORE spells.js, so the spells are listed here — one per spells.js `SCROLLS` entry (server/items.js refuses to start if one is missing)
     for (const base of ['scroll', 'scroll_firebolt', 'scroll_greatbolt']) {
       LOOKS[base] = tool(14, 4.4, 0.1, 0.5, 1, 'sc', Object.assign({ rest: 'upright', tip: 1 }, SCX), 'blunt');
-      // (step 2c) held up to be read as the open tome is: the hand under its bottom rod, the sheet standing up from it, its writing to the reader, its back (the spell's sign) to everybody else
-      for (const k of ['open', 'b1', 'b2', 'b3', 'b4']) LOOKS[base + '_' + k] = tool(14, 4.4, 0.1, 0.03, 1, 'sc', Object.assign({ rest: 'read', open: true, tip: 0.6 }, SCX), 'blunt');
+      // (step 2d, the user: held from the TOP rod "makes more sense") hung from its top rod in front of your face, its writing to you, its back (the spell's sign) to everybody else
+      for (const k of ['open', 'b1', 'b2', 'b3', 'b4']) LOOKS[base + '_' + k] = tool(14, 4.4, 0.1, 0.03, 1, 'sc', Object.assign({ rest: 'read', open: true, tip: 0.7 }, SCX), 'blunt');
     }
   }
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
