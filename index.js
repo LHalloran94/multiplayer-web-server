@@ -3965,6 +3965,7 @@ setInterval(() => {
 }, 250);
 // THE RUNES lying in each room (in memory: a restart clears them) · one going off: everybody is told; each player's own game takes the blast for its own body
 const _magicRunes = new Map();
+const _magicDoubles = new Map();   // (magic step 3g) room → Map(cast id → { by, until }): the doubles walking, so one bursts once
 function magicRunesOf(room) { let a = _magicRunes.get(room); if (!a) _magicRunes.set(room, a = []); return a; }
 function magicRuneOff(room, q, by) { const rs = magicRunesOf(room), k = rs.indexOf(q); if (k < 0) return; rs.splice(k, 1); const S = SPELLS.of(q.spell) || {};
   io.to(room).emit('magic-rune-off', { id: q.id, from: q.by, by, x: q.x, y: q.y, r: S.blastR || 90, f: S.blastF || 14, dmg: S.dmg || 3, pow: q.pow || 1 }); }
@@ -27838,6 +27839,7 @@ io.on('connection', (socket) => {
       if (SPELLS.is(m.rdy)) out.rdy = m.rdy;
       if (m.ch) { out.ch = 1; out.h = m.h ? 1 : 0; if (isFinite(m.px) && isFinite(m.py)) { out.px = Math.max(-900, Math.min(900, Math.round(+m.px))); out.py = Math.max(-900, Math.min(900, Math.round(+m.py))); } }   // (step 2h: the spell is held in the HAND — a scroll's; step 3b: which hand, and where it points from the body)
       if (m.bad) out.bad = 1;
+      if (typeof m.lf === 'string') out.lf = m.lf.slice(0, 64);   // (magic step 3g: the thing held by the thread)
     } else if (typeof m.why === 'string') out.why = m.why.slice(0, 12);
     socket.to(room).emit('magic-state', out);
   });
@@ -27859,6 +27861,9 @@ io.on('connection', (socket) => {
     if (!SC && left > 120 && !socket._magicNoCd) return no('cooldown', left);
     if (!isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return no('bad');
     const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 520) return no('far');
+    // (magic step 3g) a LIFT names a loose thing nobody holds · a DOUBLE starts by its caster and walks no faster than a run
+    if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
+    if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (step 2) REAGENTS: what the spell uses up, from what you carry (where things cost something), unless the panel's 'Spells need no reagents (for testing)'
     const gated = invGatedRoom(room), key = playerKeyFor(socket.id), reag = !SC && Array.isArray(S.uses) && gated && !socket._magicNoReag ? S.uses : null;
     if (reag) { for (const [it, n] of reag) if (ledger.itemCount(key, it) < n) return no('reagent:' + it); for (const [it, n] of reag) ledger.spendItem(key, it, n); sendInvSync(socket, room); }
@@ -27874,6 +27879,9 @@ io.on('connection', (socket) => {
     const shot = (S.kind === 'freeze' || S.kind === 'wall') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;
     if (S.kind === 'bolt' || shot) { const lf = S.life || 1, g = (S.grav || 0) * 1500; _magicLive.set(id, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: S.speed * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, land: shot ? S.kind : null, SK, spell: m.spell }); if (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
+    if (S.kind === 'lift') out.obj = m.obj;
+    if (S.kind === 'double') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); out.dv = Math.max(-400, Math.min(400, Math.round(+m.dv || 0)));
+      let D = _magicDoubles.get(room); if (!D) _magicDoubles.set(room, D = new Map()); for (const [k, q] of D) if (now > q.until) D.delete(k); D.set(id, { by: socket.id, until: now + (S.secs || 6) * 1000 * (socket._magicSecsK || 1) + 3000 }); }
     // (magic step 3d) batch b: the world changed where it was aimed — a placed thing on the ground (the point moved there), water frozen, a wall raised
     if (S.kind === 'rune' || (S.kind === 'wall' && !shot)) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; }
     if (S.kind === 'freeze' && !shot) out.n = magicFreeze(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK);
@@ -27898,6 +27906,8 @@ io.on('connection', (socket) => {
     io.to(room).emit('scroll-read', { from: socket.id, id: o.id, spell: SC.spell, ms });
   });
   socket.on('scroll-charge-off', () => { socket._magicCharge = null; });
+  // (magic step 3g) a DOUBLE struck — whoever's game saw it: everybody is told it bursts (once)
+  socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
   // (magic step 3d) a RUNE stepped on: the stepper's own game tells (it sees its body exactly) — believed when this socket's body was last near it
   socket.on('rune-step', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const rs = magicRunesOf(room), q = rs.find(r => r.id === (m.id | 0)); if (!q) return;
     const p = socket._avPos; if ((q.by === socket.id && !m.own) || Date.now() < q.at || (p && Date.now() - p.t < 3000 && Math.hypot(p.x - q.x, p.y - q.y) > 140)) return; magicRuneOff(room, q, socket.id); });
