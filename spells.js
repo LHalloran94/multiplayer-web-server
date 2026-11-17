@@ -56,9 +56,16 @@
   //  speed, life, grav, r   a bolt: px a second, seconds it flies, how much gravity pulls it (0–1), its radius (px)
   //  dmg      health it takes (of 10) · burn = what it hits catches fire
   //  innate   a catalyst's own ability: no input, not learnt
+  //  learn    (step 2) how many times it must be put in rightly with its tome open before it is yours (this life)
+  //  uses     (step 2) the reagents one cast uses up: [[item id, how many], …] (server/items.js, kind 'reagent')
+  //  burnR    cells round where it lands that catch (a bolt with `burn`), default 1
   const SPELLS = {
-    firebolt: { name: 'Firebolt', school: 'fire', form: 'bolt', tier: 0, cd: 2.5, stance: 'level', kind: 'bolt',
+    firebolt: { name: 'Firebolt', school: 'fire', form: 'bolt', tier: 0, cd: 2.5, stance: 'level', kind: 'bolt', learn: 3,
       speed: 760, life: 1.1, grav: 0.06, r: 3, dmg: 1.2, burn: true, plain: { keys: [U, R, R, D, R], rune: [6, 0, 4, 2, 8] } },
+    // (step 2, 2026-11-17 — the user's step 0 pick: "1A for the quick low one, 1B for a bigger / stronger version") the same bolt one tier up: slower, heavier, it burns
+    //   wider, and it uses up an EMBER SALT each cast
+    greatbolt: { name: 'Great firebolt', school: 'fire', form: 'bolt', tier: 1, cd: 6, stance: 'level', kind: 'bolt', learn: 5, uses: [['ember_salt', 1]],
+      speed: 560, life: 1.4, grav: 0.1, r: 5.5, dmg: 2.8, burn: true, burnR: 2, plain: { keys: [U, R, R, D, R, U], rune: [6, 0, 4, 2, 8, 7] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -70,35 +77,86 @@
     orb:   { cdK: 1,    powK: 1,    innate: 'glow' },
   };
 
+  // ⭐ STEP 2 (2026-11-17): TOMES, SCROLLS. A tome is an ITEM (server/items.js makes one per entry, kind 'tome'): its pages, each one spell, in order. A page may be
+  //   DAMAGED — 'torn' (its lower half gone: the rune is lost), 'burnt' (its corner burnt: the end of the input and your own part are lost), 'missing' (torn out: a stub,
+  //   nothing on it). Damage only hides writing: a torn or burnt page can still be learnt from by whoever works out what is missing; a missing page cannot.
+  //   `cover` = its look (server/held.js `tome_<cover>`, `tome_<cover>_open`).
+  const TOMES = {
+    tome_hearth: { name: 'The hearth primer', cover: 'hearth', pages: [{ spell: 'firebolt' }, { spell: 'greatbolt' }] },
+    tome_scorched: { name: 'A scorched primer', cover: 'scorched', pages: [{ spell: 'firebolt', dmg: 'torn' }, { dmg: 'missing' }, { spell: 'greatbolt', dmg: 'burnt' }] },
+  };
+  // A SCROLL: one use, no catalyst, no input — unrolled (the starting button held), aimed, fired; it burns up as the spell leaves. Carried in a stack (item kind 'scroll').
+  const SCROLLS = {
+    scroll_firebolt: { name: 'Scroll of firebolt', spell: 'firebolt' },
+    scroll_greatbolt: { name: 'Scroll of great firebolt', spell: 'greatbolt' },
+  };
+
   const is = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(SPELLS, id);
   const of = (id) => is(id) ? SPELLS[id] : null;
-  // the keys of a spell: `lang` = school + form (+ an "up" a tier), else its plain sequence
-  const keysOf = (id, lang) => { const S = of(id); if (!S || S.innate) return null;
-    if (!lang) return S.plain ? S.plain.keys.slice() : null;
-    const k = SCHOOLS[S.school].keys.concat(FORMS[S.form].keys); for (let i = 0; i < (S.tier || 0); i++) k.push(U); return k; };
-  // …and its rune, as ONE path through the nine points (the school's stroke, on to the form's). `parts` = where the form's stroke begins
-  const runeOf = (id, lang) => { const S = of(id); if (!S || S.innate) return null;
-    if (!lang) return S.plain ? { pts: S.plain.rune.slice(), parts: S.plain.rune.length } : null;
-    const a = SCHOOLS[S.school].rune, b = FORMS[S.form].rune; return { pts: a.concat(b[0] === a[a.length - 1] ? b.slice(1) : b), parts: a.length }; };
+  // ⭐ YOUR OWN VERSION (step 2 — kickoff §'against copied inputs' 1): every spell's input = the shared core + ONE PART worked out from you and this life. The SERVER makes
+  //   the number `h` (from a secret it keeps, your key, your life, the spell — server `magicOwnH`) and sends it to you; `ownOf` turns it into the part, the same way here and
+  //   there: a KEY put in after the school's piece, and a POINT the rune runs through after the school's stroke. null `h` = no own part (the core alone, as in step 1).
+  const ownOf = (id, lang, h) => { if (h == null || !isFinite(h)) return null; const S = of(id); if (!S || S.innate) return null; h = Math.abs(Math.floor(h));
+    const R0 = runeCore(id, lang); if (!R0) return null; const a = R0.pts.slice(0, R0.parts), b = R0.pts.slice(R0.parts), ok = [];
+    for (let p = 0; p < 9; p++) { if (p === a[a.length - 1] || p === b[0]) continue; const full = a.concat([p], b); if (runeNorm(full).length === runeNorm(R0.pts).length + 1) ok.push(p); }
+    return { k: h & 3, p: ok.length ? ok[(h >> 2) % ok.length] : null }; };
+  // the keys of a spell: `lang` = school + form (+ an "up" a tier), else its plain sequence; `own` (from `ownOf`) put in after the first two
+  const keysOf = (id, lang, own) => { const S = of(id); if (!S || S.innate) return null; let k;
+    if (!lang) { if (!S.plain) return null; k = S.plain.keys.slice(); }
+    else { k = SCHOOLS[S.school].keys.concat(FORMS[S.form].keys); for (let i = 0; i < (S.tier || 0); i++) k.push(U); }
+    if (own && own.k != null) k.splice(2, 0, own.k & 3);
+    return k; };
+  // …and its rune, as ONE path through the nine points (the school's stroke, on to the form's, then one UNDERLINE a tier — bottom left to bottom right). `parts` = where the form's
+  //   stroke begins (after the own point, when there is one)
+  const runeCore = (id, lang) => { const S = of(id); if (!S || S.innate) return null;
+    if (!lang) return S.plain ? { pts: S.plain.rune.slice(), parts: Math.min(3, S.plain.rune.length) } : null;
+    const a = SCHOOLS[S.school].rune, b = FORMS[S.form].rune, pts = a.concat(b[0] === a[a.length - 1] ? b.slice(1) : b);
+    for (let i = 0; i < (S.tier || 0); i++) pts.push(6, 8);
+    return { pts, parts: a.length }; };
+  const runeOf = (id, lang, own) => { const R0 = runeCore(id, lang); if (!R0) return null;
+    if (!own || own.p == null) return R0;
+    return { pts: R0.pts.slice(0, R0.parts).concat([own.p], R0.pts.slice(R0.parts)), parts: R0.parts + 1, own: R0.parts }; };
   // a path through the points with every point that lies exactly between its neighbours taken out (6 → 0 passes over 3: the same line)
   const runeNorm = (pts) => { const p = []; for (const n of pts) if (!p.length || p[p.length - 1] !== n) p.push(n);
     for (let i = 1; i < p.length - 1;) { const a = p[i - 1], b = p[i], c = p[i + 1];
       if ((a % 3) + (c % 3) === 2 * (b % 3) && Math.floor(a / 3) + Math.floor(c / 3) === 2 * Math.floor(b / 3) && a !== c) p.splice(i, 1); else i++; }
     return p; };
   const castable = () => Object.keys(SPELLS).filter(id => !SPELLS[id].innate);
-  // keys so far → { spell } when they are exactly a spell's · { more: true } while some spell still begins with them · null = wrong
-  const matchKeys = (seq, lang, ids) => { let more = false;
-    for (const id of ids || castable()) { const k = keysOf(id, lang); if (!k || k.length < seq.length) continue;
+  // keys so far → { spell } when they are exactly a spell's (and `more` too when a longer spell also begins with them — firebolt is the start of great firebolt) ·
+  //   { more: true } while some spell still begins with them · null = wrong. `ownH(id)` = that spell's own number, or null
+  const matchKeys = (seq, lang, ids, ownH) => { let more = false, spell = null;
+    for (const id of ids || castable()) { const k = keysOf(id, lang, ownH ? ownOf(id, lang, ownH(id)) : null); if (!k || k.length < seq.length) continue;
       let ok = true; for (let i = 0; i < seq.length; i++) if (k[i] !== seq[i]) { ok = false; break; }
-      if (!ok) continue; if (k.length === seq.length) return { spell: id }; more = true; }
-    return more ? { more: true } : null; };
-  // points joined so far → the same three answers
-  const matchRune = (pts, lang, ids) => { const p = runeNorm(pts); let more = false;
-    for (const id of ids || castable()) { const R0 = runeOf(id, lang); if (!R0) continue; const k = runeNorm(R0.pts); if (k.length < p.length) continue;
-      let ok = true; for (let i = 0; i < p.length; i++) if (k[i] !== p[i]) { ok = false; break; }
-      if (!ok) continue; if (k.length === p.length) return { spell: id }; more = true; }
-    return more ? { more: true } : null; };
+      if (!ok) continue; if (k.length === seq.length) spell = spell || id; else more = true; }
+    return spell ? { spell, more } : more ? { more: true } : null; };
+  // points joined so far → the same answers. (step 2) A point just passed over on the way to the next — 8 → 6 runs over 7 — is not wrong yet: the stroke is still going
+  const midOf = (a, b, c) => a !== c && (a % 3) + (c % 3) === 2 * (b % 3) && Math.floor(a / 3) + Math.floor(c / 3) === 2 * Math.floor(b / 3);
+  const matchRune = (pts, lang, ids, ownH) => { const p = runeNorm(pts); let more = false, spell = null;
+    for (const id of ids || castable()) { const R0 = runeOf(id, lang, ownH ? ownOf(id, lang, ownH(id)) : null); if (!R0) continue; const k = runeNorm(R0.pts); if (k.length < p.length) continue;
+      let ok = true, bad = -1; for (let i = 0; i < p.length; i++) if (k[i] !== p[i]) { ok = false; bad = i; break; }
+      if (!ok) { if (bad === p.length - 1 && bad > 0 && midOf(p[bad - 1], p[bad], k[bad])) more = true; continue; }
+      if (k.length === p.length) spell = spell || id; else more = true; }
+    return spell ? { spell, more } : more ? { more: true } : null; };
+  // A RUNE DRAWN FREELY (moved here from the client in step 2, so the server checks a practice the same way): a path as `n` points evenly along it, fitted to a unit box
+  //   (the longer side = 1), middle at 0,0 · how far one drawn path lies from a spell's rune, on average, as a share of its size (where and how big do not matter)
+  function pathFit(flat, n) {
+    const m = flat.length / 2; if (m < 2) return null;
+    let len = 0; const seg = [0]; for (let i = 1; i < m; i++) { len += Math.hypot(flat[i * 2] - flat[i * 2 - 2], flat[i * 2 + 1] - flat[i * 2 - 1]); seg.push(len); }
+    if (len < 1e-6) return null;
+    const out = []; let j = 1;
+    for (let k = 0; k < n; k++) { const d = len * k / (n - 1); while (j < m - 1 && seg[j] < d) j++; const u = (d - seg[j - 1]) / Math.max(1e-9, seg[j] - seg[j - 1]);
+      out.push(flat[j * 2 - 2] + (flat[j * 2] - flat[j * 2 - 2]) * u, flat[j * 2 - 1] + (flat[j * 2 + 1] - flat[j * 2 - 1]) * u); }
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (let k = 0; k < n; k++) { x0 = Math.min(x0, out[k * 2]); x1 = Math.max(x1, out[k * 2]); y0 = Math.min(y0, out[k * 2 + 1]); y1 = Math.max(y1, out[k * 2 + 1]); }
+    const s = Math.max(x1 - x0, y1 - y0, 1e-6), cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    for (let k = 0; k < n; k++) { out[k * 2] = (out[k * 2] - cx) / s; out[k * 2 + 1] = (out[k * 2 + 1] - cy) / s; }
+    out.len = len; return out;
+  }
+  const runeDist = (fit, id, lang, own) => { const R0 = runeOf(id, lang, own); if (!R0 || !fit) return 1e9; const flat = []; for (const p of R0.pts) flat.push(p % 3, Math.floor(p / 3));
+    const T = pathFit(flat, fit.length / 2); if (!T) return 1e9; let d = 0; const n = fit.length / 2; for (let k = 0; k < n; k++) d += Math.hypot(fit[k * 2] - T[k * 2], fit[k * 2 + 1] - T[k * 2 + 1]); return d / n; };
   // a cooldown in ms with this catalyst
   const cdMs = (id, cat) => { const S = of(id), C = CATALYSTS[cat]; return S ? Math.round(S.cd * 1000 * (C ? C.cdK : 1)) : 0; };
-  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, is, of, keysOf, runeOf, runeNorm, matchKeys, matchRune, castable, cdMs };
+  const learnN = (id) => { const S = of(id); return S ? Math.max(1, S.learn || (S.tier ? 5 : 3)) : 0; };
+  const tomeOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(TOMES, item) ? TOMES[item] : null;
+  const scrollOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(SCROLLS, item) ? SCROLLS[item] : null;
+  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, is, of, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, tomeOf, scrollOf };
 });

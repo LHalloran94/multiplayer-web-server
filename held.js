@@ -552,6 +552,20 @@
     magewand: tool(24, 3, 0.15, 0.1, 1, 'mw', { hitHalf: 1.5, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', catalyst: 'wand', tip: 1, aimsAtRest: false }, 'blunt'),
     mageorb: tool(19, 10, 0.5, 0.2, 1, 'mo', { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'iron', catalyst: 'orb', tip: 20 / 27.5, aimsAtRest: false }, 'blunt'),
   });
+  // ⭐ MAGIC, STEP 2 (2026-11-17): THE TOME and THE SCROLL (client 16zj; what is in them: server/spells.js `TOMES`, `SCROLLS`). One item, more than one look, swapped on each screen
+  //   (the server's object keeps the first): a TOME is SHUT (`tome_<cover>`: carried hanging from your hand by the top of its spine, the cover to us) or OPEN (`…_open`, while
+  //   its holder reads it: held up in front of the face on the hand under the spine, its pages turned to the reader). A SCROLL is ROLLED (`scroll`, carried upright in the fist),
+  //   UNROLLED (`scroll_open`, while the starting button is held: hung from its top rod in front of the face, the writing to the reader) and then BURNING as its spell leaves
+  //   (`scroll_b1` … `scroll_b4`, less of the sheet each). `tip` = where the practice signs / the spell gather, as a fraction of its length.
+  { const TOMEX = { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', aimsAtRest: false };
+    for (const cov of ['hearth', 'scorched']) {
+      LOOKS['tome_' + cov] = tool(22, 15, 0.6, 0.94, 1, 'tm', Object.assign({ tome: cov, rest: 'hang', holdUpright: true, tip: 0.5, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
+      LOOKS['tome_' + cov + '_open'] = tool(22, 15, 0.6, 0.3, 1, 'tm', Object.assign({ tome: cov, open: true, rest: 'hang', holdUpright: true, tip: 0.55, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
+    }
+    const SCX = { hitHalf: 2.2, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', aimsAtRest: false, scroll: true };
+    LOOKS.scroll = tool(14, 4.4, 0.1, 0.5, 1, 'sc', Object.assign({ rest: 'upright', tip: 1 }, SCX), 'blunt');
+    for (const k of ['open', 'b1', 'b2', 'b3', 'b4']) LOOKS['scroll_' + k] = tool(14, 4.4, 0.1, 0.03, 1, 'sc', Object.assign({ rest: 'hang', holdUpright: true, open: true, tip: 0.7 }, SCX), 'blunt');
+  }
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
   // an item's object shape, as server/items.js and the wire carry it

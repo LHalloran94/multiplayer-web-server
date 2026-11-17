@@ -322,6 +322,23 @@ SVG.mageorb = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path
 ITEMS.mage_staff = { name: 'Dark staff', kind: 'weapon', tier: 0, svg: SVG.magestaff, obj: HELD.objOf('magestaff'), make: { mats: [], prima: 80 } };
 ITEMS.mage_wand = { name: 'Branch wand', kind: 'tool', tier: 0, svg: SVG.magewand, obj: HELD.objOf('magewand'), make: { mats: [], prima: 50 } };
 ITEMS.mage_orb = { name: 'Clawed orb', kind: 'tool', tier: 0, svg: SVG.mageorb, obj: HELD.objOf('mageorb'), make: { mats: [], prima: 70 } };
+// ⭐ MAGIC, STEP 2 (2026-11-17): TOMES (one object each — kind 'tome': its pages are server/spells.js `TOMES`; held looks `tome_<cover>` / `tome_<cover>_open`), SCROLLS (a stack,
+//   one use each — `SCROLLS`; held look `scroll`) and REAGENTS (counted, like arrows — what a spell's `uses` takes). Client 16zj. Two of the same tome are the same: a damaged
+//   copy is its own item.
+{ const SP = require('./spells');
+  const tomeSvg = (cov, edge, burnt) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="5.4" y="3.6" width="14" height="17.4" rx="1.2" fill="#e4d6b0"/><rect x="4.4" y="3" width="13.6" height="18" rx="1.3" fill="' + cov + '"/>'
+    + '<rect x="4.4" y="3" width="2" height="18" fill="' + edge + '"/><path d="M11.2 7.6 L14.2 12 L11.2 16.4 L8.2 12 Z" fill="none" stroke="#c6a048" stroke-width="1"/><circle cx="11.2" cy="12" r="1" fill="#c6a048"/>'
+    + (burnt ? '<path d="M18 21 L18 14.6 L15.8 16.4 L14.6 14.8 L12.6 17.6 L11 16.8 L9.6 21 Z" fill="#1a110b"/><path d="M18 14.6 L15.8 16.4 L14.6 14.8 L12.6 17.6 L11 16.8 L9.6 21" fill="none" stroke="#c2581e" stroke-width=".6"/>' : '') + '</svg>';
+  SVG.tome_hearth = tomeSvg('#7a2c1e', '#4e1a12', false);
+  SVG.tome_scorched = tomeSvg('#4a3a2c', '#2c2018', true);
+  for (const id of Object.keys(SP.TOMES)) { const T = SP.TOMES[id]; ITEMS[id] = { name: T.name, kind: 'tome', tier: 0, svg: SVG['tome_' + T.cover] || SVG.tome_hearth, obj: HELD.objOf('tome_' + T.cover), make: null }; }
+  const scrollSvg = (seal) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 9 L16 3.6 L19.6 11 L8.6 16.4 Z" fill="#e6d7ac" stroke="#a08856" stroke-width=".6"/><path d="M8.6 16.4 L19.6 11" stroke="#b89c64" stroke-width="2.4" stroke-linecap="round"/>'
+    + '<path d="M5 9 L16 3.6" stroke="#c8ae74" stroke-width="1.6" stroke-linecap="round"/><circle cx="12.8" cy="13.6" r="2.2" fill="' + seal + '"/><path d="M12.2 15.4 L11.2 20 M13.6 15.4 L14.8 19.6" stroke="' + seal + '" stroke-width="1"/></svg>';
+  for (const id of Object.keys(SP.SCROLLS)) { const S = SP.SPELLS[SP.SCROLLS[id].spell]; ITEMS[id] = { name: SP.SCROLLS[id].name, kind: 'scroll', tier: S && S.tier ? 1 : 0, svg: scrollSvg(S && S.tier ? '#d8902a' : '#a82a22'), obj: HELD.objOf('scroll'), stack: true, make: null }; }
+  SVG.ember_salt = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M6 19 L8.4 11.6 L11.4 18.4 Z" fill="#e0662a"/><path d="M10 19.4 L13.2 8 L16.6 19 Z" fill="#f08a34"/><path d="M14.6 19.2 L17.2 13 L19.4 18.6 Z" fill="#c84a1c"/>'
+    + '<path d="M13.2 8 L14.2 14 L16.6 19" fill="none" stroke="#ffd59a" stroke-width=".6"/><path d="M4.6 19.8 H20" stroke="#5a3a26" stroke-width="1.2" stroke-linecap="round"/></svg>';
+  ITEMS.ember_salt = { name: 'Ember salt', kind: 'reagent', tier: 0, svg: SVG.ember_salt, make: { mats: [], prima: 3 } };
+}
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);
 

@@ -3813,6 +3813,42 @@ const DRV_LEASE_MS = 350;
 // a TUG (`obj-tug`), which the HOLDER's machine decides and this end only carries and records.
 const roomObjHeld = {};   // room → Map<objId, socketId>
 let _magicSeq = 0; const _magicLive = new Map();   // (magic step 1) bolts in the air: cast id → { by, room, x, y, until, reach, burn } — `magic-hit` ends one
+// ⭐ MAGIC, STEP 2 (2026-11-17, `scratchpad/kickoff_magic.md` §ROUND 3 step 2): WHAT YOU HAVE LEARNT THIS LIFE, by player key (`playerKeyFor` — a Level's are its own): each spell's
+//   count of right practices with its tome open (learnt at `SPELLS.learnN`), and which LIFE it is — a death clears the counts and starts the next life, so YOUR OWN PART of
+//   every spell's input (`magicOwnH`: from a secret kept here, your key, your life, the spell) changes with it. Kept in the database: a reload or a restart is the same life.
+db.exec(`CREATE TABLE IF NOT EXISTS magic_life (pkey TEXT PRIMARY KEY, life INTEGER NOT NULL DEFAULT 1)`);
+db.exec(`CREATE TABLE IF NOT EXISTS magic_learnt (pkey TEXT NOT NULL, spell TEXT NOT NULL, n INTEGER NOT NULL, PRIMARY KEY (pkey, spell))`);
+db.exec(`CREATE TABLE IF NOT EXISTS magic_meta (k TEXT PRIMARY KEY, v TEXT)`);
+const MAGIC_SECRET = (() => { const r = db.prepare('SELECT v FROM magic_meta WHERE k = ?').get('secret'); if (r) return r.v;
+  const v = crypto.randomBytes(24).toString('hex'); db.prepare('INSERT INTO magic_meta (k, v) VALUES (?, ?)').run('secret', v); return v; })();
+const _magicMind = new Map();                        // pkey → { life, n: { spell: count } } (the rows above, read once)
+function magicMindOf(pkey) {
+  let M = _magicMind.get(pkey); if (M) return M;
+  const r = db.prepare('SELECT life FROM magic_life WHERE pkey = ?').get(pkey); M = { life: r ? r.life : 1, n: {} };
+  for (const q of db.prepare('SELECT spell, n FROM magic_learnt WHERE pkey = ?').all(pkey)) if (SPELLS.is(q.spell)) M.n[q.spell] = q.n;
+  _magicMind.set(pkey, M); if (_magicMind.size > 4000) _magicMind.delete(_magicMind.keys().next().value); return M;
+}
+function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC_SECRET).update(pkey + '|' + life + '|' + spell).digest().readUInt32BE(0) & 0x3fffffff; }
+function magicKnows(socket, spell) { if (socket._magicAll) return true; const M = magicMindOf(playerKeyFor(socket.id)); return (M.n[spell] | 0) >= SPELLS.learnN(spell); }
+// what this socket is told: its counts, how many each needs, and its own numbers for the spells it knows, the pages of every tome in its hands (and every spell, knowing all)
+function magicKnowSend(socket) {
+  const key = playerKeyFor(socket.id), M = magicMindOf(key), own = {}, need = {}, room = socket._magicRoom;
+  const want = new Set(Object.keys(M.n));
+  if (socket._magicAll) for (const id of SPELLS.castable()) want.add(id);
+  { const mine = eqObjs.get(socket.id), map = room && roomObjects[room]; if (mine && map) for (const oid of mine) { const o = map.get(oid), T = o && SPELLS.tomeOf(o.item); if (T) for (const p of T.pages) if (p.spell && p.dmg !== 'missing') want.add(p.spell); } }
+  for (const id of want) if (SPELLS.is(id) && !SPELLS.of(id).innate) { need[id] = SPELLS.learnN(id); if (socket._magicOwn !== false) own[id] = magicOwnH(key, M.life, id); }
+  socket.emit('magic-know', { life: M.life, n: M.n, need, own, all: socket._magicAll ? 1 : 0, ownOn: socket._magicOwn !== false ? 1 : 0 });
+}
+function magicDied(socket) {
+  const key = playerKeyFor(socket.id), M = magicMindOf(key);
+  M.life++; M.n = {}; socket._tomeOpen = null;
+  db.prepare('DELETE FROM magic_learnt WHERE pkey = ?').run(key);
+  db.prepare('INSERT INTO magic_life (pkey, life) VALUES (?, ?) ON CONFLICT(pkey) DO UPDATE SET life = excluded.life').run(key, M.life);
+  magicKnowSend(socket);
+}
+// a tome in this socket's own hand, by object id (null if not)
+function magicTomeHeld(room, socket, id) { const map = roomObjects[room], o = map && typeof id === 'string' ? map.get(id) : null, hm = roomObjHeld[room];
+  return o && SPELLS.tomeOf(o.item) && hm && hm.get(id) === socket.id ? o : null; }
 // …and WHICH HAND (client 16p, 2026-10-14): the ids held in an OFF hand. A player may hold two things; everybody else has to be told
 // which is which to draw the right hand on each. Never trusted further than that: an id here that is not in the map above means nothing.
 const roomObjHeldOff = {};   // room → Set<objId>
@@ -26743,8 +26779,11 @@ io.on('connection', (socket) => {
   //  piles are real objects in real chunks and somebody else pays to receive them.
   // ══════════════════════════════════════════════════════════════════════════════════════════════════════════
   let lastDeathAt = 0;
+  socket.on('magic-died', () => { const t = Date.now(); if (currentAvatarRoom && t - (socket._magicDiedT || 0) > 1500) { socket._magicDiedT = t; magicDied(socket); } });   // (magic step 2: a death in a world where nothing is carried off — the client sends this instead of `avt-died`)
   socket.on('avt-died', () => {
     if (!currentAvatarRoom) return;
+    // (magic step 2) a death ends this life: what was learnt is forgotten (admin mode too — it keeps what you CARRY), and your own part of every spell changes
+    { const t = Date.now(); if (t - (socket._magicDiedT || 0) > 1500) { socket._magicDiedT = t; magicDied(socket); } }
     if (adminSockets.has(socket.id)) return;              // (2026-11-03, the user: in admin mode you keep what you carry when you die)
     const now = Date.now();
     if (now - lastDeathAt < 1500) return;
@@ -27521,7 +27560,7 @@ io.on('connection', (socket) => {
     } else {
       if (hs !== socket.id) { if (!hm.size) delete roomObjHeld[room]; return; }
       hm.delete(id); if (!hm.size) delete roomObjHeld[room];
-      if (o && o.item && o.eq === socket.id) itemObjMove(room, o, null);   // …out of their hand into the world: one fewer in their pouch
+      if (o && o.item && o.eq === socket.id) { if (o._burnt) { eqRemoveObj(room, o); broadcastObjSt(room); return; } itemObjMove(room, o, null); }   // …out of their hand into the world: one fewer in their pouch (a scroll burning away — magic step 2 — is already spent: it goes)
     }
     broadcastObjSt(room);
   });
@@ -27532,7 +27571,7 @@ io.on('connection', (socket) => {
     const map = roomObjects[room], o = map && map.get(id);
     const hm = roomObjHeld[room], hs = hm && hm.get(id);
     const ammo = o && ITEMS.isItem(o.item) && ITEMS.ITEMS[o.item].kind === 'ammo';   // (2026-10-20) …an arrow lying or stuck anywhere: back into the pouch
-    if (!o || !o.item || !(ITEMS.isObjItem(o.item) || ammo) || o.eq || (hs && hs !== socket.id) || !(o.type === 'stamp' && o.loose && o.loose !== 2 && !o.mnt)) { socket.emit('obj-hold-no', { id }); return; }
+    if (!o || !o.item || o._burnt || !(ITEMS.isObjItem(o.item) || ammo) || o.eq || (hs && hs !== socket.id) || !(o.type === 'stamp' && o.loose && o.loose !== 2 && !o.mnt)) { socket.emit('obj-hold-no', { id }); return; }
     // (§5z74) …but not a SPENT explosive (a smoke can still venting, or anything whose fuse has run): it would go back on its stack as a new one
     { const sm = roomObjSt[room], r = sm && sm.get(id); if (r && r.lit && Date.now() >= r.lit.at + bombFuseMs(o)) { socket.emit('obj-hold-no', { id }); return; } }
     if (hm) { hm.delete(id); if (!hm.size) delete roomObjHeld[room]; }
@@ -27610,7 +27649,41 @@ io.on('connection', (socket) => {
   //   LEARNT this life (step 2 fills `_magicKnow` from tomes; until then only the debug switch "know every spell" — `magic-debug` — or an innate ability passes) · its COOLDOWN
   //   (by spell, × the catalyst's) · the caster is near where they say it leaves from. Refused: `magic-no` { spell, why, left } to the caster alone.
   //   `magic-state` = the casting stance, the inputs' signs and the prepared spell, for the others to see (relayed, trimmed). `magic-hit` = where the caster's bolt ended: fire there.
-  socket.on('magic-debug', (m) => { socket._magicAll = !!(m && m.all); socket._magicNoCd = !!(m && m.nocd); });   // (the panel's 'Know every spell' + 'No cooldowns', both for testing)
+  socket.on('magic-debug', (m) => { const was = [socket._magicAll, socket._magicOwn];
+    socket._magicAll = !!(m && m.all); socket._magicNoCd = !!(m && m.nocd);   // (the panel's 'Know every spell' + 'No cooldowns', both for testing)
+    socket._magicNoReag = !!(m && m.noreag); socket._magicOwn = !(m && m.own === 0);   // (step 2: 'Spells need no reagents (for testing)'; 'Your own version of each spell' off = the shared core only)
+    socket._magicRoom = currentAvatarRoom;
+    if (was[0] !== socket._magicAll || was[1] !== socket._magicOwn) magicKnowSend(socket); });
+  // ⭐ MAGIC, STEP 2: LEARNING. `magic-know-ask` → `magic-know` (counts, needs, own numbers). `tome-open` = which page of which tome in your hand is open (null: shut) — the others are
+  //   told, so they see you reading. `magic-practice` = an input put in with the tome open: CHECKED HERE against your own version of that page's spell (keys exactly; joined points
+  //   exactly; a rune drawn freely by the same shape measure as the client's, `SPELLS.runeDist`), and counted when right.
+  socket.on('magic-know-ask', () => { socket._magicRoom = currentAvatarRoom; magicKnowSend(socket); });
+  socket.on('tome-open', (m) => {
+    const room = currentAvatarRoom; if (!room || !m) return; socket._magicRoom = room;
+    const o = m.open ? magicTomeHeld(room, socket, m.id) : null, T = o && SPELLS.tomeOf(o.item);
+    socket._tomeOpen = T ? { id: o.id, page: Math.max(0, Math.min(T.pages.length - 1, m.page | 0)) } : null;
+    socket.to(room).emit('tome-open', { from: socket.id, id: typeof m.id === 'string' ? m.id.slice(0, 64) : '', open: socket._tomeOpen ? 1 : 0, page: socket._tomeOpen ? socket._tomeOpen.page : 0 });
+    if (T) magicKnowSend(socket);
+  });
+  socket.on('magic-practice', (m) => {
+    const room = currentAvatarRoom; if (!room || !m) return;
+    const now = Date.now(); if (now - (socket._magicPrT || 0) < 300) return; socket._magicPrT = now;
+    const TO = socket._tomeOpen, o = TO && TO.id === m.tome ? magicTomeHeld(room, socket, m.tome) : null, T = o && SPELLS.tomeOf(o.item), P = T && T.pages[TO.page];
+    const no = (why) => socket.emit('magic-practised', { ok: 0, why, spell: P && P.spell || null });
+    if (!P || TO.page !== (m.page | 0)) return no('tome');
+    if (!P.spell || P.dmg === 'missing' || !SPELLS.is(P.spell)) return no('page');
+    const key = playerKeyFor(socket.id), M = magicMindOf(key), lang = !!m.lang, own = socket._magicOwn === false ? null : SPELLS.ownOf(P.spell, lang, magicOwnH(key, M.life, P.spell));
+    const seq = Array.isArray(m.seq) ? m.seq.slice(0, 128).map(v => Math.round(+v) || 0) : [];
+    let right = false;
+    if (m.how === 'keys') { const k = SPELLS.keysOf(P.spell, lang, own); right = !!k && k.length === seq.length && k.every((v, i) => v === (seq[i] & 3)); }
+    else if (m.how === 'pts') { const R0 = SPELLS.runeOf(P.spell, lang, own), a = R0 ? SPELLS.runeNorm(R0.pts) : [], b = SPELLS.runeNorm(seq.filter(v => v >= 0 && v <= 8)); right = a.length > 0 && a.length === b.length && a.every((v, i) => v === b[i]); }
+    else if (m.how === 'trail' && seq.length >= 8) { const F = SPELLS.pathFit(seq.map(v => v / 100), 32); right = !!F && SPELLS.runeDist(F, P.spell, lang, own) <= Math.min(0.3, Math.max(0.03, (+m.tol || 18) / 100)); }
+    if (!right) return no('wrong');
+    const need = SPELLS.learnN(P.spell), was = M.n[P.spell] | 0, n = Math.min(need, was + 1);
+    if (n !== was) { M.n[P.spell] = n; db.prepare('INSERT INTO magic_learnt (pkey, spell, n) VALUES (?, ?, ?) ON CONFLICT(pkey, spell) DO UPDATE SET n = excluded.n').run(key, P.spell, n); }
+    socket.emit('magic-practised', { ok: 1, spell: P.spell, n, need, learnt: n >= need ? 1 : 0 });
+    if (n >= need && was < need) magicKnowSend(socket);
+  });
   socket.on('magic-state', (m) => {
     const room = currentAvatarRoom; if (!room || !m) return;
     const now = Date.now(); if (now - (socket._magicStT || 0) > 1000) { socket._magicStT = now; socket._magicStN = 0; } if (++socket._magicStN > 30) return;
@@ -27630,17 +27703,26 @@ io.on('connection', (socket) => {
     const S = SPELLS.of(m.spell); if (!S) return no('unknown');
     const o = typeof m.cat === 'string' && roomObjects[room] ? roomObjects[room].get(m.cat) : null, H = o && o.type === 'stamp' && HELD.of(o.look);
     const hm = roomObjHeld[room];
-    if (!H || !H.catalyst || !hm || hm.get(m.cat) !== socket.id) return no('catalyst');
-    const C = SPELLS.CATALYSTS[H.catalyst] || {};
-    if (S.innate ? C.innate !== m.spell : !(socket._magicAll || (socket._magicKnow && socket._magicKnow.has(m.spell)))) return no('unlearnt');
+    // (step 2) A SCROLL in your hand casts its own spell: no catalyst, nothing learnt, no cooldown, no reagents — it is used up (spent at once; burnt away in the hand, then gone)
+    const SC = o && SPELLS.scrollOf(o.item);
+    if (SC) { if (!hm || hm.get(m.cat) !== socket.id || o._burnt || SC.spell !== m.spell) return no('scroll'); }
+    else if (!H || !H.catalyst || !hm || hm.get(m.cat) !== socket.id) return no('catalyst');
+    const C = SC ? {} : SPELLS.CATALYSTS[H.catalyst] || {};
+    if (!SC && (S.innate ? C.innate !== m.spell : !magicKnows(socket, m.spell))) return no('unlearnt');
     const now = Date.now(), cds = socket._magicCd || (socket._magicCd = {}), left = (cds[m.spell] || 0) - now;
-    if (left > 120 && !socket._magicNoCd) return no('cooldown', left);
+    if (!SC && left > 120 && !socket._magicNoCd) return no('cooldown', left);
     if (!isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return no('bad');
     const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 520) return no('far');
-    const cd = socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst); cds[m.spell] = now + cd;
+    // (step 2) REAGENTS: what the spell uses up, from what you carry (where things cost something), unless the panel's 'Spells need no reagents (for testing)'
+    const gated = invGatedRoom(room), key = playerKeyFor(socket.id), reag = !SC && Array.isArray(S.uses) && gated && !socket._magicNoReag ? S.uses : null;
+    if (reag) { for (const [it, n] of reag) if (ledger.itemCount(key, it) < n) return no('reagent:' + it); for (const [it, n] of reag) ledger.spendItem(key, it, n); sendInvSync(socket, room); }
+    if (SC) { o._burnt = 1; if (gated) { ledger.spendItem(key, o.item, 1); sendInvSync(socket, room); }
+      setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } }, 900); }
+    const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst); if (!SC) cds[m.spell] = now + cd;
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
     const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: C.powK || 1 };
-    if (S.kind === 'bolt') { _magicLive.set(id, { by: socket.id, room, x: out.x, y: out.y, until: now + S.life * 1000 + 800, reach: S.speed * S.life + 64, burn: !!S.burn }); if (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
+    if (SC) out.scroll = 1;
+    if (S.kind === 'bolt') { _magicLive.set(id, { by: socket.id, room, x: out.x, y: out.y, until: now + S.life * 1000 + 800, reach: S.speed * S.life + 64, burn: !!S.burn, burnR: S.burnR || 1 }); if (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     io.to(room).emit('magic-cast', out);
   });
@@ -27648,7 +27730,7 @@ io.on('connection', (socket) => {
     const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
     _magicLive.delete(m.id);
     if (Date.now() > L.until || Math.hypot(m.x - L.x, m.y - L.y) > L.reach) return;
-    if (L.burn && !m.air) igniteBox(L.room, +m.x, +m.y, TERRAIN_CELL);
+    if (L.burn && !m.air) igniteBox(L.room, +m.x, +m.y, TERRAIN_CELL * (L.burnR || 1));
     io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air: m.air ? 1 : 0, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined });
   });
   socket.on('arrow-catch', ({ id, to }) => {
