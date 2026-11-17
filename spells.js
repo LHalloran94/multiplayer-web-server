@@ -68,7 +68,6 @@
     staff: { cdK: 1.25, powK: 1.35, innate: 'glow' },
     wand:  { cdK: 0.75, powK: 0.85, innate: 'spark' },
     orb:   { cdK: 1,    powK: 1,    innate: 'glow' },
-    book:  { cdK: 0.9,  powK: 1.1,  innate: 'glow' },
   };
 
   const is = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(SPELLS, id);

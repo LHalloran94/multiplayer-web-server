@@ -27610,7 +27610,7 @@ io.on('connection', (socket) => {
   //   LEARNT this life (step 2 fills `_magicKnow` from tomes; until then only the debug switch "know every spell" — `magic-debug` — or an innate ability passes) · its COOLDOWN
   //   (by spell, × the catalyst's) · the caster is near where they say it leaves from. Refused: `magic-no` { spell, why, left } to the caster alone.
   //   `magic-state` = the casting stance, the inputs' signs and the prepared spell, for the others to see (relayed, trimmed). `magic-hit` = where the caster's bolt ended: fire there.
-  socket.on('magic-debug', (m) => { socket._magicAll = !!(m && m.all); });
+  socket.on('magic-debug', (m) => { socket._magicAll = !!(m && m.all); socket._magicNoCd = !!(m && m.nocd); });   // (the panel's 'Know every spell' + 'No cooldowns', both for testing)
   socket.on('magic-state', (m) => {
     const room = currentAvatarRoom; if (!room || !m) return;
     const now = Date.now(); if (now - (socket._magicStT || 0) > 1000) { socket._magicStT = now; socket._magicStN = 0; } if (++socket._magicStN > 30) return;
@@ -27634,10 +27634,10 @@ io.on('connection', (socket) => {
     const C = SPELLS.CATALYSTS[H.catalyst] || {};
     if (S.innate ? C.innate !== m.spell : !(socket._magicAll || (socket._magicKnow && socket._magicKnow.has(m.spell)))) return no('unlearnt');
     const now = Date.now(), cds = socket._magicCd || (socket._magicCd = {}), left = (cds[m.spell] || 0) - now;
-    if (left > 120) return no('cooldown', left);
+    if (left > 120 && !socket._magicNoCd) return no('cooldown', left);
     if (!isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return no('bad');
     const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 520) return no('far');
-    const cd = SPELLS.cdMs(m.spell, H.catalyst); cds[m.spell] = now + cd;
+    const cd = socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst); cds[m.spell] = now + cd;
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
     const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: C.powK || 1 };
     if (S.kind === 'bolt') { _magicLive.set(id, { by: socket.id, room, x: out.x, y: out.y, until: now + S.life * 1000 + 800, reach: S.speed * S.life + 64, burn: !!S.burn }); if (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }

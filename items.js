@@ -321,8 +321,6 @@ SVG.magewand = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><pat
 SVG.mageorb = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 20 L10 14.6" stroke="#c6a048" stroke-width="2" stroke-linecap="round"/><circle cx="14.4" cy="9.6" r="5.6" fill="#b08cff"/><circle cx="12.6" cy="7.8" r="1.6" fill="#e6dcff"/><path d="M9.6 14.4 C8 12 8.4 8 10.4 5.6 M10 14.8 C13 16.6 17.4 15.8 19.6 13" fill="none" stroke="#c6a048" stroke-width="1"/></svg>';
 ITEMS.mage_staff = { name: 'Dark staff', kind: 'weapon', tier: 0, svg: SVG.magestaff, obj: HELD.objOf('magestaff'), make: { mats: [], prima: 80 } };
 ITEMS.mage_wand = { name: 'Branch wand', kind: 'tool', tier: 0, svg: SVG.magewand, obj: HELD.objOf('magewand'), make: { mats: [], prima: 50 } };
-SVG.magebook = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="1.4" fill="#26345f"/><rect x="6.6" y="5" width="11.6" height="15" fill="#e8dcbe"/><rect x="5" y="4" width="12.6" height="17" rx="1.2" fill="#2f4076"/><path d="M11.2 9.4 L13.6 12.4 L11.2 15.4 L8.8 12.4 Z" fill="#c6a048"/><rect x="5" y="4" width="1.6" height="17" fill="#1c2748"/></svg>';
-ITEMS.mage_book = { name: 'Spell book', kind: 'tool', tier: 0, svg: SVG.magebook, obj: HELD.objOf('magebook'), make: { mats: [], prima: 70 } };
 ITEMS.mage_orb = { name: 'Clawed orb', kind: 'tool', tier: 0, svg: SVG.mageorb, obj: HELD.objOf('mageorb'), make: { mats: [], prima: 70 } };
 
 const isItem = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(ITEMS, id);

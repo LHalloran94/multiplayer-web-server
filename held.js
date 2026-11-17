@@ -548,13 +548,9 @@
   //   OFF hand the buttons are swapped. The STAFF (two hands, 64 px — the user: the first ones were "a little too tall") is also a blunt weapon: RIGHT, not casting, swings it.
   //   The wand and the orb do not strike.
   Object.assign(LOOKS, {
-    magestaff: weapon(64 / MELEE_K, 5, 1.4, 0.30, 0.8, 'blunt', 'ms', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', right: 'chop', noSlide: true, catalyst: 'staff', tip: 139 / 150 })),
-    magewand: tool(24, 3, 0.15, 0.1, 1, 'mw', { hitHalf: 1.5, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', catalyst: 'wand', tip: 1 }, 'blunt'),
-    // THE BOOK is ONE item with two looks (the user: "shut at rest and held properly, OPEN in the hand as if read while casting"): `magebook` shut, carried level at your side by its spine;
-    //   `magebook_open` while its holder casts (client 16zj `magicBookStep` swaps the look on each screen; the server's object stays `magebook`). Same size, same grip.
-    magebook: tool(15, 10, 0.6, 0.5, 1, 'mb', { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', rest: 'level', catalyst: 'book', tip: 0.5 }, 'blunt'),
-    magebook_open: tool(15, 10, 0.6, 0.5, 1, 'mb', { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', rest: 'level', catalyst: 'book', tip: 0.5 }, 'blunt'),
-    mageorb: tool(19, 10, 0.5, 0.2, 1, 'mo', { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'iron', catalyst: 'orb', tip: 20 / 27.5 }, 'blunt'),
+    magestaff: weapon(64 / MELEE_K, 5, 1.4, 0.30, 0.8, 'blunt', 'ms', pole(0.56, { hitHalf: 3, mark: 'rod', mat: 'wood', right: 'chop', noSlide: true, catalyst: 'staff', tip: 139 / 150, aimsAtRest: false })),
+    magewand: tool(24, 3, 0.15, 0.1, 1, 'mw', { hitHalf: 1.5, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', catalyst: 'wand', tip: 1, aimsAtRest: false }, 'blunt'),
+    mageorb: tool(19, 10, 0.5, 0.2, 1, 'mo', { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'iron', catalyst: 'orb', tip: 20 / 27.5, aimsAtRest: false }, 'blunt'),
   });
   const is = (look) => typeof look === 'string' && LOOKS[look] !== undefined;
   const of = (look) => is(look) ? LOOKS[look] : null;
