@@ -94,6 +94,9 @@
   //   nothing on it). Damage only hides writing: a torn or burnt page can still be learnt from by whoever works out what is missing; a missing page cannot.
   //   `cover` = its look (server/held.js `tome_<cover>`, `tome_<cover>_open`).
   const TOMES = {
+    // (step 3b, the user: build the spells first, tomes and scrolls later — "a master tome for the time being that I can use … which contains all spells") every castable spell, a
+    //   page each, in the table's order; a variant (`alt`) is shown on its spell's page. Filled in below, once SPELLS is known.
+    tome_master: { name: 'The master tome', cover: 'master', pages: [] },
     tome_hearth: { name: 'The hearth primer', cover: 'hearth', pages: [{ spell: 'firebolt' }, { spell: 'greatbolt' }] },
     tome_wayfarer: { name: 'The wayfarer’s primer', cover: 'wayfarer', pages: [{ spell: 'gust' }, { spell: 'lightorb' }] },   // (step 3a)
     tome_scorched: { name: 'A scorched primer', cover: 'scorched', pages: [{ spell: 'firebolt', dmg: 'torn' }, { dmg: 'missing' }, { spell: 'greatbolt', dmg: 'burnt' }] },
@@ -106,6 +109,7 @@
     scroll_lightorb: { name: 'Scroll of light orb', spell: 'lightorb' },
   };
 
+  for (const id of Object.keys(SPELLS)) if (!SPELLS[id].innate && !SPELLS[id].alt) TOMES.tome_master.pages.push({ spell: id });
   const is = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(SPELLS, id);
   const of = (id) => is(id) ? SPELLS[id] : null;
   // ⭐ YOUR OWN VERSION (step 2 — kickoff §'against copied inputs' 1): every spell's input = the shared core + ONE PART worked out from you and this life. The SERVER makes

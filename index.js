@@ -27696,7 +27696,7 @@ io.on('connection', (socket) => {
       if (Array.isArray(m.k)) out.k = m.k.slice(0, 12).map(v => v & 3);
       if (Array.isArray(m.r)) out.r = m.r.slice(0, 64).map(v => Math.max(-127, Math.min(127, Math.round(+v) || 0)));
       if (SPELLS.is(m.rdy)) out.rdy = m.rdy;
-      if (m.ch) out.ch = 1;   // (step 2h: the spell is held in the HAND — a scroll's — not in a catalyst)
+      if (m.ch) { out.ch = 1; out.h = m.h ? 1 : 0; if (isFinite(m.px) && isFinite(m.py)) { out.px = Math.max(-900, Math.min(900, Math.round(+m.px))); out.py = Math.max(-900, Math.min(900, Math.round(+m.py))); } }   // (step 2h: the spell is held in the HAND — a scroll's; step 3b: which hand, and where it points from the body)
       if (m.bad) out.bad = 1;
     } else if (typeof m.why === 'string') out.why = m.why.slice(0, 12);
     socket.to(room).emit('magic-state', out);
@@ -27743,7 +27743,7 @@ io.on('connection', (socket) => {
     o._burnt = 1; if (invGatedRoom(room)) { ledger.spendItem(playerKeyFor(socket.id), o.item, 1); sendInvSync(socket, room); }
     // (magic step 3, the user: it burns up and primes itself, then fires) it burns for `ms` (the reader's dial, 0.3–4 s; the old way 0.7 s) and is taken from the hand after it
     const ms = Math.max(300, Math.min(4000, +m.ms || 700));
-    setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } }, ms + 400);
+    setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } }, ms + 60);   // (step 3b: gone as it burns up — the hand is then free to point)
     socket._magicCharge = { spell: SC.spell, from: Date.now() + ms - 350, until: Date.now() + ms + 60000 };   // (not cast before it has burnt up — a little slack for the trip)
     io.to(room).emit('scroll-read', { from: socket.id, id: o.id, spell: SC.spell, ms });
   });
