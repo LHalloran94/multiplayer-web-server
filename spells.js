@@ -82,11 +82,14 @@
     //     cells  at most this many · ringMs  between one ring of cells and the next
     //   STONE WALL (5A: plain rock like the ground, lasting longer) — rises out of the ground at the pointer row by row; cracks over its last `crackS` seconds, then crumbles.
     //     wide, high  cells · rowMs  between rows rising
+    //   ⭐ STEP 3e (the user): freeze and the wall are SHOTS — `speed`, `life`, `grav`, `r` as a bolt's: freeze stops in the first liquid (or on rock) and freezes there; the wall's stone
+    //     is lobbed, sinks through liquid (slowed), drops down a face it meets, and the wall rises where it comes to rest on the ground. high 6 → 12 · `crumbleMs` a row, from the top
+    //     · `thruLiq` it rises through liquid, pushing it aside
     //   THE RUNE THAT GOES OFF (9A: it fades) — written on the ground at the pointer; bright, then a faint trace; whoever else steps on it sets it off: a blast (`blastR` px,
     //     `blastF` its push, `dmg` health at its middle). `armS` before it can go off · at most `most` a caster.
-    freeze: { name: 'Freeze', school: 'frost', form: 'burst', tier: 0, cd: 4, stance: 'level', kind: 'freeze', learn: 3, reach: 420, secs: 30, cells: 90, ringMs: 70,
+    freeze: { name: 'Freeze', school: 'frost', form: 'burst', tier: 0, cd: 4, stance: 'level', kind: 'freeze', learn: 3, reach: 420, secs: 30, cells: 90, ringMs: 70, speed: 620, life: 1.3, grav: 0.04, r: 3.5,
       plain: { keys: [D, L, D, R], rune: [2, 4, 6, 7] } },
-    stonewall: { name: 'Stone wall', school: 'earth', form: 'placed', tier: 1, cd: 8, stance: 'level', kind: 'wall', learn: 5, reach: 360, secs: 45, crackS: 6, wide: 2, high: 6, rowMs: 70,
+    stonewall: { name: 'Stone wall', school: 'earth', form: 'placed', tier: 1, cd: 8, stance: 'level', kind: 'wall', learn: 5, reach: 360, secs: 45, crackS: 6, wide: 2, high: 12, rowMs: 55, crumbleMs: 110, thruLiq: true, speed: 560, life: 3, grav: 0.35, r: 4.5,
       plain: { keys: [D, U, U, L, D], rune: [6, 7, 8, 5, 2] } },
     rune: { name: 'Warding rune', school: 'wards', form: 'placed', tier: 1, cd: 6, stance: 'level', kind: 'rune', learn: 5, reach: 300, secs: 180, armS: 1.5, most: 3, blastR: 90, blastF: 14, dmg: 3,
       plain: { keys: [R, L, L, D, U], rune: [0, 3, 6, 7, 4] } },
