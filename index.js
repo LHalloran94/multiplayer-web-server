@@ -27740,10 +27740,11 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string') return;
     const map = roomObjects[room], o = map && map.get(m.id), hm = roomObjHeld[room], SC = o && SPELLS.scrollOf(o.item);
     if (!SC || !hm || hm.get(m.id) !== socket.id || o._burnt) return socket.emit('magic-no', { spell: SC ? SC.spell : null, why: 'scroll', left: 0 });
-    o._burnt = 1; if (invGatedRoom(room)) { ledger.spendItem(playerKeyFor(socket.id), o.item, 1); sendInvSync(socket, room); }
+    // (magic step 3c, the user: using your LAST scroll cut its spell off — taken from you at once, the empty hand dropped the read before its spell came back) taken when it has burnt up
+    o._burnt = 1; const spendKey = invGatedRoom(room) ? playerKeyFor(socket.id) : null;
     // (magic step 3, the user: it burns up and primes itself, then fires) it burns for `ms` (the reader's dial, 0.3–4 s; the old way 0.7 s) and is taken from the hand after it
     const ms = Math.max(300, Math.min(4000, +m.ms || 700));
-    setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } }, ms + 60);   // (step 3b: gone as it burns up — the hand is then free to point)
+    setTimeout(() => { const mp = roomObjects[room], q = mp && mp.get(o.id); if (q && q._burnt) { const hm2 = roomObjHeld[room]; if (hm2) { hm2.delete(o.id); if (!hm2.size) delete roomObjHeld[room]; } eqRemoveObj(room, q); broadcastObjSt(room); } if (spendKey) { ledger.spendItem(spendKey, o.item, 1); if (socket.connected) sendInvSync(socket, room); } }, ms + 60);   // (step 3b: gone as it burns up — the hand is then free to point)
     socket._magicCharge = { spell: SC.spell, from: Date.now() + ms - 350, until: Date.now() + ms + 60000 };   // (not cast before it has burnt up — a little slack for the trip)
     io.to(room).emit('scroll-read', { from: socket.id, id: o.id, spell: SC.spell, ms });
   });
