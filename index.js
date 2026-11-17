@@ -3829,14 +3829,15 @@ function magicMindOf(pkey) {
   _magicMind.set(pkey, M); if (_magicMind.size > 4000) _magicMind.delete(_magicMind.keys().next().value); return M;
 }
 function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC_SECRET).update(pkey + '|' + life + '|' + spell).digest().readUInt32BE(0) & 0x3fffffff; }
-function magicKnows(socket, spell) { if (socket._magicAll) return true; const M = magicMindOf(playerKeyFor(socket.id)); return (M.n[spell] | 0) >= SPELLS.learnN(spell); }
+function magicKnows(socket, spell) { if (socket._magicAll) return true; const M = magicMindOf(playerKeyFor(socket.id)), b = SPELLS.baseOf(spell); return (M.n[b] | 0) >= SPELLS.learnN(b); }   // (step 3a: a variant is known with its spell)
 // what this socket is told: its counts, how many each needs, and its own numbers for the spells it knows, the pages of every tome in its hands (and every spell, knowing all)
 function magicKnowSend(socket) {
   const key = playerKeyFor(socket.id), M = magicMindOf(key), own = {}, need = {}, room = socket._magicRoom;
   const want = new Set(Object.keys(M.n));
   if (socket._magicAll) for (const id of SPELLS.castable()) want.add(id);
   { const mine = eqObjs.get(socket.id), map = room && roomObjects[room]; if (mine && map) for (const oid of mine) { const o = map.get(oid), T = o && SPELLS.tomeOf(o.item); if (T) for (const p of T.pages) if (p.spell && p.dmg !== 'missing') want.add(p.spell); } }
-  for (const id of want) if (SPELLS.is(id) && !SPELLS.of(id).innate) { need[id] = SPELLS.learnN(id); if (socket._magicOwn !== false) own[id] = magicOwnH(key, M.life, id); }
+  for (const id of [...want]) { const S = SPELLS.of(id); if (S && S.alts) for (const a of S.alts) want.add(a); }   // (step 3a) a spell's variants come with it…
+  for (const id of want) if (SPELLS.is(id) && !SPELLS.of(id).innate) { need[id] = SPELLS.learnN(id); if (socket._magicOwn !== false) own[id] = magicOwnH(key, M.life, SPELLS.baseOf(id)); }   // …with ITS own part: the variant differs only in the change
   socket.emit('magic-know', { life: M.life, n: M.n, need, own, all: socket._magicAll ? 1 : 0, ownOn: socket._magicOwn !== false ? 1 : 0 });
 }
 function magicDied(socket) {
@@ -4947,7 +4948,7 @@ function liqSplashHit(room, x, y, sp, vx, hw, want, wt, fwd) {   // `fwd` (piece
 // ⭐ (2026-11-11, the liquid effects plan, piece 2) LIQUID FLUNG BY A BLAST: the blast's owner reports it ('liquid-blast'); the liquid within its radius that open
 //   air touches (a surface, or the side of the crater) is taken — more near the middle — and thrown OUTWARD from the blast as drops, faster the nearer it was,
 //   flown and landed as every real drop is (`roomLiqFly`, 'liquid-fly'). `k` > 1 for a pressure bomb (all push). Nothing made or lost.
-function liqBlastApply(room, x, y, R, k) {
+function liqBlastApply(room, x, y, R, k, dir) {
   if (wavesOn(room)) liqWaveKick(room, x, y, 0.25 * Math.min(2, +k || 1), 0, Math.max(2, Math.min(24, Math.round((+R || 40) / TERRAIN_CELL))));   // (piece 5) a blast pushes the surface outward
   const st = cellsOf(room), grid = st.terrain; if (!grid || !st.fineAmt) return 0;
   const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, amt = st.fineAmt, tot = st.fineTotal, cov = roomCover[room] && roomCover[room].n;
@@ -4958,6 +4959,7 @@ function liqBlastApply(room, x, y, R, k) {
   for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) {
     const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
     const d = Math.hypot((c + 0.5) * T - x, (r + 0.5) * T - y); if (d >= R) continue;
+    if (dir && ((c + 0.5) * T - x) * dir.ax + ((r + 0.5) * T - y) * dir.ay < dir.c * d) continue;   // (a gust: only in its cone)
     if (!air(i - 1) && !air(i - ROWS) && !air(i + ROWS)) continue;   // open air touches it — liquid deep inside a pool is pushed, not thrown
     cand.push([d, i, c, r]);
   }
@@ -4972,6 +4974,7 @@ function liqBlastApply(room, x, y, R, k) {
     const D = LIQ_DROP[LIQ_ID[rk]] || LIQ_DROP[9];
     const u = vesselCellTake(room, i, rk, D[0] * 2, changed); if (!u) continue;
     let dx = (C[2] + 0.5) * T - x, dy = (C[3] + 0.2) * T - y; const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
+    if (dir) { dx = dx * 0.35 + dir.ax * 0.65; dy = dy * 0.35 + dir.ay * 0.65; const q = Math.hypot(dx, dy) || 1; dx /= q; dy /= q; }   // (a gust throws it along its way)
     const sp = Math.min(liqBlastCfg.vmax, (liqBlastCfg.v0 + liqBlastCfg.v1 * w) * k) * D[2] * (0.7 + 0.6 * fireVar(i, salt, 61 + q));
     const vx0 = dx * sp, vy0 = dy * sp - sp * 0.35;
     const A = powderFlyArc(ROWS, COLS, air, C[2] + 0.5, C[3] + 0.2, vx0, vy0, i, liqDropCfg.g, 0);
@@ -27724,6 +27727,8 @@ io.on('connection', (socket) => {
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
     const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: powK };
     if (SC) { out.charge = 1; out.cat = ''; }
+    // (step 3a) where a placed spell goes (the light orb): the caster's point, no further than its reach
+    if (isFinite(m.tx) && isFinite(m.ty)) { const dx = m.tx - out.x, dy = m.ty - out.y, d = Math.hypot(dx, dy), lim = (S.reach || 400) + 8, k = d > lim ? lim / d : 1; out.tx = Math.round(out.x + dx * k); out.ty = Math.round(out.y + dy * k); }
     if (S.kind === 'bolt') { _magicLive.set(id, { by: socket.id, room, x: out.x, y: out.y, until: now + S.life * 1000 + 800, reach: S.speed * S.life + 64, burn: !!S.burn, burnR: S.burnR || 1 }); if (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     io.to(room).emit('magic-cast', out);
@@ -27867,7 +27872,9 @@ io.on('connection', (socket) => {
   socket.on('liquid-blast', (m) => {
     const room = currentAvatarRoom; if (!room || !m || !liqDropsOn(room) || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - _liqBlastAt < 120) return; _liqBlastAt = now;
-    liqBlastApply(room, +m.x, +m.y, Math.max(16, Math.min(600, +m.r || 80)), Math.max(0.5, Math.min(2, +m.k || 1)));
+    // (magic step 3a, the gust) a blast one way only: `ax`, `ay` its way, `cone` the cosine of half its width
+    const dir = isFinite(m.ax) && isFinite(m.ay) && Math.hypot(m.ax, m.ay) > 0.1 ? { ax: +m.ax / Math.hypot(m.ax, m.ay), ay: +m.ay / Math.hypot(m.ax, m.ay), c: Math.max(-1, Math.min(0.99, isFinite(m.cone) ? +m.cone : 0.7)) } : null;
+    liqBlastApply(room, +m.x, +m.y, Math.max(16, Math.min(600, +m.r || 80)), Math.max(0.3, Math.min(2, +m.k || 1)), dir);
   });
   let _liqSplashAt = 0;
   // (2026-11-11, displacement by bodies) what is in liquid on this browser now: { p: [x, y] | null, o: [id, x, y, a, …] } (≤ 12 things); an empty one when nothing is

@@ -35,7 +35,7 @@
     knowing:    { name: 'Knowing',         col: '#8fe8e0', keys: [U, L], rune: [6, 2, 8] },
     voice:      { name: 'Voice',           col: '#f5f5a0', keys: [R, U], rune: [3, 1, 5] },
     summoning:  { name: 'Summoning',       col: '#e09a9a', keys: [D, R], rune: [2, 8, 6] },
-    light:      { name: 'Light',           col: '#bcd8ff', keys: [L, D], rune: [1, 4, 7] },
+    light:      { name: 'Light',           col: '#bcd8ff', keys: [L, D], rune: [0, 1, 2] },   // (step 3a: was 1 4 7 — with a form's stroke from the middle it ran back over itself, 7 → 4 → 7; no spell used it before)
   };
   // (the user, round 2: form pieces run THROUGH THE GRID'S POINTS — burst = the diamond, field = the full square, on yourself = the short diagonal)
   const FORMS = {
@@ -65,7 +65,18 @@
     // (step 2, 2026-11-17 — the user's step 0 pick: "1A for the quick low one, 1B for a bigger / stronger version") the same bolt one tier up: slower, heavier, it burns
     //   wider, and it uses up an EMBER SALT each cast
     greatbolt: { name: 'Great firebolt', school: 'fire', form: 'bolt', tier: 1, cd: 6, stance: 'level', kind: 'bolt', learn: 5, uses: [['ember_salt', 1]],
-      speed: 560, life: 1.4, grav: 0.1, r: 5.5, dmg: 2.8, burn: true, burnR: 2, plain: { keys: [U, R, R, D, R, U], rune: [6, 0, 4, 2, 8, 7] } },
+      speed: 560, life: 1.4, grav: 0.1, r: 5.5, dmg: 2.8, burn: true, burnR: 2, trailS: 1.2, plain: { keys: [U, R, R, D, R, U], rune: [6, 0, 4, 2, 8, 7] } },
+    // ⭐ STEP 3a (2026-11-17, the user's step 0 picks): GUST (2B — wind seen only by what it moves: a cone from the hand that shoves bodies, loose things and liquid) and the LIGHT ORB
+    //   (both 3A 'follows you' and 3B 'stays where you point', from ONE spell by a small change to its input — Light + Placed stays, Light + On yourself follows; the bluer light).
+    //   `alt` = the spell it is a variant of: learnt with it, your own part shared with it (`baseOf`). `alts` = its variants (the tome's page shows them).
+    //   reach  px (gust: how far it shoves; orb: how far it may be set) · cone  half its width, degrees · push  how hard (a body's speed, px a tick)
+    //   secs  how long an orb lasts · pow, rr  its light: strength and reach (px) · stay  it hangs where it was set (else it follows its caster)
+    gust: { name: 'Gust', school: 'storm', form: 'burst', tier: 0, cd: 3, stance: 'level', kind: 'gust', learn: 3, reach: 150, cone: 32, push: 9,
+      plain: { keys: [L, L, R, U], rune: [3, 1, 5, 7] } },
+    lightorb: { name: 'Light orb', school: 'light', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'orb', learn: 3, stay: true, reach: 420, secs: 60, pow: 2, rr: 230, alts: ['lightorb_f'],
+      plain: { keys: [L, D, D, L], rune: [1, 4, 7, 6] } },
+    lightorb_f: { name: 'Light orb (following)', school: 'light', form: 'self', tier: 0, cd: 4, stance: 'level', kind: 'orb', alt: 'lightorb', stay: false, secs: 60, pow: 1.6, rr: 170,
+      plain: { keys: [L, D, D, D], rune: [1, 4, 7, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -84,12 +95,15 @@
   //   `cover` = its look (server/held.js `tome_<cover>`, `tome_<cover>_open`).
   const TOMES = {
     tome_hearth: { name: 'The hearth primer', cover: 'hearth', pages: [{ spell: 'firebolt' }, { spell: 'greatbolt' }] },
+    tome_wayfarer: { name: 'The wayfarer’s primer', cover: 'wayfarer', pages: [{ spell: 'gust' }, { spell: 'lightorb' }] },   // (step 3a)
     tome_scorched: { name: 'A scorched primer', cover: 'scorched', pages: [{ spell: 'firebolt', dmg: 'torn' }, { dmg: 'missing' }, { spell: 'greatbolt', dmg: 'burnt' }] },
   };
   // A SCROLL: one use, no catalyst, no input — unrolled (the starting button held), aimed, fired; it burns up as the spell leaves. Carried in a stack (item kind 'scroll').
   const SCROLLS = {
     scroll_firebolt: { name: 'Scroll of firebolt', spell: 'firebolt' },
     scroll_greatbolt: { name: 'Scroll of great firebolt', spell: 'greatbolt' },
+    scroll_gust: { name: 'Scroll of gust', spell: 'gust' },
+    scroll_lightorb: { name: 'Scroll of light orb', spell: 'lightorb' },
   };
 
   const is = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(SPELLS, id);
@@ -156,8 +170,10 @@
     const T = pathFit(flat, fit.length / 2); if (!T) return 1e9; let d = 0; const n = fit.length / 2; for (let k = 0; k < n; k++) d += Math.hypot(fit[k * 2] - T[k * 2], fit[k * 2 + 1] - T[k * 2 + 1]); return d / n; };
   // a cooldown in ms with this catalyst
   const cdMs = (id, cat) => { const S = of(id), C = CATALYSTS[cat]; return S ? Math.round(S.cd * 1000 * (C ? C.cdK : 1)) : 0; };
-  const learnN = (id) => { const S = of(id); return S ? Math.max(1, S.learn || (S.tier ? 5 : 3)) : 0; };
+  // (step 3a) the spell a variant belongs to (learnt with it, its own part the same): the light orb that follows → the light orb
+  const baseOf = (id) => { const S = of(id); return S && S.alt && is(S.alt) ? S.alt : id; };
+  const learnN = (id) => { const S = of(baseOf(id)); return S ? Math.max(1, S.learn || (S.tier ? 5 : 3)) : 0; };
   const tomeOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(TOMES, item) ? TOMES[item] : null;
   const scrollOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(SCROLLS, item) ? SCROLLS[item] : null;
-  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, is, of, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, tomeOf, scrollOf };
+  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, is, of, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
 });

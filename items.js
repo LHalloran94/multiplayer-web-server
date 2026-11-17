@@ -331,6 +331,7 @@ ITEMS.mage_orb = { name: 'Clawed orb', kind: 'tool', tier: 0, svg: SVG.mageorb, 
     + (burnt ? '<path d="M18 21 L18 14.6 L15.8 16.4 L14.6 14.8 L12.6 17.6 L11 16.8 L9.6 21 Z" fill="#1a110b"/><path d="M18 14.6 L15.8 16.4 L14.6 14.8 L12.6 17.6 L11 16.8 L9.6 21" fill="none" stroke="#c2581e" stroke-width=".6"/>' : '') + '</svg>';
   SVG.tome_hearth = tomeSvg('#7a2c1e', '#4e1a12', false);
   SVG.tome_scorched = tomeSvg('#4a3a2c', '#2c2018', true);
+  SVG.tome_wayfarer = tomeSvg('#2c4a6a', '#1a2e44', false);
   for (const id of Object.keys(SP.TOMES)) { const T = SP.TOMES[id]; ITEMS[id] = { name: T.name, kind: 'tome', tier: 0, svg: SVG['tome_' + T.cover] || SVG.tome_hearth, obj: HELD.objOf('tome_' + T.cover), make: null }; }
   const scrollSvg = (seal) => '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M5 9 L16 3.6 L19.6 11 L8.6 16.4 Z" fill="#e6d7ac" stroke="#a08856" stroke-width=".6"/><path d="M8.6 16.4 L19.6 11" stroke="#b89c64" stroke-width="2.4" stroke-linecap="round"/>'
     + '<path d="M5 9 L16 3.6" stroke="#c8ae74" stroke-width="1.6" stroke-linecap="round"/><circle cx="12.8" cy="13.6" r="2.2" fill="' + seal + '"/><path d="M12.2 15.4 L11.2 20 M13.6 15.4 L14.8 19.6" stroke="' + seal + '" stroke-width="1"/></svg>';

@@ -559,7 +559,7 @@
   //   UNROLLED (`scroll_open`, while the starting button is held: hung from its top rod in front of the face, the writing to the reader) and then BURNING as its spell leaves
   //   (`scroll_b1` … `scroll_b4`, less of the sheet each). `tip` = where the practice signs / the spell gather, as a fraction of its length.
   { const TOMEX = { hitHalf: 4, strikes: false, sticks: false, pierces: false, daze: false, right: 'none', mat: 'wood', aimsAtRest: false };
-    for (const cov of ['hearth', 'scorched']) {
+    for (const cov of ['hearth', 'scorched', 'wayfarer']) {
       // (step 2c, the user with photos of people carrying books: "held in the middle of the spine … tucked upwards along their arm") — `rest: 'carry'` (client 16zj `magicRestPose`)
       LOOKS['tome_' + cov] = tool(14, 9.5, 0.4, 0.5, 1, 'tm', Object.assign({ tome: cov, rest: 'carry', tip: 0.5, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
       LOOKS['tome_' + cov + '_open'] = tool(14, 9.5, 0.4, 0.3, 1, 'tm', Object.assign({ tome: cov, open: true, rest: 'read', tip: 0.55, offTilt: { beside: 0, back: 0, raised: 0 } }, TOMEX), 'blunt');
@@ -569,7 +569,7 @@
     //   `rest: 'read'` = held up in front of the face (client 16zj `magicReadRest`), turned round you as any resting thing (16n / 16p). A scroll is held in the OFF hand with the other free
     //   (it casts from that hand): client 16p `handWant`.
     //   ⚠️ held.js is inlined in the client BEFORE spells.js, so the spells are listed here — one per spells.js `SCROLLS` entry (server/items.js refuses to start if one is missing)
-    for (const base of ['scroll', 'scroll_firebolt', 'scroll_greatbolt']) {
+    for (const base of ['scroll', 'scroll_firebolt', 'scroll_greatbolt', 'scroll_gust', 'scroll_lightorb']) {
       LOOKS[base] = tool(14, 4.4, 0.1, 0.5, 1, 'sc', Object.assign({ rest: 'upright', tip: 1 }, SCX), 'blunt');
       // (step 2d, the user: held from the TOP rod "makes more sense") hung from its top rod in front of your face, its writing to you, its back (the spell's sign) to everybody else
       for (const k of ['open', 'b1', 'b2', 'b3', 'b4']) LOOKS[base + '_' + k] = tool(14, 4.4, 0.1, 0.03, 1, 'sc', Object.assign({ rest: 'read', open: true, tip: 0.7 }, SCX), 'blunt');
