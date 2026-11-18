@@ -151,6 +151,17 @@
       mend: true, plain: { keys: [D, U, U, L, U], rune: [6, 7, 4, 1, 2] } },
     grease: { name: 'Grease', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, oil: 3, film: 0.5, oilR: 6, secs: 60, dryR: 30, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#caa12a', look: 'oil',
       plain: { keys: [D, U, U, R, D], rune: [0, 1, 4, 5, 8] } },
+    // ⭐ STEP 5b (2026-11-18 — EARTH, THE THROWS; the user: the chunk 'should come from pulling actual terrain near the pointer … then I guess you could move it around and such, and
+    //   then releasing it would shoot it in the direction it is pointing away from the player'). kind 'chunk', HELD (`chan`, `chanS` the most): the cast TEARS up to `cells` of the
+    //   ground nearest the pointer (within `grab` cells; the pointer within `reach` of you) out of the world (server `magicChunkTear` — moved, not made); while the fire button is
+    //   held it floats to your pointer (no further than `reach` from you, `holdV` px/s, stopped by rock); LET GO and it flies AWAY FROM YOU (from your middle through it) at
+    //   `speed` px/s under `grav`; time up / a blow / the cast let go DROPS it. ROCK CHUNK: hard ground (not what a spade digs) — it hurts whoever it hits by its weight (`dmg` a
+    //   cell, at most 4; `kn` its knock a cell) and breaks into its own cells where it comes down (server `magicPileAt`). SOIL FLUNG (`soil`): only what a spade digs — let go it
+    //   SPRAYS out as grains (`fan` radians) that land as ground (the spade's throw: `powder-fly`).
+    rockchunk: { name: 'Rock chunk', school: 'earth', form: 'shaping', tier: 0, cd: 6, stance: 'level', kind: 'chunk', learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 9, holdV: 520, speed: 760, grav: 0.35, life: 3, dmg: 0.35, kn: 0.7, fx: '#c9a26a', look: 'tear',
+      plain: { keys: [D, U, L, R, R], rune: [6, 3, 4, 5, 8] } },
+    soilfling: { name: 'Soil flung', school: 'earth', form: 'shaping', tier: 0, cd: 4, stance: 'level', kind: 'chunk', soil: true, learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 12, holdV: 560, speed: 420, fan: 0.5, fx: '#b89060', look: 'tear',
+      plain: { keys: [D, U, L, L, D], rune: [0, 3, 6, 7, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -211,6 +222,7 @@
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
+    rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]],
     lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]], leap_o: [[R, U], [4, 1, 2]],
     haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
