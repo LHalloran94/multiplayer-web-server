@@ -144,11 +144,11 @@
   //   own part of it as a spell's, per world, a death forgets it). ONE a cast. It costs more keys and `cdK` × the spell's cooldown. `kinds` = the spells it goes on (their `kind`).
   //   ITS PIECE, the same in the language and plain:  keys — a DOWN that opens it (a tier adds only ups, so the two never mix), YOUR OWN KEY, then its two `keys`;
   //   rune — on to the top left point and along the TOP ROW (the tier's underline is the bottom row), YOUR OWN POINT, then its `rune` stroke.
-  //   follow  the caster's game turns it towards the pointer (`turn` radians a second), `speedK` its speed, `lifeK` its time, `gravK` its gravity; others are sent where it is
+  //   follow  the caster's game turns it towards the pointer (`turn` radians a second, up to 3 × close to it; the client's dial overrides), `speedK` its speed, `lifeK` its time, `gravK` its gravity; others are sent where it is
   //   arc     a lob that comes down on the pointer (`g` px/s² its gravity, `reach` px the farthest point) — every screen works the same arc out of the cast (`arcAim`)
   //   split   at `at` seconds it becomes `n`, `fan` degrees apart, each `dmgK` of the blow · faint  drawn at `seen` of its strength on others' screens, `seenOwn` on yours
   const MODS = {
-    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [4, 3], kinds: ['bolt'], cdK: 1.5, learn: 3, turn: 9, speedK: 0.7, lifeK: 2, gravK: 0.3 },
+    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [4, 3], kinds: ['bolt'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 2, gravK: 0.3 },
     mod_arc:    { name: 'Arcs', keys: [U, R], rune: [6, 4, 8], kinds: ['bolt'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },
     mod_split:  { name: 'Splits in three', keys: [L, R], rune: [3, 7, 5], kinds: ['bolt'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45 },
     mod_faint:  { name: 'Faint', keys: [D, D], rune: [6, 7], kinds: ['bolt'], cdK: 1.5, learn: 3, seen: 0.22, seenOwn: 0.5 },

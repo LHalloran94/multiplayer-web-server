@@ -27859,6 +27859,7 @@ io.on('connection', (socket) => {
     if (m.on) {
       if (typeof m.cat === 'string') out.cat = m.cat.slice(0, 64);
       if (Array.isArray(m.k)) out.k = m.k.slice(0, 12).map(v => v & 3);
+      if (Number.isInteger(m.mi) && m.mi > 0 && m.mi < 12) out.mi = m.mi;   // (magic 4c round 2: where a modifier's marks begin — the others draw them on a second ring)
       if (Array.isArray(m.r)) out.r = m.r.slice(0, 64).map(v => Math.max(-127, Math.min(127, Math.round(+v) || 0)));
       if (SPELLS.is(m.rdy)) out.rdy = m.rdy;
       if (m.ch) { out.ch = 1; out.h = m.h ? 1 : 0; if (isFinite(m.px) && isFinite(m.py)) { out.px = Math.max(-900, Math.min(900, Math.round(+m.px))); out.py = Math.max(-900, Math.min(900, Math.round(+m.py))); } }   // (step 2h: the spell is held in the HAND — a scroll's; step 3b: which hand, and where it points from the body)
