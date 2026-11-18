@@ -162,7 +162,7 @@
     //   SPRAYS out as grains (`fan` radians) that land as ground (the spade's throw: `powder-fly`).
     rockchunk: { name: 'Rock chunk', school: 'earth', form: 'shaping', tier: 0, cd: 6, stance: 'level', kind: 'chunk', learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 9, holdV: 520, speed: 520, grav: 0.35, life: 20, dmg: 0.35, kn: 0.7, dent: 34, fx: '#c9a26a', look: 'tear',
       plain: { keys: [D, U, L, R, R], rune: [6, 3, 4, 5, 8] } },
-    soilfling: { name: 'Soil flung', school: 'earth', form: 'shaping', tier: 0, cd: 4, stance: 'level', kind: 'chunk', soil: true, learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 12, holdV: 560, speed: 420, fan: 0.5, fx: '#b89060', look: 'tear',
+    soilfling: { name: 'Soil flung', school: 'earth', form: 'shaping', tier: 0, cd: 4, stance: 'level', kind: 'chunk', soil: true, learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 12, holdV: 560, speed: 640, fan: 0.12, fx: '#b89060', look: 'tear',
       plain: { keys: [D, U, L, L, D], rune: [0, 3, 6, 7, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },

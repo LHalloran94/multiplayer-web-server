@@ -4018,12 +4018,16 @@ function magicChunkFall(F) {
 function magicSoilSpray(room, x, y, K, vx, vy, S) {
   const st = cellsOf(room), grid = st.terrain; if (!grid) return; const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
   const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
-  const fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], now = Date.now(), a0 = Math.atan2(vy, vx), s0 = Math.min(60, Math.hypot(vx, vy) / T);
-  const c0 = Math.floor(x / T), r0 = Math.floor(y / T); let i0 = c0 * ROWS + r0;
-  if (!air(i0)) { let bd = 1e9, b = -1; for (let dc = -2; dc <= 2; dc++) for (let dr = -2; dr <= 2; dr++) { const j = (c0 + dc) * ROWS + r0 + dr, d = dc * dc + dr * dr; if (d < bd && air(j)) { bd = d; b = j; } } if (b < 0) { magicPileAt(room, x, y, K.m, null); return; } i0 = b; }
-  const c = Math.floor(i0 / ROWS), r = i0 % ROWS;
-  for (const v of K.m) { const a = a0 + (Math.random() - 0.5) * (S.fan || 0.5), s = Math.max(4, s0 * (0.65 + 0.55 * Math.random())), fvx = Math.cos(a) * s, fvy = Math.sin(a) * s;
-    const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.5, fvx, fvy, i0); fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: 0, how: 0, hold: 0, settle: 1 }); wire.push(i0, v, Math.round(fvx * 100), Math.round(fvy * 100), A.steps); }
+  const fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], now = Date.now(), a0 = Math.atan2(vy, vx), s0 = Math.min(90, Math.hypot(vx, vy) / T);
+  // (5b round 3, the user: 'it doesn't keep its shape as it falls and it lands as one big tower') EACH GRAIN LEAVES FROM ITS OWN PLACE in the clump, all near the same speed and way
+  //   (`fan` small) — the clump keeps its shape in the air and comes down spread over its own width
+  const o = K.o || [], n = K.m.length; let mx = 0, my = 0; for (let k = 0; k < n; k++) { mx += o[2 * k] || 0; my += o[2 * k + 1] || 0; } mx /= n || 1; my /= n || 1;
+  const near = (c0, r0) => { let i = c0 * ROWS + r0; if (air(i)) return i; let bd = 1e9, b = -1; for (let dc = -2; dc <= 2; dc++) for (let dr = -2; dr <= 2; dr++) { const j = (c0 + dc) * ROWS + r0 + dr, d = dc * dc + dr * dr; if (d < bd && air(j)) { bd = d; b = j; } } return b; };
+  const left = [];
+  K.m.forEach((v, k) => { const i0 = near(Math.floor(x / T + (o[2 * k] || 0) - mx), Math.floor(y / T + (o[2 * k + 1] || 0) - my)); if (i0 < 0) { left.push(v); return; } const c = Math.floor(i0 / ROWS), r = i0 % ROWS;
+    const a = a0 + (Math.random() - 0.5) * (S.fan || 0.12), s = Math.max(4, s0 * (0.95 + 0.1 * Math.random())), fvx = Math.cos(a) * s, fvy = Math.sin(a) * s;
+    const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.5, fvx, fvy, i0); fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: 0, how: 0, hold: 0, settle: 1 }); wire.push(i0, v, Math.round(fvx * 100), Math.round(fvy * 100), A.steps); });
+  if (left.length) magicPileAt(room, x, y, left, null);
   if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: powderSplashCfg.g, d: powderSplashCfg.drag });
 }
 // STONE WALL: `wide` columns side by side, each rising from its own ground, `high` cells, a row every `rowMs`; only into open cells, stopping at the first that is not.
@@ -28068,7 +28072,7 @@ io.on('connection', (socket) => {
     const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (5a: the ground changed — a shot too)
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
-      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil } : null });
+      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil } : null });
       if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy) };   // (5b: its caster's game ends it — the server's own end only if they are gone)
       out.chan = 1; out.secs = secs; if (!SC && !socket._magicNoCd) cds[m.spell] = now + secs * 1000 + cd; }
     if (S.kind === 'bolt' || shot) { let lf = S.life || 1, g = (S.grav || 0) * 1500, v = S.speed;
@@ -28136,8 +28140,10 @@ io.on('connection', (socket) => {
     const S = SPELLS.of(F.spell) || {}, t = (Date.now() - F.t0) / 1000 + 0.5, reach = Math.hypot(F.vx, F.vy) * t + 0.5 * (S.grav || 0.35) * 1500 * t * t + 64; let x = +m.x, y = +m.y;
     if (Math.hypot(x - F.x, y - F.y) > reach) { const p = magicChunkFall(F); x = p.x; y = p.y; }
     // (5b round 2, the user: 'rock into rock with the appropriate effects … the terrain should probably get damaged') not magic now: heaped as plain rock, and IT and WHAT IT STRUCK cracked by how hard
+    // (5b round 3: it bounces and drops off what it struck first — `hx`/`hy` where it struck hardest, `x`/`y` where it came to rest)
     const P = magicPileAt(F.room, x, y, F.m, null), k = Math.max(0, Math.min(1, (+m.v || 0) / Math.max(1, S.speed || 520)));
-    if (k > 0.15 && S.dent) magicChunkDent(F.room, x, y, P, k * S.dent, F.m.length);
+    let hx = +m.hx, hy = +m.hy; if (!isFinite(hx) || !isFinite(hy) || Math.hypot(hx - F.x, hy - F.y) > reach) { hx = x; hy = y; }
+    if (k > 0.15 && S.dent) magicChunkDent(F.room, hx, hy, P, k * S.dent, F.m.length);
     io.to(F.room).emit('magic-chunk-end', { id, x: Math.round(x), y: Math.round(y), n: P.length, c: P.slice(0, 12) }); });
   socket.on('magic-chan-burn', (m) => { const room = currentAvatarRoom, q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - (q.burnT || 0) < 180) return; q.burnT = now; if (Math.hypot(m.x - q.x, m.y - q.y) > q.reach + 64) return; igniteBox(room, +m.x, +m.y, TERRAIN_CELL); });
