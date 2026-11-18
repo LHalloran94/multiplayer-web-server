@@ -28134,7 +28134,7 @@ io.on('connection', (socket) => {
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
       _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null } : null });
-      if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined };   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
+      if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined, w: CHK.w || undefined };   // (round 6: `w` its cells' damage — drawn cracked while held)   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
       out.chan = 1; out.secs = secs; if (!SC && !socket._magicNoCd) cds[m.spell] = now + secs * 1000 + cd; }
     if (S.kind === 'bolt' || shot) { let lf = S.life || 1, g = (S.grav || 0) * 1500, v = S.speed;
       // (4c) a modifier's flight: the follower slower, longer, less pulled down · the lob by its own arc (every screen works out the same) · a split: an id for each piece
