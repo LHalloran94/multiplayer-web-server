@@ -3841,11 +3841,11 @@ function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) r
   if (sk && !sk._magicNoCd) { cd = SPELLS.cdMs(q.spell, q.cat); (sk._magicCd || (sk._magicCd = {}))[q.spell] = Date.now() + cd; }
   io.to(q.room).emit('magic-chan-end', Object.assign({ id, by: q.by, why, cd, spell: q.spell }, extra || {}));
   // (5b) a held chunk ended without its caster's throw (time, gone, a new cast): it comes down where it last was
-  if (q.chunk && !extra) { const P = magicPileAt(q.room, q.chunk.cx, q.chunk.cy, q.chunk.m, q.spell); io.to(q.room).emit('magic-chunk-end', { id, x: Math.round(q.chunk.cx), y: Math.round(q.chunk.cy), n: P.length, drop: 1 }); } }
+  if (q.chunk && !extra) { const P = magicPileAt(q.room, q.chunk.cx, q.chunk.cy, q.chunk.m, null); io.to(q.room).emit('magic-chunk-end', { id, x: Math.round(q.chunk.cx), y: Math.round(q.chunk.cy), n: P.length, drop: 1, c: P.slice(0, 12) }); } }
 // ⭐ MAGIC 5b (2026-11-18, EARTH — THE THROWS): a chunk THROWN, in the air: id → { room, by, spell, m (its cells' materials), x, y, vx, vy (px, px/s at the throw), t0, until }. Its caster's
 //   game flies it and says where it came down (`magic-chunk-land`); not told by `until` (its caster gone), it comes down where its flight would have (`magicChunkFall`).
 const _magicChunks = new Map();
-setInterval(() => { if (!_magicChunks.size) return; const now = Date.now(); for (const [id, F] of _magicChunks) if (now > F.until) { _magicChunks.delete(id); const p = magicChunkFall(F); const P = magicPileAt(F.room, p.x, p.y, F.m, F.spell); io.to(F.room).emit('magic-chunk-end', { id, x: Math.round(p.x), y: Math.round(p.y), n: P.length }); } }, 250);
+setInterval(() => { if (!_magicChunks.size) return; const now = Date.now(); for (const [id, F] of _magicChunks) if (now > F.until) { _magicChunks.delete(id); const p = magicChunkFall(F); const P = magicPileAt(F.room, p.x, p.y, F.m, null); io.to(F.room).emit('magic-chunk-end', { id, x: Math.round(p.x), y: Math.round(p.y), n: P.length }); } }, 250);
 setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) if (now > q.until || !io.sockets.sockets.get(q.by)) magicChanEnd(id, now > q.until ? 'time' : 'gone'); }, 250);
 function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC_SECRET).update(pkey + '|' + life + '|' + spell).digest().readUInt32BE(0) & 0x3fffffff; }
 // ⭐ MAGIC STEP 3d (2026-11-17) — BATCH b: THE WORLD CHANGED BY A SPELL, AND PUT BACK. Each changed cell is written as the liquid reactions write theirs (`grid.s` + `hp.s`, the
@@ -3995,10 +3995,22 @@ function magicPileAt(room, x, y, mats, sp) {
   if (cells.length) { wireFanout(room, 'terrain-set', { cells }); if (sp) io.to(room).emit('magic-cells', { c: placed, spell: sp, look: 'rock' }); }
   return placed;
 }
+// (5b round 2) A CHUNK STRUCK: its own placed cells and the ground it hit (the solid cells round the point that are not its own, the nearest first) take WEAR by how hard — the same kept
+//   wear a blow leaves (`wearPut`; told to the room as a strike is, `terrain-wear` with the point: cracks there, chips and sparks on every screen). Never past the most (it does not break).
+function magicChunkDent(room, x, y, placed, w, n) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return; const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, W = wearOf(room), geom = worldGeom(room), own = new Set(placed), out = [];
+  const old = (i) => { const m = W.by.get(wearChunkOf(geom, i)), e = m && m.get(i); return e ? e[0] | 0 : 0; };
+  const add = (i, a) => { const v = peekCellAt(grid, i); if (!(v > 0) || !isSolidCell(v) || isPlantId(v)) return; const nw = Math.min(59, old(i) + Math.round(a)); if (nw <= 0) return; wearPut(room, i, nw, v, [Math.round(x), Math.round(y)]); out.push(i, nw); };
+  for (const i of placed) add(i, w * (0.6 + 0.4 * Math.random()));
+  const c0 = Math.floor(x / T), r0 = Math.floor(y / T), R = Math.ceil(1.2 + 0.45 * Math.sqrt(n)), hit = [];
+  for (let dc = -R; dc <= R; dc++) for (let dr = -R; dr <= R; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r; if (own.has(i)) continue; const v = peekCellAt(grid, i); if (v > 0 && isSolidCell(v)) hit.push([dc * dc + dr * dr, i]); }
+  hit.sort((a, b) => a[0] - b[0]); for (const [d, i] of hit.slice(0, 8)) add(i, w * Math.max(0.3, 1 - Math.sqrt(d) / (R + 1)));
+  if (out.length) io.to(room).emit('terrain-wear', { c: out, p: [Math.round(x), Math.round(y)] });
+}
 // where a thrown chunk would have come down (its caster gone): its flight from the throw, through open cells, at most its life
 function magicChunkFall(F) {
   const st = cellsOf(F.room), grid = st.terrain, S = SPELLS.of(F.spell) || {}; if (!grid) return { x: F.x, y: F.y }; const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, g = (S.grav || 0.35) * 1500, floorRow = Math.floor(roomFloorTop(F.room) / T);
-  let x = F.x, y = F.y, vx = F.vx, vy = F.vy; for (let k = 0; k < 200; k++) { const nx = x + vx * 0.02, ny = y + vy * 0.02; vy += g * 0.02; const c = Math.floor(nx / T), r = Math.floor(ny / T);
+  let x = F.x, y = F.y, vx = F.vx, vy = F.vy; for (let k = 0; k < 1100; k++) { const nx = x + vx * 0.02, ny = y + vy * 0.02; vy += g * 0.02; const c = Math.floor(nx / T), r = Math.floor(ny / T);
     if (c < 0 || c >= COLS || r < 0 || r >= floorRow) break; const v = peekCellAt(grid, c * ROWS + r); if (v > 0 && isSolidCell(v)) break; x = nx; y = ny; }
   return { x, y };
 }
@@ -28117,13 +28129,16 @@ io.on('connection', (socket) => {
       if (Math.hypot(x - K.cx, y - K.cy) > 140) { x = K.cx; y = K.cy; } const vl = Math.hypot(vx, vy), vm = (S.speed || 760) * 1.1; if (vl > vm) { vx *= vm / vl; vy *= vm / vl; }
       const ex = { thr: 1, x: Math.round(x), y: Math.round(y), vx: Math.round(vx), vy: Math.round(vy) };
       if (K.soil) { magicSoilSpray(q.room, x, y, K, vx, vy, S); ex.spray = 1; magicChanEnd(m.id | 0, 'let', ex); return; }
-      _magicChunks.set(m.id | 0, { room: q.room, by: socket.id, spell: q.spell, m: K.m, x, y, vx, vy, t0: now, until: now + ((S.life || 3) + 2) * 1000 });
+      _magicChunks.set(m.id | 0, { room: q.room, by: socket.id, spell: q.spell, m: K.m, x, y, vx, vy, t0: now, until: now + ((S.life || 20) + 3) * 1000 });
       magicChanEnd(m.id | 0, 'let', ex); return; }
     magicChanEnd(m.id | 0, 'let'); });
   socket.on('magic-chunk-land', (m) => { const id = m && (m.id | 0), F = id && _magicChunks.get(id); if (!F || F.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return; _magicChunks.delete(id);
     const S = SPELLS.of(F.spell) || {}, t = (Date.now() - F.t0) / 1000 + 0.5, reach = Math.hypot(F.vx, F.vy) * t + 0.5 * (S.grav || 0.35) * 1500 * t * t + 64; let x = +m.x, y = +m.y;
     if (Math.hypot(x - F.x, y - F.y) > reach) { const p = magicChunkFall(F); x = p.x; y = p.y; }
-    const P = magicPileAt(F.room, x, y, F.m, F.spell); io.to(F.room).emit('magic-chunk-end', { id, x: Math.round(x), y: Math.round(y), n: P.length }); });
+    // (5b round 2, the user: 'rock into rock with the appropriate effects … the terrain should probably get damaged') not magic now: heaped as plain rock, and IT and WHAT IT STRUCK cracked by how hard
+    const P = magicPileAt(F.room, x, y, F.m, null), k = Math.max(0, Math.min(1, (+m.v || 0) / Math.max(1, S.speed || 520)));
+    if (k > 0.15 && S.dent) magicChunkDent(F.room, x, y, P, k * S.dent, F.m.length);
+    io.to(F.room).emit('magic-chunk-end', { id, x: Math.round(x), y: Math.round(y), n: P.length, c: P.slice(0, 12) }); });
   socket.on('magic-chan-burn', (m) => { const room = currentAvatarRoom, q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - (q.burnT || 0) < 180) return; q.burnT = now; if (Math.hypot(m.x - q.x, m.y - q.y) > q.reach + 64) return; igniteBox(room, +m.x, +m.y, TERRAIN_CELL); });
   socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); { const pd = roomDblPos[room], r = pd && pd.get(q.by); if (r && r.dbl === id) { pd.delete(q.by); if (!pd.size) delete roomDblPos[room]; } } io.to(room).emit('magic-double-pop', { id, by: socket.id }); });

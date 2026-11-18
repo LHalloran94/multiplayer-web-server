@@ -154,11 +154,13 @@
     // ⭐ STEP 5b (2026-11-18 — EARTH, THE THROWS; the user: the chunk 'should come from pulling actual terrain near the pointer … then I guess you could move it around and such, and
     //   then releasing it would shoot it in the direction it is pointing away from the player'). kind 'chunk', HELD (`chan`, `chanS` the most): the cast TEARS up to `cells` of the
     //   ground nearest the pointer (within `grab` cells; the pointer within `reach` of you) out of the world (server `magicChunkTear` — moved, not made); while the fire button is
-    //   held it floats to your pointer (no further than `reach` from you, `holdV` px/s, stopped by rock); LET GO and it flies AWAY FROM YOU (from your middle through it) at
-    //   `speed` px/s under `grav`; time up / a blow / the cast let go DROPS it. ROCK CHUNK: hard ground (not what a spade digs) — it hurts whoever it hits by its weight (`dmg` a
+    //   held it floats to your pointer (no further than `reach` from you, `holdV` px/s, stopped by rock); FIRE AGAIN (5b round 2, the user: 'press right click again to fire') and
+//   it flies AWAY FROM YOU (from your middle through it) at
+    //   `speed` px/s under `grav` until it meets something (`life` only a safety cap); time up / a blow / the cast let go DROPS it. Where it strikes, it and what it struck are CRACKED by
+//   how hard (`dent` the most wear, at full speed). ROCK CHUNK: hard ground (not what a spade digs) — it hurts whoever it hits by its weight (`dmg` a
     //   cell, at most 4; `kn` its knock a cell) and breaks into its own cells where it comes down (server `magicPileAt`). SOIL FLUNG (`soil`): only what a spade digs — let go it
     //   SPRAYS out as grains (`fan` radians) that land as ground (the spade's throw: `powder-fly`).
-    rockchunk: { name: 'Rock chunk', school: 'earth', form: 'shaping', tier: 0, cd: 6, stance: 'level', kind: 'chunk', learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 9, holdV: 520, speed: 760, grav: 0.35, life: 3, dmg: 0.35, kn: 0.7, fx: '#c9a26a', look: 'tear',
+    rockchunk: { name: 'Rock chunk', school: 'earth', form: 'shaping', tier: 0, cd: 6, stance: 'level', kind: 'chunk', learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 9, holdV: 520, speed: 520, grav: 0.35, life: 20, dmg: 0.35, kn: 0.7, dent: 34, fx: '#c9a26a', look: 'tear',
       plain: { keys: [D, U, L, R, R], rune: [6, 3, 4, 5, 8] } },
     soilfling: { name: 'Soil flung', school: 'earth', form: 'shaping', tier: 0, cd: 4, stance: 'level', kind: 'chunk', soil: true, learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 12, holdV: 560, speed: 420, fan: 0.5, fx: '#b89060', look: 'tear',
       plain: { keys: [D, U, L, L, D], rune: [0, 3, 6, 7, 8] } },
