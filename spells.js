@@ -120,8 +120,8 @@
     //   CHILL BOLT: a frost bolt that SLOWS whoever it hits (`slow` × their speed for `slowS` s — the new 'slow' power, 01_state `POWERUP_KINDS.slow`).
     leap: { name: 'Leap', school: 'force', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'boots', secs: 20, learn: 3, alts: ['leap_o'], plain: { keys: [R, U, U, D, R], rune: [6, 4, 2, 5, 8] } },
     leap_o: { name: 'Leap (on another)', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'boon', pw: 'boots', secs: 20, alt: 'leap', other: true, reach: 240, plain: { keys: [R, U, U, D, L], rune: [6, 4, 2, 5, 3] } },
-    feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'wings', secs: 20, learn: 3, alts: ['feather_o'], plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
-    feather_o: { name: 'Feather fall (on another)', school: 'storm', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'boon', pw: 'wings', secs: 20, alt: 'feather', other: true, reach: 240, plain: { keys: [L, R, D, D, R], rune: [0, 4, 8, 7, 4] } },
+    feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'feather', secs: 20, learn: 3, alts: ['feather_o'], plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
+    feather_o: { name: 'Feather fall (on another)', school: 'storm', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'boon', pw: 'feather', secs: 20, alt: 'feather', other: true, reach: 240, plain: { keys: [L, R, D, D, R], rune: [0, 4, 8, 7, 4] } },
     haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, alts: ['haste_o'], plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
@@ -130,7 +130,7 @@
     shrink_o: { name: 'Shrink (on another)', school: 'decay', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mini', secs: 15, alt: 'shrink', other: true, reach: 240, plain: { keys: [D, R, D, L, U], rune: [1, 5, 7, 3, 0] } },
     fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     fireward_o: { name: 'Fire ward (on another)', school: 'wards', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'fireproof', secs: 20, alt: 'fireward', other: true, reach: 240, plain: { keys: [L, D, R, U, L], rune: [0, 6, 8, 2, 1] } },
-    chillbolt: { name: 'Chill bolt', school: 'frost', form: 'bolt', tier: 0, cd: 4, stance: 'level', kind: 'bolt', learn: 3, speed: 640, life: 1.1, grav: 0.05, r: 3, dmg: 0.4, slow: 0.55, slowS: 4,
+    chillbolt: { name: 'Chill bolt', school: 'frost', form: 'bolt', tier: 0, cd: 4, stance: 'level', kind: 'bolt', learn: 3, speed: 640, life: 1.1, grav: 0.05, r: 3, dmg: 0.4, slow: 0.55, slowS: 4, freezeN: 2, freezeS: 20,
       plain: { keys: [D, D, R, U, R], rune: [2, 4, 3, 6, 7] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
@@ -182,9 +182,19 @@
   const modFits = (mid, spell) => { const M = modOf(mid), S = SPELLS[spell] && Object.prototype.hasOwnProperty.call(SPELLS, spell) ? SPELLS[spell] : null; return !!M && !!S && !S.innate && M.kinds.indexOf(S.kind) >= 0; };
   // (step 3h, the user: "add a contents page to the master tome … the tabs should probably just be for each school and the spells should be arranged by schools") its first page
   //   is the CONTENTS (`contents`: no spell — the client lists the schools and their spells there, each a link), then the spells school by school, in the schools' order
-  TOMES.tome_master.pages.push({ contents: true });
-  for (const sc of Object.keys(SCHOOLS)) for (const id of Object.keys(SPELLS)) if (!SPELLS[id].innate && !SPELLS[id].alt && SPELLS[id].school === sc) TOMES.tome_master.pages.push({ spell: id });
-  for (const id of Object.keys(MODS)) TOMES.tome_master.pages.push({ mod: id });   // (4c) the modifiers after the spells, a page each
+  //   (4e round 2, the user: 'the master tome probably needs multiple pages for the contents, rather than trying to squeeze them all onto the same page') THE CONTENTS over as many
+  //   pages as it needs: its lines (a school, then its spells; the modifiers last) laid into COLUMNS — a left page holds 10 under its title, a right page 13; a school's name never
+  //   ends a column — `contents` = the columns, each line with the page it is on; a contents page (`contents`, `part`) is one spread, two columns
+  { const T = TOMES.tome_master, rows = [], pageOf = [];
+    for (const sc of Object.keys(SCHOOLS)) { const ids = Object.keys(SPELLS).filter(id => !SPELLS[id].innate && !SPELLS[id].alt && SPELLS[id].school === sc); if (!ids.length) continue; rows.push({ school: sc }); for (const id of ids) rows.push({ spell: id }); }
+    rows.push({ school: 'mods' }); for (const id of Object.keys(MODS)) rows.push({ spell: id, mod: 1 });
+    const CAP = [10, 13], cols = []; let cur = [];
+    for (const r of rows) { const cap = CAP[cols.length % 2]; if (cur.length >= cap || (r.school && cur.length >= cap - 1)) { cols.push(cur); cur = []; } cur.push(r); }
+    if (cur.length) cols.push(cur);
+    const nC = Math.max(1, Math.ceil(cols.length / 2)); for (let k = 0; k < nC; k++) T.pages.push({ contents: true, part: k });
+    for (const r of rows) { if (r.school) continue; r.page = T.pages.length; T.pages.push(r.mod ? { mod: r.spell } : { spell: r.spell }); }
+    for (const c of cols) for (let i = 0; i < c.length; i++) if (c[i].school) { const nx = c[i + 1] || null; c[i].page = nx ? nx.page : T.pages.length - 1; }
+    T.contents = cols; }
   const is = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(SPELLS, id);
   const of = (id) => is(id) ? SPELLS[id] : null;
   // ⭐ YOUR OWN VERSION (step 2 — kickoff §'against copied inputs' 1): every spell's input = the shared core + ONE PART worked out from you and this life. The SERVER makes

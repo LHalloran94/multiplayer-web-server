@@ -27902,7 +27902,7 @@ io.on('connection', (socket) => {
     if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
     if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (4e) ON ANOTHER: a player in this room, near enough (by where their own game last said they were)
-    if (S.other) { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;
+    if (S.other && m.tgt !== 'mw-test-dummy') { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;   // (4e round 2: the practice dummy lives on its caster's machine alone)
       if (!ts || ts.id === socket.id || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 240) + 120)) return no('nobody'); }
     // (step 2) REAGENTS: what the spell uses up, from what you carry (where things cost something), unless the panel's 'Spells need no reagents (for testing)'
     const gated = invGatedRoom(room), key = playerKeyFor(socket.id), reag = !SC && Array.isArray(S.uses) && gated && !socket._magicNoReag ? S.uses : null;
@@ -27928,7 +27928,8 @@ io.on('connection', (socket) => {
       if (MD && m.mod === 'mod_follow') { lf *= MD.lifeK || 1; v *= MD.speedK || 1; g *= MD.gravK != null ? MD.gravK : 1; }
       if (MD && m.mod === 'mod_arc') { const A = SPELLS.arcAim(S, MD, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
       const ids = [id]; if (MD && m.mod === 'mod_split') { for (let i = 1; i < (MD.n || 3); i++) ids.push(++_magicSeq); out.ids = ids; }
-      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, land: shot ? S.kind : null, SK, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0 });
+      const SKf = S.freezeN ? Object.assign({}, SK, { cells: S.freezeN, secs: (S.freezeS || 20) * (socket._magicSecsK || 1), ringMs: 60 }) : SK;   // (4e round 2: the chill bolt's freeze — a cell or two)
+      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, land: shot ? S.kind : S.freezeN ? 'freeze' : null, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0 });
       while (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     if (S.kind === 'lift') out.obj = m.obj;
@@ -27988,7 +27989,8 @@ io.on('connection', (socket) => {
     if (L.burn && !m.air) igniteBox(L.room, +m.x, +m.y, TERRAIN_CELL * (L.burnR || 1));
     // (step 3e) a shot that landed: the ice / the wall where it came down (a wall only on ground under it — else it falls apart in the air)
     let land = null, n = 0, tx = Math.round(m.x), ty = Math.round(m.y), air = m.air ? 1 : 0;
-    if (L.land === 'freeze') { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); air = 0; }
+    if (L.land === 'freeze' && L.chill) { if (m.liq) { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); } }   // (4e round 2) the chill bolt: only where it went into water
+    else if (L.land === 'freeze') { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); air = 0; }
     else if (L.land === 'wall' && (m.side === 1 || m.side === -1) && (n = magicWallSide(L.room, +m.x, +m.y, m.side, L.SK)) != null) { land = 'wall'; air = 0; }   // (step 3f: out of a face, level)
     else if (L.land === 'wall') { const g = magicGroundAt(L.room, +m.x, +m.y); if (g && Math.abs(g.y - m.y) <= 3 * TERRAIN_CELL) { land = 'wall'; tx = g.x; ty = g.y; n = magicWall(L.room, g.x, g.y, L.SK); air = 0; } else air = 1; }
     io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell });
