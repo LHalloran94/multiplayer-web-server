@@ -180,6 +180,28 @@
   const isMod = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(MODS, id);
   const modOf = (id) => isMod(id) ? MODS[id] : null;
   const modFits = (mid, spell) => { const M = modOf(mid), S = SPELLS[spell] && Object.prototype.hasOwnProperty.call(SPELLS, spell) ? SPELLS[spell] : null; return !!M && !!S && !S.innate && M.kinds.indexOf(S.kind) >= 0; };
+  // ⭐ (4e round 3, 2026-11-18 — the user: 'On yourself' as a shared form forced similar spells into different schools; 'the school be the thing held static and the form part simply
+  //   something unique for every spell … similar spells could be similar') A SPELL'S INPUT IN THE LANGUAGE = its SCHOOL's piece · your own key · its own WORD (`word`: two keys and a
+  //   stroke from the middle, unique within its school) · an up / an underline a tier. SHARED ENDINGS kept where they mean the same in every school: a BOLT ends → → (stroke middle →
+  //   right), a held STREAM → ↓ (middle → bottom right) — no other word uses them. ON ANOTHER (a Touch variant): the word's FIRST mark turned → (towards them); its stroke carries on
+  //   to the top right point. Similar spells look alike: grow ← ↑, shrink ← ↓. `form` stays what the spell DOES (its kind of delivery); `word` is only how it is said.
+  //   Switch back: `wordOf` falls to the old form's piece when a spell has no word (none now). Plain inputs are unchanged.
+  const WORDS = {
+    firebolt: [[R, R], [4, 5]], greatbolt: [[R, R], [4, 5]], flamestream: [[R, D], [4, 8]],
+    chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
+    gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
+    stonewall: [[U, U], [4, 7]],
+    lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]], leap_o: [[R, U], [4, 1, 2]],
+    haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
+    rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
+    closewounds: [[D, D], [4, 6]],
+    grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
+    double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
+    lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
+  };
+  for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
+  SPELLS.shrink.school = 'alteration'; SPELLS.shrink_o.school = 'alteration';   // (grow and shrink one school — the user)
+  const wordOf = (S) => S.word || FORMS[S.form] || { keys: [], rune: [] };
   // (step 3h, the user: "add a contents page to the master tome … the tabs should probably just be for each school and the spells should be arranged by schools") its first page
   //   is the CONTENTS (`contents`: no spell — the client lists the schools and their spells there, each a link), then the spells school by school, in the schools' order
   //   (4e round 2, the user: 'the master tome probably needs multiple pages for the contents, rather than trying to squeeze them all onto the same page') THE CONTENTS over as many
@@ -216,14 +238,14 @@
   const keysOf = (id, lang, own, mod, modOwn) => { if (isMod(id)) return modKeys(id, own); const k0 = keysCore(id, lang, own); if (!k0 || !mod) return k0; const mk = modKeys(mod, modOwn); return mk ? k0.concat(mk) : null; };
   const keysCore = (id, lang, own) => { const S = of(id); if (!S || S.innate) return null; let k;
     if (!lang) { if (!S.plain) return null; k = S.plain.keys.slice(); }
-    else { k = SCHOOLS[S.school].keys.concat(FORMS[S.form].keys); for (let i = 0; i < (S.tier || 0); i++) k.push(U); }
+    else { k = SCHOOLS[S.school].keys.concat(wordOf(S).keys); for (let i = 0; i < (S.tier || 0); i++) k.push(U); }
     if (own && own.k != null) k.splice(2, 0, own.k & 3);
     return k; };
   // …and its rune, as ONE path through the nine points (the school's stroke, on to the form's, then one UNDERLINE a tier — bottom left to bottom right). `parts` = where the form's
   //   stroke begins (after the own point, when there is one)
   const runeCore = (id, lang) => { const S = of(id); if (!S || S.innate) return null;
     if (!lang) return S.plain ? { pts: S.plain.rune.slice(), parts: Math.min(3, S.plain.rune.length) } : null;
-    const a = SCHOOLS[S.school].rune, b = FORMS[S.form].rune, pts = a.concat(b[0] === a[a.length - 1] ? b.slice(1) : b);
+    const a = SCHOOLS[S.school].rune, b = wordOf(S).rune, pts = a.concat(b[0] === a[a.length - 1] ? b.slice(1) : b);
     for (let i = 0; i < (S.tier || 0); i++) pts.push(6, 8);
     return { pts, parts: a.length }; };
   const runeSpell = (id, lang, own) => { const R0 = runeCore(id, lang); if (!R0) return null;
