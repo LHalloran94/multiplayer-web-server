@@ -136,7 +136,8 @@
     //   kind 'change': a SHOT (as freeze: flies from the hand, ends on the first rock — lava to rock in the first liquid, `inLiq`) that CHANGES THE GROUND where it lands, from
     //   the nearest cell it works on (within 3 cells) outward through the touching ones, ring by ring (`ringMs`), at most `cells` (server `magicChange`). For good — the matter
     //   is changed, not made (a cell for a cell). `map` = what becomes what (cell ids) · `lava` + `to` = lava (a cell at least a third full of lava alone) becomes `to` ·
-    //   `mend` = the damage taken out of rock (its strength and its cracks — wood and plants not) · `oil` = GREASE: that many cells of oil poured as a film on the ground there,
+    //   `mend` = the damage taken out of rock (its strength and its cracks — wood and plants not) · `oil` = GREASE: that many cells of oil as a film (`film` of a cell each) on the
+//   rock it hit — floor, wall or ceiling (the open cells touching rock nearest it, within `oilR`),
     //   MADE (so it dries away after `secs`, as much as was poured, from round where it was — `dryR` cells). `fx` the shot's and the change's colour.
     crumble: { name: 'Rock to sand', school: 'earth', form: 'burst', tier: 0, cd: 5, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 24, ringMs: 60, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#e6cb86', look: 'sand',
       map: { 2: 3, 19: 3, 22: 3, 23: 3, 24: 3, 25: 3, 26: 3, 33: 3, 43: 3, 44: 3, 45: 3, 76: 3, 77: 3, 79: 3, 80: 3, 81: 3, 89: 3 }, plain: { keys: [D, U, L, D, D], rune: [0, 3, 4, 7, 6] } },
@@ -148,7 +149,7 @@
       lava: true, to: 23, inLiq: true, plain: { keys: [D, U, D, R, U], rune: [2, 5, 4, 7, 8] } },
     mend: { name: 'Mend rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 60, ringMs: 50, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#d9c08a', look: 'mend',
       mend: true, plain: { keys: [D, U, U, L, U], rune: [6, 7, 4, 1, 2] } },
-    grease: { name: 'Grease', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, oil: 3, oilW: 3, secs: 60, dryR: 30, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#caa12a', look: 'oil',
+    grease: { name: 'Grease', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, oil: 3, film: 0.5, oilR: 6, secs: 60, dryR: 30, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#caa12a', look: 'oil',
       plain: { keys: [D, U, U, R, D], rune: [0, 1, 4, 5, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },

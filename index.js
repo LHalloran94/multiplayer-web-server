@@ -3903,27 +3903,38 @@ function magicChange(room, x, y, S) {
   while (n < most) { const last = rings[rings.length - 1], next = []; for (const i of last) { const r = i % ROWS; for (const j of [i - ROWS, i + ROWS, r > 0 ? i - 1 : -1, r < ROWS - 1 ? i + 1 : -1]) { if (j < 0 || seen.has(j) || !fits(j)) continue; seen.add(j); next.push(j); if (++n >= most) break; } if (n >= most) break; } if (!next.length) break; rings.push(next); }
   let done = 0;
   rings.forEach((ring, k) => setTimeout(() => {
-    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = []; let pc0 = 1e9, pr0 = 1e9, pc1 = -1, pr1 = -1;
+    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = [], mended = []; let pc0 = 1e9, pr0 = 1e9, pc1 = -1, pr1 = -1;
     for (const i of ring) { if (!fits(i)) continue; const v = peekCellAt(grid, i);
-      if (S.mend) { if (!damaged(i, v)) continue; s2.terrainHp.s(i, matStrengthSrv(mats, v)); wearDel(room, i); cells.push(i, v); done++; continue; }
+      if (S.mend) { if (!damaged(i, v)) continue; s2.terrainHp.s(i, matStrengthSrv(mats, v)); wearDel(room, i); mended.push(i); done++; continue; }
       let to = S.lava ? S.to : S.map[v]; if (!(to > 0)) continue;
       if (S.lava) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; tot.s(i, 0); fineSet(room).delete(i); liq.push(i); }
       grid.s(i, to); s2.terrainHp.s(i, matStrengthSrv(mats, to)); cells.push(i, to); done++;
       const c = Math.floor(i / ROWS), r = i % ROWS; if (c < pc0) pc0 = c; if (c > pc1) pc1 = c; if (r < pr0) pr0 = r; if (r > pr1) pr1 = r; }
     if (cells.length) wireFanout(room, 'terrain-set', { cells });
+    if (mended.length) io.to(room).emit('magic-mend', { c: mended });   // (5a round 2: each screen eases the cracks away and redraws every copy of the cell — 16zj `magicMendStep`)
     if (liq.length) emitFineCells(room, liq);
     if (pc1 >= 0) { activatePowderRect(room, grid, pc0 - 1, pr0 - 1, pc1 + 1, pr1 + 1); if (magicCfgSrv.wake) for (let c = pc0; c <= pc1; c++) fineWakeAround(room, c * ROWS + pr0); }   // (sand made falls; liquid round it flows on)
   }, k * (S.ringMs || 60)));
   return n;
 }
-// GREASE: `oil` cells of oil as a film on the ground round the point — the open cell resting on the ground in each column, the middle first, out to `oilW` either side
+// GREASE: `oil` cells of oil as a film on WHATEVER IT HIT (5a round 2, the user: 'it should also produce the oil when it hits the side of a wall or a ceiling') — the open cells
+//   touching rock nearest the point (floor, wall or ceiling alike), through open cells from where it landed, within `oilR` cells, each given `film` of a cell; from there it runs
+//   and drips as any oil does
 function magicGrease(room, x, y, S) {
   const grid = ensureTerrain(room); ensureTerrainHp(room); if (!cellsOf(room).fineAmt) ensureFineArrays(room, 1);   // (a room with no liquid yet has no liquid store: made, as a liquid brush makes it)
   const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal; if (!grid || !amt || !tot || (st.fineSub || 1) !== 1) return 0;
-  const OR = LIQ_RANK[15], ROWS = st.rows, T = TERRAIN_CELL, c0 = Math.floor(x / T), W = S.oilW || 3, order = [0]; for (let d = 1; d <= W; d++) order.push(-d, d);
-  const all = Math.round((S.oil || 3) * LIQUID_MAX), each = Math.ceil(all / order.length), liq = [], cells = []; let left = all;
-  for (let pass = 0; pass < 3 && left > 0; pass++) for (const dc of order) { if (left <= 0) break;
-    const g = magicGroundAt(room, (c0 + dc + 0.5) * T, y); if (!g || Math.abs(g.y - y) > 4 * T) continue; const i = g.c * ROWS + g.r; if (!magicOpen(grid, i)) continue;
+  const OR = LIQ_RANK[15], ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, R = S.oilR || 6, floorRow = Math.floor(roomFloorTop(room) / T);
+  const c0 = Math.floor(x / T), r0 = Math.floor(y / T);
+  const solidAt = (j) => { if (j < 0 || j >= N) return false; if (j % ROWS >= floorRow) return true; const v = peekCellAt(grid, j); return v > 0 && isSolidCell(v); };   // (a level's floor is a line, not cells)
+  const open = (j) => j >= 0 && j < N && j % ROWS < floorRow && magicOpen(grid, j);
+  let i0 = -1, bd = 1e9; for (let dc = -2; dc <= 2; dc++) for (let dr = -2; dr <= 2; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const j = c * ROWS + r, d = dc * dc + dr * dr; if (d < bd && open(j)) { bd = d; i0 = j; } }
+  if (i0 < 0) return 0;
+  const all = Math.round((S.oil || 3) * LIQUID_MAX), each = Math.max(1, Math.round(LIQUID_MAX * (S.film || 0.5))), want = Math.ceil(all / each) + 2, list = [], seen = new Set([i0]), Q = [i0];
+  const touch = (j) => { const r = j % ROWS; return solidAt(j + 1) || (r > 0 && solidAt(j - 1)) || solidAt(j - ROWS) || solidAt(j + ROWS); };
+  while (Q.length && list.length < want) { const k = Q.shift(); if (touch(k)) list.push(k); const r = k % ROWS, c = (k / ROWS) | 0;
+    for (const j of [k + 1, r > 0 ? k - 1 : -1, k - ROWS, k + ROWS]) { if (j < 0 || seen.has(j)) continue; seen.add(j); const jc = (j / ROWS) | 0, jr = j % ROWS; if (Math.abs(jc - c0) > R || Math.abs(jr - r0) > R || !open(j)) continue; Q.push(j); } void c; }
+  const liq = [], cells = []; let left = all;
+  for (let pass = 0; pass < 3 && left > 0; pass++) for (const i of list) { if (left <= 0) break;
     const t = Math.max(0, peekCellAt(tot, i)), m = Math.min(LIQUID_MAX - t, each, left); if (m <= 0) continue;
     const p = amt.wp(i), b = amt.o(i); p[b + OR] += m; tot.s(i, t + m); left -= m; fineSet(room).add(i); liq.push(i); if (fineSyncGrid(room, i)) cells.push(i, grid.g(i)); }
   if (cells.length) wireFanout(room, 'terrain-set', { cells });
