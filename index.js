@@ -3833,6 +3833,14 @@ function magicMindOf(pkey) {
 //   Overworld version. Elsewhere keeps the plain player key (the rows learnt before this); the Overworld is the key + '|ow'. A death ends the life of the world you died in.
 //   Switch back: Items › Magic › 'What you learn is kept apart for the Overworld' off (`socket._magicOneMind`) = one learnt set everywhere, as before.
 function magicMindKey(socket) { const k = playerKeyFor(socket.id); if (socket._magicOneMind) return k; const r = socketToAvatarRoom[socket.id]; return r && overworldRooms.has(r) ? k + '|ow' : k; }
+// ⭐ MAGIC 4d (2026-11-18) — CHANNELLED SPELLS (spells.js `chan`): a cast id → { by, room, spell, cat, until, x, y, ax, ay, reach } while its caster holds it. Ended by its caster
+//   letting go (`magic-chan-stop`), its time (`chanS`; a minute at most), or its caster gone — everybody is told (`magic-chan-end`, with the cooldown, which counts from here).
+//   Where it points while held comes from its caster (`magic-aim`) and goes on to the others; the ground at its end is lit here (`magic-chan-burn`). PROCESSOR: a few a second.
+const _magicChans = new Map();
+function magicChanEnd(id, why) { const q = _magicChans.get(id); if (!q) return; _magicChans.delete(id); const sk = io.sockets.sockets.get(q.by); let cd = 0;
+  if (sk && !sk._magicNoCd) { cd = SPELLS.cdMs(q.spell, q.cat); (sk._magicCd || (sk._magicCd = {}))[q.spell] = Date.now() + cd; }
+  io.to(q.room).emit('magic-chan-end', { id, by: q.by, why, cd, spell: q.spell }); }
+setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) if (now > q.until || !io.sockets.sockets.get(q.by)) magicChanEnd(id, now > q.until ? 'time' : 'gone'); }, 250);
 function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC_SECRET).update(pkey + '|' + life + '|' + spell).digest().readUInt32BE(0) & 0x3fffffff; }
 // ⭐ MAGIC STEP 3d (2026-11-17) — BATCH b: THE WORLD CHANGED BY A SPELL, AND PUT BACK. Each changed cell is written as the liquid reactions write theirs (`grid.s` + `hp.s`, the
 //   `terrain-set` wire; fine liquid cleared / written + `emitFineCells`) and remembered in `magicTemp` with when it goes back and what it was — also in the DATABASE (`magic_temp`), so a
@@ -27907,6 +27915,10 @@ io.on('connection', (socket) => {
     const SK = socket._magicSecsK && socket._magicSecsK !== 1 && S.secs ? Object.assign({}, S, { secs: S.secs * socket._magicSecsK, crackS: (S.crackS || 0) * Math.min(1, socket._magicSecsK) }) : S;
     // (step 3e, the user) FREEZE and the STONE WALL are SHOTS: they fly from the hand (each screen flies them, as a bolt) and do what they do where they land — the caster's game says where (`magic-hit`)
     const shot = (S.kind === 'freeze' || S.kind === 'wall') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;
+    // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
+    if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
+      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + 300, x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120 });
+      out.chan = 1; out.secs = secs; if (!SC && !socket._magicNoCd) cds[m.spell] = now + secs * 1000 + cd; }
     if (S.kind === 'bolt' || shot) { let lf = S.life || 1, g = (S.grav || 0) * 1500, v = S.speed;
       // (4c) a modifier's flight: the follower slower, longer, less pulled down · the lob by its own arc (every screen works out the same) · a split: an id for each piece
       if (MD && m.mod === 'mod_follow') { lf *= MD.lifeK || 1; v *= MD.speedK || 1; g *= MD.gravK != null ? MD.gravK : 1; }
@@ -27951,6 +27963,14 @@ io.on('connection', (socket) => {
   socket.on('magic-steer', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const L = _magicLive.get(m.id | 0); if (!L || L.by !== socket.id || !L.steer || L.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - (socket._steerT || 0) < 35) return; socket._steerT = now; if (Math.hypot(+m.x - L.x, +m.y - L.y) > L.reach) return;
     socket.to(room).emit('magic-steer', { id: m.id | 0, x: Math.round(+m.x), y: Math.round(+m.y), vx: Math.max(-2000, Math.min(2000, Math.round(+m.vx || 0))), vy: Math.max(-2000, Math.min(2000, Math.round(+m.vy || 0))) }); });
+  // ⭐ (4d) A HELD SPELL from its caster: where it points (relayed), let go, and the ground lit at its end (near where it is, a few times a second)
+  socket.on('magic-aim', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const q = _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return;
+    const now = Date.now(); if (now - (socket._aimT || 0) < 35) return; socket._aimT = now; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 520) return;
+    const al = Math.hypot(m.ax, m.ay) || 1; q.x = Math.round(+m.x); q.y = Math.round(+m.y); q.ax = m.ax / al; q.ay = m.ay / al;
+    socket.to(room).emit('magic-aim', { id: m.id | 0, x: q.x, y: q.y, ax: +q.ax.toFixed(3), ay: +q.ay.toFixed(3) }); });
+  socket.on('magic-chan-stop', (m) => { const q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id) return; magicChanEnd(m.id | 0, 'let'); });
+  socket.on('magic-chan-burn', (m) => { const room = currentAvatarRoom, q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
+    const now = Date.now(); if (now - (q.burnT || 0) < 180) return; q.burnT = now; if (Math.hypot(m.x - q.x, m.y - q.y) > q.reach + 64) return; igniteBox(room, +m.x, +m.y, TERRAIN_CELL); });
   socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); { const pd = roomDblPos[room], r = pd && pd.get(q.by); if (r && r.dbl === id) { pd.delete(q.by); if (!pd.size) delete roomDblPos[room]; } } io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
   // (magic step 3d) a RUNE stepped on: the stepper's own game tells (it sees its body exactly) — believed when this socket's body was last near it
   socket.on('rune-step', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const rs = magicRunesOf(room), q = rs.find(r => r.id === (m.id | 0)); if (!q) return;

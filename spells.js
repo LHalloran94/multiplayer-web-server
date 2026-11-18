@@ -108,6 +108,12 @@
     //   mirror  moves as your mirror image (client 16zj `magicDoubleSimStep`)
     double_m: { name: 'A mirror double', school: 'illusion', form: 'placed', tier: 1, cd: 12, stance: 'raise', kind: 'double', alt: 'double', mirror: true, secs: 60,
       plain: { keys: [L, U, R, D, U], rune: [2, 0, 6, 7, 4] } },
+    // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
+    //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
+    //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
+    //   stopped by rock, fizzling in liquid; `hw` its half width; it sets alight what it touches (each player's own game for their body, as a turret's jet), the ground at its end
+    flamestream: { name: 'Flame stream', school: 'fire', form: 'stream', tier: 0, cd: 4, stance: 'level', kind: 'stream', learn: 3, chan: true, chanS: 5, reach: 120, hw: 7,
+      plain: { keys: [U, R, D, D, R], rune: [6, 0, 4, 8, 5] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
