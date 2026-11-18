@@ -132,6 +132,24 @@
     fireward_o: { name: 'Fire ward (on another)', school: 'wards', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'fireproof', secs: 20, alt: 'fireward', other: true, reach: 240, plain: { keys: [L, D, R, U, L], rune: [0, 6, 8, 2, 1] } },
     chillbolt: { name: 'Chill bolt', school: 'frost', form: 'bolt', tier: 0, cd: 4, stance: 'level', kind: 'bolt', learn: 3, speed: 640, life: 1.1, grav: 0.05, r: 3, dmg: 0.4, slow: 0.55, slowS: 4, freezeN: 2, freezeS: 20,
       plain: { keys: [D, D, R, U, R], rune: [2, 4, 3, 6, 7] } },
+    // ⭐ STEP 5a (2026-11-18 — EARTH, the user: 'all the spells should go in'; 'how the earth spells change the world sound right': moved / changed matter STAYS, made matter goes).
+    //   kind 'change': a SHOT (as freeze: flies from the hand, ends on the first rock — lava to rock in the first liquid, `inLiq`) that CHANGES THE GROUND where it lands, from
+    //   the nearest cell it works on (within 3 cells) outward through the touching ones, ring by ring (`ringMs`), at most `cells` (server `magicChange`). For good — the matter
+    //   is changed, not made (a cell for a cell). `map` = what becomes what (cell ids) · `lava` + `to` = lava (a cell at least a third full of lava alone) becomes `to` ·
+    //   `mend` = the damage taken out of rock (its strength and its cracks — wood and plants not) · `oil` = GREASE: that many cells of oil poured as a film on the ground there,
+    //   MADE (so it dries away after `secs`, as much as was poured, from round where it was — `dryR` cells). `fx` the shot's and the change's colour.
+    crumble: { name: 'Rock to sand', school: 'earth', form: 'burst', tier: 0, cd: 5, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 24, ringMs: 60, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#e6cb86', look: 'sand',
+      map: { 2: 3, 19: 3, 22: 3, 23: 3, 24: 3, 25: 3, 26: 3, 33: 3, 43: 3, 44: 3, 45: 3, 76: 3, 77: 3, 79: 3, 80: 3, 81: 3, 89: 3 }, plain: { keys: [D, U, L, D, D], rune: [0, 3, 4, 7, 6] } },
+    harden: { name: 'Sand to rock', school: 'earth', form: 'burst', tier: 0, cd: 5, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 30, ringMs: 60, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#a08868', look: 'rock',
+      map: { 3: 25, 21: 89, 38: 44, 39: 89, 8: 4, 5: 19 }, plain: { keys: [D, U, L, U, U], rune: [6, 3, 4, 1, 0] } },
+    glassify: { name: 'Sand to glass', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 20, ringMs: 70, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#bfe6ea', look: 'glass',
+      map: { 3: 16 }, plain: { keys: [D, U, D, L, R], rune: [8, 5, 4, 3, 0] } },
+    coollava: { name: 'Lava to rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 30, ringMs: 60, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#ff9a4a', look: 'cool',
+      lava: true, to: 23, inLiq: true, plain: { keys: [D, U, D, R, U], rune: [2, 5, 4, 7, 8] } },
+    mend: { name: 'Mend rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 60, ringMs: 50, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#d9c08a', look: 'mend',
+      mend: true, plain: { keys: [D, U, U, L, U], rune: [6, 7, 4, 1, 2] } },
+    grease: { name: 'Grease', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, oil: 3, oilW: 3, secs: 60, dryR: 30, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#caa12a', look: 'oil',
+      plain: { keys: [D, U, U, R, D], rune: [0, 1, 4, 5, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -191,6 +209,7 @@
     chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
     stonewall: [[U, U], [4, 7]],
+    crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
     lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]], leap_o: [[R, U], [4, 1, 2]],
     haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],

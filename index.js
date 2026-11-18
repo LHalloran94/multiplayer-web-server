@@ -3881,6 +3881,66 @@ function magicFreeze(room, x, y, S) {
   }, k * (S.ringMs || 70)));
   return n;
 }
+// ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
+//   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
+//   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
+//   its kept wear gone — `wearDel`; the client's `terrain-set` resets the cracks). GREASE (`oil`) is the exception — oil MADE, so it dries away (`magicOilDry`).
+//   PROCESSOR: a few dozen cells a cast.
+const MAGIC_WOODY = new Set([28, 40, 91, 92]);   // (wood, driftwood, timber, charcoal: not mended — wood keeps its own cuts and notches)
+function wearHas(room, wi) { const W = wearOf(room); if (!W.n) return false; const m = W.by.get(wearChunkOf(worldGeom(room), wi)); return !!(m && m.has(wi)); }
+function wearDel(room, wi) { const W = wearOf(room), ch = wearChunkOf(worldGeom(room), wi), m = W.by.get(ch); if (!m || !m.has(wi)) return; m.delete(wi); W.n--; if (!m.size) W.by.delete(ch); try { _delWear.run(room, wi); } catch (e) {} }
+function magicChange(room, x, y, S) {
+  if (S.oil) return magicGrease(room, x, y, S);
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, c0 = Math.floor(x / T), r0 = Math.floor(y / T), mats = roomMats[room] || {};
+  const amt = st.fineAmt, tot = st.fineTotal, LV = LIQ_RANK[11];
+  const lava = (i) => { if (!amt || !tot || (st.fineSub || 1) !== 1) return false; const t = peekCellAt(tot, i); if (!(t >= LIQUID_MAX / 3)) return false; const p = amt.rp(i), b = amt.o(i); return p[b + LV] === t; };
+  const damaged = (i, v) => st.terrainHp.g(i) < matStrengthSrv(mats, v) || wearHas(room, i);
+  const fits = (i) => { if (i < 0 || i >= N) return false; if (S.lava) return lava(i); const v = peekCellAt(grid, i); if (!(v > 0) || !isSolidCell(v)) return false;
+    if (S.mend) return !isPlantId(v) && !MAGIC_WOODY.has(v); return S.map && S.map[v] != null; };
+  let start = -1, bd = 1e9; for (let dc = -3; dc <= 3; dc++) for (let dr = -3; dr <= 3; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r, d = dc * dc + dr * dr; if (d < bd && fits(i)) { bd = d; start = i; } }
+  if (start < 0) return 0;
+  const most = S.cells || 24, seen = new Set([start]), rings = [[start]]; let n = 1;
+  while (n < most) { const last = rings[rings.length - 1], next = []; for (const i of last) { const r = i % ROWS; for (const j of [i - ROWS, i + ROWS, r > 0 ? i - 1 : -1, r < ROWS - 1 ? i + 1 : -1]) { if (j < 0 || seen.has(j) || !fits(j)) continue; seen.add(j); next.push(j); if (++n >= most) break; } if (n >= most) break; } if (!next.length) break; rings.push(next); }
+  let done = 0;
+  rings.forEach((ring, k) => setTimeout(() => {
+    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = []; let pc0 = 1e9, pr0 = 1e9, pc1 = -1, pr1 = -1;
+    for (const i of ring) { if (!fits(i)) continue; const v = peekCellAt(grid, i);
+      if (S.mend) { if (!damaged(i, v)) continue; s2.terrainHp.s(i, matStrengthSrv(mats, v)); wearDel(room, i); cells.push(i, v); done++; continue; }
+      let to = S.lava ? S.to : S.map[v]; if (!(to > 0)) continue;
+      if (S.lava) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; tot.s(i, 0); fineSet(room).delete(i); liq.push(i); }
+      grid.s(i, to); s2.terrainHp.s(i, matStrengthSrv(mats, to)); cells.push(i, to); done++;
+      const c = Math.floor(i / ROWS), r = i % ROWS; if (c < pc0) pc0 = c; if (c > pc1) pc1 = c; if (r < pr0) pr0 = r; if (r > pr1) pr1 = r; }
+    if (cells.length) wireFanout(room, 'terrain-set', { cells });
+    if (liq.length) emitFineCells(room, liq);
+    if (pc1 >= 0) { activatePowderRect(room, grid, pc0 - 1, pr0 - 1, pc1 + 1, pr1 + 1); if (magicCfgSrv.wake) for (let c = pc0; c <= pc1; c++) fineWakeAround(room, c * ROWS + pr0); }   // (sand made falls; liquid round it flows on)
+  }, k * (S.ringMs || 60)));
+  return n;
+}
+// GREASE: `oil` cells of oil as a film on the ground round the point — the open cell resting on the ground in each column, the middle first, out to `oilW` either side
+function magicGrease(room, x, y, S) {
+  const grid = ensureTerrain(room); ensureTerrainHp(room); if (!cellsOf(room).fineAmt) ensureFineArrays(room, 1);   // (a room with no liquid yet has no liquid store: made, as a liquid brush makes it)
+  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal; if (!grid || !amt || !tot || (st.fineSub || 1) !== 1) return 0;
+  const OR = LIQ_RANK[15], ROWS = st.rows, T = TERRAIN_CELL, c0 = Math.floor(x / T), W = S.oilW || 3, order = [0]; for (let d = 1; d <= W; d++) order.push(-d, d);
+  const all = Math.round((S.oil || 3) * LIQUID_MAX), each = Math.ceil(all / order.length), liq = [], cells = []; let left = all;
+  for (let pass = 0; pass < 3 && left > 0; pass++) for (const dc of order) { if (left <= 0) break;
+    const g = magicGroundAt(room, (c0 + dc + 0.5) * T, y); if (!g || Math.abs(g.y - y) > 4 * T) continue; const i = g.c * ROWS + g.r; if (!magicOpen(grid, i)) continue;
+    const t = Math.max(0, peekCellAt(tot, i)), m = Math.min(LIQUID_MAX - t, each, left); if (m <= 0) continue;
+    const p = amt.wp(i), b = amt.o(i); p[b + OR] += m; tot.s(i, t + m); left -= m; fineSet(room).add(i); liq.push(i); if (fineSyncGrid(room, i)) cells.push(i, grid.g(i)); }
+  if (cells.length) wireFanout(room, 'terrain-set', { cells });
+  if (liq.length) { for (const i of liq) fineWakeAround(room, i); emitFineCells(room, liq); }
+  const put = all - left; if (put > 0 && S.secs > 0) setTimeout(() => magicOilDry(room, x, y, put, S.dryR || 30), S.secs * 1000);
+  return Math.ceil(put / LIQUID_MAX);
+}
+// …and it dries: as much oil as was poured, taken from the oil within `R` cells of where it was, the nearest first (wherever it has run to; a restart before then keeps it)
+function magicOilDry(room, x, y, units, R) {
+  const st = roomCells.get(room); if (!st || !st.terrain || !st.fineAmt || !st.fineTotal) return; const grid = st.terrain, amt = st.fineAmt, tot = st.fineTotal, ROWS = st.rows, COLS = st.cols, OR = LIQ_RANK[15];
+  const T = TERRAIN_CELL, c0 = Math.floor(x / T), r0 = Math.floor(y / T), have = [];
+  for (let dc = -R; dc <= R; dc++) for (let dr = -R; dr <= R; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r, t = peekCellAt(tot, i); if (!(t > 0)) continue; const p = amt.rp(i), b = amt.o(i); if (p[b + OR] > 0) have.push([dc * dc + dr * dr, i]); }
+  have.sort((a, b) => a[0] - b[0]); const liq = [], cells = []; let left = units;
+  for (const [, i] of have) { if (left <= 0) break; const p = amt.wp(i), b = amt.o(i), m = Math.min(p[b + OR], left); p[b + OR] -= m; left -= m; const t = peekCellAt(tot, i) - m; tot.s(i, Math.max(0, t)); if (t <= 0) fineSet(room).delete(i); liq.push(i); if (fineSyncGrid(room, i)) cells.push(i, grid.g(i)); fineWakeAround(room, i); }
+  if (cells.length) wireFanout(room, 'terrain-set', { cells });
+  if (liq.length) emitFineCells(room, liq);
+}
 // STONE WALL: `wide` columns side by side, each rising from its own ground, `high` cells, a row every `rowMs`; only into open cells, stopping at the first that is not.
 //   (step 3e, the user) …through LIQUID too (`thruLiq`): the liquid in a cell it rises into is pushed out to the nearest cells with room (`magicLiqOut` — nothing made or lost);
 //   EVERY cell cracks on one clock (`ce`: the cracks complete as the top row goes), and it CRUMBLES FROM THE TOP DOWN, `crumbleMs` a row.
@@ -27918,7 +27978,7 @@ io.on('connection', (socket) => {
     if (MD) { out.mod = m.mod; if (m.mod === 'mod_arc' && !isFinite(out.tx)) return no('bad'); }
     const SK = socket._magicSecsK && socket._magicSecsK !== 1 && S.secs ? Object.assign({}, S, { secs: S.secs * socket._magicSecsK, crackS: (S.crackS || 0) * Math.min(1, socket._magicSecsK) }) : S;
     // (step 3e, the user) FREEZE and the STONE WALL are SHOTS: they fly from the hand (each screen flies them, as a bolt) and do what they do where they land — the caster's game says where (`magic-hit`)
-    const shot = (S.kind === 'freeze' || S.kind === 'wall') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;
+    const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (5a: the ground changed — a shot too)
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
       _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + 300, x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120 });
@@ -27939,6 +27999,7 @@ io.on('connection', (socket) => {
     if (S.kind === 'rune' || (S.kind === 'wall' && !shot)) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; }
     if (S.kind === 'freeze' && !shot) out.n = magicFreeze(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK);
     if (S.kind === 'wall' && !shot) out.n = magicWall(room, out.tx, out.ty, SK);
+    if (S.kind === 'change' && !shot) out.n = magicChange(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK);
     if (S.kind === 'rune') { const rs = magicRunesOf(room), mine = rs.filter(q => q.by === socket.id); while (mine.length >= (S.most || 3)) { const q = mine.shift(); rs.splice(rs.indexOf(q), 1); io.to(room).emit('magic-rune-gone', { id: q.id }); }
       rs.push({ id, by: socket.id, x: out.tx, y: out.ty, at: now + (S.armS || 1.5) * 1000, until: now + (SK.secs || 180) * 1000, spell: m.spell, pow: powK }); }
     io.to(room).emit('magic-cast', out);
@@ -27991,6 +28052,7 @@ io.on('connection', (socket) => {
     let land = null, n = 0, tx = Math.round(m.x), ty = Math.round(m.y), air = m.air ? 1 : 0;
     if (L.land === 'freeze' && L.chill) { if (m.liq) { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); } }   // (4e round 2) the chill bolt: only where it went into water
     else if (L.land === 'freeze') { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); air = 0; }
+    else if (L.land === 'change') { land = 'change'; n = magicChange(L.room, +m.x, +m.y, L.SK); air = 0; }   // (5a)
     else if (L.land === 'wall' && (m.side === 1 || m.side === -1) && (n = magicWallSide(L.room, +m.x, +m.y, m.side, L.SK)) != null) { land = 'wall'; air = 0; }   // (step 3f: out of a face, level)
     else if (L.land === 'wall') { const g = magicGroundAt(L.room, +m.x, +m.y); if (g && Math.abs(g.y - m.y) <= 3 * TERRAIN_CELL) { land = 'wall'; tx = g.x; ty = g.y; n = magicWall(L.room, g.x, g.y, L.SK); air = 0; } else air = 1; }
     io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell });
