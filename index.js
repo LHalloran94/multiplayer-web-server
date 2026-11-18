@@ -3841,6 +3841,7 @@ function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) r
   if (sk && !sk._magicNoCd) { cd = SPELLS.cdMs(q.spell, q.cat); (sk._magicCd || (sk._magicCd = {}))[q.spell] = Date.now() + cd; }
   io.to(q.room).emit('magic-chan-end', Object.assign({ id, by: q.by, why, cd, spell: q.spell }, extra || {}));
   // (5b) a held chunk ended without its caster's throw (time, gone, a new cast): it comes down where it last was
+  if (q.chunk && !extra && !q.chunk.soil && !(sk && sk._magicHeap)) { magicBoulderMake(q.room, q.by, q.spell, q.chunk, q.chunk.cx, q.chunk.cy, q.chunk.a || 0, 0, 0, 0, id); io.to(q.room).emit('magic-chunk-end', { id, x: Math.round(q.chunk.cx), y: Math.round(q.chunk.cy), n: 0, drop: 1, boulder: 1 }); return; }
   if (q.chunk && !extra) { const P = magicPileAt(q.room, q.chunk.cx, q.chunk.cy, q.chunk.m, null); io.to(q.room).emit('magic-chunk-end', { id, x: Math.round(q.chunk.cx), y: Math.round(q.chunk.cy), n: P.length, drop: 1, c: P.slice(0, 12) }); } }
 // ⭐ MAGIC 5b (2026-11-18, EARTH — THE THROWS): a chunk THROWN, in the air: id → { room, by, spell, m (its cells' materials), x, y, vx, vy (px, px/s at the throw), t0, until }. Its caster's
 //   game flies it and says where it came down (`magic-chunk-land`); not told by `until` (its caster gone), it comes down where its flight would have (`magicChunkFall`).
@@ -3964,7 +3965,7 @@ function magicOilDry(room, x, y, units, R) {
 //   open, its kept wear gone; powder above woken, liquid round it flows in) and carried: → { m (materials), o (each one's [dc, dr] from the first), cx, cy (its middle, px) } or null.
 function magicChunkTear(room, x, y, S, sp) {
   const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, c0 = Math.floor(x / T), r0 = Math.floor(y / T), floorRow = Math.floor(roomFloorTop(room) / T);
-  const ok = (i) => { if (i < 0 || i >= N || i % ROWS >= floorRow) return false; const v = peekCellAt(grid, i); if (!(v > 0) || v >= 250 || !isSolidCell(v) || isPlantId(v) || MAGIC_WOODY.has(v)) return false; const soft = !!HELD.SPADE_SOFT[v]; return S.soil ? soft : !soft; };
+  const ok = (i) => { if (i < 0 || i >= N || i % ROWS >= floorRow) return false; const v = peekCellAt(grid, i); if (!(v > 0) || v >= 249 || !isSolidCell(v) || isPlantId(v) || MAGIC_WOODY.has(v)) return false; const soft = !!HELD.SPADE_SOFT[v]; return S.soil ? soft : !soft; };
   const G = S.grab || 3; let start = -1, bd = 1e9; for (let dc = -G; dc <= G; dc++) for (let dr = -G; dr <= G; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r, d = dc * dc + dr * dr; if (d < bd && ok(i)) { bd = d; start = i; } }
   if (start < 0) return null;
   const most = S.cells || 9, seen = new Set([start]), take = [start];
@@ -3997,10 +3998,11 @@ function magicPileAt(room, x, y, mats, sp) {
 }
 // (5b round 2) A CHUNK STRUCK: its own placed cells and the ground it hit (the solid cells round the point that are not its own, the nearest first) take WEAR by how hard — the same kept
 //   wear a blow leaves (`wearPut`; told to the room as a strike is, `terrain-wear` with the point: cracks there, chips and sparks on every screen). Never past the most (it does not break).
+//   (5b round 5) never an object's own cells (`isBodyId`) — a boulder's damage is its own (`fw`, `magic-boulder-hit`)
 function magicChunkDent(room, x, y, placed, w, n) {
   const st = cellsOf(room), grid = st.terrain; if (!grid) return; const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, W = wearOf(room), geom = worldGeom(room), own = new Set(placed), out = [];
   const old = (i) => { const m = W.by.get(wearChunkOf(geom, i)), e = m && m.get(i); return e ? e[0] | 0 : 0; };
-  const add = (i, a) => { const v = peekCellAt(grid, i); if (!(v > 0) || !isSolidCell(v) || isPlantId(v)) return; const nw = Math.min(59, old(i) + Math.round(a)); if (nw <= 0) return; wearPut(room, i, nw, v, [Math.round(x), Math.round(y)]); out.push(i, nw); };
+  const add = (i, a) => { const v = peekCellAt(grid, i); if (!(v > 0) || !isSolidCell(v) || isPlantId(v) || isBodyId(v)) return; const nw = Math.min(59, old(i) + Math.round(a)); if (nw <= 0) return; wearPut(room, i, nw, v, [Math.round(x), Math.round(y)]); out.push(i, nw); };
   for (const i of placed) add(i, w * (0.6 + 0.4 * Math.random()));
   const c0 = Math.floor(x / T), r0 = Math.floor(y / T), R = Math.ceil(1.2 + 0.45 * Math.sqrt(n)), hit = [];
   for (let dc = -R; dc <= R; dc++) for (let dr = -R; dr <= R; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r; if (own.has(i)) continue; const v = peekCellAt(grid, i); if (v > 0 && isSolidCell(v)) hit.push([dc * dc + dr * dr, i]); }
@@ -4013,6 +4015,55 @@ function magicChunkFall(F) {
   let x = F.x, y = F.y, vx = F.vx, vy = F.vy; for (let k = 0; k < 1100; k++) { const nx = x + vx * 0.02, ny = y + vy * 0.02; vy += g * 0.02; const c = Math.floor(nx / T), r = Math.floor(ny / T);
     if (c < 0 || c >= COLS || r < 0 || r >= floorRow) break; const v = peekCellAt(grid, c * ROWS + r); if (v > 0 && isSolidCell(v)) break; x = nx; y = ny; }
   return { x, y };
+}
+// ⭐⭐ MAGIC 5b ROUND 5 (2026-11-19, the user: the thrown chunk 'drops as an object and then sort of skips back to being terrain in a disjointed way' — kickoff_magic.md §'5b ROUND 5')
+//   THE ROCK CHUNK STAYS A LOOSE BOULDER: thrown or dropped it becomes a FELLED-STYLE PIECE (`look: 'fallen'`, `fm` its rock materials, loose) at the chunk's own pose, under the
+//   physics every loose thing uses; written into the world as `BODY_STONE` at rest; mined like a felled log (`body-chop`, `body-dig`); the oldest settled bodies bake back into
+//   the ground past the room's ceiling (`bakeCfg.cap`). The caster's game takes it over when it arrives (`magic-boulder`: the id of the cast and of the object, its speed and spin)
+//   and says where it first strikes hard (`magic-boulder-hit`). PROCESSOR: a few cells, once a throw. Switch back: Items › Magic › 'A thrown rock chunk stays a loose boulder' off.
+const _magicBoulders = new Map();   // object id → { room, by, spell, t0, n, dent }
+// a boulder's pose now: where it is written into the world, else where its mover last said it lay, else where it was made (its box's middle, px · its turn)
+function magicBoulderPose(room, obj) { const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id); if (S) return { x: S.x, y: S.y, a: S.a || 0 };
+  const P = roomLoosePose[room], pp = P && P.get(obj.id); return pp ? { x: pp.x, y: pp.y, a: pp.a || 0 } : { x: obj.x, y: obj.y, a: +obj.angle || 0 }; }
+// K = { m (materials), o ([dc, dr] each from the first), w (each one's damage 0…255, or null) } · (x, y) the middle of its cells (as the chunk is held) · a its turn → the object
+function magicBoulderMake(room, by, spell, K, x, y, a, vx, vy, w, cid) {
+  const T = TERRAIN_CELL, n = K.m.length; if (!n || !isFinite(x) || !isFinite(y)) return null;
+  let cA = 1e9, cB = -1e9, rA = 1e9, rB = -1e9, mx = 0, my = 0;
+  for (let k = 0; k < n; k++) { const dc = K.o[2 * k] | 0, dr = K.o[2 * k + 1] | 0; if (dc < cA) cA = dc; if (dc > cB) cB = dc; if (dr < rA) rA = dr; if (dr > rB) rB = dr; mx += dc; my += dr; }
+  mx /= n; my /= n; const W = cB - cA + 1, H = rB - rA + 1; if (W > FALL_DIM || H > FALL_DIM) return null;
+  const fm = new Uint8Array(W * H), fw = new Uint8Array(W * H);
+  for (let k = 0; k < n; k++) { const kk = ((K.o[2 * k + 1] | 0) - rA) * W + ((K.o[2 * k] | 0) - cA); fm[kk] = K.m[k]; if (K.w && K.w[k]) fw[kk] = Math.min(253, K.w[k] | 0); }
+  // its box's middle from the middle of its cells (the chunk is held, drawn and thrown by that — client 16zj `magicChunkPaint`: a cell's middle at (dc − mx)·T), turned with it
+  const dx = ((cA + cB) / 2 - mx) * T, dy = ((rA + rB) / 2 - my) * T, ca = Math.cos(a), sa = Math.sin(a);
+  const obj = { id: 'boulder-' + (++fallSeq) + '-' + (Date.now() % 1e8).toString(36), type: 'stamp', look: 'fallen', content: '🪨', shape: 'rect', ownerId: 'world', owner: 'world',
+                x: x + dx * ca - dy * sa, y: y + dx * sa + dy * ca, w: W * T, h: H * T, angle: a, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64') };
+  fallWearSet(obj, fw);
+  objIndex(room, obj);
+  emitObjToChunks(room, obj, 'avatar-object-add', obj);
+  bodyStamp(room, obj, obj.x, obj.y, a);
+  broadcastObjSt(room);
+  io.to(room).emit('magic-boulder', { id: cid | 0, oid: obj.id, by, vx: Math.round(vx || 0), vy: Math.round(vy || 0), w: +(w || 0).toFixed(3) });
+  const now = Date.now(); _magicBoulders.set(obj.id, { room, by, spell, t0: now, n, dent: 0 });
+  for (const [k, B] of _magicBoulders) if (now - B.t0 > 60000 || _magicBoulders.size > 256) _magicBoulders.delete(k); else break;
+  return obj;
+}
+// THE ROCK CHUNK SPELL TAKES A LOOSE BOULDER FIRST (the user): one all of rock, no bigger than the spell takes (`cells`), with a cell's middle within `grab` cells of the point —
+//   taken out of the world and off every screen, and held as the chunk it was (its turn and its damage kept) → as `magicChunkTear`'s, + a (its turn), w (damage), from (its id); or null
+function magicBoulderGrab(room, x, y, S) {
+  const map = roomObjects[room]; if (!map) return null; const T = TERRAIN_CELL, G = ((S.grab || 3) + 0.5) * T; let best = null, bd = 1e9;
+  for (const obj of map.values()) { if (bodySpec(obj) !== 'fallen' || !bodyLoose(obj) || obj.eq) continue; const fm = fallMats(obj); let n = 0, rock = true;
+    for (let k = 0; k < fm.length; k++) if (fm[k]) { n++; if (fallCode(fm[k]) !== BODY_STONE_CODE) { rock = false; break; } }
+    if (!rock || !n || n > (S.cells || 9)) continue; const P = magicBoulderPose(room, obj); if (Math.hypot(P.x - x, P.y - y) > G + Math.hypot(obj.w, obj.h) / 2) continue;
+    const D = bodyDims(obj), ca = Math.cos(P.a), sa = Math.sin(P.a);
+    for (let k = 0; k < fm.length; k++) { if (!fm[k]) continue; const lx = ((k % D.c) + 0.5 - D.c / 2) * T, ly = (((k / D.c) | 0) + 0.5 - D.r / 2) * T, d = Math.hypot(P.x + lx * ca - ly * sa - x, P.y + lx * sa + ly * ca - y);
+      if (d <= G && d < bd) { bd = d; best = { obj, P, D, fm }; } } }
+  if (!best) return null;
+  const { obj, P, D, fm } = best, fw = fallWear(obj), ca = Math.cos(P.a), sa = Math.sin(P.a), m = [], o = [], w = []; let c0 = -1, r0 = 0, wx = 0, wy = 0;
+  for (let k = 0; k < fm.length; k++) { if (!fm[k]) continue; const c = k % D.c, r = (k / D.c) | 0; if (c0 < 0) { c0 = c; r0 = r; } m.push(fm[k]); o.push(c - c0, r - r0); w.push(fw[k] || 0);
+    const lx = (c + 0.5 - D.c / 2) * T, ly = (r + 0.5 - D.r / 2) * T; wx += P.x + lx * ca - ly * sa; wy += P.y + lx * sa + ly * ca; }
+  bodyUnstamp(room, obj.id, true); objStOf(room).delete(obj.id); coverDrop(room, obj.id); objUnindex(room, obj); _magicBoulders.delete(obj.id);
+  emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id }); broadcastObjSt(room);
+  return { m, o, cx: wx / m.length, cy: wy / m.length, a: P.a, w: w.some(v => v) ? w : null, from: obj.id };
 }
 // SOIL FLUNG let go: each of its cells a grain sprayed out from where it is, `fan` either side of the throw — the spade's throw (`powder-fly`, landed as ground by `powderFlyLand`)
 function magicSoilSpray(room, x, y, K, vx, vy, S) {
@@ -4361,10 +4412,16 @@ const BODY_LEAF = 252;
 // at and to dig, no longer fuel, and the only state crumbling will take. It is a real material and not a hidden
 // timer so that every client sees the same thing and draws it without being told separately.
 const BODY_FRIABLE = 253;
-function isBodyId(v) { return v === 250 || v === 251 || v === 252 || v === BODY_FRIABLE; }
+// ⭐⭐ 249 — A LOOSE BOULDER'S ROCK (2026-11-19, magic 5b round 5: the thrown rock chunk stays a loose boulder — scratchpad/kickoff_magic.md §'5b ROUND 5').
+//   A felled-style piece made of rock (`fm` its real rock materials) is written into the world as THIS while at rest: solid to the liquid and the powder, open air to the
+//   client (the boulder's own outline collides), never fuel (no row in the fire's tables). Its code in a body's grid is 3|8 (`BODY_STONE_CODE`): any `code & 3` test
+//   still sees a cell there, and every test of bit 8 already says "not fuel". 249 was the top of the custom-block range: `CUSTOM_MAT_HI` is 248 now.
+const BODY_STONE = 249, BODY_STONE_CODE = 3 | 8;
+function isStoneCode(code) { return (code & 11) === 11; }
+function isBodyId(v) { return v === 250 || v === 251 || v === 252 || v === BODY_FRIABLE || v === BODY_STONE; }
 // a body cell's code (0 gone · 1 wood · 2 charcoal · 3 foliage, +4 alight) ↔ the material it is written into the world as
-function bodyCodeMat(code) { const c = code & 3; return c === 2 ? ((code & 8) ? BODY_FRIABLE : BODY_CHAR) : c === 3 ? BODY_LEAF : BODY_WOOD; }
-function bodyMatCode(v) { return v === BODY_WOOD ? 1 : v === BODY_CHAR ? 2 : v === BODY_FRIABLE ? (2 | 8) : v === BODY_LEAF ? 3 : 0; }
+function bodyCodeMat(code) { const c = code & 3; return c === 2 ? ((code & 8) ? BODY_FRIABLE : BODY_CHAR) : c === 3 ? ((code & 8) ? BODY_STONE : BODY_LEAF) : BODY_WOOD; }
+function bodyMatCode(v) { return v === BODY_WOOD ? 1 : v === BODY_CHAR ? 2 : v === BODY_FRIABLE ? (2 | 8) : v === BODY_LEAF ? 3 : v === BODY_STONE ? BODY_STONE_CODE : 0; }
 const BODY_LOOKS = { crate: 'box', barrel: 'round', log: 'round' };
 function bodySpec(obj) {
   // ⭐ STEP 3 — A FALLEN PIECE OF TERRAIN (`fallCut`) is a body whatever its hit points: it is MINED cell by cell (user),
@@ -4434,7 +4491,8 @@ function nkTurn(L, U, rad) {
 }
 function fallWearSet(obj, a) { let any = false; for (let k = 0; k < a.length; k++) if (a[k]) { any = true; break; } if (any) obj.fw = Buffer.from(a).toString('base64'); else delete obj.fw; }
 // what a material is as a body: charcoal chars, woody things are wood, every other plant is foliage (burns fast, leaves nothing)
-function fallCode(m) { return !m ? 0 : (m === 92 || m === 254) ? 2 : (m === 28 || m === 91 || m === 40) ? 1 : 3; }
+//   …and (2026-11-19, 5b round 5) anything that is not a plant, wood or charcoal — a boulder's rock — is STONE (`BODY_STONE_CODE`)
+function fallCode(m) { return !m ? 0 : (m === 92 || m === 254) ? 2 : (m === 28 || m === 91 || m === 40) ? 1 : fallCand(m) ? 3 : BODY_STONE_CODE; }
 // A whole one. Codes: 0 gone · 1 wood · 2 charcoal, +4 alight. A round thing (barrel, log) has its four corner cells
 // missing — its outline at cell resolution. ⚠️ Mirrored on the client (`bodyFresh`).
 function bodyFresh(D, kind, obj) {
@@ -4841,7 +4899,8 @@ function bodyBurnMoving(room, obj, B, now) {
     //    nothing at all if it happened to be falling, and a burning canopy sheds branches the whole time. Now it stops
     //    at burnt-through and holds there: matter is never destroyed by which path a cell happened to be on, and once
     //    the piece comes to rest it is back in the world, where the ordinary rules finish it.
-    if ((cells[k] & 3) === 1) next[k] = 2 | 4;                        // wood → charcoal, still alight
+    if (isStoneCode(cells[k])) next[k] = BODY_STONE_CODE;             // (2026-11-19) a boulder's rock: never fuel — put out, unchanged
+    else if ((cells[k] & 3) === 1) next[k] = 2 | 4;                   // wood → charcoal, still alight
     else if ((cells[k] & 3) === 3) next[k] = 0;                       // foliage → nothing, as leaves do everywhere
     else {
       next[k] = 2 | 8;                                                // charcoal, or already burnt through → burnt through, out
@@ -5814,7 +5873,7 @@ function bodySkipChar(room, obj, S, now) {
   let changed = false;
   for (let k = 0; k < n; k++) {
     const code = cells[k] & 3;
-    if (!S.skip[k] || !code || (code === 2 && (cells[k] & 8))) continue;   // …in the world, empty, or already burnt through
+    if (!S.skip[k] || !code || (code === 2 && (cells[k] & 8)) || isStoneCode(cells[k])) continue;   // …in the world, empty, already burnt through, or a boulder's rock
     const c = k % D.c, r = (k / D.c) | 0;
     if (!hot(c - 1, r) && !hot(c + 1, r) && !hot(c, r - 1) && !hot(c, r + 1)) continue;
     S.sage[k] += dt;
@@ -6169,7 +6228,7 @@ function bodyIslands(cells, D) {
   return out;
 }
 // What a body cell's code is made of, once it is debris: a body is planks and charcoal, whatever it was drawn as.
-function bodySplitMat(code) { return (code & 3) === 2 ? 92 : (code & 3) === 3 ? 29 : 91; }
+function bodySplitMat(code) { return isStoneCode(code) ? 2 : (code & 3) === 2 ? 92 : (code & 3) === 3 ? 29 : 91; }   // (stone with no material of its own: Stone)
 // 🟥🟥 THE SPECKLED CRATES (user, 2026-09-21: *"a whole bunch of crates stacked in a pile and then burnt for a fairly
 // long time, and sometimes jostled around"*). Reproduced by `e2e_fire_live --speckle`: after five minutes one crate was
 // down to **5 cells in 3 islands**, drawn and collided as four separate flecks moving as one thing — and it was NOT
@@ -9584,7 +9643,7 @@ function carveCellSrv(grid, hp, mats, i, hard) {
   const v = grid.g(i); if (!v) return false;
   // ⭐ A CELL BODY IS NOT DUG (user, 2026-09-19: objects keep their hit-point breaking) — not even by the editor's
   // hard delete, which would leave an object with a hole in it that nothing but fire is meant to make.
-  if (v >= 250 && v <= 252) return false;
+  if (v === BODY_STONE || (v >= 250 && v <= 252)) return false;
   if (!hard) {
     if (!matBreakableSrv(mats, v)) return false;
     const s = matStrengthSrv(mats, v);
@@ -9624,7 +9683,7 @@ function rasterTerrainCircle(grid, hp, mats, wx, wy, r, val, hard, cap) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if ((ccx - wx) * (ccx - wx) + (ccy - wy) * (ccy - wy) > r2) continue;
     const i = cx * ROWS + ry;
-    if (val) { const was = grid.g(i); if (was >= 250 && was <= 252) continue;   // a cell body: not paintable over (see carveCellSrv)
+    if (val) { const was = grid.g(i); if (was === BODY_STONE || (was >= 250 && was <= 252)) continue;   // a cell body: not paintable over (see carveCellSrv)
       if (_rasterSkip && rasterSkipHit(ccx, ccy)) continue;                      // …nor into a player's body (see `_rasterSkip`)
       if (was !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
@@ -9643,7 +9702,7 @@ function rasterTerrainSquare(grid, hp, mats, wx, wy, r, val, hard, cap) {
     const ccx = (cx + 0.5) * TERRAIN_CELL, ccy = (ry + 0.5) * TERRAIN_CELL;
     if (Math.abs(ccx - wx) > r || Math.abs(ccy - wy) > r) continue;
     const i = cx * ROWS + ry;
-    if (val) { const was = grid.g(i); if (was >= 250 && was <= 252) continue;   // a cell body: not paintable over (see carveCellSrv)
+    if (val) { const was = grid.g(i); if (was === BODY_STONE || (was >= 250 && was <= 252)) continue;   // a cell body: not paintable over (see carveCellSrv)
       if (_rasterSkip && rasterSkipHit(ccx, ccy)) continue;                      // …nor into a player's body (see `_rasterSkip`)
       if (was !== val) { grid.s(i, val); changed++; } hp.s(i, matStrengthSrv(mats, val)); }
     else if (carveCellSrv(grid, hp, mats, i, hard)) changed++;
@@ -10764,10 +10823,10 @@ function powderTickRoom(room) {
   const cov = buryFn ? null : (typeof coverSync === 'function' ? coverSync(room) : null);   // (typeof: the rigs slice this tick without it)
   const canDisplace = cov && cov.size
     ? (j) => { if (cov.has(j)) return false; const v = peekG(j); return v === 0 || isFluidId(v); }
-    : buryFn ? (j) => { const v = peekG(j); return v === 0 || isFluidId(v) || (v >= 250 && v <= 253); }
+    : buryFn ? (j) => { const v = peekG(j); return v === 0 || isFluidId(v) || (v >= 249 && v <= 253); }
     : (j) => { const v = peekG(j); return v === 0 || isFluidId(v); };   // -1 (unbuilt) is neither
   // …a move into a wooden thing's cell has to be allowed by the thing first (it can refuse: not one of its stamped cells)
-  const enter = (src, dst) => { const v = peekG(dst); if (v >= 250 && v <= 253 && !(buryFn && buryFn(room, dst, buried))) return false; swapMove(src, dst); return true; };
+  const enter = (src, dst) => { const v = peekG(dst); if (v >= 249 && v <= 253 && !(buryFn && buryFn(room, dst, buried))) return false; swapMove(src, dst); return true; };
   // …and the same question asked on behalf of a RIGID block, which floats: air yes, fluid no. See MAT_RIGID.
   const canEnter = (gv, j) => (MAT_RIGID[gv] ? peekG(j) === 0 && !(cov && cov.has(j)) : canDisplace(j));
   const list = Array.from(active); active.clear();
@@ -12207,6 +12266,7 @@ function bodyWholeApply() {
   //   so the burn went on; whole, every cell is lit at once and the crate went out ~20s after it charred
   FIRE_RATE[251] = liquidCfg.bodyWhole ? Math.max(0.005, +liquidCfg.bodyCharRate || 0.1) : 0.16;
   FIRE_RATE[253] = liquidCfg.bodyWhole ? 0 : 0.05;         // burnt through: inert, or smoulders away from the outside
+  FIRE_RATE[249] = 0;                                        // (2026-11-19) a boulder's rock: never burns
 }
 bodyWholeApply();
 let liqReactSkips = 0;        // ticks on which the reaction pass hit reactMaxCand (⇒ it is biting; see the Perf tab)
@@ -15514,7 +15574,7 @@ const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → materi
 // material. That was a latent bug before the window existed (an uninstalled custom mat did the same thing) and
 // it threw every frame the first time the window was switched on. Allocating up to 255 would make it reachable
 // by an ordinary player creating enough blocks. 250..254 are left spare on purpose.
-const CUSTOM_MAT_HI = 249;
+const CUSTOM_MAT_HI = 248;   // (2026-11-19: 249 is a boulder's rock, `BODY_STONE` — was 249)
 // ---- Custom material registry (Stage 6 feature A): per-room map of custom mat id → opaque appearance/property def.
 // The server stores + dedups + assigns ids; it does NOT interpret the def physically (the client clones a base mat).
 // ⚠️ MOVED 18 → 90 by the world-redesign port (increment 1): ids 18..89 are now the generator's 72 materials.
@@ -15524,7 +15584,7 @@ const CUSTOM_MAT_HI = 249;
 // nothing on disk holds a custom id and no remap is needed. If that ever stops being true, the import path at
 // 16a's `CUSTOM_MAT_FLOOR` remap is where it would go.
 // 255 stays reserved: it is the client's TW_UNKNOWN (a cell outside the terrain window), not a material.
-const CUSTOM_MAT_MIN = MATGEN.GEN_MAT_MAX + 1, CUSTOM_MAT_CAP = 160;   // custom mat ids start at 90 (built-ins 1..17 + generator 18..89 — the client's CUSTOM_MAT_FLOOR must match); 90..249 fit 160
+const CUSTOM_MAT_MIN = MATGEN.GEN_MAT_MAX + 1, CUSTOM_MAT_CAP = 159;   // custom mat ids start at 90 (built-ins 1..17 + generator 18..89 — the client's CUSTOM_MAT_FLOOR must match); 90..248 fit 159 (249 = BODY_STONE)
 // ⭐ THE OTHER HALF OF THE POWDER/PLANT/SALT SEAM (see the `POWDER_MOVE` note in the liquid sim block). The
 // tables are declared inside that block, knowing sand and snow on their own; materials.js tops them up here.
 // scree + ash fall and are reseeded · the twelve plant materials fall but are NEVER reseeded · vine hangs.
@@ -17617,10 +17677,10 @@ saveChunkBlob = function (room, p, blob, pristine) {
   // stamped into — and only on the way to DISK: the in-memory eviction blob keeps them, because the object is
   // still stamped there and will read them back.
   let hasBody = false;
-  for (let k = 0; k < blob.m.length; k++) if (blob.m[k] >= 250 && blob.m[k] <= 252) { hasBody = true; break; }
+  for (let k = 0; k < blob.m.length; k++) if (blob.m[k] >= 249 && blob.m[k] <= 252) { hasBody = true; break; }
   if (hasBody) {
     const m2 = Uint8Array.from(blob.m), hp2 = Uint8Array.from(blob.hp);
-    for (let k = 0; k < m2.length; k++) if (m2[k] >= 250 && m2[k] <= 252) { m2[k] = 0; hp2[k] = 0; }
+    for (let k = 0; k < m2.length; k++) if (m2[k] >= 249 && m2[k] <= 252) { m2[k] = 0; hp2[k] = 0; }
     blob = Object.assign({}, blob, { m: m2, hp: hp2 });
   }
   persistChunkBlob(room, p, blob, genVersion(room));
@@ -19745,14 +19805,14 @@ function hydrateRoomFromBlob(avRoom, blob, keepGame) {
   if (!sc || !sr) return;
   const mats = ensureMats(avRoom);
   if (blob.mats && typeof blob.mats === 'object') {
-    for (const k in blob.mats) { const d = sanitizeMatDef(blob.mats[k]); if (d) mats[k] = d; }
+    for (const k in blob.mats) { if ((k | 0) > CUSTOM_MAT_HI) continue; const d = sanitizeMatDef(blob.mats[k]); if (d) mats[k] = d; }   // (2026-11-19: 249 is a boulder's rock now — never a custom block)
   }
   const grid = ensureTerrain(avRoom), hp = ensureTerrainHp(avRoom);
   grid.fill(0); hp.fill(0);
   // Decode the stored runs at their OWN resolution, then NEAREST-NEIGHBOUR resample to the current grid. Worlds saved
   // at the old 24px res (cols 640) upscale 1→3×3 into the 8px grid (1920) instead of being skipped (which would leave
   // published/persistent rooms empty AND let autosave overwrite their live_state with nothing).
-  const src = new Uint8Array(sc * sr); { let i = 0; for (const run of terr.runs || []) { const v = run[0] | 0, n = run[1] | 0; for (let k = 0; k < n && i < src.length; k++, i++) src[i] = v; } }
+  const src = new Uint8Array(sc * sr); { let i = 0; for (const run of terr.runs || []) { let v = run[0] | 0; const n = run[1] | 0; if (v >= 249 && v <= 253) v = 0; for (let k = 0; k < n && i < src.length; k++, i++) src[i] = v; } }   // (object cells are never stored: an old custom block at 249 reads as nothing)
   const srcHp = new Uint8Array(sc * sr); if (Array.isArray(terr.hpRuns)) { let j = 0; for (const run of terr.hpRuns) { const val = run[0] | 0, n = run[1] | 0; for (let k = 0; k < n && j < srcHp.length; k++, j++) srcHp[j] = val; } }
   // ⚠️ A STORED BLOB IS ROW-MAJOR (`si = row * sc + col`) and stays that way — increment 5 changed the in-memory
   // index, not the serialisation, so every published_worlds row is still valid and needs no migration.
@@ -19936,7 +19996,7 @@ function captureRoomBlob(avRoom) {                      // → a Lvl blob (terra
     // ⭐ A CELL BODY'S CELLS ARE SAVED AS AIR — they are the object's, and the object is saved on its own and
     // re-stamped when it is loaded (see `saveChunkBlob` for the same rule on the Overworld's side).
     const _runs = terrainRLE(g).runs;
-    for (const run of _runs) if (run[0] >= 250 && run[0] <= 252) run[0] = 0;   // runs are [value, count] pairs
+    for (const run of _runs) if (run[0] >= 249 && run[0] <= 252) run[0] = 0;   // runs are [value, count] pairs
     cached = { sig, mats, terrain: { cols: g.geom.cols, rows: g.geom.rows, cell: TERRAIN_CELL, runs: _runs, hpRuns: peekCells(avRoom).terrainHp ? terrainRLE(peekCells(avRoom).terrainHp).runs : undefined } };
     if (sig >= 0) _terrBlobCache.set(avRoom, cached); else _terrBlobCache.delete(avRoom);
   }
@@ -27974,6 +28034,7 @@ io.on('connection', (socket) => {
   //   `magic-state` = the casting stance, the inputs' signs and the prepared spell, for the others to see (relayed, trimmed). `magic-hit` = where the caster's bolt ended: fire there.
   socket.on('magic-debug', (m) => { const was = [socket._magicAll, socket._magicOwn, socket._magicOneMind];
     socket._magicOneMind = !!(m && m.apart === 0);   // (4a: 'What you learn is kept apart for the Overworld' off)
+    socket._magicHeap = !!(m && m.boulder === 0);     // (5b round 5: 'A thrown rock chunk stays a loose boulder' off = heaped back into the ground, as before)
     socket._magicAll = !!(m && m.all); socket._magicNoCd = !!(m && m.nocd);   // (the panel's 'Know every spell' + 'No cooldowns', both for testing)
     socket._magicNoReag = !!(m && m.noreag); socket._magicOwn = !(m && m.own === 0);   // (step 2: 'Spells need no reagents (for testing)'; 'Your own version of each spell' off = the shared core only)
     socket._magicRoom = currentAvatarRoom; socket._magicSecsK = Math.max(0.05, Math.min(5, isFinite(m && m.secs) ? +m.secs / 100 : 1));   // (step 3d: 'Spell changes to the world last (%)', for testing)
@@ -28057,7 +28118,7 @@ io.on('connection', (socket) => {
     const gated = invGatedRoom(room), key = playerKeyFor(socket.id), reag = !SC && Array.isArray(S.uses) && gated && !socket._magicNoReag ? S.uses : null;
     if (reag) { for (const [it, n] of reag) if (ledger.itemCount(key, it) < n) return no('reagent:' + it); for (const [it, n] of reag) ledger.spendItem(key, it, n); sendInvSync(socket, room); }
     // (5b) A CHUNK: torn out of the ground nearest the pointer, here (nothing to tear: refused, nothing spent)
-    let CHK = null; if (S.kind === 'chunk') { if (!isFinite(m.tx) || !isFinite(m.ty) || (p && now - p.t < 4000 && Math.hypot(m.tx - p.x, m.ty - p.y) > (S.reach || 320) + 60)) return no('far'); CHK = magicChunkTear(room, +m.tx, +m.ty, S, m.spell); if (!CHK) return no('nothing'); }
+    let CHK = null; if (S.kind === 'chunk') { if (!isFinite(m.tx) || !isFinite(m.ty) || (p && now - p.t < 4000 && Math.hypot(m.tx - p.x, m.ty - p.y) > (S.reach || 320) + 60)) return no('far'); CHK = (!S.soil && !socket._magicHeap && magicBoulderGrab(room, +m.tx, +m.ty, S)) || magicChunkTear(room, +m.tx, +m.ty, S, m.spell); if (!CHK) return no('nothing'); }   // (5b round 5: a loose boulder near the point first)
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
@@ -28072,8 +28133,8 @@ io.on('connection', (socket) => {
     const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (5a: the ground changed — a shot too)
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
-      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil } : null });
-      if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy) };   // (5b: its caster's game ends it — the server's own end only if they are gone)
+      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null } : null });
+      if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined };   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
       out.chan = 1; out.secs = secs; if (!SC && !socket._magicNoCd) cds[m.spell] = now + secs * 1000 + cd; }
     if (S.kind === 'bolt' || shot) { let lf = S.life || 1, g = (S.grav || 0) * 1500, v = S.speed;
       // (4c) a modifier's flight: the follower slower, longer, less pulled down · the lob by its own arc (every screen works out the same) · a split: an id for each piece
@@ -28133,6 +28194,9 @@ io.on('connection', (socket) => {
       if (Math.hypot(x - K.cx, y - K.cy) > 140) { x = K.cx; y = K.cy; } const vl = Math.hypot(vx, vy), vm = (S.speed || 760) * 1.1; if (vl > vm) { vx *= vm / vl; vy *= vm / vl; }
       const ex = { thr: 1, x: Math.round(x), y: Math.round(y), vx: Math.round(vx), vy: Math.round(vy) };
       if (K.soil) { magicSoilSpray(q.room, x, y, K, vx, vy, S); ex.spray = 1; magicChanEnd(m.id | 0, 'let', ex); return; }
+      // (5b round 5) A LOOSE BOULDER from here, at the caster's pose and speed (its turn `a`, spin `w`) — the caster's game takes it over when it arrives (`magic-boulder`)
+      if (!socket._magicHeap) { const a = isFinite(m.a) ? +m.a : (K.a || 0), w = isFinite(m.w) ? Math.max(-20, Math.min(20, +m.w)) : 0; ex.boulder = 1;
+        magicBoulderMake(q.room, socket.id, q.spell, K, x, y, a, vx, vy, w, m.id | 0); magicChanEnd(m.id | 0, 'let', ex); return; }
       _magicChunks.set(m.id | 0, { room: q.room, by: socket.id, spell: q.spell, m: K.m, x, y, vx, vy, t0: now, until: now + ((S.life || 20) + 3) * 1000 });
       magicChanEnd(m.id | 0, 'let', ex); return; }
     magicChanEnd(m.id | 0, 'let'); });
@@ -28145,6 +28209,14 @@ io.on('connection', (socket) => {
     let hx = +m.hx, hy = +m.hy; if (!isFinite(hx) || !isFinite(hy) || Math.hypot(hx - F.x, hy - F.y) > reach) { hx = x; hy = y; }
     if (k > 0.15 && S.dent) magicChunkDent(F.room, hx, hy, P, k * S.dent, F.m.length);
     io.to(F.room).emit('magic-chunk-end', { id, x: Math.round(x), y: Math.round(y), n: P.length, c: P.slice(0, 12) }); });
+  // ⭐ (5b round 5) A THROWN BOULDER'S FIRST HARD STRIKE, from its caster's game (which moves it): the ground it struck cracked by how hard, and the boulder itself
+  socket.on('magic-boulder-hit', (m) => { const id = m && String(m.id), B = id && _magicBoulders.get(id); if (!B || B.by !== socket.id || B.dent || !isFinite(m.x) || !isFinite(m.y)) return;
+    const obj = roomObjects[B.room] && roomObjects[B.room].get(id); if (!obj || Date.now() - B.t0 > 20000) return; const P = magicBoulderPose(B.room, obj);
+    if (Math.hypot(+m.x - P.x, +m.y - P.y) > (obj.w + obj.h) + 96) return; B.dent = 1;
+    const S = SPELLS.of(B.spell) || {}, k = Math.max(0, Math.min(1, (+m.v || 0) / Math.max(1, S.speed || 520))); if (!(k > 0.15) || !S.dent) return;
+    magicChunkDent(B.room, +m.x, +m.y, [], k * S.dent, B.n);
+    const fm = fallMats(obj), fw = fallWear(obj); for (let q = 0; q < fm.length; q++) if (fm[q]) fw[q] = Math.min(253, fw[q] + Math.round(k * S.dent * (0.6 + 0.4 * Math.random()) / 60 * 255));
+    fallWearSet(obj, fw); if (objChunked(B.room)) objsTouch(B.room, obj.ch); emitObjToChunks(B.room, obj, 'body-fw', { id: obj.id, fw: obj.fw || '', fn: obj.fn || '' }); });
   socket.on('magic-chan-burn', (m) => { const room = currentAvatarRoom, q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - (q.burnT || 0) < 180) return; q.burnT = now; if (Math.hypot(m.x - q.x, m.y - q.y) > q.reach + 64) return; igniteBox(room, +m.x, +m.y, TERRAIN_CELL); });
   socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); { const pd = roomDblPos[room], r = pd && pd.get(q.by); if (r && r.dbl === id) { pd.delete(q.by); if (!pd.size) delete roomDblPos[room]; } } io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
@@ -28352,6 +28424,8 @@ io.on('connection', (socket) => {
     if (!obj || bodySpec(obj) !== 'fallen') return;
     const fm = fallMats(obj), fw = fallWear(obj), fn = fallNotch(obj), up = u ? 1 : 0, mine = [];
     for (let i = 0; i < ks.length; i++) { const k = ks[i] | 0, f = Math.max(0, Math.min(1, +fs[i] || 0)); if (k < 0 || k >= fm.length || !fm[k] || !f) continue;
+      // (2026-11-19, 5b round 5) A BOULDER'S ROCK (the pick's blow): no notch — its damage only, and mined once it is used up, as a rock cell in the ground is
+      if (fallCode(fm[k]) === BODY_STONE_CODE) { const d = fw[k] + Math.max(1, Math.round(f * 255)); if (d >= 254) { mine.push(k); fw[k] = 0; } else fw[k] = d; continue; }
       const j = k * 6 + up * 3; if (fn[j] >= 254) continue;
       if (!fn[j]) { const q = Array.isArray(nq) ? nq[i] | 0 : 0; fn[j + 1] = ((q >> 8) & 255) || 128; fn[j + 2] = ((q >> 16) & 255) || 128; }
       const d = Math.min(255, fn[j] + Math.max(1, Math.round(f * 255)));
