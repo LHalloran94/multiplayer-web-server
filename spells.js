@@ -140,21 +140,47 @@
     scroll_lightorb: { name: 'Scroll of light orb', spell: 'lightorb' },
   };
 
+  // ⭐ 4c (2026-11-18, Trello #707 — kickoff §ROUND 4): MODIFIERS, a THIRD PIECE put in after a whole spell (after its tier's ups). Learnt from tomes as spells are (a page each; your
+  //   own part of it as a spell's, per world, a death forgets it). ONE a cast. It costs more keys and `cdK` × the spell's cooldown. `kinds` = the spells it goes on (their `kind`).
+  //   ITS PIECE, the same in the language and plain:  keys — a DOWN that opens it (a tier adds only ups, so the two never mix), YOUR OWN KEY, then its two `keys`;
+  //   rune — on to the top left point and along the TOP ROW (the tier's underline is the bottom row), YOUR OWN POINT, then its `rune` stroke.
+  //   follow  the caster's game turns it towards the pointer (`turn` radians a second), `speedK` its speed, `lifeK` its time, `gravK` its gravity; others are sent where it is
+  //   arc     a lob that comes down on the pointer (`g` px/s² its gravity, `reach` px the farthest point) — every screen works the same arc out of the cast (`arcAim`)
+  //   split   at `at` seconds it becomes `n`, `fan` degrees apart, each `dmgK` of the blow · faint  drawn at `seen` of its strength on others' screens, `seenOwn` on yours
+  const MODS = {
+    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [4, 3], kinds: ['bolt'], cdK: 1.5, learn: 3, turn: 9, speedK: 0.7, lifeK: 2, gravK: 0.3 },
+    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [6, 4, 8], kinds: ['bolt'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },
+    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [3, 7, 5], kinds: ['bolt'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45 },
+    mod_faint:  { name: 'Faint', keys: [D, D], rune: [6, 7], kinds: ['bolt'], cdK: 1.5, learn: 3, seen: 0.22, seenOwn: 0.5 },
+  };
+  const isMod = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(MODS, id);
+  const modOf = (id) => isMod(id) ? MODS[id] : null;
+  const modFits = (mid, spell) => { const M = modOf(mid), S = SPELLS[spell] && Object.prototype.hasOwnProperty.call(SPELLS, spell) ? SPELLS[spell] : null; return !!M && !!S && !S.innate && M.kinds.indexOf(S.kind) >= 0; };
   // (step 3h, the user: "add a contents page to the master tome … the tabs should probably just be for each school and the spells should be arranged by schools") its first page
   //   is the CONTENTS (`contents`: no spell — the client lists the schools and their spells there, each a link), then the spells school by school, in the schools' order
   TOMES.tome_master.pages.push({ contents: true });
   for (const sc of Object.keys(SCHOOLS)) for (const id of Object.keys(SPELLS)) if (!SPELLS[id].innate && !SPELLS[id].alt && SPELLS[id].school === sc) TOMES.tome_master.pages.push({ spell: id });
+  for (const id of Object.keys(MODS)) TOMES.tome_master.pages.push({ mod: id });   // (4c) the modifiers after the spells, a page each
   const is = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(SPELLS, id);
   const of = (id) => is(id) ? SPELLS[id] : null;
   // ⭐ YOUR OWN VERSION (step 2 — kickoff §'against copied inputs' 1): every spell's input = the shared core + ONE PART worked out from you and this life. The SERVER makes
   //   the number `h` (from a secret it keeps, your key, your life, the spell — server `magicOwnH`) and sends it to you; `ownOf` turns it into the part, the same way here and
   //   there: a KEY put in after the school's piece, and a POINT the rune runs through after the school's stroke. null `h` = no own part (the core alone, as in step 1).
-  const ownOf = (id, lang, h) => { if (h == null || !isFinite(h)) return null; const S = of(id); if (!S || S.innate) return null; h = Math.abs(Math.floor(h));
+  const ownOf = (id, lang, h) => { if (h == null || !isFinite(h)) return null; if (isMod(id)) return modOwnOf(id, h); const S = of(id); if (!S || S.innate) return null; h = Math.abs(Math.floor(h));
     const R0 = runeCore(id, lang); if (!R0) return null; const a = R0.pts.slice(0, R0.parts), b = R0.pts.slice(R0.parts), ok = [];
     for (let p = 0; p < 9; p++) { if (p === a[a.length - 1] || p === b[0]) continue; const full = a.concat([p], b); if (runeNorm(full).length === runeNorm(R0.pts).length + 1) ok.push(p); }
     return { k: h & 3, p: ok.length ? ok[(h >> 2) % ok.length] : null }; };
-  // the keys of a spell: `lang` = school + form (+ an "up" a tier), else its plain sequence; `own` (from `ownOf`) put in after the first two
-  const keysOf = (id, lang, own) => { const S = of(id); if (!S || S.innate) return null; let k;
+  // (4c) A MODIFIER'S OWN PART: a key after its opening down, and a point after the top row (one that makes its stroke one point longer, as a spell's own point does)
+  const modOwnOf = (mid, h) => { const M = modOf(mid); if (!M) return null; h = Math.abs(Math.floor(h)); const L0 = runeNorm([0, 2].concat(M.rune)).length, ok = [];
+    for (let p = 3; p < 9; p++) { if (p === M.rune[0]) continue; if (runeNorm([0, 2, p].concat(M.rune)).length === L0 + 1) ok.push(p); }
+    return { k: h & 3, p: ok.length ? ok[(h >> 2) % ok.length] : null }; };
+  // (4c) a modifier's piece alone: keys (the opening down, your own key, its two) · its rune (the top row, your own point, its stroke; `own` = where your point is)
+  const modKeys = (mid, own) => { const M = modOf(mid); if (!M) return null; const k = [D]; if (own && own.k != null) k.push(own.k & 3); return k.concat(M.keys); };
+  const modRune = (mid, own) => { const M = modOf(mid); if (!M) return null; const pts = [0, 2]; let o = null; if (own && own.p != null) { o = 2; pts.push(own.p); } return { pts: pts.concat(M.rune), own: o }; };
+  // the keys of a spell: `lang` = school + form (+ an "up" a tier), else its plain sequence; `own` (from `ownOf`) put in after the first two. (4c) `mod` = a modifier put in after
+  //   it, `modOwn` its own part · a MODIFIER's id alone = its piece alone (what its page practises)
+  const keysOf = (id, lang, own, mod, modOwn) => { if (isMod(id)) return modKeys(id, own); const k0 = keysCore(id, lang, own); if (!k0 || !mod) return k0; const mk = modKeys(mod, modOwn); return mk ? k0.concat(mk) : null; };
+  const keysCore = (id, lang, own) => { const S = of(id); if (!S || S.innate) return null; let k;
     if (!lang) { if (!S.plain) return null; k = S.plain.keys.slice(); }
     else { k = SCHOOLS[S.school].keys.concat(FORMS[S.form].keys); for (let i = 0; i < (S.tier || 0); i++) k.push(U); }
     if (own && own.k != null) k.splice(2, 0, own.k & 3);
@@ -166,9 +192,14 @@
     const a = SCHOOLS[S.school].rune, b = FORMS[S.form].rune, pts = a.concat(b[0] === a[a.length - 1] ? b.slice(1) : b);
     for (let i = 0; i < (S.tier || 0); i++) pts.push(6, 8);
     return { pts, parts: a.length }; };
-  const runeOf = (id, lang, own) => { const R0 = runeCore(id, lang); if (!R0) return null;
+  const runeSpell = (id, lang, own) => { const R0 = runeCore(id, lang); if (!R0) return null;
     if (!own || own.p == null) return R0;
     return { pts: R0.pts.slice(0, R0.parts).concat([own.p], R0.pts.slice(R0.parts)), parts: R0.parts + 1, own: R0.parts }; };
+  // (4c) …with a modifier's stroke after it (`mod` = where it begins, `modOwn` = your own point in it) · a modifier alone: its stroke (`parts` 2 = the top row is its opening)
+  const runeOf = (id, lang, own, mod, modOwn) => {
+    if (isMod(id)) { const Q = modRune(id, own); return Q ? { pts: Q.pts, parts: 2, own: Q.own != null ? Q.own : undefined } : null; }
+    const R0 = runeSpell(id, lang, own); if (!R0 || !mod) return R0; const Q = modRune(mod, modOwn); if (!Q) return null;
+    return Object.assign({}, R0, { pts: R0.pts.concat(Q.pts), mod: R0.pts.length, modOwn: Q.own != null ? R0.pts.length + Q.own : null }); };
   // a path through the points with every point that lies exactly between its neighbours taken out (6 → 0 passes over 3: the same line)
   const runeNorm = (pts) => { const p = []; for (const n of pts) if (!p.length || p[p.length - 1] !== n) p.push(n);
     for (let i = 1; i < p.length - 1;) { const a = p[i - 1], b = p[i], c = p[i + 1];
@@ -177,19 +208,23 @@
   const castable = () => Object.keys(SPELLS).filter(id => !SPELLS[id].innate);
   // keys so far → { spell } when they are exactly a spell's (and `more` too when a longer spell also begins with them — firebolt is the start of great firebolt) ·
   //   { more: true } while some spell still begins with them · null = wrong. `ownH(id)` = that spell's own number, or null
-  const matchKeys = (seq, lang, ids, ownH) => { let more = false, spell = null;
-    for (const id of ids || castable()) { const k = keysOf(id, lang, ownH ? ownOf(id, lang, ownH(id)) : null); if (!k || k.length < seq.length) continue;
+  //   (4c) `mods` = the modifiers that may follow (each spell is tried alone, then with each that goes on it) → also `mod` (the one put in) and `moreOf` (the spells a modifier
+  //   is still being put in after) · a modifier's id in `ids` = its piece alone
+  const inputsOf = (ids, mods) => { const out = []; for (const id of ids || castable()) { out.push([id, null]); if (mods && !isMod(id)) for (const m of mods) if (modFits(m, id)) out.push([id, m]); } return out; };
+  const ownFor = (id, lang, ownH) => ownH ? ownOf(id, lang, ownH(id)) : null;
+  const matchKeys = (seq, lang, ids, ownH, mods) => { let more = false, spell = null, mod = null; const moreOf = [];
+    for (const [id, md] of inputsOf(ids, mods)) { const k = keysOf(id, lang, ownFor(id, lang, ownH), md, md ? ownFor(md, lang, ownH) : null); if (!k || k.length < seq.length) continue;
       let ok = true; for (let i = 0; i < seq.length; i++) if (k[i] !== seq[i]) { ok = false; break; }
-      if (!ok) continue; if (k.length === seq.length) spell = spell || id; else more = true; }
-    return spell ? { spell, more } : more ? { more: true } : null; };
+      if (!ok) continue; if (k.length === seq.length) { if (!spell) { spell = id; mod = md; } } else { more = true; if (md && moreOf.indexOf(id) < 0) moreOf.push(id); } }
+    return spell ? { spell, mod, more, moreOf } : more ? { more: true, moreOf } : null; };
   // points joined so far → the same answers. (step 2) A point just passed over on the way to the next — 8 → 6 runs over 7 — is not wrong yet: the stroke is still going
   const midOf = (a, b, c) => a !== c && (a % 3) + (c % 3) === 2 * (b % 3) && Math.floor(a / 3) + Math.floor(c / 3) === 2 * Math.floor(b / 3);
-  const matchRune = (pts, lang, ids, ownH) => { const p = runeNorm(pts); let more = false, spell = null;
-    for (const id of ids || castable()) { const R0 = runeOf(id, lang, ownH ? ownOf(id, lang, ownH(id)) : null); if (!R0) continue; const k = runeNorm(R0.pts); if (k.length < p.length) continue;
+  const matchRune = (pts, lang, ids, ownH, mods) => { const p = runeNorm(pts); let more = false, spell = null, mod = null; const moreOf = [];
+    for (const [id, md] of inputsOf(ids, mods)) { const R0 = runeOf(id, lang, ownFor(id, lang, ownH), md, md ? ownFor(md, lang, ownH) : null); if (!R0) continue; const k = runeNorm(R0.pts); if (k.length < p.length) continue;
       let ok = true, bad = -1; for (let i = 0; i < p.length; i++) if (k[i] !== p[i]) { ok = false; bad = i; break; }
-      if (!ok) { if (bad === p.length - 1 && bad > 0 && midOf(p[bad - 1], p[bad], k[bad])) more = true; continue; }
-      if (k.length === p.length) spell = spell || id; else more = true; }
-    return spell ? { spell, more } : more ? { more: true } : null; };
+      if (!ok) { if (bad === p.length - 1 && bad > 0 && midOf(p[bad - 1], p[bad], k[bad])) { more = true; if (md && moreOf.indexOf(id) < 0) moreOf.push(id); } continue; }
+      if (k.length === p.length) { if (!spell) { spell = id; mod = md; } } else { more = true; if (md && moreOf.indexOf(id) < 0) moreOf.push(id); } }
+    return spell ? { spell, mod, more, moreOf } : more ? { more: true, moreOf } : null; };
   // A RUNE DRAWN FREELY (moved here from the client in step 2, so the server checks a practice the same way): a path as `n` points evenly along it, fitted to a unit box
   //   (the longer side = 1), middle at 0,0 · how far one drawn path lies from a spell's rune, on average, as a share of its size (where and how big do not matter)
   function pathFit(flat, n) {
@@ -204,14 +239,17 @@
     for (let k = 0; k < n; k++) { out[k * 2] = (out[k * 2] - cx) / s; out[k * 2 + 1] = (out[k * 2 + 1] - cy) / s; }
     out.len = len; return out;
   }
-  const runeDist = (fit, id, lang, own) => { const R0 = runeOf(id, lang, own); if (!R0 || !fit) return 1e9; const flat = []; for (const p of R0.pts) flat.push(p % 3, Math.floor(p / 3));
+  const runeDist = (fit, id, lang, own, mod, modOwn) => { const R0 = runeOf(id, lang, own, mod, modOwn); if (!R0 || !fit) return 1e9; const flat = []; for (const p of R0.pts) flat.push(p % 3, Math.floor(p / 3));
     const T = pathFit(flat, fit.length / 2); if (!T) return 1e9; let d = 0; const n = fit.length / 2; for (let k = 0; k < n; k++) d += Math.hypot(fit[k * 2] - T[k * 2], fit[k * 2 + 1] - T[k * 2 + 1]); return d / n; };
   // a cooldown in ms with this catalyst
-  const cdMs = (id, cat) => { const S = of(id), C = CATALYSTS[cat]; return S ? Math.round(S.cd * 1000 * (C ? C.cdK : 1)) : 0; };
+  const cdMs = (id, cat, mod) => { const S = of(id), C = CATALYSTS[cat], M = modOf(mod); return S ? Math.round(S.cd * 1000 * (C ? C.cdK : 1) * (M ? M.cdK || 1 : 1)) : 0; };   // (4c: × a modifier's)
+  // (4c) THE LOB (the arc modifier): from x, y it comes down on tx, ty — the time by how far (never under 0.45 s), the gravity the modifier's. Every screen works out the same
+  const arcAim = (S, M, x, y, tx, ty) => { const dx = tx - x, dy = ty - y, g = (M && M.g) || 1100, T = Math.max(0.45, Math.min(1.8, Math.hypot(dx, dy) / Math.max(80, ((S && S.speed) || 600) * 0.75)));
+    return { vx: dx / T, vy: (dy - 0.5 * g * T * T) / T, g, T, life: T + 0.6 }; };
   // (step 3a) the spell a variant belongs to (learnt with it, its own part the same): the light orb that follows → the light orb
   const baseOf = (id) => { const S = of(id); return S && S.alt && is(S.alt) ? S.alt : id; };
-  const learnN = (id) => { const S = of(baseOf(id)); return S ? Math.max(1, S.learn || (S.tier ? 5 : 3)) : 0; };
+  const learnN = (id) => { if (isMod(id)) return Math.max(1, MODS[id].learn || 3); const S = of(baseOf(id)); return S ? Math.max(1, S.learn || (S.tier ? 5 : 3)) : 0; };
   const tomeOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(TOMES, item) ? TOMES[item] : null;
   const scrollOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(SCROLLS, item) ? SCROLLS[item] : null;
-  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, is, of, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
+  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, MODS, is, of, isMod, modOf, modFits, arcAim, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
 });
