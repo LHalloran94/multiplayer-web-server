@@ -114,6 +114,24 @@
     //   stopped by rock, fizzling in liquid; `hw` its half width; it sets alight what it touches (each player's own game for their body, as a turret's jet), the ground at its end
     flamestream: { name: 'Flame stream', school: 'fire', form: 'stream', tier: 0, cd: 4, stance: 'level', kind: 'stream', learn: 3, chan: true, chanS: 5, reach: 120, hw: 7,
       plain: { keys: [U, R, D, D, R], rune: [6, 0, 4, 8, 5] } },
+    // ⭐ 4e (2026-11-18, kickoff §ROUND 4 — ON YOURSELF / ON ANOTHER, from the powerups' timed effects): kind 'boon' gives the powerup `pw` for `secs` seconds through the same
+    //   grant a pickup uses (client 16a `powerGrant`) — each player's own game holds their own, everybody sees it by the powers' mask on the position packet. On yourself = the
+    //   form 'On yourself'; ON ANOTHER = its variant with 'Touch' (`other`): the player nearest your pointer within `reach` px of you (the server checks they are there).
+    //   CHILL BOLT: a frost bolt that SLOWS whoever it hits (`slow` × their speed for `slowS` s — the new 'slow' power, 01_state `POWERUP_KINDS.slow`).
+    leap: { name: 'Leap', school: 'force', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'boots', secs: 20, learn: 3, alts: ['leap_o'], plain: { keys: [R, U, U, D, R], rune: [6, 4, 2, 5, 8] } },
+    leap_o: { name: 'Leap (on another)', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'boon', pw: 'boots', secs: 20, alt: 'leap', other: true, reach: 240, plain: { keys: [R, U, U, D, L], rune: [6, 4, 2, 5, 3] } },
+    feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'wings', secs: 20, learn: 3, alts: ['feather_o'], plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
+    feather_o: { name: 'Feather fall (on another)', school: 'storm', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'boon', pw: 'wings', secs: 20, alt: 'feather', other: true, reach: 240, plain: { keys: [L, R, D, D, R], rune: [0, 4, 8, 7, 4] } },
+    haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, alts: ['haste_o'], plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
+    haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
+    grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
+    grow_o: { name: 'Grow (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mega', secs: 15, alt: 'grow', other: true, reach: 240, plain: { keys: [U, L, U, R, D], rune: [7, 3, 1, 5, 4] } },
+    shrink: { name: 'Shrink', school: 'decay', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mini', secs: 15, learn: 5, alts: ['shrink_o'], plain: { keys: [D, R, D, L, D], rune: [1, 5, 7, 3, 4] } },
+    shrink_o: { name: 'Shrink (on another)', school: 'decay', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mini', secs: 15, alt: 'shrink', other: true, reach: 240, plain: { keys: [D, R, D, L, U], rune: [1, 5, 7, 3, 0] } },
+    fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
+    fireward_o: { name: 'Fire ward (on another)', school: 'wards', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'fireproof', secs: 20, alt: 'fireward', other: true, reach: 240, plain: { keys: [L, D, R, U, L], rune: [0, 6, 8, 2, 1] } },
+    chillbolt: { name: 'Chill bolt', school: 'frost', form: 'bolt', tier: 0, cd: 4, stance: 'level', kind: 'bolt', learn: 3, speed: 640, life: 1.1, grav: 0.05, r: 3, dmg: 0.4, slow: 0.55, slowS: 4,
+      plain: { keys: [D, D, R, U, R], rune: [2, 4, 3, 6, 7] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },

@@ -27901,6 +27901,9 @@ io.on('connection', (socket) => {
     // (magic step 3g) a LIFT names a loose thing nobody holds · a DOUBLE starts by its caster and walks no faster than a run
     if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
     if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    // (4e) ON ANOTHER: a player in this room, near enough (by where their own game last said they were)
+    if (S.other) { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;
+      if (!ts || ts.id === socket.id || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 240) + 120)) return no('nobody'); }
     // (step 2) REAGENTS: what the spell uses up, from what you carry (where things cost something), unless the panel's 'Spells need no reagents (for testing)'
     const gated = invGatedRoom(room), key = playerKeyFor(socket.id), reag = !SC && Array.isArray(S.uses) && gated && !socket._magicNoReag ? S.uses : null;
     if (reag) { for (const [it, n] of reag) if (ledger.itemCount(key, it) < n) return no('reagent:' + it); for (const [it, n] of reag) ledger.spendItem(key, it, n); sendInvSync(socket, room); }
@@ -27909,6 +27912,7 @@ io.on('connection', (socket) => {
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
     const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: powK };
     if (SC) { out.charge = 1; out.cat = ''; }
+    if (S.other) out.tgt = m.tgt;   // (4e)
     // (step 3a) where a placed spell goes (the light orb): the caster's point, no further than its reach
     if (isFinite(m.tx) && isFinite(m.ty)) { const dx = m.tx - out.x, dy = m.ty - out.y, d = Math.hypot(dx, dy), lim = ((MD && MD.reach) || S.reach || 400) + 8, k = d > lim ? lim / d : 1; out.tx = Math.round(out.x + dx * k); out.ty = Math.round(out.y + dy * k); }   // (4c: the lob's reach)
     if (MD) { out.mod = m.mod; if (m.mod === 'mod_arc' && !isFinite(out.tx)) return no('bad'); }
