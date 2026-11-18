@@ -101,8 +101,13 @@
       plain: { keys: [U, D, U, D], rune: [7, 4, 1, 0] } },
     lift: { name: 'Lift and throw', school: 'force', form: 'shaping', tier: 0, cd: 3, stance: 'level', kind: 'lift', learn: 3, reach: 320, secs: 10, pull: 0.16, vmax: 11, throwV: 12,
       plain: { keys: [R, R, U, L], rune: [3, 4, 5, 2] } },
-    double: { name: 'A double of you', school: 'illusion', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'double', learn: 5, secs: 60, secsWalk: 6, walk: 150, jump: 420,
+    double: { name: 'A double of you', school: 'illusion', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'double', learn: 5, secs: 60, secsWalk: 6, walk: 150, jump: 420, alts: ['double_m'],
       plain: { keys: [L, U, R, D, D], rune: [2, 0, 6, 7, 8] } },
+    // ⭐ 4b (2026-11-18, Trello #711): THE MIRROR DOUBLE — the double's variant (one mark changed, as the light orb's: On yourself → Placed; plain: the last key up). It comes out
+    //   on you and moves with YOUR movement LEFT ↔ RIGHT SWAPPED (jumps as they are) while you move freely — never steered; it bursts as the double does; `secs`.
+    //   mirror  moves as your mirror image (client 16zj `magicDoubleSimStep`)
+    double_m: { name: 'A mirror double', school: 'illusion', form: 'placed', tier: 1, cd: 12, stance: 'raise', kind: 'double', alt: 'double', mirror: true, secs: 60,
+      plain: { keys: [L, U, R, D, U], rune: [2, 0, 6, 7, 4] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
