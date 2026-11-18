@@ -3828,6 +3828,11 @@ function magicMindOf(pkey) {
   for (const q of db.prepare('SELECT spell, n FROM magic_learnt WHERE pkey = ?').all(pkey)) if (SPELLS.is(q.spell)) M.n[q.spell] = q.n;
   _magicMind.set(pkey, M); if (_magicMind.size > 4000) _magicMind.delete(_magicMind.keys().next().value); return M;
 }
+// ⭐ MAGIC 4a (2026-11-18, kickoff §ROUND 4, Trello #710): what you have LEARNT, your LIFE and your OWN PART of every spell are kept APART for the Overworld and for everywhere
+//   else (the sandbox, page worlds, Levels) — the same core inputs everywhere (muscle memory), but a tome read in the sandbox never teaches the Overworld, nor shows your
+//   Overworld version. Elsewhere keeps the plain player key (the rows learnt before this); the Overworld is the key + '|ow'. A death ends the life of the world you died in.
+//   Switch back: Items › Magic › 'What you learn is kept apart for the Overworld' off (`socket._magicOneMind`) = one learnt set everywhere, as before.
+function magicMindKey(socket) { const k = playerKeyFor(socket.id); if (socket._magicOneMind) return k; const r = socketToAvatarRoom[socket.id]; return r && overworldRooms.has(r) ? k + '|ow' : k; }
 function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC_SECRET).update(pkey + '|' + life + '|' + spell).digest().readUInt32BE(0) & 0x3fffffff; }
 // ⭐ MAGIC STEP 3d (2026-11-17) — BATCH b: THE WORLD CHANGED BY A SPELL, AND PUT BACK. Each changed cell is written as the liquid reactions write theirs (`grid.s` + `hp.s`, the
 //   `terrain-set` wire; fine liquid cleared / written + `emitFineCells`) and remembered in `magicTemp` with when it goes back and what it was — also in the DATABASE (`magic_temp`), so a
@@ -3969,19 +3974,20 @@ const _magicDoubles = new Map();   // (magic step 3g) room → Map(cast id → {
 function magicRunesOf(room) { let a = _magicRunes.get(room); if (!a) _magicRunes.set(room, a = []); return a; }
 function magicRuneOff(room, q, by) { const rs = magicRunesOf(room), k = rs.indexOf(q); if (k < 0) return; rs.splice(k, 1); const S = SPELLS.of(q.spell) || {};
   io.to(room).emit('magic-rune-off', { id: q.id, from: q.by, by, x: q.x, y: q.y, r: S.blastR || 90, f: S.blastF || 14, dmg: S.dmg || 3, pow: q.pow || 1 }); }
-function magicKnows(socket, spell) { if (socket._magicAll) return true; const M = magicMindOf(playerKeyFor(socket.id)), b = SPELLS.baseOf(spell); return (M.n[b] | 0) >= SPELLS.learnN(b); }   // (step 3a: a variant is known with its spell)
+function magicKnows(socket, spell) { if (socket._magicAll) return true; const M = magicMindOf(magicMindKey(socket)), b = SPELLS.baseOf(spell); return (M.n[b] | 0) >= SPELLS.learnN(b); }   // (step 3a: a variant is known with its spell)
 // what this socket is told: its counts, how many each needs, and its own numbers for the spells it knows, the pages of every tome in its hands (and every spell, knowing all)
 function magicKnowSend(socket) {
-  const key = playerKeyFor(socket.id), M = magicMindOf(key), own = {}, need = {}, room = socket._magicRoom;
+  const key = magicMindKey(socket), M = magicMindOf(key), own = {}, need = {}, room = socket._magicRoom;
   const want = new Set(Object.keys(M.n));
   if (socket._magicAll) for (const id of SPELLS.castable()) want.add(id);
   { const mine = eqObjs.get(socket.id), map = room && roomObjects[room]; if (mine && map) for (const oid of mine) { const o = map.get(oid), T = o && SPELLS.tomeOf(o.item); if (T) for (const p of T.pages) if (p.spell && p.dmg !== 'missing') want.add(p.spell); } }
   for (const id of [...want]) { const S = SPELLS.of(id); if (S && S.alts) for (const a of S.alts) want.add(a); }   // (step 3a) a spell's variants come with it…
   for (const id of want) if (SPELLS.is(id) && !SPELLS.of(id).innate) { need[id] = SPELLS.learnN(id); if (socket._magicOwn !== false) own[id] = magicOwnH(key, M.life, SPELLS.baseOf(id)); }   // …with ITS own part: the variant differs only in the change
+  { const r = socketToAvatarRoom[socket.id]; socket._magicOwSent = !!(r && overworldRooms.has(r)); }   // (4a) which world's set it was told
   socket.emit('magic-know', { life: M.life, n: M.n, need, own, all: socket._magicAll ? 1 : 0, ownOn: socket._magicOwn !== false ? 1 : 0 });
 }
 function magicDied(socket) {
-  const key = playerKeyFor(socket.id), M = magicMindOf(key);
+  const key = magicMindKey(socket), M = magicMindOf(key);
   M.life++; M.n = {}; socket._tomeOpen = null;
   db.prepare('DELETE FROM magic_learnt WHERE pkey = ?').run(key);
   db.prepare('INSERT INTO magic_life (pkey, life) VALUES (?, ?) ON CONFLICT(pkey) DO UPDATE SET life = excluded.life').run(key, M.life);
@@ -25420,7 +25426,10 @@ io.on('connection', (socket) => {
       dropRelay(currentAvatarRoom, socket.id); forgetRuleSocket(currentAvatarRoom, socket.id); if (forgetPlateSocket(currentAvatarRoom, socket.id)) broadcastObjSt(currentAvatarRoom);   // Phase 5a: a Level switch must not leave a ghost being relayed · #98: switching Level also leaves every region
     }
     currentAvatarRoom = avRoom;
+    { const was = socketToAvatarRoom[socket.id];
     socketToAvatarRoom[socket.id] = avRoom;
+    // (magic 4a) into or out of the Overworld: a different learnt set — tell the client now, not at its next ask (by what it was last TOLD: leaving a room clears its entry here)
+    if (socket._magicOwSent != null && socket._magicOwSent !== overworldRooms.has(avRoom)) { socket._magicRoom = avRoom; magicKnowSend(socket); } }
     socket.join(avRoom);
     if (type === 'world') ensureWorldGenerated(avRoom, roomId, levelIndex);   // seed keyed by roomId (=URL for the default room → identical worlds), once per server lifetime; band from the Level's size preset
     // ⚠️ NOT INTO THE OVERWORLD. Hydration server-loads a PUBLISHED page world's stored content into a room;
@@ -27806,11 +27815,12 @@ io.on('connection', (socket) => {
   //   LEARNT this life (step 2 fills `_magicKnow` from tomes; until then only the debug switch "know every spell" — `magic-debug` — or an innate ability passes) · its COOLDOWN
   //   (by spell, × the catalyst's) · the caster is near where they say it leaves from. Refused: `magic-no` { spell, why, left } to the caster alone.
   //   `magic-state` = the casting stance, the inputs' signs and the prepared spell, for the others to see (relayed, trimmed). `magic-hit` = where the caster's bolt ended: fire there.
-  socket.on('magic-debug', (m) => { const was = [socket._magicAll, socket._magicOwn];
+  socket.on('magic-debug', (m) => { const was = [socket._magicAll, socket._magicOwn, socket._magicOneMind];
+    socket._magicOneMind = !!(m && m.apart === 0);   // (4a: 'What you learn is kept apart for the Overworld' off)
     socket._magicAll = !!(m && m.all); socket._magicNoCd = !!(m && m.nocd);   // (the panel's 'Know every spell' + 'No cooldowns', both for testing)
     socket._magicNoReag = !!(m && m.noreag); socket._magicOwn = !(m && m.own === 0);   // (step 2: 'Spells need no reagents (for testing)'; 'Your own version of each spell' off = the shared core only)
     socket._magicRoom = currentAvatarRoom; socket._magicSecsK = Math.max(0.05, Math.min(5, isFinite(m && m.secs) ? +m.secs / 100 : 1));   // (step 3d: 'Spell changes to the world last (%)', for testing)
-    if (was[0] !== socket._magicAll || was[1] !== socket._magicOwn) magicKnowSend(socket); });
+    if (was[0] !== socket._magicAll || was[1] !== socket._magicOwn || was[2] !== socket._magicOneMind) magicKnowSend(socket); });
   // ⭐ MAGIC, STEP 2: LEARNING. `magic-know-ask` → `magic-know` (counts, needs, own numbers). `tome-open` = which page of which tome in your hand is open (null: shut) — the others are
   //   told, so they see you reading. `magic-practice` = an input put in with the tome open: CHECKED HERE against your own version of that page's spell (keys exactly; joined points
   //   exactly; a rune drawn freely by the same shape measure as the client's, `SPELLS.runeDist`), and counted when right.
@@ -27829,7 +27839,7 @@ io.on('connection', (socket) => {
     const no = (why) => socket.emit('magic-practised', { ok: 0, why, spell: P && P.spell || null });
     if (!P || TO.page !== (m.page | 0)) return no('tome');
     if (!P.spell || P.dmg === 'missing' || !SPELLS.is(P.spell)) return no('page');
-    const key = playerKeyFor(socket.id), M = magicMindOf(key), lang = !!m.lang, own = socket._magicOwn === false ? null : SPELLS.ownOf(P.spell, lang, magicOwnH(key, M.life, P.spell));
+    const key = magicMindKey(socket), M = magicMindOf(key), lang = !!m.lang, own = socket._magicOwn === false ? null : SPELLS.ownOf(P.spell, lang, magicOwnH(key, M.life, P.spell));
     const seq = Array.isArray(m.seq) ? m.seq.slice(0, 128).map(v => Math.round(+v) || 0) : [];
     let right = false;
     if (m.how === 'keys') { const k = SPELLS.keysOf(P.spell, lang, own); right = !!k && k.length === seq.length && k.every((v, i) => v === (seq[i] & 3)); }
