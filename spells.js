@@ -230,7 +230,7 @@
     //   (frozen into ice, a frost flask's freeze) and a chill bolt's slow ends; it lights nothing. Seen as a SHIMMER (what is behind it wavers — no lines), steam where it melts.
     //   FLAMING WEAPON, kind 'flameblade': the weapon in your OTHER hand (`wpn`, the caster's game says which; none: refused) burns `secs`: its hits set alight, what it brushes
     //   that burns catches (server `magic-blade-burn`), torch light; everybody sees it. In liquid its flames are out until it comes out.
-    heat: { name: 'Heat', school: 'fire', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'heat', learn: 3, chan: true, chanS: 6, reach: 140, half: 0.42, growMs: 2500, melt: 16,
+    heat: { name: 'Heat', school: 'fire', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'heat', learn: 3, chan: true, chanS: 10, reach: 140, half: 0.42, growMs: 2500, melt: 16,
       plain: { keys: [U, L, U, L, R], rune: [6, 3, 2, 7, 0] } },
     flameblade: { name: 'Flaming weapon', school: 'fire', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'flameblade', learn: 5, secs: 30,
       plain: { keys: [U, R, U, R, D], rune: [6, 1, 2, 4, 8] } },
