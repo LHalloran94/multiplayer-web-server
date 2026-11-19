@@ -28492,6 +28492,7 @@ io.on('connection', (socket) => {
   socket.on('magic-blade-burn', (m) => { const room = currentAvatarRoom, q = _magicBlades.get(socket.id); if (!q || q.room !== room || !m || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now > q.until || now - (q.burnT || 0) < 120) return; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(+m.x - p.x, +m.y - p.y) > 200) return;
     q.burnT = now; igniteBox(room, +m.x, +m.y, TERRAIN_CELL * 0.5); });
+  socket.on('magic-blade-out', () => { const q = _magicBlades.get(socket.id); if (!q) return; _magicBlades.delete(socket.id); io.to(q.room).emit('magic-blade-out', { wpn: q.wpn }); });   // (6c round 4) quenched in liquid: out for good, on every screen
   socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); { const pd = roomDblPos[room], r = pd && pd.get(q.by); if (r && r.dbl === id) { pd.delete(q.by); if (!pd.size) delete roomDblPos[room]; } } io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
   // (magic step 3d) a RUNE stepped on: the stepper's own game tells (it sees its body exactly) — believed when this socket's body was last near it
   socket.on('rune-step', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const rs = magicRunesOf(room), q = rs.find(r => r.id === (m.id | 0)); if (!q) return;
