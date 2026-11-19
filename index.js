@@ -4247,39 +4247,94 @@ function magicWallSide(room, x, y, dir, S) {
 }
 // grow the lines a cell a step (`rowMs`), each only into open cells — through LIQUID too (`thruLiq`: pushed to the nearest room, `magicLiqOut`) — and stopping at the first that is
 //   not; every cell cracks on one clock (`ce`) and the far end crumbles first, `crumbleMs` a cell (step 3f: quick — the removals timed exactly, the sweep only schedules them)
+// ⭐ (5d, 2026-11-19 — the spikes, the pillar, the bridge built on it) ONE STEP A TICK (`rowMs`) for every line: a line waits for its own start (`t0` ms — the spikes' wave);
+//   a cell -2 is a step with nothing put (the bridge still over its own ground); a line with `wait` held up by a RESTING LOOSE THING (its body cells) tries again next tick, at
+//   most `waitN` times (the pillar lifting what lies on it — the caster's game hops it up); each line goes on its own clock from its start (`t0` added to its time) and its far
+//   end first. `S.sink`: the cells are kind 'sink' (the pillar SINKS back the way it rose: no cracks, no rubble). `S.crackS` 0 = no cracks.
 function magicWallLines(room, lines, S) {
-  const st = cellsOf(room), grid = st.terrain, H = S.high || 12; if (!lines.length) return 0;
-  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS || 6) * 1000, gap = S.crumbleMs || 30, mats = roomMats[room] || {};
-  const avoid = new Set(); for (const L of lines) for (const i of L.cells) if (i >= 0) avoid.add(i);
-  for (let h = 0; h < H; h++) setTimeout(() => {
-    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = [], t2 = s2.fineTotal;
-    for (const L of lines) { if (L.stop) continue; const i = L.cells[h], wet = i >= 0 && t2 && peekCellAt(t2, i) > 0;
-      if (i < 0 || !(wet ? magicOpen(grid, i) : peekAir(grid, i)) || (wet && !S.thruLiq)) { L.stop = true; continue; }   // (open: 0, or not made yet in a room that is not generated — `peekAir`; liquid's own cells too)
+  const st = cellsOf(room), grid = st.terrain; if (!lines.length || !grid) return 0;
+  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS != null ? S.crackS : 6) * 1000, gap = S.crumbleMs || 30, mats = roomMats[room] || {}, kind = S.sink ? 'sink' : 'wall', rowMs = S.rowMs || 70, waitN = S.waitN || 0;
+  const avoid = new Set(); let total = 0; for (const L of lines) { L.k = 0; L.w = 0; total += L.cells.length; for (const i of L.cells) if (i >= 0) avoid.add(i); }
+  const tick = (h) => {
+    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = [], t2 = s2.fineTotal, el = h * rowMs; let live = false;
+    for (const L of lines) { if (L.stop || L.k >= L.cells.length) continue; live = true; if (el < (L.t0 || 0)) continue;
+      const k = L.k, i = L.cells[k]; if (i === -2) { L.k++; continue; }
+      const wet = i >= 0 && t2 && peekCellAt(t2, i) > 0;
+      if (i < 0 || !(wet ? magicOpen(grid, i) : peekAir(grid, i)) || (wet && !S.thruLiq)) {   // (open: 0, or not made yet in a room that is not generated — `peekAir`; liquid's own cells too)
+        if (L.wait && i >= 0 && L.w < waitN && isBodyId(peekCellAt(grid, i))) { L.w++; continue; }
+        L.stop = true; continue; }
       if (wet && magicLiqOut(room, i, avoid, liq, cells) > 0) { L.stop = true; continue; }
-      grid.s(i, L.mat); s2.terrainHp.s(i, matStrengthSrv(mats, L.mat)); cells.push(i, L.mat);
-      const u = until + (H - 1 - h) * gap; magicTempPut(room, i, { kind: 'wall', mat: L.mat, back: 0, units: 0, until: u, crack: crack + (u - until), ce: until }); }
+      grid.s(i, L.mat); s2.terrainHp.s(i, matStrengthSrv(mats, L.mat)); cells.push(i, L.mat); L.k++;
+      const lu = until + (L.t0 || 0), u = lu + (L.cells.length - 1 - k) * gap; magicTempPut(room, i, { kind, mat: L.mat, back: 0, units: 0, until: u, crack: crack > 0 ? crack + (u - lu) : 0, ce: lu }); }
     if (cells.length) wireFanout(room, 'terrain-set', { cells });
     if (liq.length) emitFineCells(room, liq);
-  }, h * (S.rowMs || 70));
-  return lines.length * H;
+    if (live && h < 400) setTimeout(() => tick(h + 1), rowMs);
+  };
+  setTimeout(() => tick(0), 0);
+  return total;
+}
+// ⭐⭐ MAGIC 5d (2026-11-19 — EARTH, MADE MATTER THAT GOES; the user agreed the proposal and its three picks). Each works out its LINES of cells here (nothing put yet — a cast
+//   refused for no ground spends nothing), then `magicWallLines` grows them. The stone is the ground's own rock where it rises if a plain one, else stone (as the wall).
+//   STONE SPIKES: a LINE along the ground from in front of you towards the pointer — `n` spikes `gap` cells apart from `first` cells out, each on the ground there (following
+//   it up or down at most `step` cells; a higher wall or a drop ends the line). Each spike: a column `high` tall and one beside it `base` tall (the side turns spike to spike),
+//   bursting up `rowMs` a cell, `warnMs` + `waveMs` a spike after the cast — the client's warning bulge comes first. → { lines, sp: [[x, ground y, ms, high, side], …] }
+const magicUnderMat = (room, grid, c, r) => { const st = cellsOf(room), fr = Math.floor(roomFloorTop(room) / TERRAIN_CELL), v = r + 1 < fr ? peekCellAt(grid, c * st.rows + r + 1) : 2; return MAGIC_ROCKY.has(v) ? v : 2; };
+function magicSpikesPlan(room, bx, by, tx, S) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL;
+  const dir = tx >= bx ? 1 : -1, g0 = magicGroundAt(room, bx, by - T); if (!g0) return null;
+  let py = g0.y; const lines = [], sp = [], H = S.high || 5, B = S.base || 2;
+  const col = (c, r, h) => { const cs = []; for (let j = 0; j < h; j++) cs.push(r - j >= 1 ? c * ROWS + r - j : -1); return cs; };
+  for (let k = 0; k < (S.n || 5); k++) {
+    const x = bx + dir * ((S.first || 3) + k * (S.gap || 4)) * T, g = magicGroundAt(room, x, py - T); if (!g || Math.abs(g.y - py) > (S.step || 3) * T) break; py = g.y;
+    const mat = magicUnderMat(room, grid, g.c, g.r), t0 = (S.warnMs || 140) + k * (S.waveMs || 70), side = k % 2 ? 1 : -1, c2 = g.c + side;
+    lines.push({ cells: col(g.c, g.r, H), mat, t0 });
+    if (c2 >= 0 && c2 < COLS && peekAir(grid, c2 * ROWS + g.r) && !peekAir(grid, c2 * ROWS + g.r + 1)) lines.push({ cells: col(c2, g.r, B), mat, t0 });
+    sp.push([g.x, g.y, t0, H, side]); }
+  return lines.length ? { lines, sp } : null;
+}
+// RISING PILLAR: `wide` columns out of the ground under the pointer, each from its own ground (within 2 cells of the middle's), `high` tall, a row every `rowMs`; held up by a
+//   resting loose thing it waits (`wait`), stopped by rock. It SINKS back (`sink`) a row every `crumbleMs` from the top. → { lines, x, y }
+function magicPillarPlan(room, x, y, S) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, T = TERRAIN_CELL, g = magicGroundAt(room, x, y); if (!g) return null;
+  const W = S.wide || 3, H = S.high || 16, cL = g.c - Math.floor(W / 2), mat = magicUnderMat(room, grid, g.c, g.r), lines = [];
+  for (let k = 0; k < W; k++) { const gk = magicGroundAt(room, (cL + k + 0.5) * T, g.y - T); if (!gk || gk.c !== cL + k || Math.abs(gk.y - g.y) > 2 * T) continue;
+    const cs = []; for (let h = 0; h < H; h++) cs.push(gk.r - h >= 1 ? gk.c * ROWS + gk.r - h : -1); lines.push({ cells: cs, mat, wait: 1, t0: S.warnMs || 0 }); }   // (after the ring that marks it)
+  return lines.length ? { lines, x: g.x, y: g.y } : null;
+}
+// BRIDGE: from the edge in front of your feet towards the pointer — a span `thick` cells deep whose top is level with the ground you stand on, along the line to the pointer
+//   (its slope at most `slope`: 1 = 45°, up or down — a ramp), `len` columns, a column every `rowMs`. It begins at the first column (within `skip`) where its top is open air;
+//   from there a row still in the ground is passed over (-2) until it comes out; once begun, rock ends it (joined to the far side). → { lines, br: { c0, r0, s, dir, sl, n, ms } }
+function magicBridgePlan(room, bx, by, tx, ty, S) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, floorRow = Math.floor(roomFloorTop(room) / T);
+  const g0 = magicGroundAt(room, bx, by - T); if (!g0) return null;
+  const dir = tx >= bx ? 1 : -1, SL = S.slope != null ? S.slope : 1, sl = Math.max(-SL, Math.min(SL, (ty - g0.y) / Math.max(T, Math.abs(tx - bx)))), c0 = g0.c, r0 = g0.r + 1, D = S.thick || 2;
+  const solid = (c, r) => { if (r >= floorRow) return true; const v = peekCellAt(grid, c * ROWS + r); return !(peekAir(grid, c * ROWS + r) || isFluidId(v)); };
+  const rowAt = (k) => r0 + Math.round(sl * k);
+  let s = -1; for (let k = 1; k <= (S.skip || 12); k++) { const c = c0 + dir * k; if (c < 0 || c >= COLS) return null; if (!solid(c, rowAt(k))) { s = k; break; } }
+  if (s < 0) return null; const mat = magicUnderMat(room, grid, g0.c, g0.r), n = S.len || 32, lines = [];
+  for (let d = 0; d < D; d++) { const cs = []; let begun = false;
+    for (let j = 0; j < n; j++) { const k = s + j, c = c0 + dir * k, r = rowAt(k) + d; if (c < 0 || c >= COLS || r < 1 || r >= floorRow) { cs.push(-1); break; }
+      if (!begun && solid(c, r)) { cs.push(-2); continue; } begun = true; cs.push(c * ROWS + r); }
+    lines.push({ cells: cs, mat }); }
+  return { lines, br: { c0, r0, s, dir, sl: +sl.toFixed(3), n, ms: S.rowMs || 40 } };
 }
 // (step 3f) PUT BACK the cells whose time is up, at THEIR moment (scheduled by the sweep below — a crumble is smooth, not in quarter-second lumps): ice gives back its water, a wall's
 //   rubble falls; the liquid round each is WOKEN (`fineWakeAround`) so it flows into the space — a wall that stood under water left a hole the water never filled
 const magicCfgSrv = { wake: 1, exact: 1 };   // switches back: `wake` 0 = the liquid round a put-back cell is not woken · `exact` 0 = put back by the quarter-second sweep
 function magicTempEnd(room, list) {
   const st = roomCells.get(room), M = magicTemp.get(room); if (!st || !st.terrain || !M) return; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal;
-  const cells = [], liq = [], gone = [], woke = [];
+  const cells = [], liq = [], gone = [], woke = [], sank = [];
   for (const i of list) { const T = M.get(i); if (!T) continue; const v = peekCellAt(grid, i); if (v < 0) { T.sch = 0; continue; }
     if (v !== T.mat) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
     grid.s(i, 0); hp.s(i, 0);
     if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }
     cells.push(i, grid.g(i)); woke.push(i);
-    if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
+    if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat); else if (T.kind === 'sink') sank.push(Math.floor(i / st.rows), i % st.rows, T.mat);
     M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} }
   if (magicCfgSrv.wake) for (const i of woke) fineWakeAround(room, i);
   if (cells.length) wireFanout(room, 'terrain-set', { cells });
   if (liq.length) emitFineCells(room, liq);
-  if (gone.length) io.to(room).emit('magic-wall-end', { cells: gone });
+  if (gone.length || sank.length) io.to(room).emit('magic-wall-end', { cells: gone, sink: sank.length ? sank : undefined });   // (5d: a pillar's cells SINK — no rubble)
   if (!M.size) magicTemp.delete(room);
 }
 // four times a second: cracks coming on a wall that is about to go (its strength lowered — the same crack look as a dug cell), and every cell whose time is up put back
@@ -4295,7 +4350,7 @@ setInterval(() => {
       if (now >= T.until) {
         grid.s(i, 0); hp.s(i, 0); cells.push(i, 0);
         if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); }
-        if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
+        if (T.kind === 'wall' || T.kind === 'sink') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
         M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {}
       } else if (T.crack && now >= T.until - T.crack) { const s = matStrengthSrv(mats, T.mat), e = T.ce || T.until, c0 = T.until - T.crack, h = Math.max(1, Math.ceil(s * Math.max(0, e - now) / Math.max(1, e - c0))); if (hp.g(i) > h) { hp.s(i, h); dmg.push(i, h); } }   // (step 3e: on the wall's one clock, `ce`)
     }
@@ -28253,6 +28308,12 @@ io.on('connection', (socket) => {
     if (reag) { for (const [it, n] of reag) if (ledger.itemCount(key, it) < n) return no('reagent:' + it); for (const [it, n] of reag) ledger.spendItem(key, it, n); sendInvSync(socket, room); }
     // (5b) A CHUNK: torn out of the ground nearest the pointer, here (nothing to tear: refused, nothing spent)
     let CHK = null; if (S.kind === 'chunk') { if (!isFinite(m.tx) || !isFinite(m.ty) || (p && now - p.t < 4000 && Math.hypot(m.tx - p.x, m.ty - p.y) > (S.reach || 320) + 60)) return no('far'); CHK = (!S.soil && !socket._magicHeap && magicBoulderGrab(room, +m.tx, +m.ty, S)) || magicChunkTear(room, +m.tx, +m.ty, S, m.spell); if (!CHK) return no('nothing'); }   // (5b round 5: a loose boulder near the point first)
+    // (5d) SPIKES / PILLAR / BRIDGE: their cells worked out now — nowhere to put them, refused before anything is spent. Spikes and the bridge go from the caster's FEET (`bx`, `by`)
+    //   towards the pointer; the pillar rises under the pointer (within its reach of the cast)
+    let MADE = null; if (S.kind === 'spikes' || S.kind === 'bridge' || S.kind === 'pillar') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad');
+      if (S.kind === 'pillar') { if (Math.hypot(m.tx - m.x, m.ty - m.y) > (S.reach || 360) + 40) return no('far'); MADE = magicPillarPlan(room, +m.tx, +m.ty, S); }
+      else { if (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160) return no('bad'); MADE = S.kind === 'spikes' ? magicSpikesPlan(room, +m.bx, +m.by, +m.tx, S) : magicBridgePlan(room, +m.bx, +m.by, +m.tx, +m.ty, S); }
+      if (!MADE) return no('ground'); }
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
@@ -28290,6 +28351,8 @@ io.on('connection', (socket) => {
     if (S.kind === 'rune' || (S.kind === 'wall' && !shot)) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; }
     if (S.kind === 'freeze' && !shot) out.n = magicFreeze(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK);
     if (S.kind === 'wall' && !shot) out.n = magicWall(room, out.tx, out.ty, SK);
+    if (MADE) { out.n = magicWallLines(room, MADE.lines, SK); out.secs = +(SK.secs || 0).toFixed(2);   // (5d) grown from now — every screen is told where, for its effects (and its own body's hit)
+      if (MADE.sp) out.sp = MADE.sp; if (MADE.br) out.br = MADE.br; if (S.kind === 'pillar') { out.tx = MADE.x; out.ty = MADE.y; out.cols = MADE.lines.length; } }
     if (S.kind === 'change' && !shot) out.n = magicChange(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK, m.spell);
     if (S.kind === 'rune') { const rs = magicRunesOf(room), mine = rs.filter(q => q.by === socket.id); while (mine.length >= (S.most || 3)) { const q = mine.shift(); rs.splice(rs.indexOf(q), 1); io.to(room).emit('magic-rune-gone', { id: q.id }); }
       rs.push({ id, by: socket.id, x: out.tx, y: out.ty, at: now + (S.armS || 1.5) * 1000, until: now + (SK.secs || 180) * 1000, spell: m.spell, pow: powK }); }

@@ -179,6 +179,22 @@
       push: 34, len: 40, bore: 1.05, stepMs: 30, air: 4, rubbleV: 22, fan: 0.45, fx: '#e2b878', look: 'bore', plain: { keys: [D, U, R, R, R], rune: [3, 4, 5, 2, 1] } },
     quake: { name: 'Quake', school: 'earth', form: 'burst', tier: 0, cd: 10, stance: 'level', kind: 'quake', learn: 3, rad: 9, crack: 34, looseW: 52, ringMs: 55, loose: 30, clump: 9,
       slamMs: 260, shake: 5, kn: 4, fx: '#d8b07a', look: 'quake', plain: { keys: [D, U, D, D, D], rune: [6, 3, 0, 1, 2] } },
+    // ⭐ STEP 5d (2026-11-19 — EARTH, MADE MATTER: it goes; the user agreed the proposal and its picks — the spikes a line along the ground, the pillar SINKS back, the bridge
+    //   follows the line to the pointer). All three grow as the stone wall does (server `magicWallLines`: the ground's own rock, through liquid pushing it aside, kept in the
+    //   database, cracking over `crackS` before `secs` is up, then going `crumbleMs` a cell from the far end). What it does to bodies is each player's own game's (16zj).
+    //   STONE SPIKES, kind 'spikes': a line of `n` along the ground from `first` cells in front of you towards the pointer, `gap` cells apart, each on the ground there (up or down
+    //     `step` cells at most); a spike = a column `high` tall + one `base` tall beside it, bursting up `rowMs` a cell, `warnMs` after the cast and `waveMs` after the one before
+    //     (its spot bulges first). Rising under a body: `dmg` health, thrown up `kn`; once a cast each.
+    //   RISING PILLAR, kind 'pillar': `wide` columns out of the ground under the pointer (within `reach`), `high` tall, a row every `rowMs` — whoever stands on it rides it up; a
+    //     resting loose thing on it is hopped up (it waits `waitN` ticks for it); `secs`, then it SINKS back a row every `crumbleMs` (`sink`: no cracks, no rubble).
+    //   BRIDGE, kind 'bridge': from the edge in front of your feet towards the pointer, `thick` cells deep, its top level with your ground, along the line to the pointer (slope at
+    //     most `slope`: 1 = 45°), `len` columns, `rowMs` a column; rock it meets ends it (joined). `skip` = how far the ground may go on before it begins.
+    spikes: { name: 'Stone spikes', school: 'earth', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'spikes', learn: 3, n: 5, first: 3, gap: 4, step: 3, high: 5, base: 2, rowMs: 16, warnMs: 140, waveMs: 70,
+      secs: 4, crackS: 1, crumbleMs: 40, thruLiq: true, dmg: 1.5, kn: 7, fx: '#d9b27a', look: 'spike', plain: { keys: [D, U, U, D, U], rune: [6, 4, 8, 5, 2] } },
+    pillar: { name: 'Rising pillar', school: 'earth', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'pillar', learn: 3, reach: 360, wide: 3, high: 16, rowMs: 90, waitN: 12, secs: 30, crackS: 0, crumbleMs: 90, sink: true,
+      thruLiq: true, warnMs: 300, fx: '#d9b27a', look: 'pillar', plain: { keys: [D, U, D, U, U], rune: [8, 7, 4, 1, 2] } },
+    bridge: { name: 'Bridge', school: 'earth', form: 'shaping', tier: 0, cd: 8, stance: 'level', kind: 'bridge', learn: 3, len: 32, thick: 2, slope: 1, skip: 12, rowMs: 40, secs: 40, crackS: 4, crumbleMs: 30,
+      thruLiq: true, fx: '#d9b27a', look: 'bridge', plain: { keys: [D, U, R, L, R], rune: [3, 4, 5, 8, 6] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -240,6 +256,7 @@
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],
+    spikes: [[U, D], [4, 1, 5]], pillar: [[D, U], [4, 7, 1]], bridge: [[R, L], [4, 0, 2]],   // (5d: a peak ∧ · down into the ground and up · out and across)
     lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]], leap_o: [[R, U], [4, 1, 2]],
     haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
