@@ -4036,7 +4036,7 @@ function magicBoulderMake(room, by, spell, K, x, y, a, vx, vy, w, cid) {
   // its box's middle from the middle of its cells (the chunk is held, drawn and thrown by that — client 16zj `magicChunkPaint`: a cell's middle at (dc − mx)·T), turned with it
   const dx = ((cA + cB) / 2 - mx) * T, dy = ((rA + rB) / 2 - my) * T, ca = Math.cos(a), sa = Math.sin(a);
   const obj = { id: 'boulder-' + (++fallSeq) + '-' + (Date.now() % 1e8).toString(36), type: 'stamp', look: 'fallen', content: '🪨', shape: 'rect', ownerId: 'world', owner: 'world',
-                x: x + dx * ca - dy * sa, y: y + dx * sa + dy * ca, w: W * T, h: H * T, angle: a, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64') };
+                x: x + dx * ca - dy * sa, y: y + dx * sa + dy * ca, w: W * T, h: H * T, angle: a, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64'), cs: K.cs != null ? K.cs : (Math.random() * 1e6) | 0 };   // (round 7: `cs` the crack seed, kept from its chunk)
   fallWearSet(obj, fw);
   objIndex(room, obj);
   emitObjToChunks(room, obj, 'avatar-object-add', obj);
@@ -4063,7 +4063,7 @@ function magicBoulderGrab(room, x, y, S) {
     const lx = (c + 0.5 - D.c / 2) * T, ly = (r + 0.5 - D.r / 2) * T; wx += P.x + lx * ca - ly * sa; wy += P.y + lx * sa + ly * ca; }
   bodyUnstamp(room, obj.id, true); objStOf(room).delete(obj.id); coverDrop(room, obj.id); objUnindex(room, obj); _magicBoulders.delete(obj.id);
   emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id }); broadcastObjSt(room);
-  return { m, o, cx: wx / m.length, cy: wy / m.length, a: P.a, w: w.some(v => v) ? w : null, from: obj.id };
+  return { m, o, cx: wx / m.length, cy: wy / m.length, a: P.a, w: w.some(v => v) ? w : null, from: obj.id, cs: obj.cs };
 }
 // SOIL FLUNG let go: each of its cells a grain sprayed out from where it is, `fan` either side of the throw — the spade's throw (`powder-fly`, landed as ground by `powderFlyLand`)
 function magicSoilSpray(room, x, y, K, vx, vy, S) {
@@ -28133,8 +28133,8 @@ io.on('connection', (socket) => {
     const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (5a: the ground changed — a shot too)
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
-      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null } : null });
-      if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined, w: CHK.w || undefined };   // (round 6: `w` its cells' damage — drawn cracked while held)   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
+      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });
+      if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined, w: CHK.w || undefined, cs: CHK.cs };   // (round 7: `cs` its crack pattern's seed — the same chunk and boulder)   // (round 6: `w` its cells' damage — drawn cracked while held)   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
       out.chan = 1; out.secs = secs; if (!SC && !socket._magicNoCd) cds[m.spell] = now + secs * 1000 + cd; }
     if (S.kind === 'bolt' || shot) { let lf = S.life || 1, g = (S.grav || 0) * 1500, v = S.speed;
       // (4c) a modifier's flight: the follower slower, longer, less pulled down · the lob by its own arc (every screen works out the same) · a split: an id for each piece
