@@ -3862,6 +3862,14 @@ function magicTempPut(room, i, T) { let M = magicTemp.get(room); if (!M) magicTe
 const MAGIC_WATER_RK = 4, MAGIC_ICE = 4;   // (water's rank in LIQ_ID [11, 10, 14, 12, 9, 15], declared further down; ice = 4)
 const MAGIC_ROCKY = new Set([2, 19, 22, 23, 24, 25, 26]);   // stone, clay, granite, basalt, limestone, sandstone, shale: a wall is made of the ground's own rock if it is one of these, else stone
 // the ground under a point: the open cell resting on it (looking down from the point, or up out of rock) → { x, y (its top), c, r (the open cell) } or null
+// ⭐ (step 6b) A WALL OF FIRE standing on the ground at (x, y — the ground's top): what burns in it catches (the world's own fire — `igniteBox` over its box, the cell under
+//   its foot too). → what every screen is told: its size in px, how long, how many cells caught
+function magicFireWallAt(room, x, y, S) {
+  const C = TERRAIN_CELL, w = (S.wide || 3) * C, h = (S.high || 12) * C;
+  const n = igniteBox(room, x, y - h / 2 + C / 2, w / 2 - C / 2, h / 2 - C / 2);
+  return { w, h, secs: +(S.secs || 8).toFixed(2), n };
+}
+const _magicAuras = new Map();   // (6b) the flame rings burning: cast id → { by, room, until, burnT }
 function magicGroundAt(room, x, y) {
   const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, c = Math.floor(x / TERRAIN_CELL); let r = Math.floor(y / TERRAIN_CELL); if (c < 0 || c >= COLS) return null;   // (a room nobody has painted has no grid yet: made, as a brush makes it)
   const floorRow = Math.floor(roomFloorTop(room) / TERRAIN_CELL), solid = (rr) => { if (rr >= floorRow) return true; const v = peekCellAt(grid, c * ROWS + rr); return v > 0 && isSolidCell(v); };   // (a level's floor is a line, not cells — the rig's room stands on one)
@@ -28345,7 +28353,7 @@ io.on('connection', (socket) => {
     if (MD) { out.mod = m.mod; if (m.mod === 'mod_arc' && !isFinite(out.tx)) return no('bad'); }
     const SK = socket._magicSecsK && socket._magicSecsK !== 1 && S.secs ? Object.assign({}, S, { secs: S.secs * socket._magicSecsK, crackS: (S.crackS || 0) * Math.min(1, socket._magicSecsK) }) : S;
     // (step 3e, the user) FREEZE and the STONE WALL are SHOTS: they fly from the hand (each screen flies them, as a bolt) and do what they do where they land — the caster's game says where (`magic-hit`)
-    const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change' || S.kind === 'tunnel') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (5a: the ground changed — a shot too; 5c: the tunnelling bolt)
+    const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change' || S.kind === 'tunnel' || S.kind === 'firewall') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (6b: the wall of fire, lobbed as the stone wall's stone)   // (5a: the ground changed — a shot too; 5c: the tunnelling bolt)
     // (5c) THE QUAKE: on the ground under the catalyst's tip, once the staff's foot is down (`slamMs`)
     if (S.kind === 'tunnel') { const st0 = cellsOf(room), g0 = st0.terrain, c = Math.floor(out.x / TERRAIN_CELL), r = Math.floor(out.y / TERRAIN_CELL); if (g0 && c >= 0 && c < st0.cols && r >= 0 && r < st0.rows) { const v = peekCellAt(g0, c * st0.rows + r); if (v > 0 && isSolidCell(v)) return no('rock'); } }   // (5c round 2: not cast from inside rock)
     if (S.kind === 'quake') { const g = magicGroundAt(room, out.x, out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; out.slam = S.slamMs || 0; const by = socket.id, sp = m.spell, SQ = SK;
@@ -28373,6 +28381,9 @@ io.on('connection', (socket) => {
     if (S.kind === 'rune' || (S.kind === 'wall' && !shot)) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; }
     if (S.kind === 'freeze' && !shot) out.n = magicFreeze(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK);
     if (S.kind === 'wall' && !shot) out.n = magicWall(room, out.tx, out.ty, SK);
+    if (S.kind === 'firewall' && !shot) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; Object.assign(out, magicFireWallAt(room, g.x, g.y, SK)); }   // (6b)
+    // ⭐ (6b) THE FLAME RING: kept here while it burns, so the ground its flames brush can be lit (`magic-fire-at`) — one a caster, a new one ends the old
+    if (S.kind === 'firering') { const secs = +(SK.secs || 12).toFixed(2); for (const [k, q] of _magicAuras) if (q.by === socket.id || now > q.until) _magicAuras.delete(k); _magicAuras.set(id, { by: socket.id, room, until: now + secs * 1000 + 500 }); out.secs = secs; }
     if (MADE) { out.n = MADE.lines.length ? magicWallLines(room, MADE.lines, SK) : (MADE.sp || []).length; out.secs = +(SK.secs || 0).toFixed(2);   // (5d) grown from now — every screen is told where, for its effects (and its own body's hit)
       if (MADE.sp) out.sp = MADE.sp; if (MADE.br) out.br = MADE.br; if (S.kind === 'pillar') { out.tx = MADE.x; out.ty = MADE.y; out.cols = MADE.lines.length; } }
     if (S.kind === 'change' && !shot) out.n = magicChange(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK, m.spell);
@@ -28447,6 +28458,10 @@ io.on('connection', (socket) => {
     fallWearSet(obj, fw); if (objChunked(B.room)) objsTouch(B.room, obj.ch); emitObjToChunks(B.room, obj, 'body-fw', { id: obj.id, fw: obj.fw || '', fn: obj.fn || '' }); });
   socket.on('magic-chan-burn', (m) => { const room = currentAvatarRoom, q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - (q.burnT || 0) < 180) return; q.burnT = now; if (Math.hypot(m.x - q.x, m.y - q.y) > q.reach + 64) return; igniteBox(room, +m.x, +m.y, TERRAIN_CELL); });
+  // ⭐ (6b) THE GROUND A FLAME RING'S FLAMES BRUSH, from its caster's game (which sees where they go) — near where its caster last said they were, a few times a second
+  socket.on('magic-fire-at', (m) => { const room = currentAvatarRoom, q = m && _magicAuras.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
+    const now = Date.now(); if (now > q.until || now - (q.burnT || 0) < 140) return; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(+m.x - p.x, +m.y - p.y) > 160) return;
+    q.burnT = now; igniteBox(room, +m.x, +m.y, TERRAIN_CELL * 0.5); });
   socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); { const pd = roomDblPos[room], r = pd && pd.get(q.by); if (r && r.dbl === id) { pd.delete(q.by); if (!pd.size) delete roomDblPos[room]; } } io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
   // (magic step 3d) a RUNE stepped on: the stepper's own game tells (it sees its body exactly) — believed when this socket's body was last near it
   socket.on('rune-step', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const rs = magicRunesOf(room), q = rs.find(r => r.id === (m.id | 0)); if (!q) return;
@@ -28469,8 +28484,10 @@ io.on('connection', (socket) => {
     else if (L.land === 'tunnel') { const R0 = magicTunnel(L.room, +m.x, +m.y, L.ax, L.ay, L.SK, L.spell); land = 'tunnel'; n = R0.n; air = 0; m.len = R0.len; m.ms = R0.ms; }   // (5c)
     else if (L.land === 'wall' && (m.side === 1 || m.side === -1) && (n = magicWallSide(L.room, +m.x, +m.y, m.side, L.SK)) != null) { land = 'wall'; air = 0; }   // (step 3f: out of a face, level)
     else if (L.land === 'wall') { const g = magicGroundAt(L.room, +m.x, +m.y); if (g && Math.abs(g.y - m.y) <= 3 * TERRAIN_CELL) { land = 'wall'; tx = g.x; ty = g.y; n = magicWall(L.room, g.x, g.y, L.SK); air = 0; } else air = 1; }
-    io.to(L.room).emit('magic-end', Object.assign({ id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell },
-      land === 'tunnel' ? { ax: +(+L.ax).toFixed(3), ay: +(+L.ay).toFixed(3), len: Math.round(m.len || 0), ms: Math.round(m.ms || 0) } : {}));
+    // ⭐ (6b) A WALL OF FIRE where its ember came down (on ground, as the stone wall's) — in liquid it went out: steam, nothing stands
+    let FW = null; if (L.land === 'firewall') { if (m.liq) { land = 'firewall'; air = 0; FW = { liq: 1 }; } else { const g = magicGroundAt(L.room, +m.x, +m.y); if (g && Math.abs(g.y - m.y) <= 3 * TERRAIN_CELL) { land = 'firewall'; tx = g.x; ty = g.y; air = 0; FW = magicFireWallAt(L.room, g.x, g.y, L.SK); n = FW.n; } else air = 1; } }
+    io.to(L.room).emit('magic-end', Object.assign({ id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell, from: L.by },
+      land === 'tunnel' ? { ax: +(+L.ax).toFixed(3), ay: +(+L.ay).toFixed(3), len: Math.round(m.len || 0), ms: Math.round(m.ms || 0) } : {}, FW || {}));
   });
   socket.on('arrow-catch', ({ id, to }) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string' || typeof to !== 'string') return;

@@ -208,6 +208,23 @@
       dmg: 0, burn: true, burst: { r: 64, dmg: 2.5, f: 14 }, plain: { keys: [U, D, R, U, D], rune: [6, 1, 5, 3, 8] } },
     kindle: { name: 'Kindle', school: 'fire', form: 'placed', tier: 0, cd: 2, stance: 'level', kind: 'kindle', learn: 3, reach: 400, fx: '#ffb060',
       plain: { keys: [U, R, U, L, U], rune: [6, 5, 1, 3, 2] } },
+    // ⭐ 6b (2026-11-19, kickoff §'STEP 6' — the user's picks): WALL OF FIRE, kind 'firewall', two variants (`alt`, as the light orb's): lobbed as the stone wall's stone (`speed`,
+    //   `life`, `grav`, `r`) — it goes OUT in liquid (steam) — and where it comes down on the ground a wall of flame stands `secs`: the CURTAIN `wide` × `high` cells upright, the
+    //   STRIP along the ground. Not solid: whoever touches it catches fire (each game its own body — the caster's too), what burns where it stands catches (server `igniteBox`),
+    //   moving wooden things and bomb fuses touching it catch (the caster's game). Liquid reaching its foot puts it out.
+    //   FLAME RING, kind 'firering': cast, then flames ORBIT you (`n` of them, `orbit` × your radius out, a turn every `turnS` s) for `secs`, in depth (behind you on the far side).
+    //   Whoever ELSE they touch catches fire; the ground they brush catches (the caster's game says where — server `magic-fire-at`); you are untouched. A flame in liquid goes out.
+    //   FLAME PILLARS, kind 'pillars', HELD (`chan`, `chanS` the most): the catalyst held upright in your middle, and pillars of flame (`high` px, ± `highJ`) shoot up out of the
+    //   ground either side of you in a random pattern (the same on every screen — from the cast's id), one every `gapMs`, `near`–`far` px from you; whoever stands in one is
+    //   flung up (`lift`) and set alight, a loose thing thrown up, the ground at its foot lit (`magic-chan-burn`). A foot in liquid: a burst of steam.
+    firewall: { name: 'Wall of fire', school: 'fire', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'firewall', learn: 5, reach: 360, secs: 8, wide: 3, high: 12, speed: 560, life: 3, grav: 0.35, r: 4.5, alts: ['firestrip'],
+      plain: { keys: [U, L, R, L, R], rune: [6, 7, 5, 3, 1] } },
+    firestrip: { name: 'Wall of fire (along the ground)', school: 'fire', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'firewall', alt: 'firewall', reach: 360, secs: 8, wide: 12, high: 5, speed: 560, life: 3, grav: 0.35, r: 4.5,
+      plain: { keys: [U, L, R, L, D], rune: [6, 7, 5, 3, 0] } },
+    flamering: { name: 'Flame ring', school: 'fire', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'firering', learn: 3, secs: 12, n: 5, orbit: 1.9, turnS: 1.5, fr: 6,
+      plain: { keys: [U, D, D, L, R], rune: [6, 3, 1, 5, 8] } },
+    flamepillars: { name: 'Flame pillars', school: 'fire', form: 'stream', tier: 1, cd: 8, stance: 'raise', kind: 'pillars', learn: 5, chan: true, chanS: 6, reach: 140, gapMs: 190, near: 34, far: 120, high: 120, highJ: 34, hw: 8, lift: 9, upright: true,
+      plain: { keys: [U, D, U, D, U], rune: [6, 4, 0, 5, 2] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -264,7 +281,8 @@
   //   Switch back: `wordOf` falls to the old form's piece when a spell has no word (none now). Plain inputs are unchanged.
   const WORDS = {
     firebolt: [[R, R], [4, 5]], greatbolt: [[R, R], [4, 5]], flamestream: [[R, D], [4, 8]],
-    fireball: [[U, D], [4, 1, 5, 7, 3, 1]], kindle: [[R, U], [4, 5, 2]],   // (6a: a burst's diamond, as gust / freeze · right then up — a spark sent out and lifting)
+    fireball: [[U, D], [4, 1, 5, 7, 3, 1]], kindle: [[R, U], [4, 5, 2]],
+    firewall: [[L, R], [4, 6, 0]], firestrip: [[L, D], [4, 6, 8]], flamering: [[D, D], [4, 3, 1, 5]], flamepillars: [[D, U], [4, 7, 1]],   // (6b: a wall drawn up · laid down · round you · down into the ground and up, as Earth's pillar)   // (6a: a burst's diamond, as gust / freeze · right then up — a spark sent out and lifting)
     chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
     stonewall: [[U, U], [4, 7]],
