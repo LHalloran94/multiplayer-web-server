@@ -4275,22 +4275,19 @@ function magicWallLines(room, lines, S) {
 }
 // ⭐⭐ MAGIC 5d (2026-11-19 — EARTH, MADE MATTER THAT GOES; the user agreed the proposal and its three picks). Each works out its LINES of cells here (nothing put yet — a cast
 //   refused for no ground spends nothing), then `magicWallLines` grows them. The stone is the ground's own rock where it rises if a plain one, else stone (as the wall).
-//   STONE SPIKES: a LINE along the ground from under the catalyst's tip (round 2) towards the pointer — `n` spikes `gap` cells apart from `first` cells out, each on the ground there (following
-//   it up or down at most `step` cells; a higher wall or a drop ends the line). Each spike: a column `high` tall and one beside it `base` tall (the side turns spike to spike),
-//   bursting up `rowMs` a cell, `warnMs` + `waveMs` a spike after the cast — the client's warning bulge comes first. → { lines, sp: [[x, ground y, ms, high, side], …] }
+//   STONE SPIKES (5d round 3, the user's pick D + 'only an attack'): NO CELLS — a LINE of spots along the ground from under the catalyst's tip towards the pointer, `n` `gap` cells
+//     apart from `first` cells out, each on the ground there (up or down `step` cells at most; a higher wall or a drop ends it). Each player's game draws the needles and takes
+//     its own hit (16zj). → { lines: [], sp: [[x, ground y, ms, high (cells), dir, the ground's material], …] }
 const magicUnderMat = (room, grid, c, r) => { const st = cellsOf(room), fr = Math.floor(roomFloorTop(room) / TERRAIN_CELL), v = r + 1 < fr ? peekCellAt(grid, c * st.rows + r + 1) : 2; return MAGIC_ROCKY.has(v) ? v : 2; };
 function magicSpikesPlan(room, bx, by, tx, S) {
-  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL;
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, T = TERRAIN_CELL, fr = Math.floor(roomFloorTop(room) / T);
   const dir = tx >= bx ? 1 : -1, g0 = magicGroundAt(room, bx, by - T); if (!g0) return null;
-  let py = g0.y; const lines = [], sp = [], H = S.high || 5, B = S.base || 2;
-  const col = (c, r, h) => { const cs = []; for (let j = 0; j < h; j++) cs.push(r - j >= 1 ? c * ROWS + r - j : -1); return cs; };
+  let py = g0.y; const sp = [];
   for (let k = 0; k < (S.n || 5); k++) {
-    const x = bx + dir * ((S.first || 3) + k * (S.gap || 4)) * T, g = magicGroundAt(room, x, py - T); if (!g || Math.abs(g.y - py) > (S.step || 3) * T) break; py = g.y;
-    const mat = magicUnderMat(room, grid, g.c, g.r), t0 = (S.warnMs || 140) + k * (S.waveMs || 70), side = k % 2 ? 1 : -1, c2 = g.c + side;
-    lines.push({ cells: col(g.c, g.r, H), mat, t0 });
-    if (c2 >= 0 && c2 < COLS && peekAir(grid, c2 * ROWS + g.r) && !peekAir(grid, c2 * ROWS + g.r + 1)) lines.push({ cells: col(c2, g.r, B), mat, t0 });
-    sp.push([g.x, g.y, t0, H, side]); }
-  return lines.length ? { lines, sp } : null;
+    const x = bx + dir * ((S.first != null ? S.first : 3) + k * (S.gap || 4)) * T, g = magicGroundAt(room, x, py - T); if (!g || Math.abs(g.y - py) > (S.step || 3) * T) break; py = g.y;
+    const v = g.r + 1 < fr ? peekCellAt(grid, g.c * ROWS + g.r + 1) : 2;
+    sp.push([g.x, g.y, (S.warnMs || 140) + k * (S.waveMs || 70), S.high || 6.5, dir, v > 0 && isSolidCell(v) ? v : 2]); }
+  return sp.length ? { lines: [], sp } : null;
 }
 // RISING PILLAR: `wide` columns out of the ground under the caster (round 2; was the pointer), each from its own ground (within 2 cells of the middle's), `high` tall, a row every `rowMs`; held up by a
 //   resting loose thing it waits (`wait`), stopped by rock. It SINKS back (`sink`) a row every `crumbleMs` from the top. → { lines, x, y }
@@ -28352,7 +28349,7 @@ io.on('connection', (socket) => {
     if (S.kind === 'rune' || (S.kind === 'wall' && !shot)) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; }
     if (S.kind === 'freeze' && !shot) out.n = magicFreeze(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK);
     if (S.kind === 'wall' && !shot) out.n = magicWall(room, out.tx, out.ty, SK);
-    if (MADE) { out.n = magicWallLines(room, MADE.lines, SK); out.secs = +(SK.secs || 0).toFixed(2);   // (5d) grown from now — every screen is told where, for its effects (and its own body's hit)
+    if (MADE) { out.n = MADE.lines.length ? magicWallLines(room, MADE.lines, SK) : (MADE.sp || []).length; out.secs = +(SK.secs || 0).toFixed(2);   // (5d) grown from now — every screen is told where, for its effects (and its own body's hit)
       if (MADE.sp) out.sp = MADE.sp; if (MADE.br) out.br = MADE.br; if (S.kind === 'pillar') { out.tx = MADE.x; out.ty = MADE.y; out.cols = MADE.lines.length; } }
     if (S.kind === 'change' && !shot) out.n = magicChange(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK, m.spell);
     if (S.kind === 'rune') { const rs = magicRunesOf(room), mine = rs.filter(q => q.by === socket.id); while (mine.length >= (S.most || 3)) { const q = mine.shift(); rs.splice(rs.indexOf(q), 1); io.to(room).emit('magic-rune-gone', { id: q.id }); }
