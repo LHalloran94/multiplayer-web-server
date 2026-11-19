@@ -4093,30 +4093,29 @@ function magicTunnel(room, x, y, ax, ay, S, sp) {
     plan.push(here); if (stop) break;
   }
   while (plan.length && !plan[plan.length - 1].length) plan.pop();
-  const ms = S.stepMs || 30, mouth = (() => { const c = Math.floor((x - ax * half) / T), r = Math.floor((y - ay * half) / T); return c >= 0 && c < COLS && r >= 0 && r < ROWS ? c * ROWS + r : -1; })();
+  const ms = S.stepMs || 30;
   plan.forEach((here, k) => { if (!here.length) return; setTimeout(() => {
     const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], fx = [], rub = []; let pc0 = 1e9, pr0 = 1e9, pc1 = -1, pr1 = -1;
     for (const i of here) { if (!rock(i)) continue; const v = peekCellAt(grid, i); grid.s(i, 0); s2.terrainHp.s(i, 0); wearDel(room, i); cells.push(i, 0); fx.push(i);
-      rub.push(v);   // (5c round 2, the user: 'the rock that comes out should just be whatever it was originally, rather than scree')
+      rub.push([i, v]);   // (round 2: the rock it was, not scree · round 3: a pick-up where it was)
       const c = Math.floor(i / ROWS), r = i % ROWS; if (c < pc0) pc0 = c; if (c > pc1) pc1 = c; if (r < pr0) pr0 = r; if (r > pr1) pr1 = r; }
     if (!cells.length) return;
     wireFanout(room, 'terrain-set', { cells });
     if (sp) io.to(room).emit('magic-cells', { c: fx, spell: sp, look: 'bore' });
     activatePowderRect(room, grid, pc0 - 1, pr0 - 1, pc1 + 1, pr1 + 1); if (magicCfgSrv.wake) for (const i of fx) fineWakeAround(room, i);
-    magicRubbleOut(room, mouth, ax, ay, rub, S);
+    magicRubbleBits(room, rub, -ax, -ay);
   }, k * ms); });
   return { n: taken.size, len: last * half, ms: plan.length * ms };
 }
-// THE RUBBLE OUT OF THE MOUTH: each material a grain thrown back out of the open cell `mouth` (against the bore's way, a little up, `fan` either side), landed as ground — the spade's
-//   throw (`powder-fly`). With no open cell to come out of, it is heaped where it can (`magicPileAt`).
-function magicRubbleOut(room, mouth, ax, ay, mats, S) {
-  const st = cellsOf(room), grid = st.terrain; if (!grid || !mats.length) return; const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
-  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
-  if (mouth < 0 || !air(mouth)) { const c = Math.floor(mouth / ROWS), r = mouth % ROWS; if (mouth >= 0) magicPileAt(room, (c + 0.5) * T, (r + 0.5) * T, mats, null); return; }
-  const fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], now = Date.now(), c = Math.floor(mouth / ROWS), r = mouth % ROWS, a0 = Math.atan2(-ay - 0.25, -ax), s0 = S.rubbleV || 22;
-  for (const v of mats) { const a = a0 + (Math.random() - 0.5) * 2 * (S.fan || 0.45), s = s0 * (0.6 + 0.6 * Math.random()), fvx = Math.cos(a) * s, fvy = Math.sin(a) * s;
-    const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.5, fvx, fvy, mouth); fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: 0, how: 0, hold: 0, settle: 1 }); wire.push(mouth, v, Math.round(fvx * 100), Math.round(fvy * 100), A.steps); }
-  if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: powderSplashCfg.g, d: powderSplashCfg.drag });
+// ⭐ (5c round 3, the user: the rubble sprayed out from where the bolt first met rock 'often causes it to land and block the tunnel … have the rock spray out as pickupable terrain,
+//   rather than as solid blocks'; and a boulder broken by a quake 'should turn into the loose pickups, not back into rock') WHAT A SPELL BREAKS OFF IS PICK-UPS: each cell its own,
+//   where it was, thrown a little the way given (`dx`, `dy` — out of the bore; none: either way), of what digging it gives (`yieldOf`) — the pick's own pieces (`terrain-bits`:
+//   `spawnDrop` lone). In a world with no inventory (a sandbox) nothing is left, as every dig there. [[i (world cell), material], …]
+function magicRubbleBits(room, list, dx, dy) {
+  if (!list.length || !invGatedRoom(room)) return; const st = cellsOf(room), ROWS = st.rows, T = TERRAIN_CELL, dims = roomDims(room); dropWhy = 'spell';
+  for (const [i, v] of list.slice(0, 64)) { const c = Math.floor(i / ROWS), r = i % ROWS, x = (c + 0.5) * T, y = (r + 0.5) * T, m = MATGEN.yieldOf(v);
+    const vx = dx || dy ? Math.max(-0.3, Math.min(0.3, (dx || 0) * 0.25 + (Math.random() - 0.5) * 0.08)) : (Math.random() - 0.5) * 0.24;
+    spawnDrop(room, Math.max(0, Math.min(dims.cols * T, x)), Math.max(0, Math.min(dims.rows * T, y)), [[m, 1]], 0, { vx, lone: 1, hold: 300 }); }
 }
 // ⭐⭐ MAGIC 5c — THE QUAKE (spells.js `quake`): from the ground cell under (x, y) outward, ring by ring, every rock cell within `rad` cells cracked (kept wear — `wearPut`, sent as a
 //   blow's: `terrain-wear` with where it came from); then those cracked near through, or hanging by one, shaken loose — touching ones together as LOOSE BOULDERS (`magicBoulderMake`),
@@ -4142,7 +4141,7 @@ function magicQuake(room, x, y, S, sp, by) {
     if (sp && fx.length) io.to(room).emit('magic-cells', { c: fx.slice(0, 120), spell: sp, look: 'quake' });
   }, k * ms); });
   // …and what is left hanging, or cracked through, comes down once the last ring has passed
-  setTimeout(() => { if (cellsOf(room).terrain !== grid) return; let left = S.loose || 30; const seen = new Set(), cells = [], fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], now = Date.now();
+  setTimeout(() => { if (cellsOf(room).terrain !== grid) return; let left = S.loose || 30; const seen = new Set(), cells = [], lone = [], fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], now = Date.now();
     const air = (j) => j >= 0 && j < N && peekAir(grid, j) && (j % ROWS) < floorRow;
     for (const i0 of cand) { if (left <= 0) break; if (seen.has(i0) || !rock(i0)) continue; const clump = [i0]; seen.add(i0);
       for (let q = 0; q < clump.length && clump.length < (S.clump || 9); q++) { const i = clump[q], r = i % ROWS; for (const j of [i - ROWS, i + ROWS, r > 0 ? i - 1 : -1, i + 1]) { if (j < 0 || seen.has(j) || !cand.has(j) || !rock(j)) continue; seen.add(j); clump.push(j); if (clump.length >= (S.clump || 9)) break; } }
@@ -4150,8 +4149,8 @@ function magicQuake(room, x, y, S, sp, by) {
       for (const i of take) { const v = peekCellAt(grid, i), c = Math.floor(i / ROWS), r = i % ROWS; m.push(v); o.push(c - sc, r - sr); w.push(Math.min(253, Math.round(oldW(i) / 60 * 255))); mx += c + 0.5; my += r + 0.5;
         grid.s(i, 0); st.terrainHp.s(i, 0); wearDel(room, i); cells.push(i, 0); }
       if (take.length >= 2) magicBoulderMake(room, by, sp, { m, o, w }, mx / take.length * T, my / take.length * T, 0, (Math.random() - 0.5) * 30, 0, (Math.random() - 0.5) * 2, 0);
-      else { const i = take[0], c = Math.floor(i / ROWS), r = i % ROWS, v = m[0], fvx = (Math.random() - 0.5) * 3, A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.5, fvx, 0, i);
-        fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: 0, how: 0, hold: 0, settle: 1 }); wire.push(i, v, Math.round(fvx * 100), 0, A.steps); } }
+      else lone.push([take[0], m[0]]); }   // (round 3: a lone cell shaken loose is a pick-up, not a falling block)
+    magicRubbleBits(room, lone, 0, 0);
     if (cells.length) wireFanout(room, 'terrain-set', { cells });
     if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: powderSplashCfg.g, d: powderSplashCfg.drag });
     activatePowderRect(room, grid, c0 - Rr - 1, r0 - Rr - 1, c0 + Rr + 1, r0 + Rr + 1); fineWakeRect(room, c0 - Rr - 1, r0 - Rr - 1, c0 + Rr + 1, r0 + Rr + 1);
@@ -4171,11 +4170,8 @@ function magicQuakeBodies(room, x, y, S, Rr, ms) {
     setTimeout(() => { const o = roomObjects[room] && roomObjects[room].get(obj.id); if (!o) return; const fm2 = fallMats(o), fw = fallWear(o), gone = [], at = [];
       for (const [k, d, wx, wy] of hits) { if (!fm2[k]) continue; const add = (S.crack || 34) * (1 - d / (Rr + 1)) * (0.75 + 0.5 * Math.random()); fw[k] = Math.min(255, fw[k] + Math.round(add / 60 * 255)); if (fw[k] >= brk) { gone.push(k); at.push([wx, wy, fm2[k]]); } }
       fallWearSet(o, fw); if (objChunked(room)) objsTouch(room, o.ch); emitObjToChunks(room, o, 'body-fw', { id: o.id, fw: o.fw || '', fn: o.fn || '' });
-      if (gone.length) { bodyMine(room, o, gone); const st = cellsOf(room), grid = st.terrain; if (!grid) return; const ROWS = st.rows, COLS = st.cols, N = grid.length, floorRow = Math.floor(roomFloorTop(room) / T);
-        const air = (j) => j >= 0 && j < N && peekAir(grid, j) && (j % ROWS) < floorRow, fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], now = Date.now();
-        for (const [wx, wy, v] of at) { const c = Math.floor(wx / T), r = Math.floor(wy / T), i = c * ROWS + r; if (c < 0 || c >= COLS || !air(i)) continue; const fvx = (Math.random() - 0.5) * 3, A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.5, fvx, 0, i);
-          fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: 0, how: 0, hold: 0, settle: 1 }); wire.push(i, v, Math.round(fvx * 100), 0, A.steps); }
-        if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: powderSplashCfg.g, d: powderSplashCfg.drag }); }
+      if (gone.length) { bodyMine(room, o, gone); const st = cellsOf(room); if (!st.terrain) return; const ROWS = st.rows;   // (round 3: each crumbled cell a PICK-UP where it was — the user)
+        magicRubbleBits(room, at.map(([wx, wy, v]) => [Math.floor(wx / T) * ROWS + Math.floor(wy / T), v]), 0, 0); }
     }, Math.floor(dmin) * ms);
   }
 }
