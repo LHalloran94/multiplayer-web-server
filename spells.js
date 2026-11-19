@@ -214,7 +214,7 @@
     //   moving wooden things and bomb fuses touching it catch (the caster's game). Liquid reaching its foot puts it out.
     //   FLAME RING, kind 'firering': cast, then flames ORBIT you (`n` of them, `orbit` × your radius out, a turn every `turnS` s) for `secs`, in depth (behind you on the far side).
     //   Whoever ELSE they touch catches fire; the ground they brush catches (the caster's game says where — server `magic-fire-at`); you are untouched. A flame in liquid goes out.
-    //   FLAME PILLARS, kind 'pillars', HELD (`chan`, `chanS` the most): the catalyst held upright in your middle, and pillars of flame (`high` px, ± `highJ`) shoot up out of the
+    //   FLAME PILLARS, kind 'pillars', HELD (`chan`, `chanS` the most), held as any held spell (the upright catalyst was tried and taken out, the user 2026-11-19): pillars of flame (`high` px, ± `highJ`) shoot up out of the
     //   ground either side of you in a random pattern (the same on every screen — from the cast's id), one every `gapMs`, `near`–`far` px from you; whoever stands in one is
     //   flung up (`lift`) and set alight, a loose thing thrown up, the ground at its foot lit (`magic-chan-burn`). A foot in liquid: a burst of steam.
     firewall: { name: 'Wall of fire', school: 'fire', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'firewall', learn: 5, reach: 360, secs: 8, wide: 3, high: 12, speed: 560, life: 3, grav: 0.35, r: 4.5, alts: ['firestrip'],
@@ -223,7 +223,7 @@
       plain: { keys: [U, L, R, L, D], rune: [6, 7, 5, 3, 0] } },
     flamering: { name: 'Flame ring', school: 'fire', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'firering', learn: 3, secs: 12, n: 5, orbit: 1.9, turnS: 1.5, fr: 6,
       plain: { keys: [U, D, D, L, R], rune: [6, 3, 1, 5, 8] } },
-    flamepillars: { name: 'Flame pillars', school: 'fire', form: 'stream', tier: 1, cd: 8, stance: 'raise', kind: 'pillars', learn: 5, chan: true, chanS: 6, reach: 140, gapMs: 190, near: 34, far: 120, high: 120, highJ: 34, hw: 8, lift: 9, upright: true,
+    flamepillars: { name: 'Flame pillars', school: 'fire', form: 'stream', tier: 1, cd: 8, stance: 'raise', kind: 'pillars', learn: 5, chan: true, chanS: 6, reach: 140, gapMs: 190, near: 34, far: 120, high: 120, highJ: 34, hw: 8, lift: 9,
       plain: { keys: [U, D, U, D, U], rune: [6, 4, 0, 5, 2] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
