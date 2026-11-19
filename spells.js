@@ -160,7 +160,7 @@
 //   how hard (`dent` the most wear, at full speed). ROCK CHUNK: hard ground (not what a spade digs) — it hurts whoever it hits by its weight (`dmg` a
     //   cell, at most 4; `kn` its knock a cell) and breaks into its own cells where it comes down (server `magicPileAt`). SOIL FLUNG (`soil`): only what a spade digs — let go it
     //   SPRAYS out as grains (`fan` radians) that land as ground (the spade's throw: `powder-fly`).
-    rockchunk: { name: 'Rock chunk', school: 'earth', form: 'shaping', tier: 0, cd: 6, stance: 'level', kind: 'chunk', learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 9, holdV: 520, speed: 520, grav: 0.35, life: 20, dmg: 0.35, kn: 0.7, dent: 34, fx: '#c9a26a', look: 'tear',
+    rockchunk: { name: 'Rock chunk', school: 'earth', form: 'shaping', tier: 0, cd: 6, stance: 'level', kind: 'chunk', learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 9, holdV: 520, speed: 520, grav: 0.35, life: 20, dmg: 0.35, kn: 0.7, dent: 34, breakThrowV: 150, breakV: 230, fx: '#c9a26a', look: 'tear',
       plain: { keys: [D, U, L, R, R], rune: [6, 3, 4, 5, 8] } },
     soilfling: { name: 'Soil flung', school: 'earth', form: 'shaping', tier: 0, cd: 4, stance: 'level', kind: 'chunk', soil: true, learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 12, holdV: 560, speed: 640, fan: 0.12, fx: '#b89060', look: 'tear',
       plain: { keys: [D, U, L, L, D], rune: [0, 3, 6, 7, 8] } },

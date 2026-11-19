@@ -3970,13 +3970,19 @@ function magicChunkTear(room, x, y, S, sp) {
   if (start < 0) return null;
   const most = S.cells || 9, seen = new Set([start]), take = [start];
   for (let q = 0; q < take.length && take.length < most; q++) { const i = take[q], r = i % ROWS; for (const j of [i - 1, i - ROWS, i + ROWS, r < ROWS - 1 ? i + 1 : -1]) { if (j < 0 || seen.has(j) || !ok(j)) continue; seen.add(j); take.push(j); if (take.length >= most) break; } }
-  const sc = Math.floor(start / ROWS), sr = start % ROWS, m = [], o = [], cells = []; let mx = 0, my = 0, cA = 1e9, cB = -1, rA = 1e9, rB = -1;
-  for (const i of take) { const v = peekCellAt(grid, i), c = Math.floor(i / ROWS), r = i % ROWS; m.push(v); o.push(c - sc, r - sr); mx += c; my += r; grid.s(i, 0); st.terrainHp.s(i, 0); wearDel(room, i); cells.push(i, 0);
+  const sc = Math.floor(start / ROWS), sr = start % ROWS, m = [], o = [], cells = [], w = []; let mx = 0, my = 0, cA = 1e9, cB = -1, rA = 1e9, rB = -1;
+  // (5c round 4, the user: 'pulling off rock chunks and them not having the cracks/damage they already had') each cell's DAMAGE goes with it — its kept wear or how far it has been
+  //   dug (its strength left), the more of the two, as a piece's 0…253 — and where its cells were (`co`: the world cell of its box's first, so its cracks are seeded as the ground's)
+  const W0 = wearOf(room), geom0 = worldGeom(room), mats0 = roomMats[room] || {};
+  for (const i of take) { const v = peekCellAt(grid, i), c = Math.floor(i / ROWS), r = i % ROWS; m.push(v); o.push(c - sc, r - sr); mx += c; my += r;
+    { const wm = W0.by.get(wearChunkOf(geom0, i)), e = wm && wm.get(i), wv = e ? (e[0] | 0) / 60 : 0, sg = matStrengthSrv(mats0, v), h = st.terrainHp.g(i), dug = sg > 1 && h > 0 && h < sg ? 1 - h / sg : 0; w.push(Math.min(253, Math.round(Math.max(wv, dug) * 255))); }
+    grid.s(i, 0); st.terrainHp.s(i, 0); wearDel(room, i); cells.push(i, 0);
     if (c < cA) cA = c; if (c > cB) cB = c; if (r < rA) rA = r; if (r > rB) rB = r; }
   wireFanout(room, 'terrain-set', { cells });
   activatePowderRect(room, grid, cA - 1, rA - 1, cB + 1, rB + 1); if (magicCfgSrv.wake) for (const i of take) fineWakeAround(room, i);
   if (sp) io.to(room).emit('magic-cells', { c: take, spell: sp, look: 'tear' });
-  return { m, o, cx: (mx / take.length + 0.5) * T, cy: (my / take.length + 0.5) * T };
+  let oc = 1e9, orr = 1e9; for (let k = 0; k < o.length; k += 2) { if (o[k] < oc) oc = o[k]; if (o[k + 1] < orr) orr = o[k + 1]; }
+  return { m, o, cx: (mx / take.length + 0.5) * T, cy: (my / take.length + 0.5) * T, w: w.some(x => x) ? w : null, co: [sc + oc, sr + orr] };
 }
 // …and PUT BACK where it comes down: first down to whatever is under the point, then cell by cell into the open cell resting on something nearest it (within 6) — a heap of its own
 //   cells, the bottom first. Told to the room for each placed cell's effect (`magic-cells`, look 'rock'). → the cells placed
@@ -4026,7 +4032,7 @@ const _magicBoulders = new Map();   // object id → { room, by, spell, t0, n, d
 function magicBoulderPose(room, obj) { const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id); if (S) return { x: S.x, y: S.y, a: S.a || 0 };
   const P = roomLoosePose[room], pp = P && P.get(obj.id); return pp ? { x: pp.x, y: pp.y, a: pp.a || 0 } : { x: obj.x, y: obj.y, a: +obj.angle || 0 }; }
 // K = { m (materials), o ([dc, dr] each from the first), w (each one's damage 0…255, or null) } · (x, y) the middle of its cells (as the chunk is held) · a its turn → the object
-function magicBoulderMake(room, by, spell, K, x, y, a, vx, vy, w, cid) {
+function magicBoulderMake(room, by, spell, K, x, y, a, vx, vy, w, cid, thrown) {
   const T = TERRAIN_CELL, n = K.m.length; if (!n || !isFinite(x) || !isFinite(y)) return null;
   let cA = 1e9, cB = -1e9, rA = 1e9, rB = -1e9, mx = 0, my = 0;
   for (let k = 0; k < n; k++) { const dc = K.o[2 * k] | 0, dr = K.o[2 * k + 1] | 0; if (dc < cA) cA = dc; if (dc > cB) cB = dc; if (dr < rA) rA = dr; if (dr > rB) rB = dr; mx += dc; my += dr; }
@@ -4036,16 +4042,30 @@ function magicBoulderMake(room, by, spell, K, x, y, a, vx, vy, w, cid) {
   // its box's middle from the middle of its cells (the chunk is held, drawn and thrown by that — client 16zj `magicChunkPaint`: a cell's middle at (dc − mx)·T), turned with it
   const dx = ((cA + cB) / 2 - mx) * T, dy = ((rA + rB) / 2 - my) * T, ca = Math.cos(a), sa = Math.sin(a);
   const obj = { id: 'boulder-' + (++fallSeq) + '-' + (Date.now() % 1e8).toString(36), type: 'stamp', look: 'fallen', content: '🪨', shape: 'rect', ownerId: 'world', owner: 'world',
-                x: x + dx * ca - dy * sa, y: y + dx * sa + dy * ca, w: W * T, h: H * T, angle: a, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64'), cs: K.cs != null ? K.cs : (Math.random() * 1e6) | 0 };   // (round 7: `cs` the crack seed, kept from its chunk)
+                x: x + dx * ca - dy * sa, y: y + dx * sa + dy * ca, w: W * T, h: H * T, angle: a, loose: 1, hp: null, fm: Buffer.from(fm).toString('base64'), cs: K.cs != null ? K.cs : (Math.random() * 1e6) | 0 };
+  if (Array.isArray(K.co) && isFinite(K.co[0]) && isFinite(K.co[1])) obj.co = [K.co[0] | 0, K.co[1] | 0];   // (round 4: its cracks seeded where its cells were in the ground)   // (round 7: `cs` the crack seed, kept from its chunk)
   fallWearSet(obj, fw);
   objIndex(room, obj);
   emitObjToChunks(room, obj, 'avatar-object-add', obj);
   bodyStamp(room, obj, obj.x, obj.y, a);
   broadcastObjSt(room);
   io.to(room).emit('magic-boulder', { id: cid | 0, oid: obj.id, by, vx: Math.round(vx || 0), vy: Math.round(vy || 0), w: +(w || 0).toFixed(3) });
-  const now = Date.now(); _magicBoulders.set(obj.id, { room, by, spell, t0: now, n, dent: 0 });
+  const now = Date.now(); _magicBoulders.set(obj.id, { room, by, spell, t0: now, n, dent: 0, thrown: !!thrown });
   for (const [k, B] of _magicBoulders) if (now - B.t0 > 60000 || _magicBoulders.size > 256) _magicBoulders.delete(k); else break;
   return obj;
+}
+// …BROKEN UP where it struck: each of its cells a pick-up where that cell is (its mover's pose sent with the strike, if near the server's), the boulder gone (`magicRubbleBits`:
+//   nothing in a world with no inventory, as every dig there). Every screen has already shown the strike (dust, rubble — 16zj `magicChunkImpact`).
+function magicBoulderBreak(room, obj, m) {
+  const st = cellsOf(room), ROWS = st.rows, T = TERRAIN_CELL; let P = magicBoulderPose(room, obj);
+  if (isFinite(m.bx) && isFinite(m.by) && Math.hypot(+m.bx - P.x, +m.by - P.y) < 160) P = { x: +m.bx, y: +m.by, a: isFinite(m.a) ? +m.a : P.a };
+  const fm = fallMats(obj), D = bodyDims(obj), ca = Math.cos(P.a), sa = Math.sin(P.a), list = [];
+  for (let k = 0; k < fm.length; k++) { if (!fm[k]) continue; const lx = ((k % D.c) + 0.5 - D.c / 2) * T, ly = (((k / D.c) | 0) + 0.5 - D.r / 2) * T, c = Math.floor((P.x + lx * ca - ly * sa) / T), r = Math.floor((P.y + lx * sa + ly * ca) / T);
+    if (c >= 0 && c < st.cols && r >= 0 && r < ROWS) list.push([c * ROWS + r, fm[k]]); }
+  bodyUnstamp(room, obj.id, true); objStOf(room).delete(obj.id); coverDrop(room, obj.id); objUnindex(room, obj); _magicBoulders.delete(obj.id);
+  emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id }); broadcastObjSt(room);
+  io.to(room).emit('magic-boulder-break', { id: obj.id, x: Math.round(P.x), y: Math.round(P.y), n: list.length, m: list.length ? list[0][1] : 0 });
+  magicRubbleBits(room, list, 0, 0);
 }
 // THE ROCK CHUNK SPELL TAKES A LOOSE BOULDER FIRST (the user): one all of rock, no bigger than the spell takes (`cells`), with a cell's middle within `grab` cells of the point —
 //   taken out of the world and off every screen, and held as the chunk it was (its turn and its damage kept) → as `magicChunkTear`'s, + a (its turn), w (damage), from (its id); or null
@@ -4063,7 +4083,7 @@ function magicBoulderGrab(room, x, y, S) {
     const lx = (c + 0.5 - D.c / 2) * T, ly = (r + 0.5 - D.r / 2) * T; wx += P.x + lx * ca - ly * sa; wy += P.y + lx * sa + ly * ca; }
   bodyUnstamp(room, obj.id, true); objStOf(room).delete(obj.id); coverDrop(room, obj.id); objUnindex(room, obj); _magicBoulders.delete(obj.id);
   emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id }); broadcastObjSt(room);
-  return { m, o, cx: wx / m.length, cy: wy / m.length, a: P.a, w: w.some(v => v) ? w : null, from: obj.id, cs: obj.cs };
+  return { m, o, cx: wx / m.length, cy: wy / m.length, a: P.a, w: w.some(v => v) ? w : null, from: obj.id, cs: obj.cs, co: obj.co };
 }
 // ⭐⭐ MAGIC 5c (2026-11-19) — THE TUNNELLING BOLT BORES (spells.js `tunnelbolt` — what it does, its numbers): from where the shot met rock, on along its way (ax, ay) a step every
 //   half cell, each step's cells (within `bore` cells of the line) taken out `stepMs` after the last, as long as `push` lasts (each cell its rock's strength). Its rubble sprays back out
@@ -4148,7 +4168,8 @@ function magicQuake(room, x, y, S, sp, by) {
       const take = clump.slice(0, left); left -= take.length; const m = [], o = [], w = [], sc = Math.floor(take[0] / ROWS), sr = take[0] % ROWS; let mx = 0, my = 0;
       for (const i of take) { const v = peekCellAt(grid, i), c = Math.floor(i / ROWS), r = i % ROWS; m.push(v); o.push(c - sc, r - sr); w.push(Math.min(253, Math.round(oldW(i) / 60 * 255))); mx += c + 0.5; my += r + 0.5;
         grid.s(i, 0); st.terrainHp.s(i, 0); wearDel(room, i); cells.push(i, 0); }
-      if (take.length >= 2) magicBoulderMake(room, by, sp, { m, o, w }, mx / take.length * T, my / take.length * T, 0, (Math.random() - 0.5) * 30, 0, (Math.random() - 0.5) * 2, 0);
+      if (take.length >= 2) { let oc = 1e9, orr = 1e9; for (let q = 0; q < o.length; q += 2) { if (o[q] < oc) oc = o[q]; if (o[q + 1] < orr) orr = o[q + 1]; }
+        magicBoulderMake(room, by, sp, { m, o, w, co: [sc + oc, sr + orr] }, mx / take.length * T, my / take.length * T, 0, (Math.random() - 0.5) * 30, 0, (Math.random() - 0.5) * 2, 0); }
       else lone.push([take[0], m[0]]); }   // (round 3: a lone cell shaken loose is a pick-up, not a falling block)
     magicRubbleBits(room, lone, 0, 0);
     if (cells.length) wireFanout(room, 'terrain-set', { cells });
@@ -28250,8 +28271,8 @@ io.on('connection', (socket) => {
       setTimeout(() => magicQuake(room, g.x, g.y, SQ, sp, by), S.slamMs || 0); }
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
-      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });
-      if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined, w: CHK.w || undefined, cs: CHK.cs };   // (round 7: `cs` its crack pattern's seed — the same chunk and boulder)   // (round 6: `w` its cells' damage — drawn cracked while held)   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
+      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, co: CHK.co || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });
+      if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined, w: CHK.w || undefined, cs: CHK.cs, co: CHK.co || undefined };   // (round 7: `cs` its crack pattern's seed — the same chunk and boulder)   // (round 6: `w` its cells' damage — drawn cracked while held)   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
       out.chan = 1; out.secs = secs; if (!SC && !socket._magicNoCd) cds[m.spell] = now + secs * 1000 + cd; }
     if (S.kind === 'bolt' || shot) { let lf = S.life || 1, g = (S.grav || 0) * 1500, v = S.speed;
       // (4c) a modifier's flight: the follower slower, longer, less pulled down · the lob by its own arc (every screen works out the same) · a split: an id for each piece
@@ -28313,7 +28334,7 @@ io.on('connection', (socket) => {
       if (K.soil) { magicSoilSpray(q.room, x, y, K, vx, vy, S); ex.spray = 1; magicChanEnd(m.id | 0, 'let', ex); return; }
       // (5b round 5) A LOOSE BOULDER from here, at the caster's pose and speed (its turn `a`, spin `w`) — the caster's game takes it over when it arrives (`magic-boulder`)
       if (!socket._magicHeap) { const a = isFinite(m.a) ? +m.a : (K.a || 0), w = isFinite(m.w) ? Math.max(-20, Math.min(20, +m.w)) : 0; ex.boulder = 1;
-        magicBoulderMake(q.room, socket.id, q.spell, K, x, y, a, vx, vy, w, m.id | 0); magicChanEnd(m.id | 0, 'let', ex); return; }
+        magicBoulderMake(q.room, socket.id, q.spell, K, x, y, a, vx, vy, w, m.id | 0, m.th === 1); magicChanEnd(m.id | 0, 'let', ex); return; }
       _magicChunks.set(m.id | 0, { room: q.room, by: socket.id, spell: q.spell, m: K.m, x, y, vx, vy, t0: now, until: now + ((S.life || 20) + 3) * 1000 });
       magicChanEnd(m.id | 0, 'let', ex); return; }
     magicChanEnd(m.id | 0, 'let'); });
@@ -28330,8 +28351,13 @@ io.on('connection', (socket) => {
   socket.on('magic-boulder-hit', (m) => { const id = m && String(m.id), B = id && _magicBoulders.get(id); if (!B || B.by !== socket.id || B.dent || !isFinite(m.x) || !isFinite(m.y)) return;
     const obj = roomObjects[B.room] && roomObjects[B.room].get(id); if (!obj || Date.now() - B.t0 > 20000) return; const P = magicBoulderPose(B.room, obj);
     if (Math.hypot(+m.x - P.x, +m.y - P.y) > (obj.w + obj.h) + 96) return; B.dent = 1;
-    const S = SPELLS.of(B.spell) || {}, k = Math.max(0, Math.min(1, (+m.v || 0) / Math.max(1, S.speed || 520))); if (!(k > 0.15) || !S.dent) return;
-    magicChunkDent(B.room, +m.x, +m.y, [], k * S.dent, B.n);
+    const S = SPELLS.of(B.spell) || {}, k = Math.max(0, Math.min(1, (+m.v || 0) / Math.max(1, S.speed || 520)));
+    // ⭐ (5c round 4, the user: 'if you drop the rock chunk, rather than throw it, it stays as a boulder, but if you throw it or drop it from a sufficient height it breaks up') — a
+    //   THROWN one breaks into pick-ups on its first hard strike (≥ `breakThrowV`), a dropped one only struck at `breakV` or more (a fall of ~6 cells at the chunk's own pull — every boulder from a chunk falls at it until it touches): `magicBoulderBreak`
+    const brk = (+m.v || 0) >= (B.thrown ? (S.breakThrowV || 150) : (S.breakV || 560));
+    if (k > 0.15 && S.dent) magicChunkDent(B.room, +m.x, +m.y, [], k * S.dent, B.n);
+    if (brk) { magicBoulderBreak(B.room, obj, m); return; }
+    if (!(k > 0.15) || !S.dent) return;
     const fm = fallMats(obj), fw = fallWear(obj); for (let q = 0; q < fm.length; q++) if (fm[q]) fw[q] = Math.min(253, fw[q] + Math.round(k * S.dent * (0.6 + 0.4 * Math.random()) / 60 * 255));
     fallWearSet(obj, fw); if (objChunked(B.room)) objsTouch(B.room, obj.ch); emitObjToChunks(B.room, obj, 'body-fw', { id: obj.id, fw: obj.fw || '', fn: obj.fn || '' }); });
   socket.on('magic-chan-burn', (m) => { const room = currentAvatarRoom, q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
