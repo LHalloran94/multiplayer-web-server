@@ -196,6 +196,18 @@
       thruLiq: true, warnMs: 300, fx: '#d9b27a', look: 'pillar', plain: { keys: [D, U, D, U, U], rune: [8, 7, 4, 1, 2] } },
     bridge: { name: 'Bridge', school: 'earth', form: 'shaping', tier: 0, cd: 8, stance: 'level', kind: 'bridge', learn: 3, len: 32, thick: 2, slope: 1, skip: 12, rowMs: 40, secs: 40, crackS: 4, crumbleMs: 30,
       thruLiq: true, fx: '#d9b27a', look: 'bridge', plain: { keys: [D, U, R, L, R], rune: [3, 4, 5, 8, 6] } },
+    // ⭐ STEP 6a (2026-11-19 — FIRE; kickoff §'STEP 6', the user agreed the set and picked the fireball's look 3A: a swelling ball that rolls up into smoke).
+    //   FIREBALL, kind 'bolt' with a `burst`: a slow heavy ball of flame (`speed`, `life`, `grav`, `r` as a bolt's) that BURSTS on the first thing it touches — the ground, a
+    //     player, a loose thing, liquid — or in the air when its flight ends. `burst.r` px: everything that burns there catches (server `magicFireBurst` — round, only what the
+    //     blast reaches), and on every screen its own body: thrown out (`burst.f`, a small bomb's push), up to `burst.dmg` health at the middle, alight; the caster's game throws
+    //     the loose things and the dummy, flings the liquid, sets off bombs and barrels. No hole (the user: fire burns, bombs dig). Into liquid: a burst of steam — nothing lit,
+    //     no one alight, half the blow. Its direct hit is no extra blow (the burst is the blow).
+    //   KINDLE, kind 'kindle': no shot — the spot under the pointer (`reach` px, short of the first rock on the way) catches: what burns there (server `igniteBox`), a player
+    //     standing on it (alight, no blow), a bomb's fuse. A thread of sparks from the catalyst's tip to it, a flare there.
+    fireball: { name: 'Fireball', school: 'fire', form: 'burst', tier: 1, cd: 8, stance: 'level', kind: 'bolt', learn: 5, uses: [['ember_salt', 1]], speed: 430, life: 1.6, grav: 0.16, r: 6,
+      dmg: 0, burn: true, burst: { r: 64, dmg: 2.5, f: 14 }, plain: { keys: [U, D, R, U, D], rune: [6, 1, 5, 3, 8] } },
+    kindle: { name: 'Kindle', school: 'fire', form: 'placed', tier: 0, cd: 2, stance: 'level', kind: 'kindle', learn: 3, reach: 400, fx: '#ffb060',
+      plain: { keys: [U, R, U, L, U], rune: [6, 5, 1, 3, 2] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -252,6 +264,7 @@
   //   Switch back: `wordOf` falls to the old form's piece when a spell has no word (none now). Plain inputs are unchanged.
   const WORDS = {
     firebolt: [[R, R], [4, 5]], greatbolt: [[R, R], [4, 5]], flamestream: [[R, D], [4, 8]],
+    fireball: [[U, D], [4, 1, 5, 7, 3, 1]], kindle: [[R, U], [4, 5, 2]],   // (6a: a burst's diamond, as gust / freeze · right then up — a spark sent out and lifting)
     chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
     stonewall: [[U, U], [4, 7]],

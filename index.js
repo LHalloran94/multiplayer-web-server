@@ -3869,6 +3869,28 @@ function magicGroundAt(room, x, y) {
   else { let k = 0; while (k < 12 && r < ROWS - 1 && !solid(r + 1)) { r++; k++; } if (!solid(r + 1)) return null; }
   return { x: Math.round((c + 0.5) * TERRAIN_CELL), y: (r + 1) * TERRAIN_CELL, c, r };
 }
+// ⭐ (step 6a, 2026-11-19 — FIRE) THE FIREBALL'S BURST: everything that can burn within `R` px of (x, y) catches — the world's own fire (`FIRE_RATE`, oil), as `igniteBox` lights,
+//   but ROUND, and only cells the blast can reach: a cell touching open air (or oil, a liquid), so a seam of coal behind rock is not lit through it. Not in liquid (the caller's).
+function magicFireBurst(room, x, y, R) {
+  const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt;
+  if (!grid || !amt || (st.fineSub || 1) !== 1 || !(R > 0)) return 0;
+  const C = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols, fs = fineFireSet(room), lit = [];
+  const c0 = Math.max(0, Math.floor((x - R) / C)), c1 = Math.min(COLS - 1, Math.floor((x + R) / C)), r0 = Math.max(0, Math.floor((y - R) / C)), r1 = Math.min(ROWS - 1, Math.floor((y + R) / C));
+  if ((c1 - c0 + 1) * (r1 - r0 + 1) > 4096) return 0;
+  const open = (c, r) => { if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return false; return peekCellAt(grid, c * ROWS + r) === 0; };
+  for (let c = c0; c <= c1; c++) for (let rw = r0; rw <= r1; rw++) {
+    if (Math.hypot((c + 0.5) * C - x, (rw + 0.5) * C - y) > R) continue;
+    const i = c * ROWS + rw; if (fs.has(i)) continue;
+    const g = peekCellAt(grid, i); if (g < 0) continue;
+    const solid = liquidCfg.fireSolids && g > 0 && FIRE_RATE[g] > 0;
+    const oil = !solid && amt.rp(i)[amt.o(i) + 5] > 0;
+    if (!solid && !oil) continue;
+    if (solid && !(open(c - 1, rw) || open(c + 1, rw) || open(c, rw - 1) || open(c, rw + 1))) continue;
+    fs.add(i); lit.push(i, 1);
+  }
+  if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
+  return lit.length / 2;
+}
 // FREEZE: the water nearest the point (within 3 cells), then outward through touching water, ring by ring (`ringMs` apart), at most `cells` — only cells that hold water and nothing else
 function magicFreeze(room, x, y, S) {
   const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt, tot = st.fineTotal; if (!grid || !amt || !tot || (st.fineSub || 1) !== 1 || MAGIC_WATER_RK < 0) return 0;
@@ -28339,9 +28361,11 @@ io.on('connection', (socket) => {
       if (MD && m.mod === 'mod_arc') { const A = SPELLS.arcAim(S, MD, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
       const ids = [id]; if (MD && m.mod === 'mod_split') { for (let i = 1; i < (MD.n || 3); i++) ids.push(++_magicSeq); out.ids = ids; }
       const SKf = S.freezeN ? Object.assign({}, SK, { cells: S.freezeN, secs: (S.freezeS || 20) * (socket._magicSecsK || 1), ringMs: 60 }) : SK;   // (4e round 2: the chill bolt's freeze — a cell or two)
-      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, land: shot ? S.kind : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0 });
+      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (MD && m.mod === 'mod_split' ? 0.6 : 1)).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0 });
       while (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
+    // ⭐ (step 6a) KINDLE: what burns at the caster's point (short of the first rock on the way — their game's) catches, no further than its reach (held to it above)
+    if (S.kind === 'kindle') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.n = igniteBox(room, out.tx, out.ty, 4); }
     if (S.kind === 'lift') out.obj = m.obj;
     if (S.kind === 'double') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); out.dv = Math.max(-400, Math.min(400, Math.round(+m.dv || 0)));
       let D = _magicDoubles.get(room); if (!D) _magicDoubles.set(room, D = new Map()); for (const [k, q] of D) if (now > q.until) D.delete(k); D.set(id, { by: socket.id, until: now + Math.max(S.secs || 60, S.secsWalk || 6) * 1000 + 3000 }); }
@@ -28433,6 +28457,9 @@ io.on('connection', (socket) => {
     const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
     _magicLive.delete(m.id);
     if (Date.now() > L.until || Math.hypot(m.x - L.x, m.y - L.y) > L.reach) return;
+    // ⭐ (step 6a) A FIREBALL BURSTS wherever it ends — on what it touched, or in the air at the end of its flight: everything that burns in its reach catches (not in liquid: steam)
+    if (L.burst) { const liq = m.liq ? 1 : 0, n0 = liq ? 0 : magicFireBurst(L.room, +m.x, +m.y, L.burst);
+      io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air: 0, land: 'burst', r: L.burst, liq, pow: +(L.pow || 1).toFixed(2), n: n0, spell: L.spell, from: L.by, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined }); return; }
     if (L.burn && !m.air) igniteBox(L.room, +m.x, +m.y, TERRAIN_CELL * (L.burnR || 1));
     // (step 3e) a shot that landed: the ice / the wall where it came down (a wall only on ground under it — else it falls apart in the air)
     let land = null, n = 0, tx = Math.round(m.x), ty = Math.round(m.y), air = m.air ? 1 : 0;
