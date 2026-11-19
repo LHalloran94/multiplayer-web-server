@@ -3840,6 +3840,8 @@ const _magicChans = new Map();
 function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) return; _magicChans.delete(id); const sk = io.sockets.sockets.get(q.by); let cd = 0;
   if (sk && !sk._magicNoCd) { cd = SPELLS.cdMs(q.spell, q.cat); (sk._magicCd || (sk._magicCd = {}))[q.spell] = Date.now() + cd; }
   io.to(q.room).emit('magic-chan-end', Object.assign({ id, by: q.by, why, cd, spell: q.spell }, extra || {}));
+  if (q.made > 0) { const S = SPELLS.of(q.spell) || {}, room = q.room, x = q.dx != null ? q.dx : q.x, y = q.dy != null ? q.dy : q.y, u = q.made; setTimeout(() => magicOilDry(room, x, y, u, 30, MAGIC_WATER_RK), (S.drySecs || 60) * 1000 * ((sk && sk._magicSecsK) || 1)); }   // (7b) the jet's water dries
+  if (q.water && !extra) { magicWaterSplash(q.room, q.water.cx, q.water.cy, q.water.u, 0, 0); io.to(q.room).emit('magic-water-end', { id, x: q.water.cx, y: q.water.cy, drop: 1 }); return; }   // (7b) a held ball ended without its caster's throw: it falls where it was
   // (5b) a held chunk ended without its caster's throw (time, gone, a new cast): it comes down where it last was
   if (q.chunk && !extra && !q.chunk.soil && !(sk && sk._magicHeap)) { magicBoulderMake(q.room, q.by, q.spell, q.chunk, q.chunk.cx, q.chunk.cy, q.chunk.a || 0, 0, 0, 0, id); io.to(q.room).emit('magic-chunk-end', { id, x: Math.round(q.chunk.cx), y: Math.round(q.chunk.cy), n: 0, drop: 1, boulder: 1 }); return; }
   if (q.chunk && !extra) { const P = magicPileAt(q.room, q.chunk.cx, q.chunk.cy, q.chunk.m, null); io.to(q.room).emit('magic-chunk-end', { id, x: Math.round(q.chunk.cx), y: Math.round(q.chunk.cy), n: P.length, drop: 1, c: P.slice(0, 12) }); } }
@@ -3998,6 +4000,68 @@ function magicMeltSweep(now) {
       objUnindex(room, o); { const dm = roomObjDrv[room]; if (dm) dm.delete(id); const dl = roomObjDrvAt[room]; if (dl) dl.delete(id); } emitObjToChunks(room, o, 'avatar-object-removed', { id, melt: 1 }); }
     if (!M.size) _magicMelt.delete(room); }
 }
+// ⭐ MAGIC 7b (2026-11-20, FROST AND WATER): SHAPE WATER — REAL LIQUID TAKEN UP into a ball: from the liquid cell nearest the point (within `grab` cells; any liquid but lava) out
+//   through the liquid touching it, every layer but lava taken (`vesselCellTake`, as a bucket fills), at most `cells` cells' worth. Held by the server in the cast's record (`_magicChans`
+//   `water`) until it bursts (`magicWaterSplash`). → { u: units by rank, n, cx, cy, from: the cells it came out of } or null. Nothing made or lost.
+function magicWaterGrab(room, x, y, S) {
+  const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt, tot = st.fineTotal; if (!grid || !amt || !tot || (st.fineSub || 1) !== 1) return null;
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, c0 = Math.floor(x / T), r0 = Math.floor(y / T);
+  const wet = (i) => { if (i < 0 || i >= N || !(peekCellAt(tot, i) > 0)) return false; const p = amt.rp(i), b = amt.o(i); for (let k = 1; k < LIQ_T; k++) if (p[b + k] > 0) return true; return false; };
+  const G = S.grab || 3; let start = -1, bd = 1e9;
+  for (let dc = -G; dc <= G; dc++) for (let dr = -G; dr <= G; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r, d = dc * dc + dr * dr; if (d < bd && wet(i)) { bd = d; start = i; } }
+  if (start < 0) return null;
+  const seen = new Set([start]), order = [start];
+  for (let q = 0; q < order.length && order.length < 48; q++) { const i = order[q], r = i % ROWS; for (const j of [r > 0 ? i - 1 : -1, i - ROWS, i + ROWS, r < ROWS - 1 ? i + 1 : -1]) { if (j < 0 || seen.has(j) || !wet(j)) continue; seen.add(j); order.push(j); } }
+  const want = (S.cells || 3) * LIQUID_MAX, u = new Array(LIQ_T).fill(0), changed = []; let got = 0, mx = 0, my = 0, nw = 0;
+  for (const i of order) { if (got >= want) break; let took = 0; for (let k = LIQ_T - 1; k >= 1 && got < want; k--) { const n = vesselCellTake(room, i, k, want - got, changed); if (n > 0) { u[k] += n; got += n; took = 1; } } if (took) { mx += Math.floor(i / ROWS); my += i % ROWS; nw++; } }
+  if (!got) return null;
+  const from = [...new Set(changed)]; emitFineCells(room, from);
+  return { u, n: got, cx: Math.round((mx / nw + 0.5) * T), cy: Math.round((my / nw + 0.5) * T), from: from.slice(0, 24) };
+}
+// …and BURST where it came down (or was dropped): every unit flown out as the world's own drops from the nearest open cell (the ball's way carried on a little, the rest thrown up
+//   and out), landed as every real drop is (`roomLiqFly`, 'liquid-fly'); no open cell near, put straight into the nearest room for it. → drops made
+function magicWaterSplash(room, x, y, u, vx, vy) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid || !Array.isArray(u)) return 0; ensureFineArrays(room, 1);
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
+  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  const open = (j) => j >= 0 && j < N && (j % ROWS) < floorRow && (j % ROWS) > 0 && vesselCellOpen(room, j);
+  const c0 = Math.max(0, Math.min(COLS - 1, Math.floor(x / T))), r0 = Math.max(1, Math.min(ROWS - 2, Math.floor(y / T)));
+  let at = -1; for (let d = 0; d <= 4 && at < 0; d++) for (let dc = -d; dc <= d && at < 0; dc++) for (let dr = -d; dr <= d; dr++) { if (Math.max(Math.abs(dc), Math.abs(dr)) !== d) continue; const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS) continue; const j = c * ROWS + r; if (air(j)) { at = j; break; } }
+  const total = u.reduce((a, b) => a + (b | 0), 0); if (!(total > 0)) return 0;
+  if (at < 0) { const changed = [], seen = new Set(), queue = [c0 * ROWS + r0]; for (let k = 0; k < LIQ_T; k++) { let left = u[k] | 0; seen.clear(); queue.length = 1;
+      for (let q = 0; q < queue.length && left > 0 && q < 600; q++) { const j = queue[q]; if (seen.has(j)) continue; seen.add(j); if (open(j)) left -= vesselCellPut(room, j, k, left, changed); queue.push(j - 1, j - ROWS, j + ROWS, j + 1); } }
+    if (changed.length) emitFineCells(room, [...new Set(changed)]); return 0; }
+  const fly = roomLiqFly[room] || (roomLiqFly[room] = []), wire = [], now = Date.now(), fx = Math.floor(at / ROWS) + 0.5, fy = at % ROWS + 0.2, vcx = (+vx || 0) / T * 0.3, vcy = (+vy || 0) / T * 0.3;
+  const per = Math.max(2, Math.ceil(total / 36)); let n = 0;
+  for (let k = 0; k < LIQ_T; k++) { let left = u[k] | 0;
+    while (left > 0) { const q = Math.min(left, per); left -= q; const a = -Math.PI * (0.08 + 0.84 * Math.random()), sp = 5 + Math.random() * 13, dvx = Math.cos(a) * sp + vcx, dvy = Math.sin(a) * sp * 0.9 + Math.min(0, vcy) * 0.5;
+      const A = powderFlyArc(ROWS, COLS, air, fx, fy, dvx, dvy, at, liqDropCfg.g, 0);
+      fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk: k, u: q, src: at }); wire.push(at, k, Math.round(dvx * 100), Math.round(dvy * 100), A.steps, q); n++; } }
+  if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g });
+  return n;
+}
+// …a ball THROWN, in the air: cast id → { room, by, spell, u, x, y, vx, vy, t0, until } — its caster's game says where it bursts (`magic-water-land`); not told by `until`, it bursts
+//   where its flight would have come down
+const _magicWaters = new Map();
+setInterval(() => { if (!_magicWaters.size) return; const now = Date.now(); for (const [id, F] of _magicWaters) if (now > F.until) { _magicWaters.delete(id); const p = magicChunkFall(F); magicWaterSplash(F.room, p.x, p.y, F.u, 0, 0); io.to(F.room).emit('magic-water-end', { id, x: Math.round(p.x), y: Math.round(p.y) }); } }, 250);
+// ⭐ (7b) THE WATER JET: water MADE at the caster's tip while it is held — `ups` units a second flown out along the aim as the world's own drops (`dropV` cells a second, a little
+//   spread); counted (`made`) so as much dries away `drySecs` after it ends (`magicChanEnd` → `magicOilDry` with water's rank), from round where it was going. Ten times a second.
+function magicJetTick(id, q, S, now) {
+  const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid) return; ensureFineArrays(room, 1);
+  if (q.lt == null) { q.lt = now; q.acc = 0; q.made = q.made || 0; }
+  const dt = Math.min(0.3, (now - q.lt) / 1000); q.lt = now; const per = LIQ_DROP[9][0]; q.acc = Math.min(per * 4, (q.acc || 0) + (S.ups || 24) * dt);
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
+  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  const x0 = q.x + (q.ax || 0) * 6, y0 = q.y + (q.ay || 0) * 6, c = Math.floor(x0 / T), r = Math.floor(y0 / T); if (c < 0 || c >= COLS || r < 1 || r >= ROWS - 1) return;
+  const at = c * ROWS + r; if (!air(at)) return;
+  const fly = roomLiqFly[room] || (roomLiqFly[room] = []), wire = [];
+  while (q.acc >= per && fly.length < liqDropCfg.maxFly) { q.acc -= per; const sp = (S.dropV || 42) * (0.9 + 0.2 * Math.random()), a = (Math.random() - 0.5) * 0.12, ca = Math.cos(a), sa = Math.sin(a), ux = q.ax * ca - q.ay * sa, uy = q.ax * sa + q.ay * ca, vx = ux * sp, vy = uy * sp;
+    const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.2, vx, vy, at, liqDropCfg.g, 0);
+    fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk: MAGIC_WATER_RK, u: per, src: at }); wire.push(at, MAGIC_WATER_RK, Math.round(vx * 100), Math.round(vy * 100), A.steps, per); q.made += per; }
+  if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g });
+  q.dx = x0 + q.ax * (S.reach || 150); q.dy = y0 + q.ay * (S.reach || 150);
+}
+setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) { if (now > q.until) continue; const S = SPELLS.of(q.spell); if (S && S.kind === 'jet') { try { magicJetTick(id, q, S, now); } catch (e) { console.error('[magic jet] ' + (e && e.message)); } } } }, 100);
 // ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
 //   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
 //   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
@@ -4061,8 +4125,8 @@ function magicGrease(room, x, y, S, sp) {
   return Math.ceil(put / LIQUID_MAX);
 }
 // …and it dries: as much oil as was poured, taken from the oil within `R` cells of where it was, the nearest first (wherever it has run to; a restart before then keeps it)
-function magicOilDry(room, x, y, units, R) {
-  const st = roomCells.get(room); if (!st || !st.terrain || !st.fineAmt || !st.fineTotal) return; const grid = st.terrain, amt = st.fineAmt, tot = st.fineTotal, ROWS = st.rows, COLS = st.cols, OR = LIQ_RANK[15];
+function magicOilDry(room, x, y, units, R, rk) {   // (7b: `rk` another liquid's rank — the water jet's water dries the same way)
+  const st = roomCells.get(room); if (!st || !st.terrain || !st.fineAmt || !st.fineTotal) return; const grid = st.terrain, amt = st.fineAmt, tot = st.fineTotal, ROWS = st.rows, COLS = st.cols, OR = rk != null ? rk : LIQ_RANK[15];
   const T = TERRAIN_CELL, c0 = Math.floor(x / T), r0 = Math.floor(y / T), have = [];
   for (let dc = -R; dc <= R; dc++) for (let dr = -R; dr <= R; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r, t = peekCellAt(tot, i); if (!(t > 0)) continue; const p = amt.rp(i), b = amt.o(i); if (p[b + OR] > 0) have.push([dc * dc + dr * dr, i]); }
   have.sort((a, b) => a[0] - b[0]); const liq = [], cells = []; let left = units;
@@ -28424,6 +28488,7 @@ io.on('connection', (socket) => {
     const gated = invGatedRoom(room), key = playerKeyFor(socket.id), reag = !SC && Array.isArray(S.uses) && gated && !socket._magicNoReag ? S.uses : null;
     if (reag) { for (const [it, n] of reag) if (ledger.itemCount(key, it) < n) return no('reagent:' + it); for (const [it, n] of reag) ledger.spendItem(key, it, n); sendInvSync(socket, room); }
     // (5b) A CHUNK: torn out of the ground nearest the pointer, here (nothing to tear: refused, nothing spent)
+    let WB = null; if (S.kind === 'waterball') { if (!isFinite(m.tx) || !isFinite(m.ty) || (p && now - p.t < 4000 && Math.hypot(m.tx - p.x, m.ty - p.y) > (S.reach || 320) + 60)) return no('far'); WB = magicWaterGrab(room, +m.tx, +m.ty, S); if (!WB) return no('nothing'); }   // (7b) the liquid taken up
     let CHK = null; if (S.kind === 'chunk') { if (!isFinite(m.tx) || !isFinite(m.ty) || (p && now - p.t < 4000 && Math.hypot(m.tx - p.x, m.ty - p.y) > (S.reach || 320) + 60)) return no('far'); CHK = (!S.soil && !socket._magicHeap && magicBoulderGrab(room, +m.tx, +m.ty, S)) || magicChunkTear(room, +m.tx, +m.ty, S, m.spell); if (!CHK) return no('nothing'); }   // (5b round 5: a loose boulder near the point first)
     // (5d) SPIKES / PILLAR / BRIDGE: their cells worked out now — nowhere to put them, refused before anything is spent. (5d round 2, the user) the SPIKES start on the ground under
     //   the CATALYST'S TIP (the cast's own x, y — they began under the player 'in a dodgy way') and run towards the pointer; the PILLAR rises under the CASTER'S FEET (`bx`, `by` —
@@ -28453,8 +28518,9 @@ io.on('connection', (socket) => {
       setTimeout(() => magicQuake(room, g.x, g.y, SQ, sp, by), S.slamMs || 0); }
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
-      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, co: CHK.co || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });
+      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK || WB ? 3000 : 300), water: WB ? { u: WB.u, cx: WB.cx, cy: WB.cy } : null, x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, co: CHK.co || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });
       if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined, w: CHK.w || undefined, cs: CHK.cs, co: CHK.co || undefined };   // (round 7: `cs` its crack pattern's seed — the same chunk and boulder)   // (round 6: `w` its cells' damage — drawn cracked while held)   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
+      if (WB) out.wb = { u: WB.u, n: WB.n, cx: WB.cx, cy: WB.cy, from: WB.from };   // (7b)
       out.chan = 1; out.secs = secs; if (!SC && !socket._magicNoCd) cds[m.spell] = now + secs * 1000 + cd; }
     if (S.kind === 'bolt' || shot) { let lf = S.life || 1, g = (S.grav || 0) * 1500, v = S.speed;
       // (4c) a modifier's flight: the follower slower, longer, less pulled down · the lob by its own arc (every screen works out the same) · a split: an id for each piece
@@ -28516,10 +28582,14 @@ io.on('connection', (socket) => {
   socket.on('magic-aim', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const q = _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return;
     const now = Date.now(); if (now - (socket._aimT || 0) < 35) return; socket._aimT = now; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 520) return;
     const al = Math.hypot(m.ax, m.ay) || 1; q.x = Math.round(+m.x); q.y = Math.round(+m.y); q.ax = m.ax / al; q.ay = m.ay / al;
-    const K = q.chunk; if (K && isFinite(m.cx) && isFinite(m.cy) && Math.hypot(+m.cx - q.x, +m.cy - q.y) < (SPELLS.of(q.spell) || {}).reach + 120) { K.cx = Math.round(+m.cx); K.cy = Math.round(+m.cy); }   // (5b) where the held chunk is
+    const K = q.chunk || q.water; if (K && isFinite(m.cx) && isFinite(m.cy) && Math.hypot(+m.cx - q.x, +m.cy - q.y) < (SPELLS.of(q.spell) || {}).reach + 120) { K.cx = Math.round(+m.cx); K.cy = Math.round(+m.cy); }   // (5b) where the held chunk is (7b: or the ball of water)
     socket.to(room).emit('magic-aim', Object.assign({ id: m.id | 0, x: q.x, y: q.y, ax: +q.ax.toFixed(3), ay: +q.ay.toFixed(3) }, K ? { cx: K.cx, cy: K.cy } : {})); });
   socket.on('magic-chan-stop', (m) => { const q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id) return;
     // (5b) a CHUNK let go: thrown (or dropped) from where its caster's game has it — soil sprays out here; a rock flies on every screen and its caster says where it lands
+    const WQ = q.water; if (WQ && isFinite(m.x) && isFinite(m.y) && isFinite(m.vx) && isFinite(m.vy)) { const S = SPELLS.of(q.spell) || {}, now = Date.now(); let x = +m.x, y = +m.y, vx = +m.vx, vy = +m.vy;   // (7b) a ball of water let go: flown on every screen, its caster says where it bursts
+      if (Math.hypot(x - WQ.cx, y - WQ.cy) > 140) { x = WQ.cx; y = WQ.cy; } const vl = Math.hypot(vx, vy), vm = (S.speed || 620) * 1.1; if (vl > vm) { vx *= vm / vl; vy *= vm / vl; }
+      _magicWaters.set(m.id | 0, { room: q.room, by: socket.id, spell: q.spell, u: WQ.u, x, y, vx, vy, t0: now, until: now + 8000 });
+      magicChanEnd(m.id | 0, 'let', { thr: 1, x: Math.round(x), y: Math.round(y), vx: Math.round(vx), vy: Math.round(vy) }); return; }
     const K = q.chunk; if (K && isFinite(m.x) && isFinite(m.y) && isFinite(m.vx) && isFinite(m.vy)) { const S = SPELLS.of(q.spell) || {}, now = Date.now(); let x = +m.x, y = +m.y, vx = +m.vx, vy = +m.vy;
       if (Math.hypot(x - K.cx, y - K.cy) > 140) { x = K.cx; y = K.cy; } const vl = Math.hypot(vx, vy), vm = (S.speed || 760) * 1.1; if (vl > vm) { vx *= vm / vl; vy *= vm / vl; }
       const ex = { thr: 1, x: Math.round(x), y: Math.round(y), vx: Math.round(vx), vy: Math.round(vy) };
@@ -28530,6 +28600,11 @@ io.on('connection', (socket) => {
       _magicChunks.set(m.id | 0, { room: q.room, by: socket.id, spell: q.spell, m: K.m, x, y, vx, vy, t0: now, until: now + ((S.life || 20) + 3) * 1000 });
       magicChanEnd(m.id | 0, 'let', ex); return; }
     magicChanEnd(m.id | 0, 'let'); });
+  // (7b) a thrown ball of water came down where its caster's game says (no further than its flight could take it): it bursts there
+  socket.on('magic-water-land', (m) => { const id = m && (m.id | 0), F = id && _magicWaters.get(id); if (!F || F.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return; _magicWaters.delete(id);
+    const S = SPELLS.of(F.spell) || {}, t = (Date.now() - F.t0) / 1000 + 0.5, reach = Math.hypot(F.vx, F.vy) * t + 0.5 * (S.grav || 0.35) * 1500 * t * t + 64; let x = +m.x, y = +m.y;
+    if (Math.hypot(x - F.x, y - F.y) > reach) { const p = magicChunkFall(F); x = p.x; y = p.y; }
+    const n = magicWaterSplash(F.room, x, y, F.u, isFinite(m.vx) ? +m.vx : 0, isFinite(m.vy) ? +m.vy : 0); io.to(F.room).emit('magic-water-end', { id, x: Math.round(x), y: Math.round(y), n }); });
   socket.on('magic-chunk-land', (m) => { const id = m && (m.id | 0), F = id && _magicChunks.get(id); if (!F || F.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return; _magicChunks.delete(id);
     const S = SPELLS.of(F.spell) || {}, t = (Date.now() - F.t0) / 1000 + 0.5, reach = Math.hypot(F.vx, F.vy) * t + 0.5 * (S.grav || 0.35) * 1500 * t * t + 64; let x = +m.x, y = +m.y;
     if (Math.hypot(x - F.x, y - F.y) > reach) { const p = magicChunkFall(F); x = p.x; y = p.y; }

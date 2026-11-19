@@ -245,6 +245,16 @@
       plain: { keys: [D, R, R, D, U], rune: [0, 4, 5, 8, 6] } },
     frostpath: { name: 'Frost path', school: 'frost', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'frostpath', learn: 3, len: 22, step: 3, drop: 6, colMs: 32, secs: 30, fx: '#d8f4ff', look: 'frost',
       plain: { keys: [D, L, L, D, R], rune: [2, 4, 3, 6, 8] } },
+    // ⭐ STEP 7b (2026-11-20): SHAPE WATER, kind 'waterball' (held, as the rock chunk is held): REAL LIQUID near the pointer (within `grab` cells — any but lava, at most `cells` cells'
+    //   worth) drawn up into a ball; it follows the pointer (`reach`, `holdV`); a SECOND CLICK throws it away from you (`speed`, `grav`); where it meets something it BURSTS into the
+    //   world's own drops and lands as liquid. A player it meets is shoved (`kn`), put out and rinsed (oil in it coats them instead). Let go / its time: it falls as it is. Nothing made or lost.
+    //   WATER JET, kind 'jet' (held, `chanS` the most): water MADE at the catalyst's tip, `ups` units a second flown out as the world's own drops (`dropV` cells a second) along the aim;
+    //   whoever is in the stream (`reach`, `hw`) is pushed (`push`), put out and rinsed; loose things pushed. MADE, so as much as was made dries away `drySecs` after it ends.
+    //   `wet` = what it hits is put out and rinsed (16zj `magicOnHit`).
+    shapewater: { name: 'Shape water', school: 'frost', form: 'shaping', tier: 0, cd: 4, stance: 'level', kind: 'waterball', learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 3, holdV: 560, speed: 620, grav: 0.35, kn: 4.5, wet: true, fx: '#7fd0ff',
+      plain: { keys: [D, U, L, R, D], rune: [6, 3, 1, 2, 5] } },
+    waterjet: { name: 'Water jet', school: 'frost', form: 'stream', tier: 0, cd: 5, stance: 'level', kind: 'jet', learn: 3, chan: true, chanS: 6, reach: 150, hw: 5, ups: 24, dropV: 42, push: 40, drySecs: 60, wet: true,
+      plain: { keys: [D, R, D, R, U], rune: [0, 3, 4, 8, 7] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -304,7 +314,7 @@
     fireball: [[U, D], [4, 1, 5, 7, 3, 1]], kindle: [[R, U], [4, 5, 2]],
     firewall: [[L, R], [4, 6, 0]], firestrip: [[L, D], [4, 6, 8]], flamering: [[D, D], [4, 3, 1, 5]], flamepillars: [[D, U], [4, 7, 1]], heat: [[L, U], [4, 3, 0]], flameblade: [[U, R], [4, 1, 2]],   // (6b: a wall drawn up · laid down · round you · down into the ground and up, as Earth's pillar)   // (6a: a burst's diamond, as gust / freeze · right then up — a spark sent out and lifting)
     chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
-    iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]],   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
+    iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]], shapewater: [[L, R], [4, 3, 5]], waterjet: [[R, D], [4, 8]],   // (7b: grab and fling, as the rock chunk · the stream ending)   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
