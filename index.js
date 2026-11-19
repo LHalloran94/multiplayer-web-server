@@ -4275,7 +4275,7 @@ function magicWallLines(room, lines, S) {
 }
 // ⭐⭐ MAGIC 5d (2026-11-19 — EARTH, MADE MATTER THAT GOES; the user agreed the proposal and its three picks). Each works out its LINES of cells here (nothing put yet — a cast
 //   refused for no ground spends nothing), then `magicWallLines` grows them. The stone is the ground's own rock where it rises if a plain one, else stone (as the wall).
-//   STONE SPIKES: a LINE along the ground from in front of you towards the pointer — `n` spikes `gap` cells apart from `first` cells out, each on the ground there (following
+//   STONE SPIKES: a LINE along the ground from under the catalyst's tip (round 2) towards the pointer — `n` spikes `gap` cells apart from `first` cells out, each on the ground there (following
 //   it up or down at most `step` cells; a higher wall or a drop ends the line). Each spike: a column `high` tall and one beside it `base` tall (the side turns spike to spike),
 //   bursting up `rowMs` a cell, `warnMs` + `waveMs` a spike after the cast — the client's warning bulge comes first. → { lines, sp: [[x, ground y, ms, high, side], …] }
 const magicUnderMat = (room, grid, c, r) => { const st = cellsOf(room), fr = Math.floor(roomFloorTop(room) / TERRAIN_CELL), v = r + 1 < fr ? peekCellAt(grid, c * st.rows + r + 1) : 2; return MAGIC_ROCKY.has(v) ? v : 2; };
@@ -4292,7 +4292,7 @@ function magicSpikesPlan(room, bx, by, tx, S) {
     sp.push([g.x, g.y, t0, H, side]); }
   return lines.length ? { lines, sp } : null;
 }
-// RISING PILLAR: `wide` columns out of the ground under the pointer, each from its own ground (within 2 cells of the middle's), `high` tall, a row every `rowMs`; held up by a
+// RISING PILLAR: `wide` columns out of the ground under the caster (round 2; was the pointer), each from its own ground (within 2 cells of the middle's), `high` tall, a row every `rowMs`; held up by a
 //   resting loose thing it waits (`wait`), stopped by rock. It SINKS back (`sink`) a row every `crumbleMs` from the top. → { lines, x, y }
 function magicPillarPlan(room, x, y, S) {
   const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, T = TERRAIN_CELL, g = magicGroundAt(room, x, y); if (!g) return null;
@@ -28308,11 +28308,12 @@ io.on('connection', (socket) => {
     if (reag) { for (const [it, n] of reag) if (ledger.itemCount(key, it) < n) return no('reagent:' + it); for (const [it, n] of reag) ledger.spendItem(key, it, n); sendInvSync(socket, room); }
     // (5b) A CHUNK: torn out of the ground nearest the pointer, here (nothing to tear: refused, nothing spent)
     let CHK = null; if (S.kind === 'chunk') { if (!isFinite(m.tx) || !isFinite(m.ty) || (p && now - p.t < 4000 && Math.hypot(m.tx - p.x, m.ty - p.y) > (S.reach || 320) + 60)) return no('far'); CHK = (!S.soil && !socket._magicHeap && magicBoulderGrab(room, +m.tx, +m.ty, S)) || magicChunkTear(room, +m.tx, +m.ty, S, m.spell); if (!CHK) return no('nothing'); }   // (5b round 5: a loose boulder near the point first)
-    // (5d) SPIKES / PILLAR / BRIDGE: their cells worked out now — nowhere to put them, refused before anything is spent. Spikes and the bridge go from the caster's FEET (`bx`, `by`)
-    //   towards the pointer; the pillar rises under the pointer (within its reach of the cast)
+    // (5d) SPIKES / PILLAR / BRIDGE: their cells worked out now — nowhere to put them, refused before anything is spent. (5d round 2, the user) the SPIKES start on the ground under
+    //   the CATALYST'S TIP (the cast's own x, y — they began under the player 'in a dodgy way') and run towards the pointer; the PILLAR rises under the CASTER'S FEET (`bx`, `by` —
+    //   'otherwise it is basically the same thing as the stone wall'); the bridge from the caster's feet towards the pointer
     let MADE = null; if (S.kind === 'spikes' || S.kind === 'bridge' || S.kind === 'pillar') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad');
-      if (S.kind === 'pillar') { if (Math.hypot(m.tx - m.x, m.ty - m.y) > (S.reach || 360) + 40) return no('far'); MADE = magicPillarPlan(room, +m.tx, +m.ty, S); }
-      else { if (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160) return no('bad'); MADE = S.kind === 'spikes' ? magicSpikesPlan(room, +m.bx, +m.by, +m.tx, S) : magicBridgePlan(room, +m.bx, +m.by, +m.tx, +m.ty, S); }
+      if (S.kind !== 'spikes' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+      MADE = S.kind === 'spikes' ? magicSpikesPlan(room, +m.x, +m.y, +m.tx, S) : S.kind === 'pillar' ? magicPillarPlan(room, +m.bx, +m.by - 2, S) : magicBridgePlan(room, +m.bx, +m.by, +m.tx, +m.ty, S);
       if (!MADE) return no('ground'); }
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)

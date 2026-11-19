@@ -182,16 +182,16 @@
     // ⭐ STEP 5d (2026-11-19 — EARTH, MADE MATTER: it goes; the user agreed the proposal and its picks — the spikes a line along the ground, the pillar SINKS back, the bridge
     //   follows the line to the pointer). All three grow as the stone wall does (server `magicWallLines`: the ground's own rock, through liquid pushing it aside, kept in the
     //   database, cracking over `crackS` before `secs` is up, then going `crumbleMs` a cell from the far end). What it does to bodies is each player's own game's (16zj).
-    //   STONE SPIKES, kind 'spikes': a line of `n` along the ground from `first` cells in front of you towards the pointer, `gap` cells apart, each on the ground there (up or down
+    //   STONE SPIKES, kind 'spikes': a line of `n` along the ground from `first` cells past the ground under the catalyst's tip (5d round 2) towards the pointer, `gap` cells apart, each on the ground there (up or down
     //     `step` cells at most); a spike = a column `high` tall + one `base` tall beside it, bursting up `rowMs` a cell, `warnMs` after the cast and `waveMs` after the one before
     //     (its spot bulges first). Rising under a body: `dmg` health, thrown up `kn`; once a cast each.
-    //   RISING PILLAR, kind 'pillar': `wide` columns out of the ground under the pointer (within `reach`), `high` tall, a row every `rowMs` — whoever stands on it rides it up; a
+    //   RISING PILLAR, kind 'pillar': `wide` columns out of the ground under YOU (5d round 2, the user: under the pointer it was the stone wall again), `high` tall, a row every `rowMs` — whoever stands on it rides it up; a
     //     resting loose thing on it is hopped up (it waits `waitN` ticks for it); `secs`, then it SINKS back a row every `crumbleMs` (`sink`: no cracks, no rubble).
     //   BRIDGE, kind 'bridge': from the edge in front of your feet towards the pointer, `thick` cells deep, its top level with your ground, along the line to the pointer (slope at
     //     most `slope`: 1 = 45°), `len` columns, `rowMs` a column; rock it meets ends it (joined). `skip` = how far the ground may go on before it begins.
-    spikes: { name: 'Stone spikes', school: 'earth', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'spikes', learn: 3, n: 5, first: 3, gap: 4, step: 3, high: 5, base: 2, rowMs: 16, warnMs: 140, waveMs: 70,
+    spikes: { name: 'Stone spikes', school: 'earth', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'spikes', learn: 3, n: 5, first: 0, gap: 4, step: 3, high: 5, base: 2, rowMs: 16, warnMs: 140, waveMs: 70,
       secs: 4, crackS: 1, crumbleMs: 40, thruLiq: true, dmg: 1.5, kn: 7, fx: '#d9b27a', look: 'spike', plain: { keys: [D, U, U, D, U], rune: [6, 4, 8, 5, 2] } },
-    pillar: { name: 'Rising pillar', school: 'earth', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'pillar', learn: 3, reach: 360, wide: 3, high: 16, rowMs: 90, waitN: 12, secs: 30, crackS: 0, crumbleMs: 90, sink: true,
+    pillar: { name: 'Rising pillar', school: 'earth', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'pillar', learn: 3, wide: 3, high: 16, rowMs: 90, waitN: 12, secs: 30, crackS: 0, crumbleMs: 90, sink: true,
       thruLiq: true, warnMs: 300, fx: '#d9b27a', look: 'pillar', plain: { keys: [D, U, D, U, U], rune: [8, 7, 4, 1, 2] } },
     bridge: { name: 'Bridge', school: 'earth', form: 'shaping', tier: 0, cd: 8, stance: 'level', kind: 'bridge', learn: 3, len: 32, thick: 2, slope: 1, skip: 12, rowMs: 40, secs: 40, crackS: 4, crumbleMs: 30,
       thruLiq: true, fx: '#d9b27a', look: 'bridge', plain: { keys: [D, U, R, L, R], rune: [3, 4, 5, 8, 6] } },
