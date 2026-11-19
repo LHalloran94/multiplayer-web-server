@@ -164,6 +164,21 @@
       plain: { keys: [D, U, L, R, R], rune: [6, 3, 4, 5, 8] } },
     soilfling: { name: 'Soil flung', school: 'earth', form: 'shaping', tier: 0, cd: 4, stance: 'level', kind: 'chunk', soil: true, learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 12, holdV: 560, speed: 640, fan: 0.12, fx: '#b89060', look: 'tear',
       plain: { keys: [D, U, L, L, D], rune: [0, 3, 6, 7, 8] } },
+    // ⭐ STEP 5c (2026-11-19 — EARTH: THE TUNNEL AND THE QUAKE; the user's answers: the bored rock comes out of the mouth as rubble · the quake on the ground UNDER THE CATALYST, a staff's
+    //   foot slammed down 'like a "you shall not pass" type action' · the worst cracked cells and weakly held overhangs shaken loose). Matter MOVED or CHANGED, never made or lost.
+    //   TUNNELLING BOLT, kind 'tunnel': a SHOT (as the ground-changing ones: it flies at `speed`, `life` s, and ends on the first rock — stopped by liquid); where it lands the server
+    //   BORES on along its way (server `magicTunnel`): a step every half cell (`stepMs` apart, the drill seen going in), every cell within `bore` cells of its line taken out, each
+    //   costing its rock's strength (1 earth … 4 granite) of `push`; no further than `len` cells, stopped by rock nothing breaks, liquid, an object, or `air` cells of open air.
+    //   What it takes SPRAYS BACK OUT OF THE MOUTH as rubble (`rubbleV` cells/s, `fan` radians either side): hard rock as scree (crushed), soft ground as itself — the spade's throw.
+    //   QUAKE, kind 'quake': cast at the ground under the catalyst's tip (server `magicGroundAt`), `slamMs` after the cast (the staff's foot coming down — 16zj `magicSlamPose`). From
+    //   there ring by ring (`ringMs` a cell), within `rad` cells, every rock cell CRACKS by `crack` (of 60) at the middle, less outward (kept wear, as a blow's); a cell then at
+    //   `looseW` or more, or hanging with open air under it and at most one rock neighbour, SHAKES LOOSE: touching ones together as a loose BOULDER (5b's, up to `clump` cells),
+    //   a cell alone as falling scree — at most `loose` cells a cast. Every screen: the rumble, the view shaken (`shake`, by distance), dust off faces, loose things and bodies jolted
+    //   (`kn`); the caster's own body is not jolted.
+    tunnelbolt: { name: 'Tunnelling bolt', school: 'earth', form: 'bolt', tier: 0, cd: 6, stance: 'level', kind: 'tunnel', learn: 3, reach: 480, speed: 680, life: 1.4, grav: 0, r: 3.5,
+      push: 34, len: 40, bore: 1.05, stepMs: 30, air: 4, rubbleV: 22, fan: 0.45, fx: '#e2b878', look: 'bore', plain: { keys: [D, U, R, R, R], rune: [3, 4, 5, 2, 1] } },
+    quake: { name: 'Quake', school: 'earth', form: 'burst', tier: 0, cd: 10, stance: 'level', kind: 'quake', learn: 3, rad: 9, crack: 34, looseW: 52, ringMs: 55, loose: 30, clump: 9,
+      slamMs: 260, shake: 5, kn: 4, fx: '#d8b07a', look: 'quake', plain: { keys: [D, U, D, D, D], rune: [6, 3, 0, 1, 2] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -224,7 +239,7 @@
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
-    rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]],
+    rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],
     lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]], leap_o: [[R, U], [4, 1, 2]],
     haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],

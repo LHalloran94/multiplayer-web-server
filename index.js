@@ -4065,6 +4065,96 @@ function magicBoulderGrab(room, x, y, S) {
   emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id }); broadcastObjSt(room);
   return { m, o, cx: wx / m.length, cy: wy / m.length, a: P.a, w: w.some(v => v) ? w : null, from: obj.id, cs: obj.cs };
 }
+// ⭐⭐ MAGIC 5c (2026-11-19) — THE TUNNELLING BOLT BORES (spells.js `tunnelbolt` — what it does, its numbers): from where the shot met rock, on along its way (ax, ay) a step every
+//   half cell, each step's cells (within `bore` cells of the line) taken out `stepMs` after the last, as long as `push` lasts (each cell its rock's strength). Its rubble sprays back out
+//   of the mouth (the open cell it came in by) as the spade's throw does (`powder-fly`, landed as ground): hard rock as SCREE, soft ground as itself. Each taken cell's effect: the
+//   room is told (`magic-cells`, look 'bore'). → { n (cells taken), len (px bored), ms (how long it takes) }. PROCESSOR: a few dozen cells, once a cast.
+const MAGIC_SCREE = 21;
+function magicTunnel(room, x, y, ax, ay, S, sp) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, mats = roomMats[room] || {}, floorRow = Math.floor(roomFloorTop(room) / T);
+  const al = Math.hypot(ax, ay) || 1; ax /= al; ay /= al;
+  if (!isFinite(ax) || !isFinite(ay)) return { n: 0, len: 0, ms: 0 };
+  const R = (S.bore || 1) * T, half = T * 0.5, steps = Math.round((S.len || 40) * 2), taken = new Set(), plan = [], soft = (v) => !!HELD.SPADE_SOFT[v] || isPowderId(v);
+  let push = S.push || 34, airRun = 0, last = 0;
+  const rock = (i) => { const v = peekCellAt(grid, i); return v > 0 && isSolidCell(v) && !isBodyId(v) && !isPlantId(v) && !MAGIC_WOODY.has(v); };
+  for (let k = 0; k <= steps; k++) {
+    const px = x + ax * half * k, py = y + ay * half * k, c0 = Math.floor((px - R) / T), c1 = Math.floor((px + R) / T), r0 = Math.floor((py - R) / T), r1 = Math.floor((py + R) / T), here = [];
+    const hc = Math.floor(px / T), hr = Math.floor(py / T); if (hc < 0 || hc >= COLS || hr < 0 || hr >= floorRow) break;
+    { const hv = peekCellAt(grid, hc * ROWS + hr); if (isFluidId(hv) || isBodyId(hv)) break; }   // (liquid, an object: it stops)
+    let stop = false;
+    for (let c = c0; c <= c1 && !stop; c++) for (let r = r0; r <= r1; r++) { if (c < 0 || c >= COLS || r < 0 || r >= floorRow) continue; const i = c * ROWS + r; if (taken.has(i)) continue;
+      if (Math.hypot((c + 0.5) * T - px, (r + 0.5) * T - py) > R) continue; if (!rock(i)) continue; const v = peekCellAt(grid, i);
+      if (!matBreakableSrv(mats, v)) { if (c === hc && r === hr) { stop = true; break; } continue; }   // (rock nothing breaks: it stops at it, or goes on past it at the side)
+      const cost = Math.max(1, Math.min(4, matStrengthSrv(mats, v) || 1)); if (cost > push) { stop = true; break; } push -= cost; taken.add(i); here.push(i); }
+    if (here.length) { airRun = 0; last = k; } else if (k > 1 && ++airRun >= (S.air || 4) * 2) break;
+    plan.push(here); if (stop) break;
+  }
+  while (plan.length && !plan[plan.length - 1].length) plan.pop();
+  const ms = S.stepMs || 30, mouth = (() => { const c = Math.floor((x - ax * half) / T), r = Math.floor((y - ay * half) / T); return c >= 0 && c < COLS && r >= 0 && r < ROWS ? c * ROWS + r : -1; })();
+  plan.forEach((here, k) => { if (!here.length) return; setTimeout(() => {
+    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], fx = [], rub = []; let pc0 = 1e9, pr0 = 1e9, pc1 = -1, pr1 = -1;
+    for (const i of here) { if (!rock(i)) continue; const v = peekCellAt(grid, i); grid.s(i, 0); s2.terrainHp.s(i, 0); wearDel(room, i); cells.push(i, 0); fx.push(i);
+      rub.push(soft(v) ? v : (SPELLS_MAP_CRUSH[v] || v));
+      const c = Math.floor(i / ROWS), r = i % ROWS; if (c < pc0) pc0 = c; if (c > pc1) pc1 = c; if (r < pr0) pr0 = r; if (r > pr1) pr1 = r; }
+    if (!cells.length) return;
+    wireFanout(room, 'terrain-set', { cells });
+    if (sp) io.to(room).emit('magic-cells', { c: fx, spell: sp, look: 'bore' });
+    activatePowderRect(room, grid, pc0 - 1, pr0 - 1, pc1 + 1, pr1 + 1); if (magicCfgSrv.wake) for (const i of fx) fineWakeAround(room, i);
+    magicRubbleOut(room, mouth, ax, ay, rub, S);
+  }, k * ms); });
+  return { n: taken.size, len: last * half, ms: plan.length * ms };
+}
+// hard rock CRUSHED for the tunnel's rubble: the plain rocks → scree (what is left of broken rock); anything else not soft (ores, gems, glass, ice…) keeps its own material
+const SPELLS_MAP_CRUSH = (() => { const o = {}; const CR = SPELLS.of('crumble'); if (CR && CR.map) for (const k in CR.map) o[k] = MAGIC_SCREE; return o; })();
+// THE RUBBLE OUT OF THE MOUTH: each material a grain thrown back out of the open cell `mouth` (against the bore's way, a little up, `fan` either side), landed as ground — the spade's
+//   throw (`powder-fly`). With no open cell to come out of, it is heaped where it can (`magicPileAt`).
+function magicRubbleOut(room, mouth, ax, ay, mats, S) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid || !mats.length) return; const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
+  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  if (mouth < 0 || !air(mouth)) { const c = Math.floor(mouth / ROWS), r = mouth % ROWS; if (mouth >= 0) magicPileAt(room, (c + 0.5) * T, (r + 0.5) * T, mats, null); return; }
+  const fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], now = Date.now(), c = Math.floor(mouth / ROWS), r = mouth % ROWS, a0 = Math.atan2(-ay - 0.25, -ax), s0 = S.rubbleV || 22;
+  for (const v of mats) { const a = a0 + (Math.random() - 0.5) * 2 * (S.fan || 0.45), s = s0 * (0.6 + 0.6 * Math.random()), fvx = Math.cos(a) * s, fvy = Math.sin(a) * s;
+    const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.5, fvx, fvy, mouth); fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: 0, how: 0, hold: 0, settle: 1 }); wire.push(mouth, v, Math.round(fvx * 100), Math.round(fvy * 100), A.steps); }
+  if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: powderSplashCfg.g, d: powderSplashCfg.drag });
+}
+// ⭐⭐ MAGIC 5c — THE QUAKE (spells.js `quake`): from the ground cell under (x, y) outward, ring by ring, every rock cell within `rad` cells cracked (kept wear — `wearPut`, sent as a
+//   blow's: `terrain-wear` with where it came from); then those cracked near through, or hanging by one, shaken loose — touching ones together as LOOSE BOULDERS (`magicBoulderMake`),
+//   a cell alone as falling scree. Every screen is told (`magic-quake`: where, how far, how long) for the shaking and the dust; each ring's cells their own effect (`magic-cells`
+//   look 'quake'). PROCESSOR: a few hundred cell reads and a few dozen writes, once a cast, spread over the rings.
+function magicQuake(room, x, y, S, sp, by) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return; ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, mats = roomMats[room] || {}, floorRow = Math.floor(roomFloorTop(room) / T);
+  const W = wearOf(room), geom = worldGeom(room), oldW = (i) => { const m = W.by.get(wearChunkOf(geom, i)), e = m && m.get(i); return e ? e[0] | 0 : 0; };
+  const rock = (i) => { if (i < 0 || i >= N || i % ROWS >= floorRow) return false; const v = peekCellAt(grid, i); return v > 0 && isSolidCell(v) && !isBodyId(v) && !isPlantId(v) && !MAGIC_WOODY.has(v) && !isPowderId(v); };
+  const Rr = S.rad || 9, c0 = Math.floor(x / T), r0 = Math.floor(y / T), rings = [];
+  for (let dc = -Rr; dc <= Rr; dc++) for (let dr = -Rr; dr <= Rr; dr++) { const d = Math.hypot(dc, dr); if (d > Rr) continue; const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue;
+    const i = c * ROWS + r; if (!rock(i) || !matBreakableSrv(mats, peekCellAt(grid, i))) continue; const k = Math.floor(d); (rings[k] || (rings[k] = [])).push([i, d]); }
+  const ms = S.ringMs || 55, cand = new Set();
+  io.to(room).emit('magic-quake', { x: Math.round(x), y: Math.round(y), r: Rr * T, ms: rings.length * ms, by, spell: sp });
+  rings.forEach((ring, k) => { if (!ring) return; setTimeout(() => {
+    if (cellsOf(room).terrain !== grid) return; const out = [], fx = [];
+    for (const [i, d] of ring) { if (!rock(i)) continue; const v = peekCellAt(grid, i), add = (S.crack || 34) * (1 - d / (Rr + 1)) * (0.75 + 0.5 * Math.random()), nw = Math.min(59, oldW(i) + Math.round(add));
+      if (nw <= 0) continue; wearPut(room, i, nw, v, [Math.round(x), Math.round(y)]); out.push(i, nw); fx.push(i);
+      const r = i % ROWS, below = r + 1 < floorRow && !rock(i + 1), nb = [i - ROWS, i + ROWS, r > 0 ? i - 1 : -1, i + 1].filter(j => j >= 0 && rock(j)).length;
+      if (nw >= (S.looseW || 52) || (below && nb <= 1 && nw >= 12)) cand.add(i); }
+    for (let q = 0; q < out.length; q += 128) io.to(room).emit('terrain-wear', { c: out.slice(q, q + 128), p: [Math.round(x), Math.round(y)] });
+    if (sp && fx.length) io.to(room).emit('magic-cells', { c: fx.slice(0, 120), spell: sp, look: 'quake' });
+  }, k * ms); });
+  // …and what is left hanging, or cracked through, comes down once the last ring has passed
+  setTimeout(() => { if (cellsOf(room).terrain !== grid) return; let left = S.loose || 30; const seen = new Set(), cells = [], fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], now = Date.now();
+    const air = (j) => j >= 0 && j < N && peekAir(grid, j) && (j % ROWS) < floorRow;
+    for (const i0 of cand) { if (left <= 0) break; if (seen.has(i0) || !rock(i0)) continue; const clump = [i0]; seen.add(i0);
+      for (let q = 0; q < clump.length && clump.length < (S.clump || 9); q++) { const i = clump[q], r = i % ROWS; for (const j of [i - ROWS, i + ROWS, r > 0 ? i - 1 : -1, i + 1]) { if (j < 0 || seen.has(j) || !cand.has(j) || !rock(j)) continue; seen.add(j); clump.push(j); if (clump.length >= (S.clump || 9)) break; } }
+      const take = clump.slice(0, left); left -= take.length; const m = [], o = [], w = [], sc = Math.floor(take[0] / ROWS), sr = take[0] % ROWS; let mx = 0, my = 0;
+      for (const i of take) { const v = peekCellAt(grid, i), c = Math.floor(i / ROWS), r = i % ROWS; m.push(v); o.push(c - sc, r - sr); w.push(Math.min(253, Math.round(oldW(i) / 60 * 255))); mx += c + 0.5; my += r + 0.5;
+        grid.s(i, 0); st.terrainHp.s(i, 0); wearDel(room, i); cells.push(i, 0); }
+      if (take.length >= 2) magicBoulderMake(room, by, sp, { m, o, w }, mx / take.length * T, my / take.length * T, 0, (Math.random() - 0.5) * 30, 0, (Math.random() - 0.5) * 2, 0);
+      else { const i = take[0], c = Math.floor(i / ROWS), r = i % ROWS, v = SPELLS_MAP_CRUSH[m[0]] || m[0], fvx = (Math.random() - 0.5) * 3, A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.5, fvx, 0, i);
+        fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: 0, how: 0, hold: 0, settle: 1 }); wire.push(i, v, Math.round(fvx * 100), 0, A.steps); } }
+    if (cells.length) wireFanout(room, 'terrain-set', { cells });
+    if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: powderSplashCfg.g, d: powderSplashCfg.drag });
+    activatePowderRect(room, grid, c0 - Rr - 1, r0 - Rr - 1, c0 + Rr + 1, r0 + Rr + 1); fineWakeRect(room, c0 - Rr - 1, r0 - Rr - 1, c0 + Rr + 1, r0 + Rr + 1);
+  }, rings.length * ms + 120);
+}
 // SOIL FLUNG let go: each of its cells a grain sprayed out from where it is, `fan` either side of the throw — the spade's throw (`powder-fly`, landed as ground by `powderFlyLand`)
 function magicSoilSpray(room, x, y, K, vx, vy, S) {
   const st = cellsOf(room), grid = st.terrain; if (!grid) return; const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
@@ -28130,7 +28220,10 @@ io.on('connection', (socket) => {
     if (MD) { out.mod = m.mod; if (m.mod === 'mod_arc' && !isFinite(out.tx)) return no('bad'); }
     const SK = socket._magicSecsK && socket._magicSecsK !== 1 && S.secs ? Object.assign({}, S, { secs: S.secs * socket._magicSecsK, crackS: (S.crackS || 0) * Math.min(1, socket._magicSecsK) }) : S;
     // (step 3e, the user) FREEZE and the STONE WALL are SHOTS: they fly from the hand (each screen flies them, as a bolt) and do what they do where they land — the caster's game says where (`magic-hit`)
-    const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (5a: the ground changed — a shot too)
+    const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change' || S.kind === 'tunnel') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (5a: the ground changed — a shot too; 5c: the tunnelling bolt)
+    // (5c) THE QUAKE: on the ground under the catalyst's tip, once the staff's foot is down (`slamMs`)
+    if (S.kind === 'quake') { const g = magicGroundAt(room, out.x, out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; out.slam = S.slamMs || 0; const by = socket.id, sp = m.spell, SQ = SK;
+      setTimeout(() => magicQuake(room, g.x, g.y, SQ, sp, by), S.slamMs || 0); }
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
       _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK ? 3000 : 300), x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });
@@ -28142,7 +28235,7 @@ io.on('connection', (socket) => {
       if (MD && m.mod === 'mod_arc') { const A = SPELLS.arcAim(S, MD, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
       const ids = [id]; if (MD && m.mod === 'mod_split') { for (let i = 1; i < (MD.n || 3); i++) ids.push(++_magicSeq); out.ids = ids; }
       const SKf = S.freezeN ? Object.assign({}, SK, { cells: S.freezeN, secs: (S.freezeS || 20) * (socket._magicSecsK || 1), ringMs: 60 }) : SK;   // (4e round 2: the chill bolt's freeze — a cell or two)
-      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, land: shot ? S.kind : S.freezeN ? 'freeze' : null, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0 });
+      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, land: shot ? S.kind : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0 });
       while (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     if (S.kind === 'lift') out.obj = m.obj;
@@ -28235,9 +28328,11 @@ io.on('connection', (socket) => {
     if (L.land === 'freeze' && L.chill) { if (m.liq) { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); } }   // (4e round 2) the chill bolt: only where it went into water
     else if (L.land === 'freeze') { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); air = 0; }
     else if (L.land === 'change') { land = 'change'; n = magicChange(L.room, +m.x, +m.y, L.SK, L.spell); air = 0; }   // (5a)
+    else if (L.land === 'tunnel') { const R0 = magicTunnel(L.room, +m.x, +m.y, L.ax, L.ay, L.SK, L.spell); land = 'tunnel'; n = R0.n; air = 0; m.len = R0.len; m.ms = R0.ms; }   // (5c)
     else if (L.land === 'wall' && (m.side === 1 || m.side === -1) && (n = magicWallSide(L.room, +m.x, +m.y, m.side, L.SK)) != null) { land = 'wall'; air = 0; }   // (step 3f: out of a face, level)
     else if (L.land === 'wall') { const g = magicGroundAt(L.room, +m.x, +m.y); if (g && Math.abs(g.y - m.y) <= 3 * TERRAIN_CELL) { land = 'wall'; tx = g.x; ty = g.y; n = magicWall(L.room, g.x, g.y, L.SK); air = 0; } else air = 1; }
-    io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell });
+    io.to(L.room).emit('magic-end', Object.assign({ id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell },
+      land === 'tunnel' ? { ax: +(+L.ax).toFixed(3), ay: +(+L.ay).toFixed(3), len: Math.round(m.len || 0), ms: Math.round(m.ms || 0) } : {}));
   });
   socket.on('arrow-catch', ({ id, to }) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string' || typeof to !== 'string') return;
