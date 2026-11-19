@@ -234,6 +234,17 @@
       plain: { keys: [U, L, U, L, R], rune: [6, 3, 2, 7, 0] } },
     flameblade: { name: 'Flaming weapon', school: 'fire', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'flameblade', learn: 5, secs: 30,
       plain: { keys: [U, R, U, R, D], rune: [6, 1, 2, 4, 8] } },
+    // ⭐ STEP 7a (2026-11-20, kickoff §'STEP 7' — FROST AND WATER; the user took every suggestion).
+    //   ICE SHARD, kind 'shard': a REAL OBJECT (server/held.js `iceshard`, an arrow's kind) made at the catalyst's tip by its caster's game and flown as an arrow is (16w's flight):
+    //   it sticks where it meets something, wounds (`dmg`), bleeds, a shield stops it. MADE matter, so it MELTS — gone after `secs` (the server's), dripping as it goes. Never an item.
+    //   `speed` px a step (as the bow's), `grav` × the bow's fall.
+    //   FROST PATH, kind 'frostpath': from the caster's feet towards the pointer, `len` columns along the ground (up or down `step` cells a column at most), a column every `colMs`:
+    //   the ground's TOP CELL TURNED TO ICE (slippery — ice's own `slip`) for `secs`, then back to what it was (server kind 'glaze'); a water surface on the way frozen as the freeze
+    //   does. Never ore, plants, wood or a loose thing's cells.
+    iceshard: { name: 'Ice shard', school: 'frost', form: 'bolt', tier: 1, cd: 5, stance: 'level', kind: 'shard', learn: 5, speed: 34, grav: 0.8, dmg: 2, secs: 20,
+      plain: { keys: [D, R, R, D, U], rune: [0, 4, 5, 8, 6] } },
+    frostpath: { name: 'Frost path', school: 'frost', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'frostpath', learn: 3, len: 22, step: 3, drop: 6, colMs: 32, secs: 30, fx: '#d8f4ff', look: 'frost',
+      plain: { keys: [D, L, L, D, R], rune: [2, 4, 3, 6, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -293,6 +304,7 @@
     fireball: [[U, D], [4, 1, 5, 7, 3, 1]], kindle: [[R, U], [4, 5, 2]],
     firewall: [[L, R], [4, 6, 0]], firestrip: [[L, D], [4, 6, 8]], flamering: [[D, D], [4, 3, 1, 5]], flamepillars: [[D, U], [4, 7, 1]], heat: [[L, U], [4, 3, 0]], flameblade: [[U, R], [4, 1, 2]],   // (6b: a wall drawn up · laid down · round you · down into the ground and up, as Earth's pillar)   // (6a: a burst's diamond, as gust / freeze · right then up — a spark sent out and lifting)
     chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
+    iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]],   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],

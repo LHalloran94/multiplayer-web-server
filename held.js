@@ -284,6 +284,9 @@
     grip: 0.08, rest: 'belt', aimsAtRest: false, scheme: 'P', offTilt: { beside: 0, back: 0, raised: 0 },
     hurtFrom: 0.85, hurtPad: 0, carves: false, pierces: true, sticks: true, fire: false, strikes: false, mat: 'wood', icon: 1.1 });
   Object.assign(LOOKS, { arrow_bodkin: arrowE('ab', 1.06, 0.9, 1, [1.8, 1]), arrow_broad: arrowE('ar', 0.93, 1.2, 1.35, [5.2, 0]), arrow_field: arrowE('af', 1, 1, 0.8, [1.56, 1]), arrow_elven: arrowE('ae', 1.12, 0.75, 1.15, [3.4, 0]) });
+  // ⭐ (magic 7a, 2026-11-20) THE ICE SHARD the Frost spell makes (spells.js `iceshard`): flown, stuck and wounding as an arrow — but never an item (no pouch, no hand) and it MELTS
+  //   (the server takes it away after the spell's `secs`). A round point that punctures. Its model is 16r's `iceshard`.
+  LOOKS.iceshard = Object.assign(arrowE('is', 1, 1, 1, [2.4, 1]), { w: Math.round(ARROW_W * 0.62), content: '❄', mat: 'glass', shard: true, hurtFrom: 0.7 });
 
   // ⭐ THROWABLES (2026-10-21, plan file §5z54 — the user's pick after polearms; looks agreed over two rounds, `scratchpad/look/items/throwables/`).
   //    A STACK in the pouch (server/items.js `stack`) with ONE in your main hand as the real object: throwing it spends it, and the next one comes

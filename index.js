@@ -3942,6 +3942,62 @@ function magicFreeze(room, x, y, S) {
   }, k * (S.ringMs || 70)));
   return n;
 }
+// ⭐ MAGIC 7a (2026-11-20, FROST — kickoff §'STEP 7'): THE FROST PATH. From the column under the caster's feet towards the pointer, `len` columns along the surface (it climbs `step`
+//   cells a column, drops `drop` at most; a higher wall or a deeper drop ends it). Each column's surface: the top cell of the ground — TURNED TO ICE (kind 'glaze': `back` = what it
+//   was, `units` = its strength left, both put back when its time is up or heat melts it) — or a WATER surface, frozen as the freeze does (kind 'ice'). Plants and leaves are passed
+//   through (the ground under them freezes); never ore, wood, a loose thing's cells, an unbreakable block, or a cell another spell holds. Nothing made or lost: changed for a while.
+//   → { cells: [[i, kind, column, back], …], pts: [[x, top y, ms], …] } or null. PROCESSOR: a few dozen cells a cast.
+function magicFrostPathPlan(room, bx, by, tx, S) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, fr = Math.floor(roomFloorTop(room) / T);
+  const amt = st.fineAmt, tot = st.fineTotal, fine = !!(amt && tot && (st.fineSub || 1) === 1), M = magicTemp.get(room);
+  const liqAt = (i) => fine && peekCellAt(tot, i) > 0;
+  const openAt = (c, r) => { if (r < 0 || r >= fr) return false; const i = c * ROWS + r, v = peekCellAt(grid, i); return (v === 0 || (v > 0 && (isFluidId(v) || isPlantId(v)))) && !liqAt(i); };
+  const topAt = (c, r) => { if (r < 1) return false; if (r >= fr) return true; const i = c * ROWS + r, v = peekCellAt(grid, i); if (v < 0) return false; return liqAt(i) || (v > 0 && isSolidCell(v) && !isPlantId(v)); };
+  const dir = tx >= bx ? 1 : -1, c0 = Math.floor(bx / T); if (c0 < 0 || c0 >= COLS) return null;
+  let s = -1; { const r0 = Math.floor((by - 2) / T); for (let d = 0; d <= 6 && s < 0; d++) { if (topAt(c0, r0 + d) && openAt(c0, r0 + d - 1)) s = r0 + d; else if (d && topAt(c0, r0 - d) && openAt(c0, r0 - d - 1)) s = r0 - d; } }
+  if (s < 0) return null;
+  const cells = [], pts = [], ms = S.colMs || 32, up = S.step || 3, dn = S.drop || 6;
+  for (let k = 0; k < (S.len || 22); k++) {
+    const c = c0 + dir * k; if (c < 0 || c >= COLS) break;
+    if (k) { let best = -1; for (let d = 0; d <= Math.max(up, dn) && best < 0; d++) { if (d <= dn && topAt(c, s + d) && openAt(c, s + d - 1)) best = s + d; else if (d && d <= up && topAt(c, s - d) && openAt(c, s - d - 1)) best = s - d; } if (best < 0) break; s = best; }
+    pts.push([Math.round((c + 0.5) * T), s * T, k * ms]);
+    if (s >= fr) continue;   // (a level's floor is a line, not cells: the path runs over it)
+    const i = c * ROWS + s; if (M && M.has(i)) continue;
+    if (liqAt(i)) { const t = peekCellAt(tot, i), p = amt.rp(i), b = amt.o(i); if (p[b + MAGIC_WATER_RK] > 0 && p[b + MAGIC_WATER_RK] === t) cells.push([i, 'ice', k, 0]); continue; }
+    const v = peekCellAt(grid, i); if (!(v > 0) || v === MAGIC_ICE || v >= 249 || MAGIC_WOODY.has(v) || BUILTIN_UNBREAKABLE.has(v) || MATGEN.HOST_KIND[v] > 0) continue;
+    cells.push([i, 'glaze', k, v]);
+  }
+  return cells.length ? { cells, pts } : null;
+}
+// …and written, a column every `colMs` (each cell checked again as it turns — dug out or changed meanwhile, it is left); every screen shown each cell turning (`magic-cells`)
+function magicFrostPath(room, P, S, sp) {
+  const grid = cellsOf(room).terrain, mats = roomMats[room] || {}, until0 = Date.now() + (S.secs || 30) * 1000, ms = S.colMs || 32, byK = new Map();
+  for (const q of P.cells) { let a = byK.get(q[2]); if (!a) byK.set(q[2], a = []); a.push(q); }
+  for (const [k, list] of byK) setTimeout(() => {
+    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const amt = s2.fineAmt, tot = s2.fineTotal, cells = [], liq = [], fx = [];
+    for (const [i, kind, , back] of list) { const v = peekCellAt(grid, i), until = until0 + k * ms + Math.floor(Math.random() * 1200);
+      if (kind === 'glaze') { if (v !== back) continue; const h = s2.terrainHp.g(i); grid.s(i, MAGIC_ICE); s2.terrainHp.s(i, matStrengthSrv(mats, MAGIC_ICE)); cells.push(i, MAGIC_ICE); fx.push(i);
+        magicTempPut(room, i, { kind: 'glaze', mat: MAGIC_ICE, back, units: h, until, crack: 0 }); continue; }
+      if (!amt || !tot) continue; const t = peekCellAt(tot, i); if (!(t > 0)) continue; const p = amt.wp(i), b = amt.o(i), units = p[b + MAGIC_WATER_RK]; if (!(units > 0) || units !== t) continue;
+      for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; tot.s(i, 0); fineSet(room).delete(i); grid.s(i, MAGIC_ICE); s2.terrainHp.s(i, matStrengthSrv(mats, MAGIC_ICE)); cells.push(i, MAGIC_ICE); liq.push(i); fx.push(i);
+      magicTempPut(room, i, { kind: 'ice', mat: MAGIC_ICE, back: 0, units, until, crack: 0 }); }
+    if (cells.length) wireFanout(room, 'terrain-set', { cells });
+    if (liq.length) emitFineCells(room, liq);
+    if (fx.length && sp) io.to(room).emit('magic-cells', { c: fx, spell: sp });
+  }, k * ms);
+  return P.cells.length;
+}
+// (7a) what a spell's cell goes back to when its time is up: a GLAZED cell (the frost path) to the ground it was, with the strength it had left; everything else to open air
+//   (the freeze's ice gets its water back beside this). → [material, strength]
+function magicTempBack(T, mats) { if (T.kind !== 'glaze' || !(T.back > 0)) return [0, 0]; return [T.back | 0, T.units > 0 ? T.units : matStrengthSrv(mats, T.back | 0)]; }
+// (7a) THE ICE SHARDS lying about, by room: object id → when it melts (the sweep below takes each away; `buildWorldObject` adds them, so a restart keeps them)
+const _magicMelt = new Map();
+function magicMeltAdd(room, id, at) { if (!room || !id) return; let M = _magicMelt.get(room); if (!M) _magicMelt.set(room, M = new Map()); M.set(id, at); }
+function magicMeltSweep(now) {
+  for (const [room, M] of _magicMelt) { for (const [id, at] of M) { if (now < at) continue; M.delete(id); const map = roomObjects[room], o = map && map.get(id); if (!o || o.look !== 'iceshard') continue;
+      objUnindex(room, o); { const dm = roomObjDrv[room]; if (dm) dm.delete(id); const dl = roomObjDrvAt[room]; if (dl) dl.delete(id); } emitObjToChunks(room, o, 'avatar-object-removed', { id, melt: 1 }); }
+    if (!M.size) _magicMelt.delete(room); }
+}
 // ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
 //   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
 //   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
@@ -4374,18 +4430,19 @@ function magicBridgePlan(room, bx, by, tx, ty, S) {
 const magicCfgSrv = { wake: 1, exact: 1 };   // switches back: `wake` 0 = the liquid round a put-back cell is not woken · `exact` 0 = put back by the quarter-second sweep
 function magicTempEnd(room, list) {
   const st = roomCells.get(room), M = magicTemp.get(room); if (!st || !st.terrain || !M) return; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal;
-  const cells = [], liq = [], gone = [], woke = [], sank = [];
+  const cells = [], liq = [], gone = [], woke = [], sank = [], thaw = [], tdmg = [], mats = roomMats[room] || {};
   for (const i of list) { const T = M.get(i); if (!T) continue; const v = peekCellAt(grid, i); if (v < 0) { T.sch = 0; continue; }
     if (v !== T.mat) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
-    grid.s(i, 0); hp.s(i, 0);
+    { const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) tdmg.push(i, BK[1]); } }   // (7a: a glazed cell back to its ground, with the damage it had)
     if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }
     cells.push(i, grid.g(i)); woke.push(i);
     if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat); else if (T.kind === 'sink') sank.push(Math.floor(i / st.rows), i % st.rows, T.mat);
     M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} }
   if (magicCfgSrv.wake) for (const i of woke) fineWakeAround(room, i);
-  if (cells.length) wireFanout(room, 'terrain-set', { cells });
+  if (cells.length) wireFanout(room, 'terrain-set', tdmg.length ? { cells, dmg: tdmg } : { cells });
   if (liq.length) emitFineCells(room, liq);
   if (gone.length || sank.length) io.to(room).emit('magic-wall-end', { cells: gone, sink: sank.length ? sank : undefined });   // (5d: a pillar's cells SINK — no rubble)
+  if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });   // (7a)
   if (!M.size) magicTemp.delete(room);
 }
 // four times a second: cracks coming on a wall that is about to go (its strength lowered — the same crack look as a dug cell), and every cell whose time is up put back
@@ -4393,13 +4450,14 @@ setInterval(() => {
   const now = Date.now();
   for (const [room, M] of magicTemp) {
     const st = roomCells.get(room); if (!st || !st.terrain) continue; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal, mats = roomMats[room] || {};
-    const cells = [], dmg = [], liq = [], gone = [], due = new Map();
+    const cells = [], dmg = [], liq = [], gone = [], due = new Map(), thaw = [];
     for (const [i, T] of M) {
       const v = peekCellAt(grid, i); if (v < 0) continue;   // (its chunk not here yet: later)
       if (v !== T.mat) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }   // (dug out, or changed by something else: not ours any more)
       if (magicCfgSrv.exact && T.until - now < 260) { if (!T.sch) { T.sch = 1; const k = T.until; let g = due.get(k); if (!g) due.set(k, g = []); g.push(i); } continue; }
       if (now >= T.until) {
-        grid.s(i, 0); hp.s(i, 0); cells.push(i, 0);
+        const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); cells.push(i, BK[0]);
+        if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) dmg.push(i, BK[1]); }   // (7a: the ground back with the damage it had, a powder woken)
         if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); }
         if (T.kind === 'wall' || T.kind === 'sink') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
         M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {}
@@ -4408,9 +4466,11 @@ setInterval(() => {
     if (cells.length || dmg.length) wireFanout(room, 'terrain-set', { cells, dmg });
     if (liq.length) emitFineCells(room, liq);
     if (gone.length) io.to(room).emit('magic-wall-end', { cells: gone });
+    if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });
     for (const [k, list] of due) setTimeout(() => magicTempEnd(room, list), Math.max(0, k - now));
     if (!M.size) magicTemp.delete(room);
   }
+  if (_magicMelt.size) magicMeltSweep(now);   // (7a) ice shards whose time is up
   for (const [room, rs] of _magicRunes) { for (let k = rs.length - 1; k >= 0; k--) if (now >= rs[k].until) { io.to(room).emit('magic-rune-gone', { id: rs[k].id }); rs.splice(k, 1); } if (!rs.length) _magicRunes.delete(room); }
 }, 250);
 // THE RUNES lying in each room (in memory: a restart clears them) · one going off: everybody is told; each player's own game takes the blast for its own body
@@ -19455,6 +19515,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       //   that item, as a real thing in the world. Named here or a sword left lying comes back from storage as nobody's stick.
       //   ⚠️ `eq` (whose hand it is in) is deliberately NOT kept by this rebuild — it is a fact about a person who is present.
       if (obj.loose === 1 && HELD.is(obj.look) && ITEMS.isItem(data.item)) obj.item = data.item;
+      // (magic 7a) an ICE SHARD melts: it carries when (`melt`, kept through a restart) — one whose time has passed is not built at all; never an item
+      if (obj.look === 'iceshard') { if (!(+data.melt > Date.now())) return null; obj.melt = +data.melt; delete obj.item; if (typeof magicMeltAdd === 'function') magicMeltAdd(room, id, obj.melt); }
       // (2026-10-25, tools piece 3) …or the CHISEL of a chisel pair: the item's `pair`, beside its hammer — never an item of its own (`itemObjMove`)
       if (obj.item && data.pair === 1 && ITEMS.ITEMS[obj.item].pair && ITEMS.ITEMS[obj.item].pair.look === obj.look) obj.pair = 1;
     }
@@ -26942,7 +27004,10 @@ io.on('connection', (socket) => {
     // (hand items, 2026-10-14) bringing a sword or torch out of your own pouch is not building: it needs no build permission
     const eqAsk = !!(data.eq && data.type === 'stamp' && ITEMS.isItem(data.item));
     // (2026-10-20, plan file §5z38 piece 3) an ARROW LOOSED from a bow: one comes out of the shooter's pouch as the object (16w `bowShoot`)
-    const ammoAsk = !!(data.ammo && data.type === 'stamp' && ITEMS.isItem(data.item) && ITEMS.ITEMS[data.item].kind === 'ammo');
+    // (magic 7a) …or an ICE SHARD its caster's game makes for the cast the server just passed (`socket._magicShard`, one a cast): free as an arrow is, never an item, and it melts
+    const SHD = socket._magicShard, shardAsk = !!(data.shard != null && data.type === 'stamp' && data.look === 'iceshard' && data.loose && !data.item && SHD && SHD.id === (data.shard | 0) && Date.now() < SHD.until);
+    if (shardAsk) { socket._magicShard = null; data.melt = Date.now() + SHD.secs * 1000; }
+    const ammoAsk = shardAsk || !!(data.ammo && data.type === 'stamp' && ITEMS.isItem(data.item) && ITEMS.ITEMS[data.item].kind === 'ammo');
     // (2026-10-26, tools piece 6) …nor is the ROPE a grappling hook takes with it as it is thrown (client 16za `hookOnLaunch`): asked while the hook is still in the
     //   asker's hand — checked below, once the room's props are loaded. Like an arrow it is free, not counted, and allowed on the spawn.
     const hookAsk = !!(data.hookRope && data.type === 'platform' && data.look === 'rope' && typeof data.rh === 'string');
@@ -26963,7 +27028,8 @@ io.on('connection', (socket) => {
     // ⭐ A HAND ITEM (see `itemObjMove`): allowed only as something in the asker's own hand, only while they carry one more of it
     //   than is already out, and never more than two at once (two hands). Anything else naming an item is refused and the asker's
     //   own copy is taken back — an item must not come into the world from nothing.
-    if (obj.item && ammoAsk) {
+    if (shardAsk) { const m = roomObjDrv[currentAvatarRoom] || (roomObjDrv[currentAvatarRoom] = new Map()), L = roomObjDrvAt[currentAvatarRoom] || (roomObjDrvAt[currentAvatarRoom] = new Map()); m.set(id, socket.id); L.set(id, Date.now()); }   // (7a) …its caster flies it
+    else if (obj.item && ammoAsk) {
       if (invGatedRoom(currentAvatarRoom)) { if (!ledger.spendItem(playerKeyFor(socket.id), obj.item, 1)) { socket.emit('avatar-object-removed', { id }); return; } sendInvSync(socket, currentAvatarRoom); }
       { const m = roomObjDrv[currentAvatarRoom] || (roomObjDrv[currentAvatarRoom] = new Map()), L = roomObjDrvAt[currentAvatarRoom] || (roomObjDrvAt[currentAvatarRoom] = new Map()); m.set(id, socket.id); L.set(id, Date.now()); }   // …the shooter flies it
     } else if (obj.item && obj.pair) {
@@ -28366,6 +28432,8 @@ io.on('connection', (socket) => {
       if (S.kind !== 'spikes' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
       MADE = S.kind === 'spikes' ? magicSpikesPlan(room, +m.x, +m.y, +m.tx, S) : S.kind === 'pillar' ? magicPillarPlan(room, +m.bx, +m.by - 2, S) : magicBridgePlan(room, +m.bx, +m.by, +m.tx, +m.ty, S);
       if (!MADE) return no('ground'); }
+    // (7a) THE FROST PATH: its cells worked out now, from the caster's feet towards the pointer — no ground to freeze, refused before anything is spent
+    let FP = null; if (S.kind === 'frostpath') { if (!isFinite(m.tx) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160) return no('bad'); FP = magicFrostPathPlan(room, +m.bx, +m.by, +m.tx, S); if (!FP) return no('ground'); }
     let WPN = null; if (S.kind === 'flameblade') { const ob = typeof m.wpn === 'string' && roomObjects[room] && roomObjects[room].get(m.wpn); if (!ob) return no('weapon'); WPN = m.wpn; }   // (6c) the weapon in the other hand — before anything is spent
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
@@ -28409,6 +28477,8 @@ io.on('connection', (socket) => {
     if (S.kind === 'firewall' && !shot) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; Object.assign(out, magicFireWallAt(room, g.x, g.y, SK)); }   // (6b)
     // ⭐ (6b) THE FLAME RING: kept here while it burns, so the ground its flames brush can be lit (`magic-fire-at`) — one a caster, a new one ends the old
     if (S.kind === 'firering') { const secs = +(SK.secs || 12).toFixed(2); for (const [k, q] of _magicAuras) if (q.by === socket.id || now > q.until) _magicAuras.delete(k); _magicAuras.set(id, { by: socket.id, room, until: now + secs * 1000 + 500 }); out.secs = secs; }
+    if (S.kind === 'shard') { const secs = +(SK.secs || 20).toFixed(2); socket._magicShard = { id, until: now + 3000, secs }; out.secs = secs; }   // (7a) the caster's game makes the shard (`avatar-object-spawn` `shard`)
+    if (FP) { out.n = magicFrostPath(room, FP, SK, m.spell); out.secs = +(SK.secs || 30).toFixed(2); out.fp = FP.pts; }   // (7a) every screen: where the frost runs (its effects)
     if (S.kind === 'flameblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2); _magicBlades.set(socket.id, { room, wpn: WPN, id, until: now + secs * 1000 + 500 }); out.wpn = WPN; out.secs = secs; }   // (6c)
     if (MADE) { out.n = MADE.lines.length ? magicWallLines(room, MADE.lines, SK) : (MADE.sp || []).length; out.secs = +(SK.secs || 0).toFixed(2);   // (5d) grown from now — every screen is told where, for its effects (and its own body's hit)
       if (MADE.sp) out.sp = MADE.sp; if (MADE.br) out.br = MADE.br; if (S.kind === 'pillar') { out.tx = MADE.x; out.ty = MADE.y; out.cols = MADE.lines.length; } }
