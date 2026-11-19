@@ -3869,6 +3869,30 @@ function magicFireWallAt(room, x, y, S) {
   const n = igniteBox(room, x, y - h / 2 + C / 2, w / 2 - C / 2, h / 2 - C / 2);
   return { w, h, secs: +(S.secs || 8).toFixed(2), n };
 }
+// ⭐ MAGIC 6c HEAT (held): ~7 times a second each heat melts the snow and ice in its cone — rays across it from the catalyst's tip (`magic-aim` keeps it), out to a reach that grows
+//   from the hand (`growMs`); a ray passes through snow / ice (melting it) and stops at anything else solid. The freeze spell's ice is put back as the water it was (`magicTempEnd`);
+//   other snow and ice turn to water as lava melts them (`FREACT_MELT_AMT_F` of a cell). Every screen is told where (`magic-melt`: steam). PROCESSOR, a few hundred cells looked at a tick.
+function magicHeatTick(id, q, S, now) {
+  const room = q.room, st = cellsOf(room), grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal; if (!grid || !amt || !tot || (st.fineSub || 1) !== 1) return;
+  if (q.t0 == null) q.t0 = now;
+  const T = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols, full = S.reach || 140, Rr = Math.min(full, 16 + full * (now - q.t0) / (S.growMs || 2500)), half = S.half || 0.42, a0 = Math.atan2(q.ay || 0, q.ax || 1);
+  const M = magicTemp.get(room), seen = new Set(), back = [], cells = [], liq = [], units = capFrac(FREACT_MELT_AMT_F); let budget = S.melt || 16;
+  for (let k = 0; k < 13 && budget > 0; k++) { const a = a0 - half + 2 * half * k / 12, dx = Math.cos(a), dy = Math.sin(a);
+    for (let d = 3; d <= Rr && budget > 0; d += 3) { const c = Math.floor((q.x + dx * d) / T), r = Math.floor((q.y + dy * d) / T); if (c < 0 || c >= COLS || r < 0 || r >= ROWS) break;
+      const i = c * ROWS + r; if (seen.has(i)) continue; seen.add(i); const v = peekCellAt(grid, i); if (v < 0) break; if (v === 0) continue;
+      if (v === 8 || v === 4) { budget--;
+        if (M && M.has(i) && M.get(i).mat === v) { back.push(i); continue; }
+        grid.s(i, 0); hp.s(i, 0); const p = amt.wp(i), b = amt.o(i); for (let t = 0; t < LIQ_T; t++) p[b + t] = 0; p[b + MAGIC_WATER_RK] = units; tot.s(i, units); fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); cells.push(i, 0);
+        if (r > 0 && isPowderId(grid.g(i - 1))) powderSet(room).add(i - 1);
+        continue; }
+      if (isSolidCell(v)) break; } }
+  if (back.length) magicTempEnd(room, back);
+  if (cells.length) { wireFanout(room, 'terrain-set', { cells }); emitFineCells(room, liq); if (magicCfgSrv.wake) for (let j = 0; j < cells.length; j += 2) fineWakeAround(room, cells[j]); }
+  const all = back.concat(cells.filter((_, j) => !(j & 1))); if (!all.length) return; q.melted = (q.melted || 0) + all.length;
+  const xy = []; for (const i of all.slice(0, 16)) xy.push(Math.floor(i / ROWS) * T + T / 2, (i % ROWS) * T + T / 2); io.to(room).emit('magic-melt', { id, c: xy, n: all.length });
+}
+setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) { if (now > q.until) continue; const S = SPELLS.of(q.spell); if (S && S.kind === 'heat') { try { magicHeatTick(id, q, S, now); } catch (e) { console.error('[magic heat] ' + (e && e.message)); } } } }, 150);
+const _magicBlades = new Map();   // (6c) the flaming weapons: caster's socket → { room, wpn, id, until, burnT }
 const _magicAuras = new Map();   // (6b) the flame rings burning: cast id → { by, room, until, burnT }
 function magicGroundAt(room, x, y) {
   const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, c = Math.floor(x / TERRAIN_CELL); let r = Math.floor(y / TERRAIN_CELL); if (c < 0 || c >= COLS) return null;   // (a room nobody has painted has no grid yet: made, as a brush makes it)
@@ -28342,6 +28366,7 @@ io.on('connection', (socket) => {
       if (S.kind !== 'spikes' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
       MADE = S.kind === 'spikes' ? magicSpikesPlan(room, +m.x, +m.y, +m.tx, S) : S.kind === 'pillar' ? magicPillarPlan(room, +m.bx, +m.by - 2, S) : magicBridgePlan(room, +m.bx, +m.by, +m.tx, +m.ty, S);
       if (!MADE) return no('ground'); }
+    let WPN = null; if (S.kind === 'flameblade') { const ob = typeof m.wpn === 'string' && roomObjects[room] && roomObjects[room].get(m.wpn); if (!ob) return no('weapon'); WPN = m.wpn; }   // (6c) the weapon in the other hand — before anything is spent
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
@@ -28384,6 +28409,7 @@ io.on('connection', (socket) => {
     if (S.kind === 'firewall' && !shot) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; Object.assign(out, magicFireWallAt(room, g.x, g.y, SK)); }   // (6b)
     // ⭐ (6b) THE FLAME RING: kept here while it burns, so the ground its flames brush can be lit (`magic-fire-at`) — one a caster, a new one ends the old
     if (S.kind === 'firering') { const secs = +(SK.secs || 12).toFixed(2); for (const [k, q] of _magicAuras) if (q.by === socket.id || now > q.until) _magicAuras.delete(k); _magicAuras.set(id, { by: socket.id, room, until: now + secs * 1000 + 500 }); out.secs = secs; }
+    if (S.kind === 'flameblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2); _magicBlades.set(socket.id, { room, wpn: WPN, id, until: now + secs * 1000 + 500 }); out.wpn = WPN; out.secs = secs; }   // (6c)
     if (MADE) { out.n = MADE.lines.length ? magicWallLines(room, MADE.lines, SK) : (MADE.sp || []).length; out.secs = +(SK.secs || 0).toFixed(2);   // (5d) grown from now — every screen is told where, for its effects (and its own body's hit)
       if (MADE.sp) out.sp = MADE.sp; if (MADE.br) out.br = MADE.br; if (S.kind === 'pillar') { out.tx = MADE.x; out.ty = MADE.y; out.cols = MADE.lines.length; } }
     if (S.kind === 'change' && !shot) out.n = magicChange(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK, m.spell);
@@ -28461,6 +28487,10 @@ io.on('connection', (socket) => {
   // ⭐ (6b) THE GROUND A FLAME RING'S FLAMES BRUSH, from its caster's game (which sees where they go) — near where its caster last said they were, a few times a second
   socket.on('magic-fire-at', (m) => { const room = currentAvatarRoom, q = m && _magicAuras.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now > q.until || now - (q.burnT || 0) < 140) return; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(+m.x - p.x, +m.y - p.y) > 160) return;
+    q.burnT = now; igniteBox(room, +m.x, +m.y, TERRAIN_CELL * 0.5); });
+  // ⭐ (6c) WHAT A FLAMING WEAPON BRUSHES that burns, from its holder's game (which sees where the blade is) — near where they last said they were, a few times a second
+  socket.on('magic-blade-burn', (m) => { const room = currentAvatarRoom, q = _magicBlades.get(socket.id); if (!q || q.room !== room || !m || !isFinite(m.x) || !isFinite(m.y)) return;
+    const now = Date.now(); if (now > q.until || now - (q.burnT || 0) < 120) return; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(+m.x - p.x, +m.y - p.y) > 200) return;
     q.burnT = now; igniteBox(room, +m.x, +m.y, TERRAIN_CELL * 0.5); });
   socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); { const pd = roomDblPos[room], r = pd && pd.get(q.by); if (r && r.dbl === id) { pd.delete(q.by); if (!pd.size) delete roomDblPos[room]; } } io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
   // (magic step 3d) a RUNE stepped on: the stepper's own game tells (it sees its body exactly) — believed when this socket's body was last near it

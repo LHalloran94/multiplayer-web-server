@@ -225,6 +225,15 @@
       plain: { keys: [U, D, D, L, R], rune: [6, 3, 1, 5, 8] } },
     flamepillars: { name: 'Flame pillars', school: 'fire', form: 'stream', tier: 1, cd: 8, stance: 'raise', kind: 'pillars', learn: 5, chan: true, chanS: 6, reach: 140, gapMs: 190, near: 34, far: 120, high: 120, highJ: 34, hw: 8, lift: 9,
       plain: { keys: [U, D, U, D, U], rune: [6, 4, 0, 5, 2] } },
+    // ⭐ 6c (2026-11-19, kickoff §'STEP 6'): HEAT, kind 'heat', HELD (`chanS` the most): a cone (`half` its half-angle, `reach` px) from the catalyst's tip that reaches out from the hand
+    //   (`growMs` to full) — snow and ice in it turn to water, nearest first (the freeze spell's ice back to the water it was), `melt` cells a tick at most; a player in it is thawed
+    //   (frozen into ice, a frost flask's freeze) and a chill bolt's slow ends; it lights nothing. Seen as a SHIMMER (what is behind it wavers — no lines), steam where it melts.
+    //   FLAMING WEAPON, kind 'flameblade': the weapon in your OTHER hand (`wpn`, the caster's game says which; none: refused) burns `secs`: its hits set alight, what it brushes
+    //   that burns catches (server `magic-blade-burn`), torch light; everybody sees it. In liquid its flames are out until it comes out.
+    heat: { name: 'Heat', school: 'fire', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'heat', learn: 3, chan: true, chanS: 6, reach: 140, half: 0.42, growMs: 2500, melt: 16,
+      plain: { keys: [U, L, U, L, R], rune: [6, 3, 2, 7, 0] } },
+    flameblade: { name: 'Flaming weapon', school: 'fire', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'flameblade', learn: 5, secs: 30,
+      plain: { keys: [U, R, U, R, D], rune: [6, 1, 2, 4, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -282,7 +291,7 @@
   const WORDS = {
     firebolt: [[R, R], [4, 5]], greatbolt: [[R, R], [4, 5]], flamestream: [[R, D], [4, 8]],
     fireball: [[U, D], [4, 1, 5, 7, 3, 1]], kindle: [[R, U], [4, 5, 2]],
-    firewall: [[L, R], [4, 6, 0]], firestrip: [[L, D], [4, 6, 8]], flamering: [[D, D], [4, 3, 1, 5]], flamepillars: [[D, U], [4, 7, 1]],   // (6b: a wall drawn up · laid down · round you · down into the ground and up, as Earth's pillar)   // (6a: a burst's diamond, as gust / freeze · right then up — a spark sent out and lifting)
+    firewall: [[L, R], [4, 6, 0]], firestrip: [[L, D], [4, 6, 8]], flamering: [[D, D], [4, 3, 1, 5]], flamepillars: [[D, U], [4, 7, 1]], heat: [[L, U], [4, 3, 0]], flameblade: [[U, R], [4, 1, 2]],   // (6b: a wall drawn up · laid down · round you · down into the ground and up, as Earth's pillar)   // (6a: a burst's diamond, as gust / freeze · right then up — a spark sent out and lifting)
     chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
     stonewall: [[U, U], [4, 7]],
