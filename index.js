@@ -4706,7 +4706,7 @@ function magicTempEnd(room, list) {
 }
 // four times a second: cracks coming on a wall that is about to go (its strength lowered — the same crack look as a dug cell), and every cell whose time is up put back
 setInterval(() => {
-  const now = Date.now();
+  const now = Date.now(), _mw0 = performance.now(); let _mwN = 0;   // (8b, DIAGNOSTIC — the user saw lag as a blizzard's snow melted; not reproduced in a page room: a slow sweep is logged)
   for (const [room, M] of magicTemp) {
     const st = roomCells.get(room); if (!st || !st.terrain) continue; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal, mats = roomMats[room] || {};
     const cells = [], dmg = [], liq = [], gone = [], due = new Map(), thaw = [], melt = [], imelt = [];
@@ -4733,9 +4733,11 @@ setInterval(() => {
     if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });
     if (melt.length) io.to(room).emit('magic-cells', { c: melt, spell: 'snowcloud', look: 'melt' });   // (7c)
     if (imelt.length) io.to(room).emit('magic-cells', { c: imelt, spell: 'icewall', look: 'icemelt' });   // (7d)
+    _mwN += cells.length / 2;
     for (const [k, list] of due) setTimeout(() => magicTempEnd(room, list), Math.max(0, k - now));
     if (!M.size) magicTemp.delete(room);
   }
+  { const ms = performance.now() - _mw0; if (ms > 15) console.log('[melt watch] server sweep ' + ms.toFixed(1) + ' ms · cells put back ' + _mwN); }
   if (_magicMelt.size) magicMeltSweep(now);   // (7a) ice shards whose time is up
   for (const [room, rs] of _magicRunes) { for (let k = rs.length - 1; k >= 0; k--) if (now >= rs[k].until) { io.to(room).emit('magic-rune-gone', { id: rs[k].id }); rs.splice(k, 1); } if (!rs.length) _magicRunes.delete(room); }
 }, 250);
