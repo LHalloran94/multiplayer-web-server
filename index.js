@@ -4100,7 +4100,7 @@ function magicCloudTick(id, q, S, now) {
   const wire = [], w = q.w * 0.86, r0 = Math.floor((q.y - 2) / T);
   if (q.snow) { const fly = roomPowderFly[room] || (roomPowderFly[room] = []), G = S.flakeG || 4, D = S.flakeD || 1.2;
     while (q.acc >= 1 && fly.length < 600) { q.acc -= 1; const c = Math.floor((q.x + (Math.random() - 0.5) * w) / T), at = c * ROWS + r0; if (c < 0 || c >= COLS || !air(at)) continue;
-      const vx = (Math.random() - 0.5) * 1.6, vy = 1.2 + Math.random() * 1.4, A = powderFlyArc(ROWS, COLS, air, c + 0.5, r0 + 0.5, vx, vy, at, G, D);
+      const vx = (Math.random() - 0.5) * 1.6 + (q.wind || 0) * (0.7 + 0.6 * Math.random()), vy = 1.2 + Math.random() * 1.4, A = powderFlyArc(ROWS, COLS, air, c + 0.5, r0 + 0.5, vx, vy, at, G, D);   // (8b: a blizzard's wind)
       fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v: MAGIC_SNOW, hp: 0, how: 0, hold: 0, settle: 1, mk: { room, until: q.melt } }); wire.push(at, MAGIC_SNOW, Math.round(vx * 100), Math.round(vy * 100), A.steps); q.made++; }
     if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: G, d: D, fl: id });
     return; }
@@ -4230,6 +4230,24 @@ function magicStormStrikeDo(id, q, cl, x, y, fy, pl) {
   const wet = !!(tot && (st.fineSub || 1) === 1 && i >= 0 && i < (st.terrain ? st.terrain.length : 0) && peekCellAt(tot, i) > 0); let n = 0; if (!pl && !wet) n = igniteBox(room, x, y + 2, 6);
   const sp = magicZapSpread(room, [[x, y + 2], [x, isFinite(fy) ? fy - 2 : y]], S);
   io.to(room).emit('magic-strike', { id, sub: ++q.n, from: q.by, spell: q.spell, small: 1, x: Math.round(x), y: Math.round(y), cx: Math.round(cl.x), top: Math.round(cl.y), pl: pl || undefined, n, wet: wet ? 1 : 0, liq: sp.liq, ore: sp.ore });
+}
+// ⭐ MAGIC 8b (2026-11-20, STORM): THE THUNDERCLAP'S GLASS — glass within `shatterR` px of the caster SHATTERS (gone; pick-ups where things cost, 'magic-shatter' for the shards on
+//   every screen), out to `rad` it CRACKS (wear, as the quake's — 'terrain-wear' + the quake's cell look). Glass a room keeps unbreakable is left. PROCESSOR: the cells in its circle.
+function magicClap(room, x, y, S, sp) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return 0; ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, R = S.rad || 110, RS = S.shatterR || 56, GLASS = 16, mats = roomMats[room] || {};
+  if (!matBreakableSrv(mats, GLASS)) return 0;
+  const W = wearOf(room), geom = worldGeom(room), oldW = (i) => { const m = W.by.get(wearChunkOf(geom, i)), e = m && m.get(i); return e ? e[0] | 0 : 0; };
+  const shatter = [], crack = [], fx = [];
+  for (let c = Math.max(0, Math.floor((x - R) / T)); c <= Math.min(COLS - 1, Math.floor((x + R) / T)); c++) for (let r = Math.max(0, Math.floor((y - R) / T)); r <= Math.min(ROWS - 1, Math.floor((y + R) / T)); r++) {
+    const d = Math.hypot((c + 0.5) * T - x, (r + 0.5) * T - y); if (d > R) continue; const i = c * ROWS + r; if (peekCellAt(grid, i) !== GLASS) continue;
+    if (d <= RS) { shatter.push([i, GLASS]); continue; }
+    const nw = Math.min(59, oldW(i) + Math.round((S.crack || 40) * (1 - d / (R + T)) * (0.7 + 0.6 * Math.random()))); if (nw <= 0) continue; wearPut(room, i, nw, GLASS, [Math.round(x), Math.round(y)]); crack.push(i, nw); fx.push(i); }
+  if (shatter.length) { const cells = []; for (const [i] of shatter) { grid.s(i, 0); st.terrainHp.s(i, 0); wearDel(room, i); cells.push(i, 0); }
+    wireFanout(room, 'terrain-set', { cells }); io.to(room).emit('magic-shatter', { c: shatter.slice(0, 120).map(q => q[0]), x: Math.round(x), y: Math.round(y) }); magicRubbleBits(room, shatter, 0, 0);
+    const cs = shatter.map(q => Math.floor(q[0] / ROWS)), rs = shatter.map(q => q[0] % ROWS); activatePowderRect(room, grid, Math.min(...cs) - 1, Math.min(...rs) - 2, Math.max(...cs) + 1, Math.max(...rs) + 1); }
+  for (let q = 0; q < crack.length; q += 128) io.to(room).emit('terrain-wear', { c: crack.slice(q, q + 128), p: [Math.round(x), Math.round(y)] });
+  if (sp && fx.length) io.to(room).emit('magic-cells', { c: fx.slice(0, 120), spell: sp, look: 'quake' });
+  return shatter.length + fx.length;
 }
 // ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
 //   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
@@ -28691,12 +28709,13 @@ io.on('connection', (socket) => {
     // (7c) THE CLOUD: where it forms over the caster's point (held to its reach) — no open air there, refused before anything is spent · THE COLD SNAP: round the caster's body
     let CL = null; if (S.kind === 'cloud') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 360) + 8 ? ((S.reach || 360) + 8) / d : 1;
       CL = magicCloudAt(room, m.x + dx * k, m.y + dy * k, S); if (!CL) return no('room'); }
-    if (S.kind === 'coldsnap' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    if ((S.kind === 'coldsnap' || S.kind === 'clap') && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');   // (8b: the thunderclap too)
     // (8a) CALL LIGHTNING: its cloud where the rain cloud's goes (on the pointer, held to its reach) — no open air there, refused before anything is spent
     let SKY = null; if (S.kind === 'skystrike') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 400) + 8 ? ((S.reach || 400) + 8) / d : 1;
       SKY = magicCloudAt(room, m.x + dx * k, m.y + dy * k, S); if (!SKY) return no('room'); }
     // (8a round 2) THE THUNDERSTORM: `clouds` thunderclouds `spread` px apart, centred where the caster pointed (held to its reach) — those with open air; none: refused
-    let STM = null; if (S.kind === 'storm') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 400) + 8 ? ((S.reach || 400) + 8) / d : 1, cx = m.x + dx * k, cy = m.y + dy * k, n = Math.max(1, S.clouds || 3);
+    let STM = null; if (S.kind === 'storm' || S.kind === 'blizzard') {   // (8b: the blizzard's clouds the same way)
+      if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 400) + 8 ? ((S.reach || 400) + 8) / d : 1, cx = m.x + dx * k, cy = m.y + dy * k, n = Math.max(1, S.clouds || 3);
       STM = []; for (let i = 0; i < n; i++) { const off = (i - (n - 1) / 2) * (S.spread || 110), q = magicCloudAt(room, cx + off, cy - Math.abs(off) * 0.15, S); if (q) STM.push(q); } if (!STM.length) return no('room'); }
     let WPN = null; if (S.kind === 'flameblade') { const ob = typeof m.wpn === 'string' && roomObjects[room] && roomObjects[room].get(m.wpn); if (!ob) return no('weapon'); WPN = m.wpn; }   // (6c) the weapon in the other hand — before anything is spent
     if (SC) socket._magicCharge = null;
@@ -28742,10 +28761,11 @@ io.on('connection', (socket) => {
       if (!out.zh.length && !wet) out.n = igniteBox(room, out.tx, out.ty, 8);
       const sp = magicZapSpread(room, [[out.tx, out.ty]].concat(out.zh.map(h => [h[1], h[3] - 2])), S); out.liq = sp.liq; out.ore = sp.ore; if (wet) out.wet = 1; }
     // ⭐ (8a) CALL LIGHTNING: the cloud gathers (every screen draws it); `gatherMs` later its caster's game says what it strikes (`magic-strike`) — or, if it says nothing, the ground
-    if (STM) { _magicStorms.set(id, { room, by: socket.id, spell: m.spell, clouds: STM, at: now + (S.formMs || 1400), until: out.secs ? now + out.secs * 1000 + 500 : now + 11000, n: 0, last: 0, S: SK });
+    if (STM) { const bz = S.kind === 'blizzard', wd = (isFinite(m.tx) ? m.tx - m.x : m.ax) >= 0 ? 1 : -1; if (bz) out.wd = wd;   // (8b) the blizzard's wind blows away from its caster, towards where they pointed
+      _magicStorms.set(id, { kind: S.kind, room, by: socket.id, spell: m.spell, clouds: STM, at: now + (S.formMs || 1400), until: out.secs ? now + out.secs * 1000 + 500 : now + 11000, n: 0, last: 0, S: SK });
       out.cl = STM.map(q => [Math.round(q.x), Math.round(q.y), Math.round(q.gy)]); out.w = (S.wide || 12) * TERRAIN_CELL; out.form = S.formMs || 1400;
       setTimeout(() => _magicStorms.delete(id), (out.secs || 10) * 1000 + 4000);
-      const K = socket._magicSecsK || 1; STM.forEach((q, i) => _magicClouds.set(id + (i + 1) / 10, { room, by: socket.id, spell: m.spell, x: q.x, y: q.y, gy: q.gy, w: (S.wide || 14) * TERRAIN_CELL, start: now + (S.formMs || 1400) + i * 160, until: now + (out.secs || 10) * 1000, snow: false, made: 0, acc: 0, lt: null, put: [], melt: 0, dryMs: (S.drySecs || 60) * 1000 * K })); }   // (8a round 3) its rain
+      const K = socket._magicSecsK || 1, untilC = now + (out.secs || 10) * 1000; STM.forEach((q, i) => _magicClouds.set(id + (i + 1) / 10, { room, by: socket.id, spell: m.spell, x: q.x, y: q.y, gy: q.gy, w: (S.wide || 14) * TERRAIN_CELL, start: now + (S.formMs || 1400) + i * 160, until: untilC, snow: bz, wind: bz ? wd * (S.wind || 2.6) : 0, made: 0, acc: 0, lt: null, put: [], melt: untilC + (S.meltSecs || 60) * 1000 * K, dryMs: (S.drySecs || 60) * 1000 * K })); }   // (8a round 3) its rain (8b: the blizzard's snow, blown)
     if (SKY) { const gat = Math.max(200, S.gatherMs || 900), q = { room, by: socket.id, spell: m.spell, x: SKY.x, top: SKY.y, gy: SKY.gy, at: now + gat, done: false, S: SK };
       _magicStrikes.set(id, q); out.cx = Math.round(SKY.x); out.cy = Math.round(SKY.y); out.gy = Math.round(SKY.gy); out.w = (S.wide || 10) * TERRAIN_CELL; out.gather = gat;
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
@@ -28763,6 +28783,7 @@ io.on('connection', (socket) => {
     if (CL) { const K = socket._magicSecsK || 1, secs = S.cloudS || 8, until = now + secs * 1000; for (const [k, q] of _magicClouds) if (q.by === socket.id && q.spell === m.spell && now < q.until) q.until = now;   // (one of each at a time: a new one ends your last)
       _magicClouds.set(id, { room, by: socket.id, spell: m.spell, x: CL.x, y: CL.y, gy: CL.gy, w: (S.wide || 14) * TERRAIN_CELL, until, snow: !!S.snow, made: 0, acc: 0, lt: null, put: [], melt: until + (S.meltSecs || 60) * 1000 * K, dryMs: (S.drySecs || 60) * 1000 * K });
       out.cx = Math.round(CL.x); out.cy = Math.round(CL.y); out.w = (S.wide || 14) * TERRAIN_CELL; out.secs = secs; }   // (7c) every screen draws it there
+    if (S.kind === 'clap') { const br = Math.max(4, Math.min(30, +m.br || 10)), cx = +m.bx, cy = +m.by - br; out.cx = Math.round(cx); out.cy = Math.round(cy); out.rad = S.rad || 110; const sp = m.spell, SQ = SK; setTimeout(() => magicClap(room, cx, cy, SQ, sp), 90); }   // (8b) the glass breaks as the ring reaches it
     if (S.kind === 'coldsnap') { const br = Math.max(4, Math.min(30, +m.br || 10)), cx = +m.bx, cy = +m.by - br; out.cx = Math.round(cx); out.cy = Math.round(cy); out.rad = S.rad || 96; out.hold = +(S.hold || 1.5).toFixed(2); out.crust = +(S.crustS || 8).toFixed(2); out.n = magicColdSnap(room, cx, cy, SK, br + TERRAIN_CELL * 1.5); }   // (7c) the water round you to ice; every screen frosts its own body (not the caster's)
     if (FP) { out.n = magicFrostPath(room, FP, SK, m.spell); out.secs = +(SK.secs || 30).toFixed(2); out.fp = FP.pts; }   // (7a) every screen: where the frost runs (its effects)
     if (S.kind === 'flameblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2); _magicBlades.set(socket.id, { room, wpn: WPN, id, until: now + secs * 1000 + 500 }); out.wpn = WPN; out.secs = secs; }   // (6c)
@@ -28867,7 +28888,7 @@ io.on('connection', (socket) => {
   // ⭐ (8a) CALL LIGHTNING FALLS: its caster's game says where (`x`, `y` — the top of the body it struck, or the ground; `fy` that body's feet; `pl` the body) — straight down from
   //   its cloud, near its middle, no lower than the ground under it
   socket.on('magic-strike', (m) => {
-    if (m && m.st != null) { const q = _magicStorms.get(m.st), now = Date.now(); if (!q || q.by !== socket.id || currentAvatarRoom !== q.room || now < q.at - 400 || now > q.until || !_magicChans.has(m.st)) return;   // (8a round 2) a thunderstorm's: only while it is held
+    if (m && m.st != null) { const q = _magicStorms.get(m.st), now = Date.now(); if (!q || q.kind !== 'storm' || q.by !== socket.id || currentAvatarRoom !== q.room || now < q.at - 400 || now > q.until || !_magicChans.has(m.st)) return;   // (8a round 2) a thunderstorm's: only while it is held
       if (now - q.last < 30 || !isFinite(m.x) || !isFinite(m.y)) return; const cl = q.clouds[m.k | 0]; if (!cl) return; q.last = now; const S = q.S, hw = (S.wide || 12) * TERRAIN_CELL * 0.5 + (S.side || 10) * (S.metalK || 1.8) + 10;
       const x = Math.max(cl.x - hw, Math.min(cl.x + hw, +m.x)), y = Math.max(cl.y, Math.min(cl.gy + TERRAIN_CELL, +m.y)); magicStormStrikeDo(m.st, q, cl, x, y, isFinite(m.fy) ? +m.fy : null, typeof m.pl === 'string' && m.pl.length < 64 ? m.pl : null); return; }
     const q = m && _magicStrikes.get(m.id); if (!q || q.done || q.by !== socket.id || currentAvatarRoom !== q.room || Date.now() < q.at - 400) return;

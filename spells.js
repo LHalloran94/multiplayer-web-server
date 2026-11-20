@@ -295,6 +295,23 @@
     //   second of made water, dried `drySecs` after) from when it has formed until it is let go.
     thunderstorm: { name: 'Thunderstorm', school: 'storm', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'storm', learn: 5, chan: true, chanS: 10, reach: 400, clouds: 5, spread: 64, wide: 14, down: 1, formMs: 1400,
       ups: 26, dropV: 6, dropR: 1.1, drySecs: 60, gapMin: 500, gapMax: 1400, side: 10, metalK: 1.8, dmg: 1, metalHurtK: 1.5, stunMs: 250, liqCells: 300, liqDmg: 1, oreCells: 80, fx: '#cfe0ff', plain: { keys: [L, D, L, U, U], rune: [0, 3, 7, 5, 1] } },
+    // ⭐ STEP 8b (2026-11-20, STORM — kickoff §'STEP 8'): THUNDERCLAP, kind 'clap' (a burst round you): a flash and a ring of bent air out to `rad` px; every OTHER body in it
+    //   thrown back (`push`) and DAZED (`dazeMs` at the middle, less at the edge — stood dizzy, no moving or punching); GLASS within `shatterR` px shatters (pick-ups where things
+    //   cost), out to `rad` it cracks (`crack` wear); loose things hop; pools splash. No harm to health.
+    thunderclap: { name: 'Thunderclap', school: 'storm', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'clap', learn: 5, rad: 110, push: 10, dazeMs: 800, shatterR: 56, crack: 40, fx: '#e8eeff',
+      plain: { keys: [L, D, R, D, L], rune: [0, 3, 1, 5, 7] } },
+    // WIND SHIELD, kind 'windshield' (on yourself, `secs` s; the Touch variant on another): wind circling the body bends ARROWS, THROWN THINGS, ICE SHARDS and SPELL BOLTS that come
+    //   within `R` px of it aside (turned along the wind, `k` how hard) — never its own owner's. Seen by motes and leaves circling and faint curved streaks.
+    windshield: { name: 'Wind shield', school: 'storm', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'windshield', learn: 3, secs: 12, R: 44, k: 24, alts: ['windshield_o'], fx: '#dfe8f0',
+      plain: { keys: [L, R, D, L, U], rune: [0, 5, 7, 3, 1] } },
+    windshield_o: { name: 'Wind shield (on another)', school: 'storm', form: 'touch', tier: 0, cd: 14, stance: 'level', kind: 'windshield', alt: 'windshield', other: true, reach: 240, secs: 12, R: 44, k: 24, fx: '#dfe8f0',
+      plain: { keys: [L, R, D, L, R], rune: [0, 5, 7, 3, 4] } },
+    // ⭐ (8b, FROST — the user 2026-11-20: 'we should build the blizzard in Frost also') BLIZZARD, kind 'blizzard', HELD (`chanS` s at most): `clouds` snow clouds `spread` px apart
+    //   over the pointer (in sight), formed from vapour out of the staff as the thunderstorm's; once formed each SNOWS (`cps` grains a second of real snow, as the snow cloud — melted
+    //   `meltSecs` after) blown by a WIND away from the caster (`wind` cells a step on each flake); under them (and `lee` px downwind) bodies are pushed by the wind (`windPush`),
+    //   loose things blown, and whoever stays `frostS` s is slowed (`slow`) and put out. Let go and it ends.
+    blizzard: { name: 'Blizzard', school: 'frost', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'blizzard', learn: 5, chan: true, chanS: 10, reach: 400, clouds: 4, spread: 76, wide: 14, down: 1, formMs: 1400,
+      cps: 14, flakeG: 4, flakeD: 1.2, meltSecs: 60, wind: 2.6, lee: 90, windPush: 30, frostS: 1.5, slow: 0.6, look: 'melt', fx: '#eef7ff', plain: { keys: [D, L, D, U, L], rune: [2, 5, 1, 3, 7] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -355,10 +372,10 @@
     firewall: [[L, R], [4, 6, 0]], firestrip: [[L, D], [4, 6, 8]], flamering: [[D, D], [4, 3, 1, 5]], flamepillars: [[D, U], [4, 7, 1]], heat: [[L, U], [4, 3, 0]], flameblade: [[U, R], [4, 1, 2]],   // (6b: a wall drawn up · laid down · round you · down into the ground and up, as Earth's pillar)   // (6a: a burst's diamond, as gust / freeze · right then up — a spark sent out and lifting)
     chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
     icewall: [[U, U], [4, 7]],   // (7d: a wall drawn up, as the stone wall)
-    raincloud: [[U, L], [4, 1, 0]], snowcloud: [[U, R], [4, 1, 2]], coldsnap: [[D, D], [4, 3, 1, 5]],   // (7c: up into the sky and off to one side or the other · round you, as the flame ring)
+    raincloud: [[U, L], [4, 1, 0]], snowcloud: [[U, R], [4, 1, 2]], coldsnap: [[D, D], [4, 3, 1, 5]], blizzard: [[L, L], [4, 1, 0, 3]],   // (8b: as the thunderstorm)   // (7c: up into the sky and off to one side or the other · round you, as the flame ring)
     iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]], shapewater: [[L, R], [4, 3, 5]], waterjet: [[R, D], [4, 8]],   // (7b: grab and fling, as the rock chunk · the stream ending)   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
-    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]],   // (8a: the bolt ending · up into the sky, then a zigzag down)
+    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]], thunderclap: [[D, D], [4, 3, 1, 5]], windshield: [[D, L], [4, 7]], windshield_o: [[R, L], [4, 7, 2]],   // (8b: round you, as the flame ring / cold snap · the on-another turned → and on to the top right)   // (8a: the bolt ending · up into the sky, then a zigzag down)
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],
