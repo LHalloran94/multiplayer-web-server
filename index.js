@@ -4295,7 +4295,7 @@ function magicWhirlTick(id, q, now) {
   const amt = st.fineAmt, tot = st.fineTotal;
   // (8c round 8: over liquid it rides the SURFACE — the liquid under it and just round it taken, `liqTick` a tick, up to `liq`; when mostly full, some thrown out of its top, sideways)
   if (amt && tot && (st.fineSub || 1) === 1 && q.liqN < (S.liq || 200)) { const changed = []; let got = 0;
-    for (let dc = -2; dc <= 2; dc++) for (let dr = -2; dr <= 3; dr++) { const c = c0 + dc, r = rG + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
+    for (let dc = -2; dc <= 2; dc++) for (let dr = -2; dr <= 3; dr++) { const c = c0 + dc, r = rG + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0) || magicWaveHolds(room, i)) continue;
       for (let k = LIQ_T - 1; k >= 1 && q.liqN < (S.liq || 200) && got < (S.liqTick || 20); k--) { const n = vesselCellTake(room, i, k, Math.min((S.liqTick || 20) - got, (S.liq || 200) - q.liqN), changed); if (n > 0) { q.u[k] += n; q.liqN += n; got += n; } } }
     if (changed.length) emitFineCells(room, [...new Set(changed)]); }
   if (q.liqN > (S.liq || 200) * 0.6 && now - (q.spewAt || 0) > 350) { q.spewAt = now; const part = q.u.map(v => Math.floor(v * 0.18)), n = part.reduce((p, v) => p + v, 0);
@@ -4353,15 +4353,19 @@ function magicPoolFind(room, x, y, S) {
   let bot = sr; while (bot + 1 < ROWS && wet(c, bot + 1)) bot++; if (bot - sr < 1) return null;
   return { c, sr, R: Math.min(S.maxR || 12, c - cl, cr - c), bot };
 }
+// (8d round 2, the user: 'there should be a bit of a gap or a depression in the centre of the whirlpool at the top where the water is displaced') the pump is a V: each column
+//   within `core` of its radius gives a share by how near the middle it is, from its top four rows, out to the rim — so the surface is drawn down most in the middle
 function magicPoolTick(q) {
   const st = cellsOf(q.room), amt = st.fineAmt, tot = st.fineTotal; if (!amt || !tot || !st.terrain) return; const ROWS = st.rows, COLS = st.cols, S = q.S, changed = [], u = new Array(LIQ_T).fill(0); let got = 0;
   const topOf = (c) => { if (c < 0 || c >= COLS) return -1; for (let r = Math.max(0, q.sr - 2); r <= q.bot; r++) if (peekCellAt(tot, c * ROWS + r) > 0) return r; return -1; };
-  for (let dc = -1; dc <= 1 && got < (S.pump || 70); dc++) { const c = q.c + dc, r0 = topOf(c); if (r0 < 0) continue;
-    for (let r = r0; r <= Math.min(q.bot - 1, r0 + 2) && got < (S.pump || 70); r++) { const i = c * ROWS + r; for (let k = LIQ_T - 1; k >= 0 && got < (S.pump || 70); k--) { const n = vesselCellTake(q.room, i, k, (S.pump || 70) - got, changed); if (n > 0) { u[k] += n; got += n; } } } }
-  if (got) { const rims = []; for (const s of [-1, 1]) for (let d = q.R; d >= Math.max(2, q.R - 2); d--) rims.push(q.c + s * d);
+  const P = S.pump || 240, w = Math.max(2, Math.round(q.R * (S.core || 0.35))); let wsum = 0; for (let dc = -w; dc <= w; dc++) wsum += w + 1 - Math.abs(dc);
+  for (let dc = -w; dc <= w; dc++) { const c = q.c + dc, r0 = topOf(c); if (r0 < 0) continue; let quota = Math.round(P * (w + 1 - Math.abs(dc)) / wsum), gotC = 0;
+    for (let r = r0; r <= Math.min(q.bot - 1, r0 + 3) && gotC < quota; r++) { const i = c * ROWS + r; for (let k = LIQ_T - 1; k >= 0 && gotC < quota; k--) { const n = vesselCellTake(q.room, i, k, quota - gotC, changed); if (n > 0) { u[k] += n; gotC += n; } } }
+    got += gotC; }
+  if (got) { const rims = []; for (const s0 of [-1, 1]) for (let d = q.R; d >= w + 2; d--) rims.push(q.c + s0 * d);   // (8d round 2, rig photo: put on the outer three columns it piled up and crashed back in blobs — spread over all outside its hollow)
     for (let k = 0; k < LIQ_T; k++) { let left = u[k]; for (let pass = 0; pass < 3 && left > 0; pass++) for (const c of rims) { if (left <= 0) break; const r0 = topOf(c); if (r0 < 0) continue;
-        for (const r of [r0, r0 - 1]) { if (r < 0 || left <= 0) continue; const i = c * ROWS + r; if (!vesselCellOpen(q.room, i)) continue; left -= vesselCellPut(q.room, i, k, Math.ceil(left / 3), changed); } }
-      if (left > 0) { const i = q.c * ROWS + q.bot; left -= vesselCellPut(q.room, i, k, left, changed); } if (left > 0) u[k] = left; else u[k] = 0; }
+        for (const r of [r0, r0 - 1]) { if (r < 0 || left <= 0) continue; const i = c * ROWS + r; if (!vesselCellOpen(q.room, i)) continue; left -= vesselCellPut(q.room, i, k, Math.max(1, Math.ceil(left / rims.length)), changed); } }
+      if (left > 0) { const i = q.c * ROWS + q.bot; left -= vesselCellPut(q.room, i, k, left, changed); } u[k] = Math.max(0, left); }
     q.moved += got; }
   if (changed.length) emitFineCells(q.room, [...new Set(changed)]);
 }
@@ -4370,26 +4374,37 @@ setInterval(() => { if (!_magicPools.size) return; const now = Date.now(); for (
 // THE WAVE'S SHAPE: how high (a share of `high`) at `f` along it, 0 its tail, 1 its front — a long back rising to the crest, then a steep face
 function magicWaveProf(f) { return f < 0.72 ? Math.pow(f / 0.72, 1.4) : Math.max(0.35, 1 - Math.pow((f - 0.72) / 0.28, 2) * 0.65); }
 // (rig, 8d: the world's flow spread the mound further between ticks than the cells it was put on — 3752 units were left behind) THE WATER THAT WAS THERE is recorded along its
-//   way at the cast (`magicWaveCorridor`: every cell's water in a band along its path); each tick it takes back, near it, only the water ABOVE that record — at its end, along
-//   the whole band — never more than it has out. Nothing of a pool it passed is taken; what it leaves beyond the band is counted (`lost`).
+//   way at the cast; each tick only the water ABOVE that record is taken back near it. (8d round 2, the user: several waves near each other drew 'odd, jagged' shapes, and
+//   some water stayed where there had been none) ONE LEDGER A ROOM, shared by its waves (`_magicWaveRoom`): the record (each cell recorded once — by the first wave over it, so
+//   another wave's water is never taken for water that was there), and how much conjured water is out in all. Each wave takes back near itself whatever stands above the
+//   record (anybody's — it is all the same water) and puts its own down again; when the LAST wave in the room ends, all that is still out is taken back along every wave's
+//   band (then again at 0.6 s and 1.5 s, as drops land). Splashes, gusts and whirlwinds leave conjured water alone (`magicWaveHolds`) — it never leaves the band as drops.
+const _magicWaveRoom = new Map();   // room → { base: Map(cell → its water before any wave), seen: Set(cells recorded), out, box: [c0, c1, r0, r1], n (waves on), lost }
+function magicWaveLedger(room) { let R = _magicWaveRoom.get(room); if (!R) _magicWaveRoom.set(room, R = { base: new Map(), seen: new Set(), out: 0, box: null, n: 0, lost: 0, gen: 0 }); return R; }
+function magicWaveHolds(room, i) { const R = _magicWaveRoom.get(room); if (!R || !(R.out > 0) || !R.seen.has(i)) return false; const st = cellsOf(room), amt = st.fineAmt; if (!amt) return false; return amt.rp(i)[amt.o(i) + LIQ_RANK[9]] > (R.base.get(i) || 0); }
 function magicWaveCorridor(room, x0, dir, gr, S) {
-  const st = cellsOf(room), tot = st.fineTotal, amt = st.fineAmt, ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, WR = LIQ_RANK[9], L = S.len || 16, run = Math.ceil(((S.speed || 120) * (S.secs || 4.5)) / T) + L;
-  const ca = Math.floor(x0 / T), c0 = Math.max(0, Math.min(ca - L - 16, ca + dir * run) - 16), c1 = Math.min(COLS - 1, Math.max(ca + L + 16, ca + dir * run) + 16), r0 = Math.max(0, gr - 24), r1 = Math.min(ROWS - 1, gr + 18), base = new Map();
-  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const i = c * ROWS + r; if (peekCellAt(tot, i) > 0) { const w = amt.rp(i)[amt.o(i) + WR]; if (w > 0) base.set(i, w); } }
-  return { c0, c1, r0, r1, base };
+  const st = cellsOf(room), tot = st.fineTotal, amt = st.fineAmt, ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, WR = LIQ_RANK[9], L = S.len || 16, run = Math.ceil(((S.speed || 120) * (S.secs || 4.5)) / T) + L, R = magicWaveLedger(room);
+  const ca = Math.floor(x0 / T), c0 = Math.max(0, Math.min(ca - L - 16, ca + dir * run) - 16), c1 = Math.min(COLS - 1, Math.max(ca + L + 16, ca + dir * run) + 16), r0 = Math.max(0, gr - 24), r1 = Math.min(ROWS - 1, gr + 18);
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const i = c * ROWS + r; if (R.seen.has(i)) continue; R.seen.add(i); if (peekCellAt(tot, i) > 0) { const w = amt.rp(i)[amt.o(i) + WR]; if (w > 0) R.base.set(i, w); } }
+  R.box = R.box ? [Math.min(R.box[0], c0), Math.max(R.box[1], c1), Math.min(R.box[2], r0), Math.max(R.box[3], r1)] : [c0, c1, r0, r1]; R.n++; R.gen++;
+  return { c0, c1, r0, r1 };
 }
-function magicWaveTakeBack(room, q, changed, all) {
-  const st = cellsOf(room), tot = st.fineTotal, amt = st.fineAmt, ROWS = st.rows, T = TERRAIN_CELL, WR = LIQ_RANK[9], K = q.corr, L = q.S.len || 16; q.put.clear(); if (!(q.out > 0)) return;
-  const cF = Math.floor(q.x / T), lo = all ? K.c0 : Math.max(K.c0, Math.min(cF, cF - q.dir * (L - 1)) - 14), hi = all ? K.c1 : Math.min(K.c1, Math.max(cF, cF - q.dir * (L - 1)) + 14);
-  for (let c = lo; c <= hi && q.out > 0; c++) for (let r = K.r0; r <= K.r1 && q.out > 0; r++) { const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue; const w = amt.rp(i)[amt.o(i) + WR], ex = w - (K.base.get(i) || 0); if (ex <= 0) continue;
-    q.out -= vesselCellTake(room, i, WR, Math.min(ex, q.out), changed); }
-  // (rig: 72 units left — its water had taken the place of pool water that ran off, so no cell stood above the record) at its end the rest from any water along the band, top first
-  if (all && q.out > 0) for (let c = K.c0; c <= K.c1 && q.out > 0; c++) for (let r = K.r0; r <= K.r1 && q.out > 0; r++) { const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue; const w = amt.rp(i)[amt.o(i) + WR]; if (w > 0) q.out -= vesselCellTake(room, i, WR, Math.min(w, q.out), changed); }
-  if (all && q.out > 0) { q.lost = (q.lost || 0) + q.out; q.out = 0; }
+// take back what stands above the record in columns lo..hi, rows r0..r1, at most `cap` (and never more than is out); `any`: then any water there, top first
+function magicWaveTake(room, R, lo, hi, r0, r1, cap, changed, any) {
+  const st = cellsOf(room), tot = st.fineTotal, amt = st.fineAmt, ROWS = st.rows, WR = LIQ_RANK[9]; let want = Math.min(cap, R.out), got = 0; if (!(want > 0)) return 0;
+  for (let pass = 0; pass < (any ? 2 : 1) && got < want; pass++) for (let c = lo; c <= hi && got < want; c++) for (let r = r0; r <= r1 && got < want; r++) { const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
+    const w = amt.rp(i)[amt.o(i) + WR], ex = pass ? w : w - (R.base.get(i) || 0); if (ex <= 0) continue; got += vesselCellTake(room, i, WR, Math.min(ex, want - got), changed); }
+  R.out -= got; return got;
 }
-function magicWaveBase(room, c, ref, S, K) {   // the first rock or liquid down from a little above `ref` in column c: { r, wall } (wall: rock already there — a step too tall)
+function magicWaveTakeBack(room, q, changed) {
+  const R = magicWaveLedger(room), K = q.corr, T = TERRAIN_CELL, L = q.S.len || 16, cF = Math.floor(q.x / T); q.put.clear();
+  magicWaveTake(room, R, Math.max(K.c0, Math.min(cF, cF - q.dir * (L - 1)) - 14), Math.min(K.c1, Math.max(cF, cF - q.dir * (L - 1)) + 14), K.r0, K.r1, 1e9, changed, false);
+}
+function magicWaveSweepRoom(room, any) { const R = _magicWaveRoom.get(room); if (!R || R.n > 0 || !R.box) return; const ch = [];
+  magicWaveTake(room, R, R.box[0], R.box[1], R.box[2], R.box[3], 1e9, ch, any); if (ch.length) emitFineCells(room, [...new Set(ch)]); R.lost = R.out; }
+function magicWaveBase(room, c, ref, S) {   // the first rock or liquid down from a little above `ref` in column c: { r, wall } (wall: rock already there — a step too tall)
   const st = cellsOf(room), grid = st.terrain, tot = st.fineTotal, ROWS = st.rows, floorRow = Math.floor(roomFloorTop(room) / TERRAIN_CELL); if (c < 0 || c >= st.cols) return { r: ref, wall: true };
-  const full = (r) => { if (r >= floorRow || r >= ROWS) return true; const i = c * ROWS + r, v = peekCellAt(grid, i); return (v > 0 && isSolidCell(v) && !(v >= 249 && v <= 253)) || (K ? K.base.has(i) : peekCellAt(tot, i) > 0); };   // (rig: a crate's body cells read as a wall — it broke on them; it carries them)
+  const full = (r) => { if (r >= floorRow || r >= ROWS) return true; const i = c * ROWS + r, v = peekCellAt(grid, i); if (v > 0 && isSolidCell(v) && !(v >= 249 && v <= 253)) return true; const R = _magicWaveRoom.get(room); return R && R.seen.has(i) ? R.base.has(i) : peekCellAt(tot, i) > 0; };   // (rig: a crate's body cells read as a wall — it broke on them; it carries them)
   const r0 = ref - (S.step || 3) - 1; if (r0 < 0 || full(r0)) return { r: ref, wall: true };
   for (let r = r0 + 1; r <= ref + 14; r++) if (full(r)) return { r, wall: false };
   return { r: ref + 14, wall: false };
@@ -4397,19 +4412,19 @@ function magicWaveBase(room, c, ref, S, K) {   // the first rock or liquid down 
 function magicWaveTick(id, q, now) {
   const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid || !st.fineAmt) return; ensureFineArrays(room, 1);
   const ROWS = st.rows, T = TERRAIN_CELL, S = q.S, L = S.len || 16, WR = LIQ_RANK[9], changed = [], dt = Math.min(0.2, (now - (q.at || now)) / 1000); q.at = now;
-  magicWaveTakeBack(room, q, changed, false);
+  magicWaveTakeBack(room, q, changed);
   // forward, unless broken; a step taller than it can climb (or rock at its crest's height ahead) breaks it
-  if (!q.endAt) { const nx = q.x + q.dir * (S.speed || 120) * dt, cN = Math.floor(nx / T) + q.dir, b = magicWaveBase(room, cN, q.gr, S, q.corr);
+  if (!q.endAt) { const nx = q.x + q.dir * (S.speed || 120) * dt, cN = Math.floor(nx / T) + q.dir, b = magicWaveBase(room, cN, q.gr, S);
     let wall = b.wall; if (!wall) { for (let r = b.r - 1; r >= b.r - Math.ceil((S.high || 5) * 0.8); r--) { const v = peekCellAt(grid, cN * ROWS + r); if (r < 0 || (v > 0 && isSolidCell(v) && !(v >= 249 && v <= 253))) { wall = true; break; } } }
-    if (wall) { q.endAt = now; q.broke = 1; } else { q.x = nx; q.gr = magicWaveBase(room, Math.floor(nx / T), q.gr, S, q.corr).r; } }
+    if (wall) { q.endAt = now; q.broke = b.wall ? 1 : 2; q.brokeAt = cN; } else { q.x = nx; q.gr = magicWaveBase(room, Math.floor(nx / T), q.gr, S).r; } }
   const age = now - q.t0, grow = Math.min(1, age / 400), fade = q.endAt ? Math.max(0, 1 - (now - q.endAt) / 320) : Math.max(0, Math.min(1, (q.until - now) / 500)), H = (S.high || 5) * grow * fade;
   // its columns, front to tail, each on the first rock or liquid under it (its own water taken up first)
   const cF = Math.floor(q.x / T), cols = [], bases = [], hs = []; let ref = q.gr;
-  for (let k = L - 1; k >= 0; k--) { const c = cF - q.dir * (L - 1 - k); const b = magicWaveBase(room, c, ref, S, q.corr); ref = b.wall ? ref : b.r; q.base.set(c, ref); cols.push(c); bases.push(ref); hs.push(b.wall ? 0 : H * magicWaveProf(k / (L - 1))); }
+  for (let k = L - 1; k >= 0; k--) { const c = cF - q.dir * (L - 1 - k); const b = magicWaveBase(room, c, ref, S); ref = b.wall ? ref : b.r; q.base.set(c, ref); cols.push(c); bases.push(ref); hs.push(b.wall ? 0 : H * magicWaveProf(k / (L - 1))); }
   for (const [c] of q.base) if (Math.abs(c - cF) > L + 10) q.base.delete(c);
-  let left = q.N;
+  let left = q.N; const R = magicWaveLedger(room);
   for (let j = 0; j < cols.length && left > 0; j++) { const c = cols[j], h = hs[j]; if (!(h > 0.05) || c < 0 || c >= st.cols) continue; let need = Math.round(h * LIQUID_MAX);
-    for (let r = bases[j] - 1; r >= 0 && need > 0 && left > 0; r--) { const i = c * ROWS + r; if (!vesselCellOpen(room, i)) break; const n = vesselCellPut(room, i, WR, Math.min(need, left, LIQUID_MAX), changed); if (n > 0) { q.put.set(i, (q.put.get(i) || 0) + n); need -= n; left -= n; q.out += n; } else if (need > 0 && peekCellAt(st.fineTotal, i) < LIQUID_MAX) break; } }
+    for (let r = bases[j] - 1; r >= 0 && need > 0 && left > 0; r--) { const i = c * ROWS + r; if (!vesselCellOpen(room, i)) break; const n = vesselCellPut(room, i, WR, Math.min(need, left, LIQUID_MAX), changed); if (n > 0) { q.put.set(i, (q.put.get(i) || 0) + n); need -= n; left -= n; R.out += n; } else if (need > 0 && peekCellAt(st.fineTotal, i) < LIQUID_MAX) break; } }
   // the surface's powder at its front swept up (dropped where it ends)
   if (!q.endAt && q.carry.length < (S.carry || 60)) { const M = magicTemp.get(room), cg = []; let took = 0;
     for (let dc = 0; dc <= 1 && took < (S.grab || 2); dc++) { const c = cF + q.dir * dc; if (c < 0 || c >= st.cols) continue; const b = q.base.get(c) != null ? q.base.get(c) : q.gr;
@@ -4419,11 +4434,15 @@ function magicWaveTick(id, q, now) {
   io.to(room).emit('magic-wave', { id, x: Math.round(q.x), dir: q.dir, c0: cols[cols.length - 1], b: bases.slice().reverse(), h: hs.map(v => Math.round(v * 10)).reverse(), br: q.broke ? 1 : 0, n: q.carry.length });
 }
 function magicWaveEnd(id, q) {
-  _magicWaves.delete(id); const room = q.room, changed = [], T = TERRAIN_CELL; try { magicWaveTakeBack(room, q, changed, true); } catch (e) {} if (changed.length) emitFineCells(room, [...new Set(changed)]);
+  _magicWaves.delete(id); const room = q.room, changed = [], T = TERRAIN_CELL, R = magicWaveLedger(room), K = q.corr, L = q.S.len || 16, cF = Math.floor(q.x / T);
+  let n = 0; for (const v of q.put.values()) n += v;   // (what it put down last, taken back round it now — anybody's water above the record)
+  try { magicWaveTake(room, R, Math.max(K.c0, Math.min(cF, cF - q.dir * (L - 1)) - 14), Math.min(K.c1, Math.max(cF, cF - q.dir * (L - 1)) + 14), K.r0, K.r1, n, changed, false); } catch (e) {}
+  q.put.clear(); R.n = Math.max(0, R.n - 1); if (changed.length) emitFineCells(room, [...new Set(changed)]);
+  try { magicWaveSweepRoom(room, false); } catch (e) {}
   const y = (q.gr - (q.S.high || 5) * 0.6) * T; if (q.carry.length) magicSoilSpray(room, q.x, y, { m: q.carry, o: [] }, q.dir * 160, -120, { fan: 0.6 });
-  io.to(room).emit('magic-wave-end', { id, x: Math.round(q.x), y: Math.round(q.gr * T), dir: q.dir, br: q.broke ? 1 : 0, lost: q.lost || 0 });
-  // (rig: 55 units left after — water off an edge still falling as drops when it ended) what was not found is looked for again as it lands, twice
-  for (const ms of [600, 1500]) setTimeout(() => { if (!(q.lost > 0)) return; try { const ch = []; q.out = q.lost; q.lost = 0; magicWaveTakeBack(room, q, ch, true); if (ch.length) emitFineCells(room, [...new Set(ch)]); } catch (e) {} }, ms);
+  io.to(room).emit('magic-wave-end', { id, x: Math.round(q.x), y: Math.round(q.gr * T), dir: q.dir, br: q.broke || 0, bc: q.brokeAt, out: R.out, on: R.n });
+  // (rig: water off an edge still falling as drops when it ended) when the room's last wave has ended: looked for again as it lands — the last time any water in its bands
+  const gen = R.gen; for (const ms of [600, 1500]) setTimeout(() => { const R2 = _magicWaveRoom.get(room); if (!R2 || R2.gen !== gen || R2.n > 0) return; try { magicWaveSweepRoom(room, ms > 1000); } catch (e) {} if (ms > 1000) { R2.lost = R2.out; _magicWaveRoom.delete(room); if (R2.out > 0) console.log('[magic wave] ' + R2.out + ' units not found in ' + room); } }, ms);
 }
 setInterval(() => { if (!_magicWaves.size) return; const now = Date.now();
   for (const [id, q] of _magicWaves) { try { if (now > q.until || (q.endAt && now - q.endAt > 340)) magicWaveEnd(id, q); else if (now - (q.at || 0) >= (q.S.tickMs || 60) - 8) magicWaveTick(id, q, now); } catch (e) { console.error('[magic wave] ' + (e && e.message)); _magicWaves.delete(id); } } }, 20);
@@ -6030,7 +6049,7 @@ function liqSplashHit(room, x, y, sp, vx, hw, want, wt, fwd) {   // `fwd` (piece
   // the surface near it: liquid with open air over it, nearest first (the impact's own cell last resort — a pour onto bare rock)
   const cand = [];
   for (let c = Math.max(0, ic - R); c <= Math.min(COLS - 1, ic + R); c++) for (let r = Math.max(1, ir - 2); r <= Math.min(ROWS - 2, ir + 2); r++) {
-    const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0) || !air(i - 1)) continue;
+    const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0) || !air(i - 1) || magicWaveHolds(room, i)) continue;   // (8d: a wave's own water is not thrown)
     cand.push([Math.abs(c - ic) + Math.abs(r - ir) * 0.5, i, c, r]);
   }
   if (!cand.length) { const i = ic * ROWS + ir; if (ic >= 0 && ic < COLS && ir >= 0 && ir < ROWS && peekCellAt(tot, i) > 0) cand.push([0, i, ic, ir]); else return 0; }
@@ -6074,6 +6093,7 @@ function liqBlastApply(room, x, y, R, k, dir) {
     const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
     const d = Math.hypot((c + 0.5) * T - x, (r + 0.5) * T - y); if (d >= R) continue;
     if (dir && ((c + 0.5) * T - x) * dir.ax + ((r + 0.5) * T - y) * dir.ay < dir.c * d) continue;   // (a gust: only in its cone)
+    if (magicWaveHolds(room, i)) continue;   // (8d: a wave's own water is not thrown)
     if (!air(i - 1) && !air(i - ROWS) && !air(i + ROWS)) continue;   // open air touches it — liquid deep inside a pool is pushed, not thrown
     cand.push([d, i, c, r]);
   }
