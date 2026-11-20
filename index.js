@@ -4134,6 +4134,32 @@ function magicSnowDebt(grid, hp, ROWS, i, M, n, cells, melt) { for (let k = 0; k
 function magicSnowNear(grid, ROWS, i, M) { let best = -1, bd = 1e9; const c0 = Math.floor(i / ROWS), r0 = i % ROWS;
   for (let dc = -5; dc <= 5; dc++) for (let dr = -2; dr <= 6; dr++) { const j = (c0 + dc) * ROWS + r0 + dr; if (j < 0 || j >= grid.length || M.has(j) || peekCellAt(grid, j) !== MAGIC_SNOW) continue; const d = dc * dc + dr * dr; if (d < bd) { bd = d; best = j; } }
   return best; }
+// (7d) a spell's ICE giving its liquid back when its time is up: the freeze's (kind 'ice', `units` of water) and the ice step's (kind 'stepice', `units` of water + `wq` of BRINE) → done?
+function magicTempLiq(T, amt, tot, i) {
+  if (!amt || !tot || (T.kind !== 'ice' && T.kind !== 'stepice')) return false; const w = T.units | 0, br = T.kind === 'stepice' ? T.wq | 0 : 0; if (!(w + br > 0)) return false;
+  const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = w; if (br) p[b + LIQ_RANK[14]] = br; tot.s(i, w + br); return true; }
+// ⭐ MAGIC 7d (2026-11-20, FROST — kickoff §'STEP 7'): THE ICE STEP. While it lasts its caster's game says where its feet are (`magic-step`, ~20 a second, with its speed); here the
+//   WATER or BRINE SURFACE under them and just ahead (`lead` s of the speed, falling too) turns to ICE (kind 'stepice': its water and brine kept, back when it thaws) — `thawS` after
+//   the feet were last over it (each step over a cell puts its thaw back). Only a SURFACE (no liquid above it) whose top is at or below the feet: never water round the body, so the
+//   caster is never frozen in. → the cells newly frozen. PROCESSOR: a few columns a step.
+const _magicSteps = new Map();   // caster's socket → { id, room, until, at (last step) }
+function magicIceStep(room, x, y, vx, vy, S) {
+  const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt, tot = st.fineTotal; if (!grid || !amt || !tot || (st.fineSub || 1) !== 1) return 0;
+  const T = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols, N = grid.length, WR = MAGIC_WATER_RK, BR = LIQ_RANK[14], lead = S.lead || 0.2, M = magicTemp.get(room), now = Date.now(), until = now + (S.thawS || 3) * 1000, mats = roomMats[room] || {};
+  const liqOnly = (i) => { if (i < 0 || i >= N) return false; const t = peekCellAt(tot, i); if (!(t > 0)) return false; const p = amt.rp(i), b = amt.o(i); return p[b + WR] + p[b + BR] === t; };
+  const hasLiq = (i) => i >= 0 && i < N && peekCellAt(tot, i) > 0;
+  const x0 = x - 14 + Math.min(0, vx * lead), x1 = x + 14 + Math.max(0, vx * lead), yb = y + 2 * T + Math.max(0, vy * lead);
+  const cells = [], liq = [];
+  for (let c = Math.floor(x0 / T); c <= Math.floor(x1 / T); c++) { if (c < 0 || c >= COLS) continue;
+    for (let r = Math.max(1, Math.ceil((y - 3) / T)); r * T <= yb && r < ROWS; r++) { const i = c * ROWS + r, v = peekCellAt(grid, i);
+      const T0 = M && M.get(i); if (T0 && T0.kind === 'stepice' && v === MAGIC_ICE) { if (T0.until < until) { T0.until = until; T0.sch = 0; magicTempPut(room, i, T0); } break; }   // (still over it: its thaw put back)
+      if (hasLiq(i)) { if (!hasLiq(i - 1) && liqOnly(i)) { const p = amt.wp(i), b = amt.o(i), w = p[b + WR], br = p[b + BR]; for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; tot.s(i, 0); fineSet(room).delete(i);
+          grid.s(i, MAGIC_ICE); st.terrainHp.s(i, matStrengthSrv(mats, MAGIC_ICE)); cells.push(i, MAGIC_ICE); liq.push(i); magicTempPut(room, i, { kind: 'stepice', mat: MAGIC_ICE, back: 0, units: w, wq: br, until, crack: 0 }); }
+        break; }
+      if (v !== 0 && v !== -1) break; } }
+  if (cells.length) { wireFanout(room, 'terrain-set', { cells }); emitFineCells(room, liq); const c = []; for (let q = 0; q < cells.length; q += 2) c.push(cells[q]); io.to(room).emit('magic-cells', { c, spell: 'icestep', look: 'frost' }); }
+  return cells.length / 2;
+}
 // ⭐ (7c) THE COLD SNAP round (x, y): every cell within `rad` px holding only water turns to ICE, outward from the middle ring by ring (`ringMs` a cell's distance), at most `cells` —
 //   written as the freeze writes it (kind 'ice', its water kept and given back after `secs`); every cell burning within reach goes out. → how many cells it will freeze.
 //   🟥 (rig run 2: the caster stood in a puddle and was frozen into its ice — the ice hold, 16e) 'you are untouched': water within `keep` px of the middle (the caster's body and a
@@ -4502,7 +4528,7 @@ function magicLiqOut(room, i, avoid, liq, cells) {
 function magicWall(room, x, y, S) {
   const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, T = TERRAIN_CELL, W = S.wide || 2, H = S.high || 12, cL = Math.round(x / T - W / 2), lines = [];
   for (let k = 0; k < W; k++) { const g = magicGroundAt(room, (cL + k + 0.5) * T, y - T); if (!g || Math.abs(g.y - y) > 4 * T) continue; const under = g.r + 1 < Math.floor(roomFloorTop(room) / T) ? peekCellAt(grid, g.c * ROWS + g.r + 1) : 2;
-    const cs = []; for (let h = 0; h < H; h++) cs.push(g.r - h >= 1 ? g.c * ROWS + g.r - h : -1); lines.push({ cells: cs, mat: MAGIC_ROCKY.has(under) ? under : 2 }); }
+    const cs = []; for (let h = 0; h < H; h++) cs.push(g.r - h >= 1 ? g.c * ROWS + g.r - h : -1); lines.push({ cells: cs, mat: S.mat || (MAGIC_ROCKY.has(under) ? under : 2) }); }   // (7d: the ice wall's own `mat`)
   return magicWallLines(room, lines, S);
 }
 // ⭐ (step 3f, the user: "the stone wall should also be able to go horizontal if you shoot it into the side of a wall") A WALL OUT OF A FACE: `wide` rows, level, `high` cells
@@ -4511,7 +4537,7 @@ function magicWallSide(room, x, y, dir, S) {
   const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, W = S.wide || 2, H = S.high || 12, floorRow = Math.floor(roomFloorTop(room) / T);
   const c0 = Math.floor(x / T), r0 = Math.floor(y / T), fc = c0 + dir; if (fc < 0 || fc >= COLS) return null;
   const solidAt = (c, r) => { if (r >= floorRow) return true; const v = peekCellAt(grid, c * ROWS + r); return v > 0 && isSolidCell(v); };
-  if (!solidAt(fc, r0)) return null; const face = peekCellAt(grid, fc * ROWS + r0), mat = MAGIC_ROCKY.has(face) ? face : 2, rTop = r0 - Math.floor((W - 1) / 2), lines = [];
+  if (!solidAt(fc, r0)) return null; const face = peekCellAt(grid, fc * ROWS + r0), mat = S.mat || (MAGIC_ROCKY.has(face) ? face : 2), rTop = r0 - Math.floor((W - 1) / 2), lines = [];
   for (let w = 0; w < W; w++) { const r = rTop + w; if (r < 1 || r >= floorRow || !solidAt(fc, r)) continue; const cs = []; for (let k = 0; k < H; k++) { const c = c0 - dir * k; cs.push(c >= 0 && c < COLS ? c * ROWS + r : -1); } lines.push({ cells: cs, mat }); }
   if (!lines.length) return null; return magicWallLines(room, lines, S);
 }
@@ -4523,7 +4549,7 @@ function magicWallSide(room, x, y, dir, S) {
 //   end first. `S.sink`: the cells are kind 'sink' (the pillar SINKS back the way it rose: no cracks, no rubble). `S.crackS` 0 = no cracks.
 function magicWallLines(room, lines, S) {
   const st = cellsOf(room), grid = st.terrain; if (!lines.length || !grid) return 0;
-  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS != null ? S.crackS : 6) * 1000, gap = S.crumbleMs || 30, mats = roomMats[room] || {}, kind = S.sink ? 'sink' : 'wall', rowMs = S.rowMs || 70, waitN = S.waitN || 0;
+  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS != null ? S.crackS : 6) * 1000, gap = S.crumbleMs || 30, mats = roomMats[room] || {}, kind = S.sink ? 'sink' : S.melts ? 'melt' : 'wall', rowMs = S.rowMs || 70, waitN = S.waitN || 0;
   const avoid = new Set(); let total = 0; for (const L of lines) { L.k = 0; L.w = 0; total += L.cells.length; for (const i of L.cells) if (i >= 0) avoid.add(i); }
   const tick = (h) => {
     const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = [], t2 = s2.fineTotal, el = h * rowMs; let live = false;
@@ -4537,6 +4563,7 @@ function magicWallLines(room, lines, S) {
       grid.s(i, L.mat); s2.terrainHp.s(i, matStrengthSrv(mats, L.mat)); cells.push(i, L.mat); L.k++;
       const lu = until + (L.t0 || 0), u = lu + (L.cells.length - 1 - k) * gap; magicTempPut(room, i, { kind, mat: L.mat, back: 0, units: 0, until: u, crack: crack > 0 ? crack + (u - lu) : 0, ce: lu }); }
     if (cells.length) wireFanout(room, 'terrain-set', { cells });
+    if (S.melts && cells.length) { const c = []; for (let q = 0; q < cells.length; q += 2) c.push(cells[q]); io.to(room).emit('magic-cells', { c, spell: 'icewall', look: 'frost' }); }   // (7d) the ice wall's cells rime over as they come
     if (liq.length) emitFineCells(room, liq);
     if (live && h < 400) setTimeout(() => tick(h + 1), rowMs);
   };
@@ -4591,13 +4618,14 @@ const magicCfgSrv = { wake: 1, exact: 1 };   // switches back: `wake` 0 = the li
 function magicTempEnd(room, list) {
   const st = roomCells.get(room), M = magicTemp.get(room); if (!st || !st.terrain || !M) return; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal;
   const cells = [], liq = [], gone = [], woke = [], sank = [], thaw = [], tdmg = [], mats = roomMats[room] || {};
-  const melt = [];   // (7c) snow a cloud left, melted away
+  const melt = [], imelt = [], sthaw = [];   // (7c) snow a cloud left, melted away · (7d) an ice wall's cells melted, the ice step's ice thawed
   for (const i of list) { const T = M.get(i); if (!T) continue; const v = peekCellAt(grid, i); if (v < 0) { T.sch = 0; continue; }
     if (v !== T.mat && !magicSnowIced(T, v)) { if (T.kind === 'snow' && peekAir(grid, i)) magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt);   // (7c: the grain slid on — the nearest snow goes instead)
       M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
     if (T.kind === 'snow') { melt.push(i); const up = peekCellAt(grid, i - 1); if (i % st.rows > 0 && isPowderId(up)) powderSet(room).add(i - 1); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, i, M, T.units, cells, melt); }
     { const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) tdmg.push(i, BK[1]); } }   // (7a: a glazed cell back to its ground, with the damage it had)
-    if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }
+    if (magicTempLiq(T, amt, tot, i)) { fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }   // (7d: the ice step's ice gives back its water and brine too)
+    if (T.kind === 'melt') imelt.push(i); else if (T.kind === 'stepice') sthaw.push(i);
     if (magicSnowIced(T, v)) magicSnowIceBack(room, i, liq, T);   // (7c round 2)
     cells.push(i, grid.g(i)); woke.push(i);
     if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat); else if (T.kind === 'sink') sank.push(Math.floor(i / st.rows), i % st.rows, T.mat);
@@ -4608,6 +4636,7 @@ function magicTempEnd(room, list) {
   if (gone.length || sank.length) io.to(room).emit('magic-wall-end', { cells: gone, sink: sank.length ? sank : undefined });   // (5d: a pillar's cells SINK — no rubble)
   if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });   // (7a)
   if (melt.length) io.to(room).emit('magic-cells', { c: melt, spell: 'snowcloud', look: 'melt' });   // (7c)
+  if (imelt.length) io.to(room).emit('magic-cells', { c: imelt, spell: 'icewall', look: 'icemelt' }); if (sthaw.length) io.to(room).emit('magic-cells', { c: sthaw, spell: 'icestep', look: 'thaw' });   // (7d)
   if (!M.size) magicTemp.delete(room);
 }
 // four times a second: cracks coming on a wall that is about to go (its strength lowered — the same crack look as a dug cell), and every cell whose time is up put back
@@ -4615,7 +4644,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [room, M] of magicTemp) {
     const st = roomCells.get(room); if (!st || !st.terrain) continue; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal, mats = roomMats[room] || {};
-    const cells = [], dmg = [], liq = [], gone = [], due = new Map(), thaw = [], melt = [];
+    const cells = [], dmg = [], liq = [], gone = [], due = new Map(), thaw = [], melt = [], imelt = [], sthaw = [];
     for (const [i, T] of M) {
       const v = peekCellAt(grid, i); if (v < 0) continue;   // (its chunk not here yet: later)
       // (7c) a cloud's snow grain that slid off its cell: waited for until its time, then the nearest snow nobody remembers melts instead (empty air only — snow heat turned to water is gone already)
@@ -4625,7 +4654,8 @@ setInterval(() => {
       if (now >= T.until) {
         const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); cells.push(i, BK[0]);
         if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) dmg.push(i, BK[1]); }   // (7a: the ground back with the damage it had, a powder woken)
-        if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); }
+        if (magicTempLiq(T, amt, tot, i)) { fineSet(room).add(i); liq.push(i); }
+        if (T.kind === 'melt') imelt.push(i); else if (T.kind === 'stepice') sthaw.push(i);   // (7d)
         if (magicSnowIced(T, v)) magicSnowIceBack(room, i, liq, T);   // (7c round 2)
         if (T.kind === 'wall' || T.kind === 'sink') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
         if (T.kind === 'snow') { melt.push(i); if (i % st.rows > 0 && isPowderId(peekCellAt(grid, i - 1))) powderSet(room).add(i - 1); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, i, M, T.units, cells, melt); }   // (7c: snow above it falls into the space; the grains owed round it)
@@ -4637,6 +4667,7 @@ setInterval(() => {
     if (gone.length) io.to(room).emit('magic-wall-end', { cells: gone });
     if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });
     if (melt.length) io.to(room).emit('magic-cells', { c: melt, spell: 'snowcloud', look: 'melt' });   // (7c)
+    if (imelt.length) io.to(room).emit('magic-cells', { c: imelt, spell: 'icewall', look: 'icemelt' }); if (sthaw.length) io.to(room).emit('magic-cells', { c: sthaw, spell: 'icestep', look: 'thaw' });   // (7d)
     for (const [k, list] of due) setTimeout(() => magicTempEnd(room, list), Math.max(0, k - now));
     if (!M.size) magicTemp.delete(room);
   }
@@ -11299,7 +11330,9 @@ function powderTickRoom(room) {
   // …a move into a wooden thing's cell has to be allowed by the thing first (it can refuse: not one of its stamped cells)
   const enter = (src, dst) => { const v = peekG(dst); if (v >= 249 && v <= 253 && !(buryFn && buryFn(room, dst, buried))) return false; swapMove(src, dst); return true; };
   // …and the same question asked on behalf of a RIGID block, which floats: air yes, fluid no. See MAT_RIGID.
-  const canEnter = (gv, j) => (MAT_RIGID[gv] ? peekG(j) === 0 && !(cov && cov.has(j)) : canDisplace(j));
+  // 🟥 (2026-11-20, magic 7d — the ice step's ice SANK to the pool's floor and the water rose through it) a cell of the fine liquid can read 0 in the grid while full (the grid's fluid id
+  //   is not kept on every liquid cell), so 'air' must also hold no liquid — or a floe sinks through deep water, the opposite of what MAT_RIGID promises
+  const canEnter = (gv, j) => (MAT_RIGID[gv] ? peekG(j) === 0 && !(cov && cov.has(j)) && !(ftot && peekCellAt(ftot, j) > 0) : canDisplace(j));
   const list = Array.from(active); active.clear();
   list.sort((a, b) => (b % ROWS) - (a % ROWS));   // bottom-up so a falling column cascades in a single pass
   const changedSet = new Set(), fineChanged = new Set();
@@ -28661,6 +28694,7 @@ io.on('connection', (socket) => {
     if (CL) { const K = socket._magicSecsK || 1, secs = S.cloudS || 8, until = now + secs * 1000; for (const [k, q] of _magicClouds) if (q.by === socket.id && q.spell === m.spell && now < q.until) q.until = now;   // (one of each at a time: a new one ends your last)
       _magicClouds.set(id, { room, by: socket.id, spell: m.spell, x: CL.x, y: CL.y, gy: CL.gy, w: (S.wide || 14) * TERRAIN_CELL, until, snow: !!S.snow, made: 0, acc: 0, lt: null, put: [], melt: until + (S.meltSecs || 60) * 1000 * K, dryMs: (S.drySecs || 60) * 1000 * K });
       out.cx = Math.round(CL.x); out.cy = Math.round(CL.y); out.w = (S.wide || 14) * TERRAIN_CELL; out.secs = secs; }   // (7c) every screen draws it there
+    if (S.kind === 'icestep') { const secs = +(S.secs || 20).toFixed(2); _magicSteps.set(socket.id, { id, room, until: now + secs * 1000 + 300, at: 0 }); out.secs = secs; }   // (7d) its caster's game says where its feet are (`magic-step`)
     if (S.kind === 'coldsnap') { const br = Math.max(4, Math.min(30, +m.br || 10)), cx = +m.bx, cy = +m.by - br; out.cx = Math.round(cx); out.cy = Math.round(cy); out.rad = S.rad || 96; out.hold = +(S.hold || 1.5).toFixed(2); out.crust = +(S.crustS || 8).toFixed(2); out.n = magicColdSnap(room, cx, cy, SK, br + TERRAIN_CELL * 1.5); }   // (7c) the water round you to ice; every screen frosts its own body (not the caster's)
     if (FP) { out.n = magicFrostPath(room, FP, SK, m.spell); out.secs = +(SK.secs || 30).toFixed(2); out.fp = FP.pts; }   // (7a) every screen: where the frost runs (its effects)
     if (S.kind === 'flameblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2); _magicBlades.set(socket.id, { room, wpn: WPN, id, until: now + secs * 1000 + 500 }); out.wpn = WPN; out.secs = secs; }   // (6c)
@@ -28748,6 +28782,10 @@ io.on('connection', (socket) => {
   socket.on('magic-chan-burn', (m) => { const room = currentAvatarRoom, q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - (q.burnT || 0) < 180) return; q.burnT = now; if (Math.hypot(m.x - q.x, m.y - q.y) > q.reach + 64) return; igniteBox(room, +m.x, +m.y, TERRAIN_CELL); });
   // ⭐ (6b) THE GROUND A FLAME RING'S FLAMES BRUSH, from its caster's game (which sees where they go) — near where its caster last said they were, a few times a second
+  // ⭐ (7d) THE ICE STEP: the caster's feet (x, y = where they touch), its speed (vx, vy px/s) — the surface under and ahead frozen (`magicIceStep`); at most ~30 a second, near where its game last said it was
+  socket.on('magic-step', (m) => { const room = currentAvatarRoom, q = _magicSteps.get(socket.id), now = Date.now(); if (!q || !m || (m.id | 0) !== q.id || q.room !== room || now > q.until) return;
+    if (now - q.at < 30 || !isFinite(m.x) || !isFinite(m.y)) return; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 160) return; q.at = now;
+    const S = SPELLS.of('icestep'); if (!S) return; const cap = (v) => Math.max(-900, Math.min(900, +v || 0)); try { q.n = (q.n || 0) + magicIceStep(room, +m.x, +m.y, cap(m.vx), cap(m.vy), S); } catch (e) { console.error('[magic step] ' + (e && e.message)); } });
   socket.on('magic-fire-at', (m) => { const room = currentAvatarRoom, q = m && _magicAuras.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now > q.until || now - (q.burnT || 0) < 140) return; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(+m.x - p.x, +m.y - p.y) > 160) return;
     q.burnT = now; igniteBox(room, +m.x, +m.y, TERRAIN_CELL * 0.5); });

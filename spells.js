@@ -267,6 +267,14 @@
       plain: { keys: [D, U, L, U, L], rune: [6, 4, 1, 0, 3] } },
     snowcloud: { name: 'Snow cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', alt: 'raincloud', snow: true, reach: 360, cloudS: 8, wide: 14, down: 3, cps: 8, flakeG: 4, flakeD: 1.2, meltSecs: 60, fx: '#eef7ff', look: 'melt',
       plain: { keys: [D, U, L, U, R], rune: [6, 4, 1, 2, 5] } },
+    // ⭐ STEP 7d (2026-11-20): ICE STEP, kind 'icestep' (on yourself, `secs`): the water or brine SURFACE under your feet and just ahead of them (`lead` s of your speed) freezes as you
+    //   go — your game says where your feet are (`magic-step`, ~20 a second), the server freezes; each cell thaws back to the same liquid `thawS` s after you have left it. Only
+    //   surfaces at or below your feet (never water round your body — you are never frozen in). ICE WALL, kind 'wall' (the stone wall's: lobbed, a wall `wide` × `high` where
+    //   it lands, or level out of a rock face), MADE OF ICE (`mat` 4 — slippery), `melts`: when its time is up it MELTS away from the top, `meltMs` a cell — no rubble, no water left.
+    icestep: { name: 'Ice step', school: 'frost', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'icestep', learn: 3, secs: 20, thawS: 3, lead: 0.2, fx: '#d8f4ff', look: 'frost',
+      plain: { keys: [D, D, L, U, R], rune: [1, 3, 7, 8, 5] } },
+    icewall: { name: 'Ice wall', school: 'frost', form: 'placed', tier: 1, cd: 8, stance: 'level', kind: 'wall', learn: 5, reach: 360, secs: 30, crackS: 0, wide: 2, high: 12, rowMs: 55, crumbleMs: 45, thruLiq: true, speed: 560, life: 3, grav: 0.35, r: 4.5,
+      mat: 4, melts: true, fx: '#cfefff', look: 'icemelt', plain: { keys: [D, R, L, R, U], rune: [2, 5, 4, 6, 3] } },
     coldsnap: { name: 'Cold snap', school: 'frost', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'coldsnap', learn: 5, rad: 96, cells: 220, ringMs: 22, secs: 30, hold: 1.5, crustS: 8, fx: '#cfefff',
       plain: { keys: [D, L, U, R, D], rune: [8, 4, 3, 1, 5] } },
     // the innate abilities (step 1: one each, small)
@@ -328,6 +336,7 @@
     fireball: [[U, D], [4, 1, 5, 7, 3, 1]], kindle: [[R, U], [4, 5, 2]],
     firewall: [[L, R], [4, 6, 0]], firestrip: [[L, D], [4, 6, 8]], flamering: [[D, D], [4, 3, 1, 5]], flamepillars: [[D, U], [4, 7, 1]], heat: [[L, U], [4, 3, 0]], flameblade: [[U, R], [4, 1, 2]],   // (6b: a wall drawn up · laid down · round you · down into the ground and up, as Earth's pillar)   // (6a: a burst's diamond, as gust / freeze · right then up — a spark sent out and lifting)
     chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
+    icestep: [[D, R], [4, 7, 8]], icewall: [[U, U], [4, 7]],   // (7d: down and along, a step laid under you · a wall drawn up, as the stone wall)
     raincloud: [[U, L], [4, 1, 0]], snowcloud: [[U, R], [4, 1, 2]], coldsnap: [[D, D], [4, 3, 1, 5]],   // (7c: up into the sky and off to one side or the other · round you, as the flame ring)
     iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]], shapewater: [[L, R], [4, 3, 5]], waterjet: [[R, D], [4, 8]],   // (7b: grab and fling, as the rock chunk · the stream ending)   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
