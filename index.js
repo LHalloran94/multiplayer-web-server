@@ -3856,11 +3856,12 @@ function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC
 //   restart before then still puts it back (the chunk's own save would otherwise keep the ice or the wall for good). A cell changed since by something else is left as it is.
 //   PROCESSOR: a few dozen cells a cast, a sweep of the remembered ones four times a second.
 db.exec('CREATE TABLE IF NOT EXISTS magic_temp (room TEXT NOT NULL, i INTEGER NOT NULL, kind TEXT NOT NULL, mat INTEGER NOT NULL, back INTEGER NOT NULL, units INTEGER NOT NULL, until INTEGER NOT NULL, crack INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (room, i))');
-try { db.exec('ALTER TABLE magic_temp ADD COLUMN ce INTEGER NOT NULL DEFAULT 0'); } catch (e) {}   // (step 3e: when a wall's cracks are complete — the same moment for every cell of it)
+try { db.exec('ALTER TABLE magic_temp ADD COLUMN ce INTEGER NOT NULL DEFAULT 0'); } catch (e) {}
+try { db.exec('ALTER TABLE magic_temp ADD COLUMN wq INTEGER NOT NULL DEFAULT 0'); } catch (e) {}   // (7c round 2: the water a cloud's snow took from a pool as it froze)   // (step 3e: when a wall's cracks are complete — the same moment for every cell of it)
 const magicTemp = new Map();   // room → Map(cell → { kind 'ice' | 'wall', mat, back (what it goes back to), units (water), until, crack (ms before `until` its cracks begin) })
-{ const rows = db.prepare('SELECT * FROM magic_temp').all(); for (const r of rows) { let M = magicTemp.get(r.room); if (!M) magicTemp.set(r.room, M = new Map()); M.set(r.i, { kind: r.kind, mat: r.mat, back: r.back, units: r.units, until: r.until, crack: r.crack, ce: r.ce || 0 }); } if (rows.length) console.log('magic: ' + rows.length + ' cell(s) a spell changed, to put back'); }
-const _magicTempIns = db.prepare('INSERT OR REPLACE INTO magic_temp (room, i, kind, mat, back, units, until, crack, ce) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'), _magicTempDel = db.prepare('DELETE FROM magic_temp WHERE room = ? AND i = ?');
-function magicTempPut(room, i, T) { let M = magicTemp.get(room); if (!M) magicTemp.set(room, M = new Map()); M.set(i, T); try { _magicTempIns.run(room, i, T.kind, T.mat, T.back, T.units | 0, T.until, T.crack | 0, T.ce | 0); } catch (e) {} }
+{ const rows = db.prepare('SELECT * FROM magic_temp').all(); for (const r of rows) { let M = magicTemp.get(r.room); if (!M) magicTemp.set(r.room, M = new Map()); M.set(r.i, { kind: r.kind, mat: r.mat, back: r.back, units: r.units, until: r.until, crack: r.crack, ce: r.ce || 0, wq: r.wq || 0 }); } if (rows.length) console.log('magic: ' + rows.length + ' cell(s) a spell changed, to put back'); }
+const _magicTempIns = db.prepare('INSERT OR REPLACE INTO magic_temp (room, i, kind, mat, back, units, until, crack, ce, wq) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'), _magicTempDel = db.prepare('DELETE FROM magic_temp WHERE room = ? AND i = ?');
+function magicTempPut(room, i, T) { let M = magicTemp.get(room); if (!M) magicTemp.set(room, M = new Map()); M.set(i, T); try { _magicTempIns.run(room, i, T.kind, T.mat, T.back, T.units | 0, T.until, T.crack | 0, T.ce | 0, T.wq | 0); } catch (e) {} }
 const MAGIC_WATER_RK = 4, MAGIC_ICE = 4;   // (water's rank in LIQ_ID [11, 10, 14, 12, 9, 15], declared further down; ice = 4)
 const MAGIC_ROCKY = new Set([2, 19, 22, 23, 24, 25, 26]);   // stone, clay, granite, basalt, limestone, sandstone, shale: a wall is made of the ground's own rock if it is one of these, else stone
 // the ground under a point: the open cell resting on it (looking down from the point, or up out of rock) → { x, y (its top), c, r (the open cell) } or null
@@ -4075,7 +4076,9 @@ function magicCloudAt(room, x, y, S) {
   const air = (c, r) => c >= 0 && c < COLS && r >= 0 && r < ROWS && peekAir(grid, c * ROWS + r) && !(cov && cov.has(c * ROWS + r)); void N;
   const c0 = Math.floor(x / T), r0 = Math.floor(y / T), hw = Math.max(1, Math.floor((S.wide || 14) / 6)); if (!air(c0, r0)) return null;
   const rowOpen = (r) => { for (let c = c0 - hw; c <= c0 + hw; c++) if (!air(c, r)) return false; return true; };
-  let r = r0; for (let k = 0; k < (S.up || 8); k++) { if (!rowOpen(r - 3)) break; r--; }   // (its underside; three open rows above it for its body)
+  // (7c round 2, the user: 'the cloud should spawn on the actual pointer, rather than somewhat above it') ON THE POINTER: its underside `down` cells below it, so the cloud's
+  //   body (drawn mostly above its underside) is centred on the pointer — less if the ground is nearer
+  let r = r0; for (let k = 0; k < (S.down != null ? S.down : 3); k++) { if (!rowOpen(r + 1)) break; r++; }
   let g = r; for (let k = 0; k < 60 && air(c0, g + 1); k++) g++;   // (the ground under its middle — where the made water is dried from)
   return { x: (c0 + 0.5) * T, y: r * T, gy: (g + 1) * T };
 }
@@ -4114,6 +4117,18 @@ setInterval(() => { if (!_magicClouds.size) return; const now = Date.now();
 function magicSnowLanded(room, j, mk) { if (!mk || mk.room !== room) return; const M = magicTemp.get(room), T0 = M && M.get(j);
   if (T0 && T0.kind === 'snow') { T0.units = (T0.units | 0) + 1; magicTempPut(room, j, T0); return; }
   magicTempPut(room, j, { kind: 'snow', mat: MAGIC_SNOW, back: 0, units: 0, until: mk.until + Math.floor(Math.random() * 3000), crack: 0 }); }
+// …a cloud's snow that fell on liquid and froze (the world's reaction: water + snow → ICE, the snow cell itself, the pool's water spent — `FREACT_FREEZE_COST_F`) is still the cloud's:
+//   when its time comes it goes too, and gives the pool back the water its freezing took (the user, 2026-11-20: 'when the snow melts and disappears the ice remains')
+// …and a cloud's grain MOVED by the world (falling, sliding, sinking through a pool — `powderStep`'s `swapMove`) carries its record to where it goes, as a burning grain carries its fire
+function magicTempCarry(room, src, dst) { const M = magicTemp.get(room); if (!M) return; const T = M.get(src); if (!T || T.kind !== 'snow') return;
+  M.delete(src); try { _magicTempDel.run(room, src); } catch (e) {}
+  const D = M.get(dst); if (D) { if (D.kind === 'snow') { D.units = (D.units | 0) + 1 + (T.units | 0); D.wq = (D.wq | 0) + (T.wq | 0); magicTempPut(room, dst, D); } return; }   // (onto a cell whose own grain slid on: it owes one more)
+  T.sch = 0; magicTempPut(room, dst, T); }
+function magicSnowIced(T, v) { return T.kind === 'snow' && v === MAGIC_ICE; }
+//   🟥 (rig: a fixed give-back of a whole freeze's cost made water — 582 → 671) EXACTLY what it took: the reaction records it on the record (`wq`, `magicSnowSpent`)
+function magicSnowSpent(room, i, u) { const M = magicTemp.get(room), T = M && M.get(i); if (!T || T.kind !== 'snow') return; T.wq = (T.wq | 0) + u; magicTempPut(room, i, T); }
+function magicSnowIceBack(room, i, liq, T) { const u = T ? T.wq | 0 : 0; if (!(u > 0)) return; ensureFineArrays(room, 1); const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal; if (!amt || !tot || (st.fineSub || 1) !== 1) return;
+  const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = u; tot.s(i, u); fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); fineWakeAround(room, i); }
 function magicSnowDebt(grid, hp, ROWS, i, M, n, cells, melt) { for (let k = 0; k < n; k++) { const j = magicSnowNear(grid, ROWS, i, M); if (j < 0) break; grid.s(j, 0); hp.s(j, 0); cells.push(j, 0); melt.push(j); } }
 // …a remembered snow cell found empty when its time came (the grain slid on): the nearest snow within 3 cells that no spell remembers, or −1
 function magicSnowNear(grid, ROWS, i, M) { let best = -1, bd = 1e9; const c0 = Math.floor(i / ROWS), r0 = i % ROWS;
@@ -4578,11 +4593,12 @@ function magicTempEnd(room, list) {
   const cells = [], liq = [], gone = [], woke = [], sank = [], thaw = [], tdmg = [], mats = roomMats[room] || {};
   const melt = [];   // (7c) snow a cloud left, melted away
   for (const i of list) { const T = M.get(i); if (!T) continue; const v = peekCellAt(grid, i); if (v < 0) { T.sch = 0; continue; }
-    if (v !== T.mat) { if (T.kind === 'snow' && peekAir(grid, i)) magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt);   // (7c: the grain slid on — the nearest snow goes instead)
+    if (v !== T.mat && !magicSnowIced(T, v)) { if (T.kind === 'snow' && peekAir(grid, i)) magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt);   // (7c: the grain slid on — the nearest snow goes instead)
       M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
     if (T.kind === 'snow') { melt.push(i); const up = peekCellAt(grid, i - 1); if (i % st.rows > 0 && isPowderId(up)) powderSet(room).add(i - 1); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, i, M, T.units, cells, melt); }
     { const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) tdmg.push(i, BK[1]); } }   // (7a: a glazed cell back to its ground, with the damage it had)
     if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }
+    if (magicSnowIced(T, v)) magicSnowIceBack(room, i, liq, T);   // (7c round 2)
     cells.push(i, grid.g(i)); woke.push(i);
     if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat); else if (T.kind === 'sink') sank.push(Math.floor(i / st.rows), i % st.rows, T.mat);
     M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} }
@@ -4604,12 +4620,13 @@ setInterval(() => {
       const v = peekCellAt(grid, i); if (v < 0) continue;   // (its chunk not here yet: later)
       // (7c) a cloud's snow grain that slid off its cell: waited for until its time, then the nearest snow nobody remembers melts instead (empty air only — snow heat turned to water is gone already)
       if (v !== T.mat && T.kind === 'snow' && peekAir(grid, i)) { if (now < T.until) continue; magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt); M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
-      if (v !== T.mat) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }   // (dug out, or changed by something else: not ours any more)
+      if (v !== T.mat && !magicSnowIced(T, v)) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }   // (dug out, or changed by something else: not ours any more — 7c round 2: a cloud's snow frozen to ice on liquid still is)
       if (magicCfgSrv.exact && T.until - now < 260) { if (!T.sch) { T.sch = 1; const k = T.until; let g = due.get(k); if (!g) due.set(k, g = []); g.push(i); } continue; }
       if (now >= T.until) {
         const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); cells.push(i, BK[0]);
         if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) dmg.push(i, BK[1]); }   // (7a: the ground back with the damage it had, a powder woken)
         if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); }
+        if (magicSnowIced(T, v)) magicSnowIceBack(room, i, liq, T);   // (7c round 2)
         if (T.kind === 'wall' || T.kind === 'sink') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
         if (T.kind === 'snow') { melt.push(i); if (i % st.rows > 0 && isPowderId(peekCellAt(grid, i - 1))) powderSet(room).add(i - 1); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, i, M, T.units, cells, melt); }   // (7c: snow above it falls into the space; the grains owed round it)
         M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {}
@@ -11317,6 +11334,7 @@ function powderTickRoom(room) {
   const swapMove = (src, dst) => {
     const P = grid.g(src), hpP = hp.g(src);
     swapFire(src, dst);
+    if (magicTemp.size) magicTempCarry(room, src, dst);   // (magic 7c round 2) a cloud's snow grain takes its melt record with it (it sank into a pool and froze there — the ice stayed)
     {
       const ps = famt.wp(src), bs = famt.o(src), pd = famt.wp(dst), bd = famt.o(dst);   // src is solid ⇒ holds no fine liquid; dst may hold a pool
       const carried = ftot.g(dst);
@@ -13716,8 +13734,9 @@ function fineReactTickRoom(room, SUB, phase) {
       if (snowJ >= 0) convertSolid(snowJ, 4, 2);                            // the snow itself becomes the ice, so nothing survives to slide on
       else setLiquid(saltJ, 2, capFrac(FREACT_BRINE_AMT_F));                // the salt cell itself becomes the brine (rank 2)
       const pw = amt.wp(i);
-      let q = capFrac(snowJ >= 0 ? FREACT_FREEZE_COST_F : FREACT_DISSOLVE_COST_F);
+      let q = capFrac(snowJ >= 0 ? FREACT_FREEZE_COST_F : FREACT_DISSOLVE_COST_F); const q0 = q;
       for (let rk = T - 1; rk >= 1 && q > 0; rk--) { const a = pw[b + rk]; if (a <= 0) continue; const mv = a < q ? a : q; pw[b + rk] = a - mv; q -= mv; }
+      if (snowJ >= 0 && q0 > q && magicTemp.size) magicSnowSpent(room, snowJ, q0 - q);   // (magic 7c round 2) a cloud's snow frozen here: what it took, given back when it melts
       if (snowJ < 0) addFx(saltJ, 9);                                       // fizz where the salt went
       recomp(i); liqChanged.add(i); if (tot.g(i) > 0) act.add(i); else act.delete(i); wakeN(i);
     }   // BOTH the snow and the water become one ice cell — the snow must not survive to slide on and freeze a trail

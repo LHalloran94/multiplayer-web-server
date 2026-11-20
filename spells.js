@@ -255,7 +255,7 @@
       plain: { keys: [D, U, L, R, D], rune: [6, 3, 1, 2, 5] } },
     waterjet: { name: 'Water jet', school: 'frost', form: 'stream', tier: 0, cd: 5, stance: 'level', kind: 'jet', learn: 3, chan: true, chanS: 6, reach: 150, hw: 5, ups: 60, dropV: 34, jetR: 4, push: 40, drySecs: 60, wet: true,
       plain: { keys: [D, R, D, R, U], rune: [0, 3, 4, 8, 7] } },
-    // ⭐ STEP 7c (2026-11-20): RAIN CLOUD / SNOW CLOUD, kind 'cloud', two variants (`alt`, as the walls of fire): a cloud forms `up` cells over the pointer (`reach`; lower under a roof),
+    // ⭐ STEP 7c (2026-11-20): RAIN CLOUD / SNOW CLOUD, kind 'cloud', two variants (`alt`, as the walls of fire): a cloud forms ON the pointer (`reach`; its underside `down` cells below it),
     //   `wide` cells across, for `cloudS` s (not shortened by the testing dial — it is the spell, not a world change). RAIN: water MADE — `ups` units a second fall from its underside as
     //   the world's own drops (`dropV` cells a second down, drawn `dropR` px round); burning ground where they land goes out, a burning player they touch is put out and rinsed;
     //   as much as was made dries away `drySecs` after it ends (the jet's way). SNOW: `cps` grains a second of real SNOW fall slowly (`flakeG` cells/s² down, `flakeD` sideways
@@ -263,9 +263,9 @@
     //   COLD SNAP, kind 'coldsnap' (tier 1): a burst round you — the water within `rad` px turns to ice outward from you, ring by ring (`ringMs` a cell), as the freeze does (back
     //   to water after `secs`); burning ground there goes out; every OTHER player within reach (nothing solid between) is frosted and held still `hold` s and put out, as the frost
     //   flask does; a frost crust lies on the ground it reached for `crustS` s. You are untouched.
-    raincloud: { name: 'Rain cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', learn: 3, reach: 360, cloudS: 8, wide: 14, up: 8, ups: 40, dropV: 6, dropR: 1.1, drySecs: 60, alts: ['snowcloud'], fx: '#9fd2f4',
+    raincloud: { name: 'Rain cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', learn: 3, reach: 360, cloudS: 8, wide: 14, down: 3, ups: 40, dropV: 6, dropR: 1.1, drySecs: 60, alts: ['snowcloud'], fx: '#9fd2f4',
       plain: { keys: [D, U, L, U, L], rune: [6, 4, 1, 0, 3] } },
-    snowcloud: { name: 'Snow cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', alt: 'raincloud', snow: true, reach: 360, cloudS: 8, wide: 14, up: 8, cps: 8, flakeG: 4, flakeD: 1.2, meltSecs: 60, fx: '#eef7ff', look: 'melt',
+    snowcloud: { name: 'Snow cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', alt: 'raincloud', snow: true, reach: 360, cloudS: 8, wide: 14, down: 3, cps: 8, flakeG: 4, flakeD: 1.2, meltSecs: 60, fx: '#eef7ff', look: 'melt',
       plain: { keys: [D, U, L, U, R], rune: [6, 4, 1, 2, 5] } },
     coldsnap: { name: 'Cold snap', school: 'frost', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'coldsnap', learn: 5, rad: 96, cells: 220, ringMs: 22, secs: 30, hold: 1.5, crustS: 8, fx: '#cfefff',
       plain: { keys: [D, L, U, R, D], rune: [8, 4, 3, 1, 5] } },
