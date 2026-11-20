@@ -3837,7 +3837,9 @@ function magicMindKey(socket) { const k = playerKeyFor(socket.id); if (socket._m
 //   letting go (`magic-chan-stop`), its time (`chanS`; a minute at most), or its caster gone — everybody is told (`magic-chan-end`, with the cooldown, which counts from here).
 //   Where it points while held comes from its caster (`magic-aim`) and goes on to the others; the ground at its end is lit here (`magic-chan-burn`). PROCESSOR: a few a second.
 const _magicChans = new Map();
-function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) return; _magicChans.delete(id); const sk = io.sockets.sockets.get(q.by); let cd = 0;
+function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) return; _magicChans.delete(id);
+  { const ST = _magicStorms.get(id); if (ST) for (let i = 0; i < ST.clouds.length; i++) { const c = _magicClouds.get(id + (i + 1) / 10); if (c) c.until = Math.min(c.until, Date.now()); } }   // (8a round 3) a thunderstorm let go: its rain stops
+  const sk = io.sockets.sockets.get(q.by); let cd = 0;
   if (sk && !sk._magicNoCd) { cd = SPELLS.cdMs(q.spell, q.cat); (sk._magicCd || (sk._magicCd = {}))[q.spell] = Date.now() + cd; }
   io.to(q.room).emit('magic-chan-end', Object.assign({ id, by: q.by, why, cd, spell: q.spell }, extra || {}));
   if (q.made > 0) { const S = SPELLS.of(q.spell) || {}, room = q.room, x = q.dx != null ? q.dx : q.x, y = q.dy != null ? q.dy : q.y, u = q.made; setTimeout(() => magicOilDry(room, x, y, u, 30, MAGIC_WATER_RK), (S.drySecs || 60) * 1000 * ((sk && sk._magicSecsK) || 1)); }   // (7b) the jet's water dries
@@ -4093,6 +4095,7 @@ function magicCloudTick(id, q, S, now) {
       for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 2; dr++) { const i = (c + dc) * ROWS + r + dr; if (c + dc < 0 || c + dc >= COLS || r + dr < 0 || r + dr >= ROWS) continue; if (fs.delete(i)) { out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); pts.push(c + dc, r + dr); } } }
     if (k) q.put.splice(0, k); if (out.length) { wireFanout(room, 'fire-cells', { cells: out, lift: 1 }); io.to(room).emit('magic-douse', { id, c: pts.slice(0, 80) }); q.doused = (q.doused || 0) + out.length / 2; } }
   if (now > q.until) return;
+  if (q.start && now < q.start) return;   // (8a round 3) a thunderstorm's cloud rains once it has formed
   const rate = q.snow ? (S.cps || 8) : (S.ups || 40); q.acc = Math.min(rate * 0.5, (q.acc || 0) + rate * dt);
   const wire = [], w = q.w * 0.86, r0 = Math.floor((q.y - 2) / T);
   if (q.snow) { const fly = roomPowderFly[room] || (roomPowderFly[room] = []), G = S.flakeG || 4, D = S.flakeD || 1.2;
@@ -28741,7 +28744,8 @@ io.on('connection', (socket) => {
     // ⭐ (8a) CALL LIGHTNING: the cloud gathers (every screen draws it); `gatherMs` later its caster's game says what it strikes (`magic-strike`) — or, if it says nothing, the ground
     if (STM) { _magicStorms.set(id, { room, by: socket.id, spell: m.spell, clouds: STM, at: now + (S.formMs || 1400), until: out.secs ? now + out.secs * 1000 + 500 : now + 11000, n: 0, last: 0, S: SK });
       out.cl = STM.map(q => [Math.round(q.x), Math.round(q.y), Math.round(q.gy)]); out.w = (S.wide || 12) * TERRAIN_CELL; out.form = S.formMs || 1400;
-      setTimeout(() => _magicStorms.delete(id), (out.secs || 10) * 1000 + 4000); }
+      setTimeout(() => _magicStorms.delete(id), (out.secs || 10) * 1000 + 4000);
+      const K = socket._magicSecsK || 1; STM.forEach((q, i) => _magicClouds.set(id + (i + 1) / 10, { room, by: socket.id, spell: m.spell, x: q.x, y: q.y, gy: q.gy, w: (S.wide || 14) * TERRAIN_CELL, start: now + (S.formMs || 1400) + i * 160, until: now + (out.secs || 10) * 1000, snow: false, made: 0, acc: 0, lt: null, put: [], melt: 0, dryMs: (S.drySecs || 60) * 1000 * K })); }   // (8a round 3) its rain
     if (SKY) { const gat = Math.max(200, S.gatherMs || 900), q = { room, by: socket.id, spell: m.spell, x: SKY.x, top: SKY.y, gy: SKY.gy, at: now + gat, done: false, S: SK };
       _magicStrikes.set(id, q); out.cx = Math.round(SKY.x); out.cy = Math.round(SKY.y); out.gy = Math.round(SKY.gy); out.w = (S.wide || 10) * TERRAIN_CELL; out.gather = gat;
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
