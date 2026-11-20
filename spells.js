@@ -312,6 +312,17 @@
     //   loose things blown, and whoever stays `frostS` s is slowed (`slow`) and put out. Let go and it ends.
     blizzard: { name: 'Blizzard', school: 'frost', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'blizzard', learn: 5, chan: true, chanS: 10, reach: 400, clouds: 4, spread: 76, wide: 14, down: 1, formMs: 1400,
       cps: 14, flakeG: 4, flakeD: 1.2, meltSecs: 60, wind: 2.6, lee: 90, windPush: 30, frostS: 1.5, slow: 0.6, look: 'melt', fx: '#eef7ff', plain: { keys: [D, L, D, U, L], rune: [2, 5, 1, 3, 7] } },
+    // ⭐ STEP 8c (2026-11-20, STORM): WHIRLWIND, kind 'whirl' (placed on the ground at the pointer, in sight; `secs` s): a funnel `high` px tall that DRIFTS along the ground away from
+    //   its caster at `speed` px/s (turned back once by a wall, then it stays). It takes up the surface's loose powder (`grab` cells a tick, at most `carry` — never a spell's own snow)
+    //   and liquid (at most `liq` units, not lava), and FLINGS it all back out when it ends (grains landing as ground, drops as liquid — moved, nothing made or lost); over fire it
+    //   catches and becomes a FLAMING TORNADO that lights what it touches. A body it catches is lifted (`lift`) and spun round it, thrown out after `catchS` s (still steering).
+    whirlwind: { name: 'Whirlwind', school: 'storm', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'whirl', learn: 5, reach: 360, secs: 8, speed: 40, high: 110, grab: 2, carry: 60, liq: 60, throwV: 280,
+      catchS: 1.4, lift: 3.2, fx: '#dfe8f0', plain: { keys: [L, U, L, U, R], rune: [0, 3, 4, 1, 2] } },
+    // UPDRAFT, kind 'draft' (placed, in sight; `secs` s): a column of rising air from the ground under the pointer up to `high` px (or the first rock), `wide` cells across. Bodies
+    //   in it rise at `riseV` px a frame and hover near its top; leaving it near the top gives `featherS` s of feather fall. Loose things are lifted; now and then a grain of the
+    //   surface's loose powder at its foot is flown up it (moved, as a throw).
+    updraft: { name: 'Updraft', school: 'storm', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'draft', learn: 3, reach: 360, secs: 8, high: 160, wide: 4, riseV: 4.2, featherS: 3, grainMs: 450, fx: '#dfe8f0',
+      plain: { keys: [L, L, U, U, R], rune: [0, 6, 3, 1, 5] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -375,7 +386,7 @@
     raincloud: [[U, L], [4, 1, 0]], snowcloud: [[U, R], [4, 1, 2]], coldsnap: [[D, D], [4, 3, 1, 5]], blizzard: [[L, L], [4, 1, 0, 3]],   // (8b: as the thunderstorm)   // (7c: up into the sky and off to one side or the other · round you, as the flame ring)
     iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]], shapewater: [[L, R], [4, 3, 5]], waterjet: [[R, D], [4, 8]],   // (7b: grab and fling, as the rock chunk · the stream ending)   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
-    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]], thunderclap: [[D, D], [4, 3, 1, 5]], windshield: [[D, L], [4, 7]], windshield_o: [[R, L], [4, 7, 2]],   // (8b: round you, as the flame ring / cold snap · the on-another turned → and on to the top right)   // (8a: the bolt ending · up into the sky, then a zigzag down)
+    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]], thunderclap: [[D, D], [4, 3, 1, 5]], windshield: [[D, L], [4, 7]], windshield_o: [[R, L], [4, 7, 2]], whirlwind: [[L, U], [4, 3, 0, 1]], updraft: [[U, U], [4, 1]],   // (8b: round you, as the flame ring / cold snap · the on-another turned → and on to the top right)   // (8a: the bolt ending · up into the sky, then a zigzag down)
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],

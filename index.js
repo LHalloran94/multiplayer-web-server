@@ -4249,6 +4249,46 @@ function magicClap(room, x, y, S, sp) {
   if (sp && fx.length) io.to(room).emit('magic-cells', { c: fx.slice(0, 120), spell: sp, look: 'quake' });
   return shatter.length + fx.length;
 }
+// ⭐ MAGIC 8c (2026-11-20, STORM): THE WHIRLWIND — kept here and moved ten times a second: along the ground away from its caster (a wall turns it back once, a second stops it),
+//   taking up the surface's loose powder by its foot (never a cell a spell remembers — its time to go must stay) and the liquid there (not lava); over fire it catches and then
+//   lights what burns where it stands; everybody told where it is ('magic-whirl'). At its end everything it carried is FLUNG back out as the world's own grains and drops
+//   (`magicSoilSpray`, `magicWaterSplash` — moved, nothing made or lost). PROCESSOR: a few cells a tick.
+const _magicWhirls = new Map();   // cast id → { room, by, spell, x, y (the ground under it), dir, until, moving, turned, carry: [mat…], u: [units by rank], liqN, fire, igAt, S }
+function magicWhirlTick(id, q, now) {
+  const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid) return; ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, S = q.S, M = magicTemp.get(room);
+  if (q.moving) { const nx = q.x + q.dir * (S.speed || 40) * 0.1, g = magicGroundAt(room, nx, q.y - 3 * T);
+    if (g && Math.abs(g.y - q.y) <= 4 * T + 1) { q.x = nx; q.y = g.y; } else if (!q.turned) { q.dir = -q.dir; q.turned = 1; } else q.moving = false; }
+  const c0 = Math.floor(q.x / T), rG = Math.floor(q.y / T), chg = []; let took = 0;
+  for (let dc = -1; dc <= 1 && took < (S.grab || 2); dc++) { const c = c0 + dc; if (c < 0 || c >= COLS || q.carry.length >= (S.carry || 60)) continue;
+    for (let dr = -2; dr <= 1; dr++) { const r = rG + dr, i = c * ROWS + r; if (r < 1 || r >= ROWS) continue; const v = peekCellAt(grid, i); if (!(v > 0) || !isPowderId(v) || !peekAir(grid, i - 1)) continue;
+      if (M && M.has(i)) break; grid.s(i, 0); st.terrainHp.s(i, 0); chg.push(i, 0); q.carry.push(v); took++; break; } }
+  if (chg.length) { wireFanout(room, 'terrain-set', { cells: chg }); activatePowderRect(room, grid, c0 - 2, rG - 3, c0 + 2, rG + 2); }
+  const amt = st.fineAmt, tot = st.fineTotal;
+  if (amt && tot && (st.fineSub || 1) === 1 && q.liqN < (S.liq || 60)) { const changed = [];
+    for (let dc = -1; dc <= 1; dc++) for (let dr = -3; dr <= 0; dr++) { const c = c0 + dc, r = rG + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
+      for (let k = LIQ_T - 1; k >= 1 && q.liqN < (S.liq || 60); k--) { const n = vesselCellTake(room, i, k, Math.min(6, (S.liq || 60) - q.liqN), changed); if (n > 0) { q.u[k] += n; q.liqN += n; } } }
+    if (changed.length) emitFineCells(room, [...new Set(changed)]); }
+  const fs = st.fineFire; if (!q.fire && fs && fs.size) { for (let dc = -2; dc <= 2 && !q.fire; dc++) for (let dr = -5; dr <= 1; dr++) if (fs.has((c0 + dc) * ROWS + rG + dr)) { q.fire = true; break; } }
+  if (q.fire && now - (q.igAt || 0) > 300) { q.igAt = now; igniteBox(room, q.x, q.y - (S.high || 110) * 0.4, 12, (S.high || 110) * 0.45); }
+  io.to(room).emit('magic-whirl', { id, x: Math.round(q.x), y: Math.round(q.y), f: q.fire ? 1 : 0, n: q.carry.length, u: q.liqN, cm: q.carry.slice(-6) });
+}
+function magicWhirlEnd(id, q) {
+  _magicWhirls.delete(id); const room = q.room, S = q.S, top = q.y - (S.high || 110) * 0.7, n = q.carry.length;
+  for (let g = 0; g < 6 && n; g++) { const part = q.carry.filter((v, k) => k % 6 === g); if (!part.length) continue; const a = -Math.PI * (0.12 + 0.76 * (g + Math.random() * 0.8) / 6), V = (S.throwV || 280) * (0.8 + 0.4 * Math.random());
+    magicSoilSpray(room, q.x, top, { m: part, o: [] }, Math.cos(a) * V, Math.sin(a) * V, { fan: 0.5 }); }
+  if (q.liqN > 0) magicWaterSplash(room, q.x, top, q.u, 0, 0);
+  io.to(room).emit('magic-whirl-end', { id, x: Math.round(q.x), y: Math.round(q.y), n, u: q.liqN });
+}
+setInterval(() => { if (!_magicWhirls.size) return; const now = Date.now();
+  for (const [id, q] of _magicWhirls) { try { if (now > q.until) magicWhirlEnd(id, q); else magicWhirlTick(id, q, now); } catch (e) { console.error('[magic whirl] ' + (e && e.message)); _magicWhirls.delete(id); } } }, 100);
+// THE UPDRAFT: kept here only for its grains — now and then a grain of loose powder at its foot (not a spell's) flown up it as a throw
+const _magicDrafts = new Map();   // cast id → { room, x, gy, top, until, at, S }
+setInterval(() => { if (!_magicDrafts.size) return; const now = Date.now();
+  for (const [id, q] of _magicDrafts) { if (now > q.until) { _magicDrafts.delete(id); continue; } if (now < q.at) continue; q.at = now + (q.S.grainMs || 450);
+    const st = cellsOf(q.room), grid = st.terrain; if (!grid) continue; const ROWS = st.rows, T = TERRAIN_CELL, M = magicTemp.get(q.room), r = Math.floor(q.gy / T), c = Math.floor((q.x + (Math.random() - 0.5) * (q.S.wide || 4) * T) / T), i = c * ROWS + r;
+    if (c < 0 || c >= st.cols || r < 1 || r >= ROWS) continue; const v = peekCellAt(grid, i); if (!(v > 0) || !isPowderId(v) || !peekAir(grid, i - 1) || (M && M.has(i))) continue;
+    grid.s(i, 0); st.terrainHp.s(i, 0); wireFanout(q.room, 'terrain-set', { cells: [i, 0] }); activatePowderRect(q.room, grid, c - 1, r - 2, c + 1, r + 1);
+    magicSoilSpray(q.room, (c + 0.5) * T, q.gy - T, { m: [v], o: [] }, (Math.random() - 0.5) * 60, -Math.min(q.gy - q.top, 160) * 2.4, { fan: 0.2 }); } }, 100);
 // ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
 //   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
 //   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
@@ -28719,6 +28759,11 @@ io.on('connection', (socket) => {
     let STM = null; if (S.kind === 'storm' || S.kind === 'blizzard') {   // (8b: the blizzard's clouds the same way)
       if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 400) + 8 ? ((S.reach || 400) + 8) / d : 1, cx = m.x + dx * k, cy = m.y + dy * k, n = Math.max(1, S.clouds || 3);
       STM = []; for (let i = 0; i < n; i++) { const off = (i - (n - 1) / 2) * (S.spread || 110), q = magicCloudAt(room, cx + off, cy - Math.abs(off) * 0.15, S); if (q) STM.push(q); } if (!STM.length) return no('room'); }
+    // (8c) THE WHIRLWIND: on the ground under the caster's point (held to its reach above) — none there, refused · THE UPDRAFT: the ground under the point and the column over it
+    let WHL = null, DRF = null; if (S.kind === 'whirl' || S.kind === 'draft') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 360) + 8 ? ((S.reach || 360) + 8) / d : 1;
+      const g = magicGroundAt(room, m.x + dx * k, m.y + dy * k); if (!g) return no('ground'); if (S.kind === 'whirl') WHL = { x: m.x + dx * k, y: g.y, dir: dx >= 0 ? 1 : -1 };
+      else { const st0 = cellsOf(room), g0 = st0.terrain, T = TERRAIN_CELL; let top = g.y - (S.high || 160); for (let y = g.y - T; y > g.y - (S.high || 160); y -= T) { const r = Math.floor((y - 1) / T); if (r < 0) { top = 0; break; } const v = peekCellAt(g0, g.c * st0.rows + r); if (v > 0 && isSolidCell(v)) { top = (r + 1) * T; break; } }
+        DRF = { x: g.x, gy: g.y, top }; } }
     let WPN = null; if (S.kind === 'flameblade') { const ob = typeof m.wpn === 'string' && roomObjects[room] && roomObjects[room].get(m.wpn); if (!ob) return no('weapon'); WPN = m.wpn; }   // (6c) the weapon in the other hand — before anything is spent
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
@@ -28763,6 +28808,9 @@ io.on('connection', (socket) => {
       if (!out.zh.length && !wet) out.n = igniteBox(room, out.tx, out.ty, 8);
       const sp = magicZapSpread(room, [[out.tx, out.ty]].concat(out.zh.map(h => [h[1], h[3] - 2])), S); out.liq = sp.liq; out.ore = sp.ore; if (wet) out.wet = 1; }
     // ⭐ (8a) CALL LIGHTNING: the cloud gathers (every screen draws it); `gatherMs` later its caster's game says what it strikes (`magic-strike`) — or, if it says nothing, the ground
+    if (WHL) { const secs = +(SK.secs || 8).toFixed(2); _magicWhirls.set(id, { room, by: socket.id, spell: m.spell, x: WHL.x, y: WHL.y, dir: WHL.dir, until: now + secs * 1000, moving: true, turned: 0, carry: [], u: new Array(LIQ_T).fill(0), liqN: 0, fire: false, igAt: 0, S: SK });
+      out.wx = Math.round(WHL.x); out.wy = Math.round(WHL.y); out.dir = WHL.dir; out.secs = secs; }   // (8c)
+    if (DRF) { const secs = +(SK.secs || 8).toFixed(2); _magicDrafts.set(id, { room, x: DRF.x, gy: DRF.gy, top: DRF.top, until: now + secs * 1000, at: now + 600, S: SK }); out.ux = DRF.x; out.gy = DRF.gy; out.top = DRF.top; out.secs = secs; }   // (8c)
     if (STM) { const bz = S.kind === 'blizzard', wd = (isFinite(m.tx) ? m.tx - m.x : m.ax) >= 0 ? 1 : -1; if (bz) out.wd = wd;   // (8b) the blizzard's wind blows away from its caster, towards where they pointed
       _magicStorms.set(id, { kind: S.kind, room, by: socket.id, spell: m.spell, clouds: STM, at: now + (S.formMs || 1400), until: out.secs ? now + out.secs * 1000 + 500 : now + 11000, n: 0, last: 0, S: SK });
       out.cl = STM.map(q => [Math.round(q.x), Math.round(q.y), Math.round(q.gy)]); out.w = (S.wide || 12) * TERRAIN_CELL; out.form = S.formMs || 1400;
