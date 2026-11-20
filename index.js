@@ -4295,9 +4295,13 @@ setInterval(() => { if (!_magicDrafts.size) return; const now = Date.now();
   for (const [id, q] of _magicDrafts) { if (now > q.until) { _magicDrafts.delete(id); continue; }
     { const st = cellsOf(q.room), amt = st.fineAmt, tot = st.fineTotal, T = TERRAIN_CELL;   // (8c round 2) the liquid at its foot thrown up it — a spout (the world's own drops: nothing made or lost)
       if (amt && tot && (st.fineSub || 1) === 1 && st.terrain) { const ROWS = st.rows, u = new Array(LIQ_T).fill(0), changed = [], want = q.S.liq || 6, hw = Math.ceil((q.S.wide || 4) / 2); let got = 0;
-        for (let dc = -hw; dc <= hw && got < want; dc++) for (let dr = -4; dr <= 0 && got < want; dr++) { const c = Math.floor(q.x / T) + dc, r = Math.floor(q.gy / T) - 1 + dr; if (c < 0 || c >= st.cols || r < 0 || r >= ROWS) continue; const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
+        // (8c round 3, the user: in a DEEP pool it did not move the water — it took from the pool's floor and threw it from inside the water, where nothing had room, so it was
+        //   put straight back) from the water's SURFACE in the column: the top rows of the liquid over its foot, thrown from the air just above
+        const c0 = Math.floor(q.x / T), rg = Math.floor(q.gy / T) - 1; let rs = rg + 1; for (let r = rg; r >= Math.max(0, rg - 60); r--) { if (peekCellAt(tot, c0 * ROWS + r) > 0) rs = r; else break; }
+        const base = rs <= rg ? rs : rg - 4;
+        for (let dc = -hw; dc <= hw && got < want; dc++) for (let dr = 0; dr <= 4 && got < want; dr++) { const c = c0 + dc, r = base + dr; if (c < 0 || c >= st.cols || r < 0 || r >= ROWS || r > rg) continue; const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
           for (let k = LIQ_T - 1; k >= 1 && got < want; k--) { const n = vesselCellTake(q.room, i, k, want - got, changed); if (n > 0) { u[k] += n; got += n; } } }
-        if (got) { emitFineCells(q.room, [...new Set(changed)]); magicWaterSplash(q.room, q.x, q.gy - 2 * T, u, 0, -(q.S.riseV || 10) * 160); q.lifted = (q.lifted || 0) + got; } } }
+        if (got) { emitFineCells(q.room, [...new Set(changed)]); magicWaterSplash(q.room, q.x, (rs <= rg ? rs - 1 : rg - 1) * T, u, 0, -(q.S.riseV || 10) * 160); q.lifted = (q.lifted || 0) + got; } } }
     if (now < q.at) continue; q.at = now + (q.S.grainMs || 450);
     const st = cellsOf(q.room), grid = st.terrain; if (!grid) continue; const ROWS = st.rows, T = TERRAIN_CELL, M = magicTemp.get(q.room), r = Math.floor(q.gy / T), c = Math.floor((q.x + (Math.random() - 0.5) * (q.S.wide || 4) * T) / T), i = c * ROWS + r;
     if (c < 0 || c >= st.cols || r < 1 || r >= ROWS) continue; const v = peekCellAt(grid, i); if (!(v > 0) || !isPowderId(v) || !peekAir(grid, i - 1) || (M && M.has(i))) continue;
