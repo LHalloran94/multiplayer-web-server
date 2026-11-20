@@ -317,11 +317,13 @@
     //   and liquid (at most `liq` units, not lava), and FLINGS it all back out when it ends (grains landing as ground, drops as liquid — moved, nothing made or lost); over fire it
     //   catches and becomes a FLAMING TORNADO that lights what it touches. A body it catches is lifted (`lift`) and spun round it, thrown out after `catchS` s (still steering).
     whirlwind: { name: 'Whirlwind', school: 'storm', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'whirl', learn: 5, reach: 360, secs: 8, speed: 40, high: 110, grab: 2, carry: 60, liq: 60, throwV: 280,
-      catchS: 1.4, lift: 3.2, fx: '#dfe8f0', plain: { keys: [L, U, L, U, R], rune: [0, 3, 4, 1, 2] } },
+      catchS: 1.6, lift: 6, throwOut: 10, fx: '#dfe8f0', plain: { keys: [L, U, L, U, R], rune: [0, 3, 4, 1, 2] } },
     // UPDRAFT, kind 'draft' (placed, in sight; `secs` s): a column of rising air from the ground under the pointer up to `high` px (or the first rock), `wide` cells across. Bodies
     //   in it rise at `riseV` px a frame and hover near its top; leaving it near the top gives `featherS` s of feather fall. Loose things are lifted; now and then a grain of the
     //   surface's loose powder at its foot is flown up it (moved, as a throw).
-    updraft: { name: 'Updraft', school: 'storm', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'draft', learn: 3, reach: 360, secs: 8, high: 160, wide: 4, riseV: 4.2, featherS: 3, grainMs: 450, fx: '#dfe8f0',
+    // (8c round 2, the user: 'it should be more powerful … something you could use on another player to launch them into the air, or an object'; no feather fall; it should lift
+    //   liquid too) bodies and loose things in it are LAUNCHED up at `riseV` px a frame (on past its top); the liquid at its foot is thrown up it (`liq` units a tick), powder too.
+    updraft: { name: 'Updraft', school: 'storm', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'draft', learn: 3, reach: 360, secs: 8, high: 240, wide: 4, riseV: 10, grainMs: 150, liq: 6, fx: '#dfe8f0',
       plain: { keys: [L, L, U, U, R], rune: [0, 6, 3, 1, 5] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },

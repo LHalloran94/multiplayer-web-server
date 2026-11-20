@@ -4130,6 +4130,14 @@ function magicTempCarry(room, src, dst) { const M = magicTemp.get(room); if (!M)
   M.delete(src); try { _magicTempDel.run(room, src); } catch (e) {}
   const D = M.get(dst); if (D && D.kind === 'snow' && T.kind === 'snow') { D.units = (D.units | 0) + 1 + (T.units | 0); D.wq = (D.wq | 0) + (T.wq | 0); magicTempPut(room, dst, D); return; }   // (onto a cell whose own grain slid on: it owes one more)
   T.sch = 0; magicTempPut(room, dst, T); }
+// (8c round 2, the user: a pile of snow from several blizzards melted 'from the bottom up', the snow above falling into the gaps cell by cell, 'very unsmooth and staggered')
+//   A PILE MELTS FROM THE TOP: when a remembered snow cell's time comes, the TOPMOST snow of its stack melts instead — nothing above falls; the due cell takes over that top cell's
+//   own record (its later time), or, if the top was nobody's snow, forgets its own (a cell for a cell: the same amount of snow goes). → the cell to melt
+function magicSnowTopOf(room, grid, ROWS, M, i) { let j = i; while (j % ROWS > 0 && peekCellAt(grid, j - 1) === MAGIC_SNOW) j--; if (j === i) return i;
+  const Tj = M.get(j); M.delete(j); try { _magicTempDel.run(room, j); } catch (e) {}
+  // (rig: 3 cells were left when the moved record had already been handed to the exact timer under its old cell — `sch` cleared so it is scheduled again where it now is)
+  if (Tj && Tj.kind === 'snow') { Tj.sch = 0; magicTempPut(room, i, Tj); } else { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} }
+  return j; }
 function magicSnowIced(T, v) { return T.kind === 'snow' && v === MAGIC_ICE; }
 //   🟥 (rig: a fixed give-back of a whole freeze's cost made water — 582 → 671) EXACTLY what it took: the reaction records it on the record (`wq`, `magicSnowSpent`)
 function magicSnowSpent(room, i, u) { const M = magicTemp.get(room), T = M && M.get(i); if (!T || T.kind !== 'snow') return; T.wq = (T.wq | 0) + u; magicTempPut(room, i, T); }
@@ -4284,7 +4292,13 @@ setInterval(() => { if (!_magicWhirls.size) return; const now = Date.now();
 // THE UPDRAFT: kept here only for its grains — now and then a grain of loose powder at its foot (not a spell's) flown up it as a throw
 const _magicDrafts = new Map();   // cast id → { room, x, gy, top, until, at, S }
 setInterval(() => { if (!_magicDrafts.size) return; const now = Date.now();
-  for (const [id, q] of _magicDrafts) { if (now > q.until) { _magicDrafts.delete(id); continue; } if (now < q.at) continue; q.at = now + (q.S.grainMs || 450);
+  for (const [id, q] of _magicDrafts) { if (now > q.until) { _magicDrafts.delete(id); continue; }
+    { const st = cellsOf(q.room), amt = st.fineAmt, tot = st.fineTotal, T = TERRAIN_CELL;   // (8c round 2) the liquid at its foot thrown up it — a spout (the world's own drops: nothing made or lost)
+      if (amt && tot && (st.fineSub || 1) === 1 && st.terrain) { const ROWS = st.rows, u = new Array(LIQ_T).fill(0), changed = [], want = q.S.liq || 6, hw = Math.ceil((q.S.wide || 4) / 2); let got = 0;
+        for (let dc = -hw; dc <= hw && got < want; dc++) for (let dr = -4; dr <= 0 && got < want; dr++) { const c = Math.floor(q.x / T) + dc, r = Math.floor(q.gy / T) - 1 + dr; if (c < 0 || c >= st.cols || r < 0 || r >= ROWS) continue; const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue;
+          for (let k = LIQ_T - 1; k >= 1 && got < want; k--) { const n = vesselCellTake(q.room, i, k, want - got, changed); if (n > 0) { u[k] += n; got += n; } } }
+        if (got) { emitFineCells(q.room, [...new Set(changed)]); magicWaterSplash(q.room, q.x, q.gy - 2 * T, u, 0, -(q.S.riseV || 10) * 160); q.lifted = (q.lifted || 0) + got; } } }
+    if (now < q.at) continue; q.at = now + (q.S.grainMs || 450);
     const st = cellsOf(q.room), grid = st.terrain; if (!grid) continue; const ROWS = st.rows, T = TERRAIN_CELL, M = magicTemp.get(q.room), r = Math.floor(q.gy / T), c = Math.floor((q.x + (Math.random() - 0.5) * (q.S.wide || 4) * T) / T), i = c * ROWS + r;
     if (c < 0 || c >= st.cols || r < 1 || r >= ROWS) continue; const v = peekCellAt(grid, i); if (!(v > 0) || !isPowderId(v) || !peekAir(grid, i - 1) || (M && M.has(i))) continue;
     grid.s(i, 0); st.terrainHp.s(i, 0); wireFanout(q.room, 'terrain-set', { cells: [i, 0] }); activatePowderRect(q.room, grid, c - 1, r - 2, c + 1, r + 1);
@@ -4719,7 +4733,7 @@ function magicBridgePlan(room, bx, by, tx, ty, S) {
 }
 // (step 3f) PUT BACK the cells whose time is up, at THEIR moment (scheduled by the sweep below — a crumble is smooth, not in quarter-second lumps): ice gives back its water, a wall's
 //   rubble falls; the liquid round each is WOKEN (`fineWakeAround`) so it flows into the space — a wall that stood under water left a hole the water never filled
-const magicCfgSrv = { wake: 1, exact: 1 };   // switches back: `wake` 0 = the liquid round a put-back cell is not woken · `exact` 0 = put back by the quarter-second sweep
+const magicCfgSrv = { wake: 1, exact: 1, snowTop: 1 };   // (8c round 2: `snowTop` 0 = a pile of spell snow melts cell by cell where each cell is, as before — the panel's switch, sent by 'magic-debug')   // switches back: `wake` 0 = the liquid round a put-back cell is not woken · `exact` 0 = put back by the quarter-second sweep
 function magicTempEnd(room, list) {
   const st = roomCells.get(room), M = magicTemp.get(room); if (!st || !st.terrain || !M) return; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal;
   const cells = [], liq = [], gone = [], woke = [], sank = [], thaw = [], tdmg = [], mats = roomMats[room] || {};
@@ -4727,6 +4741,7 @@ function magicTempEnd(room, list) {
   for (const i of list) { const T = M.get(i); if (!T) continue; const v = peekCellAt(grid, i); if (v < 0) { T.sch = 0; continue; }
     if (v !== T.mat && !magicSnowIced(T, v)) { if (T.kind === 'snow' && peekAir(grid, i)) magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt);   // (7c: the grain slid on — the nearest snow goes instead)
       M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
+    if (magicCfgSrv.snowTop && T.kind === 'snow' && v === MAGIC_SNOW) { const j = magicSnowTopOf(room, grid, st.rows, M, i); if (j !== i) { grid.s(j, 0); hp.s(j, 0); cells.push(j, 0); melt.push(j); woke.push(j); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, j, M, T.units, cells, melt); continue; } }
     if (T.kind === 'snow') { melt.push(i); const up = peekCellAt(grid, i - 1); if (i % st.rows > 0 && isPowderId(up)) powderSet(room).add(i - 1); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, i, M, T.units, cells, melt); }
     { const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) tdmg.push(i, BK[1]); } }   // (7a: a glazed cell back to its ground, with the damage it had)
     if (magicTempLiq(T, amt, tot, i)) { fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }   // (the freeze's ice: its water back)
@@ -4751,12 +4766,16 @@ setInterval(() => {
     const st = roomCells.get(room); if (!st || !st.terrain) continue; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal, mats = roomMats[room] || {};
     const cells = [], dmg = [], liq = [], gone = [], due = new Map(), thaw = [], melt = [], imelt = [];
     for (const [i, T] of M) {
+      // (8c round 2, the user's [melt watch]: with a big pile this sweep took ~21 ms each quarter second with nothing due — every record was looked up in the world) a record
+      //   is only looked at once its time (less its crack time) is near; a cell dug out meanwhile is found then
+      if (now < T.until - (T.crack || 0) - 300) continue;
       const v = peekCellAt(grid, i); if (v < 0) continue;   // (its chunk not here yet: later)
       // (7c) a cloud's snow grain that slid off its cell: waited for until its time, then the nearest snow nobody remembers melts instead (empty air only — snow heat turned to water is gone already)
       if (v !== T.mat && T.kind === 'snow' && peekAir(grid, i)) { if (now < T.until) continue; magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt); M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
       if (v !== T.mat && !magicSnowIced(T, v)) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }   // (dug out, or changed by something else: not ours any more — 7c round 2: a cloud's snow frozen to ice on liquid still is)
       if (magicCfgSrv.exact && T.until - now < 260) { if (!T.sch) { T.sch = 1; const k = T.until; let g = due.get(k); if (!g) due.set(k, g = []); g.push(i); } continue; }
       if (now >= T.until) {
+        if (magicCfgSrv.snowTop && T.kind === 'snow' && v === MAGIC_SNOW) { const j = magicSnowTopOf(room, grid, st.rows, M, i); if (j !== i) { grid.s(j, 0); hp.s(j, 0); cells.push(j, 0); melt.push(j); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, j, M, T.units, cells, melt); continue; } }
         const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); cells.push(i, BK[0]);
         if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) dmg.push(i, BK[1]); }   // (7a: the ground back with the damage it had, a powder woken)
         if (magicTempLiq(T, amt, tot, i)) { fineSet(room).add(i); liq.push(i); }
@@ -28653,6 +28672,7 @@ io.on('connection', (socket) => {
   //   `magic-state` = the casting stance, the inputs' signs and the prepared spell, for the others to see (relayed, trimmed). `magic-hit` = where the caster's bolt ended: fire there.
   socket.on('magic-debug', (m) => { const was = [socket._magicAll, socket._magicOwn, socket._magicOneMind];
     socket._magicOneMind = !!(m && m.apart === 0);   // (4a: 'What you learn is kept apart for the Overworld' off)
+    if (m && m.snowtop != null) magicCfgSrv.snowTop = m.snowtop ? 1 : 0;   // (8c round 2, a server-wide switch for comparing)
     socket._magicHeap = !!(m && m.boulder === 0);     // (5b round 5: 'A thrown rock chunk stays a loose boulder' off = heaped back into the ground, as before)
     socket._magicAll = !!(m && m.all); socket._magicNoCd = !!(m && m.nocd);   // (the panel's 'Know every spell' + 'No cooldowns', both for testing)
     socket._magicNoReag = !!(m && m.noreag); socket._magicOwn = !(m && m.own === 0);   // (step 2: 'Spells need no reagents (for testing)'; 'Your own version of each spell' off = the shared core only)
