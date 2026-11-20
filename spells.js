@@ -275,6 +275,18 @@
       mat: 4, melts: true, fx: '#cfefff', look: 'icemelt', plain: { keys: [D, R, L, R, U], rune: [2, 5, 4, 6, 3] } },
     coldsnap: { name: 'Cold snap', school: 'frost', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'coldsnap', learn: 5, rad: 96, cells: 220, ringMs: 22, secs: 30, hold: 1.5, crustS: 8, fx: '#cfefff',
       plain: { keys: [D, L, U, R, D], rune: [8, 4, 3, 1, 5] } },
+    // ⭐ STEP 8a (2026-11-20, STORM — kickoff §'STEP 8'): LIGHTNING, kind 'zap': an instant jagged strike from the tip towards the pointer, `reach` px, stopped by the first rock,
+    //   liquid or body on the way (the caster's game traces it); it JUMPS on to `jumps` more bodies within `jumpR` px (× `metalK` for one wearing plate or mail — they are found
+    //   first), each jump `jumpK` of the blow. `dmg` health + `stunMs` of stun to whom it strikes (× `metalHurtK` in metal). IN LIQUID that conducts (water, brine, acid — not oil or
+    //   lava) the charge runs through the touching liquid, at most `liqCells`, and shocks everybody in it for `liqDmg` (the caster too); into a METAL ORE vein it runs along it,
+    //   at most `oreCells`, shocking whoever touches it. What burns where it ends catches.
+    lightning: { name: 'Lightning', school: 'storm', form: 'bolt', tier: 0, cd: 3, stance: 'level', kind: 'zap', learn: 3, reach: 280, jumps: 2, jumpR: 70, metalK: 1.6, jumpK: 0.6, dmg: 1.5, metalHurtK: 1.5, stunMs: 350,
+      liqCells: 700, liqDmg: 1, oreCells: 160, fx: '#cfe0ff', plain: { keys: [L, R, R, U, R], rune: [0, 4, 2, 5, 7] } },
+    // CALL LIGHTNING, kind 'skystrike': a dark thundercloud gathers ON the pointer (the rain cloud's place, `down` cells), `gatherMs` later one great strike falls straight down from
+    //   it onto the first thing under it (a body within `side` px of its middle — one in metal from `side` × `metalK` — or the ground); `dmg` + alight + `stunMs`. Sand where it lands
+    //   FUSES to glass (a small branching tube down into it, at most `glass` cells — for good, changed not made); liquid / ore as lightning's.
+    calllightning: { name: 'Call lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'skystrike', learn: 5, reach: 400, wide: 10, down: 1, gatherMs: 900, side: 14, metalK: 1.8,
+      dmg: 3, metalHurtK: 1.5, stunMs: 600, liqCells: 1000, liqDmg: 1.5, oreCells: 240, glass: 9, fx: '#cfe0ff', plain: { keys: [L, U, L, D, D], rune: [0, 1, 3, 7, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -338,6 +350,7 @@
     raincloud: [[U, L], [4, 1, 0]], snowcloud: [[U, R], [4, 1, 2]], coldsnap: [[D, D], [4, 3, 1, 5]],   // (7c: up into the sky and off to one side or the other · round you, as the flame ring)
     iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]], shapewater: [[L, R], [4, 3, 5]], waterjet: [[R, D], [4, 8]],   // (7b: grab and fling, as the rock chunk · the stream ending)   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
+    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]],   // (8a: the bolt ending · up into the sky, then a zigzag down)
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],

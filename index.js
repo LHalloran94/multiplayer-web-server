@@ -4165,6 +4165,60 @@ function magicColdSnap(room, x, y, S, keep) {
   }, k * (S.ringMs || 22));
   return list.length;
 }
+// ⭐ MAGIC 8a (2026-11-20, STORM — kickoff §'STEP 8'): LIGHTNING and CALL LIGHTNING. Where a strike lands (and where each body it struck stands) the charge RUNS ON:
+//   · through the LIQUID touching that point (4 ways, liquid that conducts — water, brine, acid; not where oil or lava is most of it), at most `liqCells` in all;
+//   · along a METAL ORE vein touching it (8 ways — iron, copper, gold, silver, tin, platinum), at most `oreCells`.
+//   → { liq: [column, top row, bottom row, …] (the liquid as runs down each column), ore: [column, row, parent's place in this list (−1 the first), …] (the vein as a tree, so
+//   every screen can draw the charge running out along it) }. Each screen shocks its OWN body if it is in that liquid or touching that vein. PROCESSOR: a bounded fill, once a strike.
+const MAGIC_METAL_ORE = new Set([34, 35, 51, 52, 54, 73]);
+function magicZapSpread(room, pts, S) {
+  const st = cellsOf(room), grid = st.terrain, out = { liq: [], ore: [] }; if (!grid) return out; const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL;
+  const amt = st.fineAmt, tot = st.fineTotal, fine = !!(amt && tot && (st.fineSub || 1) === 1), LV = LIQ_RANK[11], OR = LIQ_RANK[15];
+  const conducts = (i) => { if (!fine || i < 0 || i >= N) return false; const t = peekCellAt(tot, i); if (!(t > 0)) return false; const p = amt.rp(i), b = amt.o(i); return t - p[b + LV] - p[b + OR] > t / 2; };
+  const ore = (i) => i >= 0 && i < N && MAGIC_METAL_ORE.has(peekCellAt(grid, i));
+  const seenL = new Set(), cols = new Map(), seenO = new Map(), tree = []; let nl = 0;
+  for (const [x, y] of pts) { if (!isFinite(x) || !isFinite(y)) continue; const c0 = Math.floor(x / T), r0 = Math.floor(y / T);
+    // the liquid: the nearest conducting cell within a cell, then outward
+    let s = -1; for (let dc = -1; dc <= 1 && s < 0; dc++) for (let dr = -1; dr <= 1 && s < 0; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r; if (!seenL.has(i) && conducts(i)) s = i; }
+    if (s >= 0 && nl < (S.liqCells || 700)) { const q = [s]; seenL.add(s); nl++;
+      for (let h = 0; h < q.length; h++) { const i = q[h], r = i % ROWS, c = (i - r) / ROWS; let L = cols.get(c); if (!L) cols.set(c, L = []); L.push(r);
+        for (const j of [i - ROWS, i + ROWS, r > 0 ? i - 1 : -1, r < ROWS - 1 ? i + 1 : -1]) { if (j < 0 || seenL.has(j) || !conducts(j)) continue; if (nl >= (S.liqCells || 700)) break; seenL.add(j); nl++; q.push(j); } } }
+    // the vein: every ore cell touching the point's cell, then outward
+    const q = []; for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) { const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r; if (!seenO.has(i) && ore(i) && seenO.size < (S.oreCells || 160)) { seenO.set(i, tree.length / 3); tree.push(c, r, -1); q.push(i); } }
+    for (let h = 0; h < q.length; h++) { const i = q[h], r = i % ROWS, c = (i - r) / ROWS, me = seenO.get(i);
+      for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 1; dr++) { if (!dc && !dr) continue; const cc = c + dc, rr = r + dr; if (cc < 0 || cc >= COLS || rr < 0 || rr >= ROWS) continue; const j = cc * ROWS + rr;
+        if (seenO.has(j) || !ore(j) || seenO.size >= (S.oreCells || 160)) continue; seenO.set(j, tree.length / 3); tree.push(cc, rr, me); q.push(j); } } }
+  for (const [c, L] of cols) { L.sort((a, b) => a - b); let a = L[0], b = L[0]; for (let k = 1; k <= L.length; k++) { if (k < L.length && L[k] === b + 1) { b = L[k]; continue; } out.liq.push(c, a, b); if (k < L.length) a = b = L[k]; } }
+  out.ore = tree; return out;
+}
+// CALL LIGHTNING'S GLASS: sand where it lands fuses — the cell struck and two thin roots wandering down through the sand under it, at most `glass` cells, for good (a cell for a
+//   cell: changed, not made — the Earth rule). → how many cells. PROCESSOR: a handful of cells.
+function magicFulgurite(room, x, y, S, sp) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, mats = roomMats[room] || {};
+  const MAP = (SPELLS.of('glassify') || {}).map || { 3: 16 }, sand = (i) => i >= 0 && i < N && MAP[peekCellAt(grid, i)] != null;
+  const c0 = Math.floor(x / T); let r0 = Math.floor(y / T), s = -1; if (c0 < 0 || c0 >= COLS) return 0;
+  for (let k = -1; k <= 3 && s < 0; k++) { const r = r0 + k; if (r < 0 || r >= ROWS) continue; const i = c0 * ROWS + r, v = peekCellAt(grid, i); if (sand(i)) s = i; else if (v > 0 && isSolidCell(v)) break; }
+  if (s < 0) return 0;
+  const most = Math.max(1, S.glass || 9), got = [s], seen = new Set([s]);
+  for (let br = 0; br < 2 && got.length < most; br++) { let i = s; for (let k = 0; k < 6 && got.length < most; k++) { const r = i % ROWS, c = (i - r) / ROWS; if (r + 1 >= ROWS) break;
+    const dc = Math.random() < 0.5 ? (br ? 1 : -1) : 0, j = (c + dc) * ROWS + r + 1, j2 = c * ROWS + r + 1, n = c + dc >= 0 && c + dc < COLS && sand(j) && !seen.has(j) ? j : (sand(j2) && !seen.has(j2) ? j2 : -1);
+    if (n < 0) break; seen.add(n); got.push(n); i = n; } }
+  const cells = []; for (const i of got) { const to = MAP[peekCellAt(grid, i)]; if (!(to > 0)) continue; grid.s(i, to); st.terrainHp.s(i, matStrengthSrv(mats, to)); cells.push(i, to); }
+  if (cells.length) { wireFanout(room, 'terrain-set', { cells }); if (sp) { const c = []; for (let q = 0; q < cells.length; q += 2) c.push(cells[q]); io.to(room).emit('magic-cells', { c, spell: sp, look: 'glass' }); }
+    const rr = s % ROWS, cc = (s - rr) / ROWS; activatePowderRect(room, grid, cc - 2, rr - 1, cc + 2, rr + 7); }
+  return cells.length / 2;
+}
+// CALL LIGHTNING waiting to fall: cast id → { room, by, spell, x, top (the cloud's underside), gy (the ground under it), at (when it may fall), done, S }. Its CASTER's game says
+//   what it strikes when the time comes (`magic-strike`: the bodies it sees in the column, the dummy, metal first); if they say nothing, the server strikes the ground itself.
+const _magicStrikes = new Map();
+function magicSkyStrikeDo(id, q, x, y, fy, pl) {
+  if (!q || q.done) return; q.done = true; const room = q.room, S = q.S, T = TERRAIN_CELL;
+  const st = cellsOf(room), tot = st.fineTotal, i = Math.floor(x / T) * st.rows + Math.floor(y / T), wet = !!(tot && (st.fineSub || 1) === 1 && i >= 0 && i < (st.terrain ? st.terrain.length : 0) && peekCellAt(tot, i) > 0);
+  let n = 0, gl = 0; if (!pl && !wet) { n = igniteBox(room, x, y + 2, 14); gl = magicFulgurite(room, x, y + 2, S, q.spell); }
+  const sp = magicZapSpread(room, [[x, y + 2], [x, isFinite(fy) ? fy - 2 : y]], S);
+  io.to(room).emit('magic-strike', { id, from: q.by, spell: q.spell, x: Math.round(x), y: Math.round(y), top: Math.round(q.top), pl: pl || undefined, n, gl, wet: wet ? 1 : 0, liq: sp.liq, ore: sp.ore });
+  setTimeout(() => _magicStrikes.delete(id), 4000);
+}
 // ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
 //   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
 //   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
@@ -28626,6 +28680,9 @@ io.on('connection', (socket) => {
     let CL = null; if (S.kind === 'cloud') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 360) + 8 ? ((S.reach || 360) + 8) / d : 1;
       CL = magicCloudAt(room, m.x + dx * k, m.y + dy * k, S); if (!CL) return no('room'); }
     if (S.kind === 'coldsnap' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    // (8a) CALL LIGHTNING: its cloud where the rain cloud's goes (on the pointer, held to its reach) — no open air there, refused before anything is spent
+    let SKY = null; if (S.kind === 'skystrike') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 400) + 8 ? ((S.reach || 400) + 8) / d : 1;
+      SKY = magicCloudAt(room, m.x + dx * k, m.y + dy * k, S); if (!SKY) return no('room'); }
     let WPN = null; if (S.kind === 'flameblade') { const ob = typeof m.wpn === 'string' && roomObjects[room] && roomObjects[room].get(m.wpn); if (!ob) return no('weapon'); WPN = m.wpn; }   // (6c) the weapon in the other hand — before anything is spent
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
@@ -28661,6 +28718,18 @@ io.on('connection', (socket) => {
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     // ⭐ (step 6a) KINDLE: what burns at the caster's point (short of the first rock on the way — their game's) catches, no further than its reach (held to it above)
     if (S.kind === 'kindle') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.n = igniteBox(room, out.tx, out.ty, 4); }
+    // ⭐ (8a) LIGHTNING: the caster's game traced it (where it ends, `tx`/`ty` — held to its reach above; the bodies it struck in order, `zh` [[id, x, y (their middle), feet y]]);
+    //   here the charge runs on through liquid and ore from those points (`magicZapSpread`), and what burns where it ends catches (not in liquid, not on a body)
+    if (S.kind === 'zap') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const lim = (S.reach || 280) + (S.jumpR || 70) * (S.metalK || 1.6) * ((S.jumps || 2) + 1) + 60;
+      out.zh = (Array.isArray(m.zh) ? m.zh : []).slice(0, (S.jumps || 2) + 1).filter(h => Array.isArray(h) && typeof h[0] === 'string' && h[0].length < 64 && isFinite(h[1]) && isFinite(h[2]) && Math.hypot(h[1] - out.x, h[2] - out.y) < lim)
+        .map(h => [h[0], Math.round(h[1]), Math.round(h[2]), Math.round(isFinite(h[3]) ? h[3] : h[2])]);
+      const st0 = cellsOf(room), tot0 = st0.fineTotal, ci = Math.floor(out.tx / TERRAIN_CELL) * st0.rows + Math.floor(out.ty / TERRAIN_CELL), wet = !!(tot0 && (st0.fineSub || 1) === 1 && ci >= 0 && st0.terrain && ci < st0.terrain.length && peekCellAt(tot0, ci) > 0);
+      if (!out.zh.length && !wet) out.n = igniteBox(room, out.tx, out.ty, 8);
+      const sp = magicZapSpread(room, [[out.tx, out.ty]].concat(out.zh.map(h => [h[1], h[3] - 2])), S); out.liq = sp.liq; out.ore = sp.ore; if (wet) out.wet = 1; }
+    // ⭐ (8a) CALL LIGHTNING: the cloud gathers (every screen draws it); `gatherMs` later its caster's game says what it strikes (`magic-strike`) — or, if it says nothing, the ground
+    if (SKY) { const gat = Math.max(200, S.gatherMs || 900), q = { room, by: socket.id, spell: m.spell, x: SKY.x, top: SKY.y, gy: SKY.gy, at: now + gat, done: false, S: SK };
+      _magicStrikes.set(id, q); out.cx = Math.round(SKY.x); out.cy = Math.round(SKY.y); out.gy = Math.round(SKY.gy); out.w = (S.wide || 10) * TERRAIN_CELL; out.gather = gat;
+      setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
     if (S.kind === 'lift') out.obj = m.obj;
     if (S.kind === 'double') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); out.dv = Math.max(-400, Math.min(400, Math.round(+m.dv || 0)));
       let D = _magicDoubles.get(room); if (!D) _magicDoubles.set(room, D = new Map()); for (const [k, q] of D) if (now > q.until) D.delete(k); D.set(id, { by: socket.id, until: now + Math.max(S.secs || 60, S.secsWalk || 6) * 1000 + 3000 }); }
@@ -28776,6 +28845,14 @@ io.on('connection', (socket) => {
     const p = socket._avPos; if ((q.by === socket.id && !m.own) || Date.now() < q.at || (p && Date.now() - p.t < 3000 && Math.hypot(p.x - q.x, p.y - q.y) > 140)) return; magicRuneOff(room, q, socket.id); });
   // what runes there are in your room now (asked when you arrive and now and then; drawn faint — a late arrival can still see a careful trace)
   socket.on('magic-runes-ask', () => { const room = currentAvatarRoom; if (!room) return; const now = Date.now(); socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
+  // ⭐ (8a) CALL LIGHTNING FALLS: its caster's game says where (`x`, `y` — the top of the body it struck, or the ground; `fy` that body's feet; `pl` the body) — straight down from
+  //   its cloud, near its middle, no lower than the ground under it
+  socket.on('magic-strike', (m) => {
+    const q = m && _magicStrikes.get(m.id); if (!q || q.done || q.by !== socket.id || currentAvatarRoom !== q.room || Date.now() < q.at - 400) return;
+    if (!isFinite(m.x) || !isFinite(m.y)) return; const S = q.S, side = (S.side || 14) * (S.metalK || 1.8) + 20;
+    const x = Math.max(q.x - side, Math.min(q.x + side, +m.x)), y = Math.max(q.top, Math.min(q.gy + TERRAIN_CELL, +m.y));
+    magicSkyStrikeDo(m.id, q, x, y, isFinite(m.fy) ? +m.fy : null, typeof m.pl === 'string' && m.pl.length < 64 ? m.pl : null);
+  });
   socket.on('magic-hit', (m) => {
     const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
     _magicLive.delete(m.id);
