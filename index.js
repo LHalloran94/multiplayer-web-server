@@ -4049,7 +4049,7 @@ setInterval(() => { if (!_magicWaters.size) return; const now = Date.now(); for 
 function magicJetTick(id, q, S, now) {
   const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid) return; ensureFineArrays(room, 1);
   if (q.lt == null) { q.lt = now; q.acc = 0; q.made = q.made || 0; }
-  const dt = Math.min(0.3, (now - q.lt) / 1000); q.lt = now; const per = LIQ_DROP[9][0]; q.acc = Math.min(per * 4, (q.acc || 0) + (S.ups || 24) * dt);
+  const dt = Math.min(0.3, (now - q.lt) / 1000); q.lt = now; const per = 2; q.acc = Math.min(per * 6, (q.acc || 0) + (S.ups || 24) * dt);
   const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
   const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
   const x0 = q.x + (q.ax || 0) * 6, y0 = q.y + (q.ay || 0) * 6, c = Math.floor(x0 / T), r = Math.floor(y0 / T); if (c < 0 || c >= COLS || r < 1 || r >= ROWS - 1) return;
@@ -4058,7 +4058,7 @@ function magicJetTick(id, q, S, now) {
   while (q.acc >= per && fly.length < liqDropCfg.maxFly) { q.acc -= per; const sp = (S.dropV || 42) * (0.9 + 0.2 * Math.random()), a = (Math.random() - 0.5) * 0.12, ca = Math.cos(a), sa = Math.sin(a), ux = q.ax * ca - q.ay * sa, uy = q.ax * sa + q.ay * ca, vx = ux * sp, vy = uy * sp;
     const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.2, vx, vy, at, liqDropCfg.g, 0);
     fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk: MAGIC_WATER_RK, u: per, src: at }); wire.push(at, MAGIC_WATER_RK, Math.round(vx * 100), Math.round(vy * 100), A.steps, per); q.made += per; }
-  if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g, j: 1 });   // (7b round 2: `j` — the jet's own drops; every screen draws the stream along their arc instead, `magicCfg.jetDrops`)
+  if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g, j: id, jr: S.jetR || 0, jt: 50 });   // (7b round 3: `j` the cast — its drops ARE the stream; `jr` drawn round so they touch; `jt` the tick, the drops spread across it)   // (7b round 2: `j` — the jet's own drops; every screen draws the stream along their arc instead, `magicCfg.jetDrops`)
   q.dx = x0 + q.ax * (S.reach || 150); q.dy = y0 + q.ay * (S.reach || 150);
 }
 setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) { if (now > q.until) continue; const S = SPELLS.of(q.spell); if (S && S.kind === 'jet') { try { magicJetTick(id, q, S, now); } catch (e) { console.error('[magic jet] ' + (e && e.message)); } } } }, 50);   // (7b round 2, the user: 'very sporadically and in small amounts' — 20 a second)
