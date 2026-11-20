@@ -4273,8 +4273,13 @@ function magicWhirlRoom(room, x, gy, S) { const st = cellsOf(room), grid = st.te
   return Math.max(0, ht); }
 function magicWhirlTick(id, q, now) {
   const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid) return; ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, S = q.S, M = magicTemp.get(room);
-  if (q.moving) { const nx = q.x + q.dir * (S.speed || 40) * 0.1, g = magicGroundAt(room, nx, q.y - 3 * T);   // (a gap lower than `minRoom` is a wall to it)
-    if (g && Math.abs(g.y - q.y) <= 4 * T + 1 && magicWhirlRoom(room, nx, g.y, S) >= (S.minRoom || 40)) { q.x = nx; q.y = g.y; } else if (!q.turned) { q.dir = -q.dir; q.turned = 1; } else q.moving = false; }
+  // (8c round 7, the user: 'it should bounce off walls … it bounces off some walls, but then at others it keeps pushing into them' — it turned once, then stopped against the
+  //   next; and only a step in the ground was seen, not rock beside the funnel) it BOUNCES every time: a step up of more than 4 cells, a gap under `minRoom`, or ROCK `clear` px
+  //   ahead of its middle 5–9 cells up (beside its narrow foot; a step it can ride over is lower — rig: with 2-cell steps it was trapped in a 3-deep pit) turn it round
+  if (q.moving) { const nx = q.x + q.dir * (S.speed || 40) * 0.1, g = magicGroundAt(room, nx, q.y - 3 * T);
+    let wall = !g || q.y - g.y > 4 * T + 1 || magicWhirlRoom(room, nx, g.y, S) < (S.minRoom || 40);
+    if (!wall) { const cA = Math.floor((nx + q.dir * (S.clear || 20)) / T), rG2 = Math.floor(g.y / T); for (let r = rG2 - 5; r >= rG2 - 9 && !wall; r--) { if (cA < 0 || cA >= COLS || r < 0) { wall = true; break; } const v = peekCellAt(grid, cA * ROWS + r); if (v > 0 && isSolidCell(v)) wall = true; } }
+    if (!wall) { q.x = nx; q.y = g.y; } else { q.dir = -q.dir; q.bounces = (q.bounces || 0) + 1; } }
   q.ht = magicWhirlRoom(room, q.x, q.y, S);
   const c0 = Math.floor(q.x / T), rG = Math.floor(q.y / T), chg = []; let took = 0;
   for (let dc = -1; dc <= 1 && took < (S.grab || 2); dc++) { const c = c0 + dc; if (c < 0 || c >= COLS || q.carry.length >= (S.carry || 60)) continue;
