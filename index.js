@@ -4331,6 +4331,102 @@ setInterval(() => { if (!_magicDrafts.size) return; const now = Date.now();
     if (c < 0 || c >= st.cols || r < 1 || r >= ROWS) continue; const v = peekCellAt(grid, i); if (!(v > 0) || !isPowderId(v) || !peekAir(grid, i - 1) || (M && M.has(i))) continue;
     grid.s(i, 0); st.terrainHp.s(i, 0); wireFanout(q.room, 'terrain-set', { cells: [i, 0] }); activatePowderRect(q.room, grid, c - 1, r - 2, c + 1, r + 1);
     magicSoilSpray(q.room, (c + 0.5) * T, q.gy - T, { m: [v], o: [] }, (Math.random() - 0.5) * 60, -Math.min(q.gy - q.top, 160) * 2.4, { fan: 0.2 }); } }, 100);
+// ═══ ⭐ MAGIC 8d (2026-11-21, STORM) BALL LIGHTNING + THE LIGHTNING WEAPON · FROST AND WATER: THE WHIRLPOOL + THE WAVE ═══════════════════════════════════════════════════
+//  · BALL LIGHTNING: flown by its caster's game (`magic-ball`, passed on); its arcs and its burst are its caster's game's to aim (`magic-ballzap`, held to its reach and rate here),
+//    the charge run on through liquid and ore here (`magicZapSpread`) and sent to everyone — each screen shocks its own body.
+//  · LIGHTNING WEAPON: kept here (`_magicStormBlades`) only so its DIP into liquid (`magic-storm-dip`, its holder's game) can run through that liquid and end it.
+//  · WHIRLPOOL: stationary in a pool; every tick its liquid PUMPED from the middle's surface out to its rim (moved, nothing made or lost) so the surface dips into a funnel.
+//  · WAVE: a mound of CONJURED WATER moved along the ground — each tick its own water taken back (from where it put it, then above the ground it stood on) and put down
+//    again ahead; at its end all of it taken away. PROCESSOR (the server's): ~100 cells a wave tick, ~10 a whirlpool tick.
+const _magicBalls = new Map();        // cast id → { room, by, x, y, until, S, last, done }
+const _magicStormBlades = new Map();  // caster's socket → { room, wpn, id, until, S }
+const _magicPools = new Map();        // cast id → { room, c, sr, R, bot, until, S, moved }
+const _magicWaves = new Map();        // cast id → { room, by, x, dir, gr, t0, until, S, N, put: Map(cell → units), base: Map(col → row), carry, endAt, broke }
+function magicPoolFind(room, x, y, S) {
+  const st = cellsOf(room), grid = st.terrain, tot = st.fineTotal; if (!grid || !tot || (st.fineSub || 1) !== 1) return null; const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL;
+  let c = Math.floor(x / T), r = Math.floor(y / T); if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return null;
+  const wet = (cc, rr) => cc >= 0 && cc < COLS && rr >= 0 && rr < ROWS && peekCellAt(tot, cc * ROWS + rr) > 0, rock = (cc, rr) => { const v = peekCellAt(grid, cc * ROWS + rr); return v > 0 && isSolidCell(v); };
+  if (!wet(c, r)) { let k = 0; while (k < 16 && r < ROWS - 1 && !wet(c, r) && !rock(c, r)) { r++; k++; } if (!wet(c, r)) return null; }
+  while (r > 0 && wet(c, r - 1)) r--; const sr = r, row = Math.min(ROWS - 1, sr + 1);
+  let cl = c, cr = c; while (cl - 1 >= 0 && wet(cl - 1, row) && c - cl < 40) cl--; while (cr + 1 < COLS && wet(cr + 1, row) && cr - c < 40) cr++;
+  const minR = S.minR || 3; if (cr - cl + 1 < 2 * minR + 1) return null; c = Math.max(cl + minR, Math.min(cr - minR, c));
+  let bot = sr; while (bot + 1 < ROWS && wet(c, bot + 1)) bot++; if (bot - sr < 1) return null;
+  return { c, sr, R: Math.min(S.maxR || 12, c - cl, cr - c), bot };
+}
+function magicPoolTick(q) {
+  const st = cellsOf(q.room), amt = st.fineAmt, tot = st.fineTotal; if (!amt || !tot || !st.terrain) return; const ROWS = st.rows, COLS = st.cols, S = q.S, changed = [], u = new Array(LIQ_T).fill(0); let got = 0;
+  const topOf = (c) => { if (c < 0 || c >= COLS) return -1; for (let r = Math.max(0, q.sr - 2); r <= q.bot; r++) if (peekCellAt(tot, c * ROWS + r) > 0) return r; return -1; };
+  for (let dc = -1; dc <= 1 && got < (S.pump || 70); dc++) { const c = q.c + dc, r0 = topOf(c); if (r0 < 0) continue;
+    for (let r = r0; r <= Math.min(q.bot - 1, r0 + 2) && got < (S.pump || 70); r++) { const i = c * ROWS + r; for (let k = LIQ_T - 1; k >= 0 && got < (S.pump || 70); k--) { const n = vesselCellTake(q.room, i, k, (S.pump || 70) - got, changed); if (n > 0) { u[k] += n; got += n; } } } }
+  if (got) { const rims = []; for (const s of [-1, 1]) for (let d = q.R; d >= Math.max(2, q.R - 2); d--) rims.push(q.c + s * d);
+    for (let k = 0; k < LIQ_T; k++) { let left = u[k]; for (let pass = 0; pass < 3 && left > 0; pass++) for (const c of rims) { if (left <= 0) break; const r0 = topOf(c); if (r0 < 0) continue;
+        for (const r of [r0, r0 - 1]) { if (r < 0 || left <= 0) continue; const i = c * ROWS + r; if (!vesselCellOpen(q.room, i)) continue; left -= vesselCellPut(q.room, i, k, Math.ceil(left / 3), changed); } }
+      if (left > 0) { const i = q.c * ROWS + q.bot; left -= vesselCellPut(q.room, i, k, left, changed); } if (left > 0) u[k] = left; else u[k] = 0; }
+    q.moved += got; }
+  if (changed.length) emitFineCells(q.room, [...new Set(changed)]);
+}
+setInterval(() => { const now = Date.now(); for (const [id, q] of _magicBalls) if (now > q.until) _magicBalls.delete(id); for (const [k, q] of _magicStormBlades) if (now > q.until) _magicStormBlades.delete(k); }, 1000);
+setInterval(() => { if (!_magicPools.size) return; const now = Date.now(); for (const [id, q] of _magicPools) { if (now > q.until) { _magicPools.delete(id); continue; } try { magicPoolTick(q); } catch (e) { console.error('[magic pool] ' + (e && e.message)); _magicPools.delete(id); } } }, 100);
+// THE WAVE'S SHAPE: how high (a share of `high`) at `f` along it, 0 its tail, 1 its front — a long back rising to the crest, then a steep face
+function magicWaveProf(f) { return f < 0.72 ? Math.pow(f / 0.72, 1.4) : Math.max(0.35, 1 - Math.pow((f - 0.72) / 0.28, 2) * 0.65); }
+// (rig, 8d: the world's flow spread the mound further between ticks than the cells it was put on — 3752 units were left behind) THE WATER THAT WAS THERE is recorded along its
+//   way at the cast (`magicWaveCorridor`: every cell's water in a band along its path); each tick it takes back, near it, only the water ABOVE that record — at its end, along
+//   the whole band — never more than it has out. Nothing of a pool it passed is taken; what it leaves beyond the band is counted (`lost`).
+function magicWaveCorridor(room, x0, dir, gr, S) {
+  const st = cellsOf(room), tot = st.fineTotal, amt = st.fineAmt, ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, WR = LIQ_RANK[9], L = S.len || 16, run = Math.ceil(((S.speed || 120) * (S.secs || 4.5)) / T) + L;
+  const ca = Math.floor(x0 / T), c0 = Math.max(0, Math.min(ca - L - 16, ca + dir * run) - 16), c1 = Math.min(COLS - 1, Math.max(ca + L + 16, ca + dir * run) + 16), r0 = Math.max(0, gr - 24), r1 = Math.min(ROWS - 1, gr + 18), base = new Map();
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const i = c * ROWS + r; if (peekCellAt(tot, i) > 0) { const w = amt.rp(i)[amt.o(i) + WR]; if (w > 0) base.set(i, w); } }
+  return { c0, c1, r0, r1, base };
+}
+function magicWaveTakeBack(room, q, changed, all) {
+  const st = cellsOf(room), tot = st.fineTotal, amt = st.fineAmt, ROWS = st.rows, T = TERRAIN_CELL, WR = LIQ_RANK[9], K = q.corr, L = q.S.len || 16; q.put.clear(); if (!(q.out > 0)) return;
+  const cF = Math.floor(q.x / T), lo = all ? K.c0 : Math.max(K.c0, Math.min(cF, cF - q.dir * (L - 1)) - 14), hi = all ? K.c1 : Math.min(K.c1, Math.max(cF, cF - q.dir * (L - 1)) + 14);
+  for (let c = lo; c <= hi && q.out > 0; c++) for (let r = K.r0; r <= K.r1 && q.out > 0; r++) { const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue; const w = amt.rp(i)[amt.o(i) + WR], ex = w - (K.base.get(i) || 0); if (ex <= 0) continue;
+    q.out -= vesselCellTake(room, i, WR, Math.min(ex, q.out), changed); }
+  // (rig: 72 units left — its water had taken the place of pool water that ran off, so no cell stood above the record) at its end the rest from any water along the band, top first
+  if (all && q.out > 0) for (let c = K.c0; c <= K.c1 && q.out > 0; c++) for (let r = K.r0; r <= K.r1 && q.out > 0; r++) { const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0)) continue; const w = amt.rp(i)[amt.o(i) + WR]; if (w > 0) q.out -= vesselCellTake(room, i, WR, Math.min(w, q.out), changed); }
+  if (all && q.out > 0) { q.lost = (q.lost || 0) + q.out; q.out = 0; }
+}
+function magicWaveBase(room, c, ref, S, K) {   // the first rock or liquid down from a little above `ref` in column c: { r, wall } (wall: rock already there — a step too tall)
+  const st = cellsOf(room), grid = st.terrain, tot = st.fineTotal, ROWS = st.rows, floorRow = Math.floor(roomFloorTop(room) / TERRAIN_CELL); if (c < 0 || c >= st.cols) return { r: ref, wall: true };
+  const full = (r) => { if (r >= floorRow || r >= ROWS) return true; const i = c * ROWS + r, v = peekCellAt(grid, i); return (v > 0 && isSolidCell(v) && !(v >= 249 && v <= 253)) || (K ? K.base.has(i) : peekCellAt(tot, i) > 0); };   // (rig: a crate's body cells read as a wall — it broke on them; it carries them)
+  const r0 = ref - (S.step || 3) - 1; if (r0 < 0 || full(r0)) return { r: ref, wall: true };
+  for (let r = r0 + 1; r <= ref + 14; r++) if (full(r)) return { r, wall: false };
+  return { r: ref + 14, wall: false };
+}
+function magicWaveTick(id, q, now) {
+  const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid || !st.fineAmt) return; ensureFineArrays(room, 1);
+  const ROWS = st.rows, T = TERRAIN_CELL, S = q.S, L = S.len || 16, WR = LIQ_RANK[9], changed = [], dt = Math.min(0.2, (now - (q.at || now)) / 1000); q.at = now;
+  magicWaveTakeBack(room, q, changed, false);
+  // forward, unless broken; a step taller than it can climb (or rock at its crest's height ahead) breaks it
+  if (!q.endAt) { const nx = q.x + q.dir * (S.speed || 120) * dt, cN = Math.floor(nx / T) + q.dir, b = magicWaveBase(room, cN, q.gr, S, q.corr);
+    let wall = b.wall; if (!wall) { for (let r = b.r - 1; r >= b.r - Math.ceil((S.high || 5) * 0.8); r--) { const v = peekCellAt(grid, cN * ROWS + r); if (r < 0 || (v > 0 && isSolidCell(v) && !(v >= 249 && v <= 253))) { wall = true; break; } } }
+    if (wall) { q.endAt = now; q.broke = 1; } else { q.x = nx; q.gr = magicWaveBase(room, Math.floor(nx / T), q.gr, S, q.corr).r; } }
+  const age = now - q.t0, grow = Math.min(1, age / 400), fade = q.endAt ? Math.max(0, 1 - (now - q.endAt) / 320) : Math.max(0, Math.min(1, (q.until - now) / 500)), H = (S.high || 5) * grow * fade;
+  // its columns, front to tail, each on the first rock or liquid under it (its own water taken up first)
+  const cF = Math.floor(q.x / T), cols = [], bases = [], hs = []; let ref = q.gr;
+  for (let k = L - 1; k >= 0; k--) { const c = cF - q.dir * (L - 1 - k); const b = magicWaveBase(room, c, ref, S, q.corr); ref = b.wall ? ref : b.r; q.base.set(c, ref); cols.push(c); bases.push(ref); hs.push(b.wall ? 0 : H * magicWaveProf(k / (L - 1))); }
+  for (const [c] of q.base) if (Math.abs(c - cF) > L + 10) q.base.delete(c);
+  let left = q.N;
+  for (let j = 0; j < cols.length && left > 0; j++) { const c = cols[j], h = hs[j]; if (!(h > 0.05) || c < 0 || c >= st.cols) continue; let need = Math.round(h * LIQUID_MAX);
+    for (let r = bases[j] - 1; r >= 0 && need > 0 && left > 0; r--) { const i = c * ROWS + r; if (!vesselCellOpen(room, i)) break; const n = vesselCellPut(room, i, WR, Math.min(need, left, LIQUID_MAX), changed); if (n > 0) { q.put.set(i, (q.put.get(i) || 0) + n); need -= n; left -= n; q.out += n; } else if (need > 0 && peekCellAt(st.fineTotal, i) < LIQUID_MAX) break; } }
+  // the surface's powder at its front swept up (dropped where it ends)
+  if (!q.endAt && q.carry.length < (S.carry || 60)) { const M = magicTemp.get(room), cg = []; let took = 0;
+    for (let dc = 0; dc <= 1 && took < (S.grab || 2); dc++) { const c = cF + q.dir * dc; if (c < 0 || c >= st.cols) continue; const b = q.base.get(c) != null ? q.base.get(c) : q.gr;
+      for (let r = b; r <= b + 1; r++) { const i = c * ROWS + r; if (r < 1 || r >= ROWS) continue; const v = peekCellAt(grid, i); if (!(v > 0) || !isPowderId(v) || (M && M.has(i))) continue; grid.s(i, 0); st.terrainHp.s(i, 0); cg.push(i, 0); q.carry.push(v); took++; break; } }
+    if (cg.length) { ensureTerrainHp(room); wireFanout(room, 'terrain-set', { cells: cg }); activatePowderRect(room, grid, cF - 2, q.gr - 3, cF + 2, q.gr + 3); } }
+  if (changed.length) emitFineCells(room, [...new Set(changed)]);
+  io.to(room).emit('magic-wave', { id, x: Math.round(q.x), dir: q.dir, c0: cols[cols.length - 1], b: bases.slice().reverse(), h: hs.map(v => Math.round(v * 10)).reverse(), br: q.broke ? 1 : 0, n: q.carry.length });
+}
+function magicWaveEnd(id, q) {
+  _magicWaves.delete(id); const room = q.room, changed = [], T = TERRAIN_CELL; try { magicWaveTakeBack(room, q, changed, true); } catch (e) {} if (changed.length) emitFineCells(room, [...new Set(changed)]);
+  const y = (q.gr - (q.S.high || 5) * 0.6) * T; if (q.carry.length) magicSoilSpray(room, q.x, y, { m: q.carry, o: [] }, q.dir * 160, -120, { fan: 0.6 });
+  io.to(room).emit('magic-wave-end', { id, x: Math.round(q.x), y: Math.round(q.gr * T), dir: q.dir, br: q.broke ? 1 : 0, lost: q.lost || 0 });
+  // (rig: 55 units left after — water off an edge still falling as drops when it ended) what was not found is looked for again as it lands, twice
+  for (const ms of [600, 1500]) setTimeout(() => { if (!(q.lost > 0)) return; try { const ch = []; q.out = q.lost; q.lost = 0; magicWaveTakeBack(room, q, ch, true); if (ch.length) emitFineCells(room, [...new Set(ch)]); } catch (e) {} }, ms);
+}
+setInterval(() => { if (!_magicWaves.size) return; const now = Date.now();
+  for (const [id, q] of _magicWaves) { try { if (now > q.until || (q.endAt && now - q.endAt > 340)) magicWaveEnd(id, q); else if (now - (q.at || 0) >= (q.S.tickMs || 60) - 8) magicWaveTick(id, q, now); } catch (e) { console.error('[magic wave] ' + (e && e.message)); _magicWaves.delete(id); } } }, 20);
 // ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
 //   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
 //   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
@@ -28812,7 +28908,11 @@ io.on('connection', (socket) => {
       const g = (S.kind === 'whirl' ? magicWhirlGround : magicGroundAt)(room, m.x + dx * k, m.y + dy * k); if (!g) return no('ground'); if (S.kind === 'whirl') WHL = { x: m.x + dx * k, y: g.y, dir: dx >= 0 ? 1 : -1 };   // (8c round 8: a whirlwind starts on a liquid's surface)
       else { const st0 = cellsOf(room), g0 = st0.terrain, T = TERRAIN_CELL; let top = g.y - (S.high || 160); for (let y = g.y - T; y > g.y - (S.high || 160); y -= T) { const r = Math.floor((y - 1) / T); if (r < 0) { top = 0; break; } const v = peekCellAt(g0, g.c * st0.rows + r); if (v > 0 && isSolidCell(v)) { top = (r + 1) * T; break; } }
         DRF = { x: g.x, gy: g.y, top }; } }
-    let WPN = null; if (S.kind === 'flameblade') { const ob = typeof m.wpn === 'string' && roomObjects[room] && roomObjects[room].get(m.wpn); if (!ob) return no('weapon'); WPN = m.wpn; }   // (6c) the weapon in the other hand — before anything is spent
+    let WPN = null; if (S.kind === 'flameblade' || S.kind === 'stormblade') { const ob = typeof m.wpn === 'string' && roomObjects[room] && roomObjects[room].get(m.wpn); if (!ob) return no('weapon'); WPN = m.wpn; }   // (6c) the weapon in the other hand — before anything is spent
+    // ⭐ (8d) THE WHIRLPOOL: in liquid at the caster's point (or under it), a pool wide and deep enough — none: refused · THE WAVE: on the ground (or a liquid's surface) under the point
+    let PL = null, WV = null; if (S.kind === 'pool' || S.kind === 'wave') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 360) + 8 ? ((S.reach || 360) + 8) / d : 1;
+      if (S.kind === 'pool') { PL = magicPoolFind(room, m.x + dx * k, m.y + dy * k, S); if (!PL) return no('water'); }
+      else { const st0 = cellsOf(room); ensureFineArrays(room, 1); if (!st0.fineAmt || (st0.fineSub || 1) !== 1) return no('water'); const g = magicWhirlGround(room, m.x + dx * k, m.y + dy * k); if (!g) return no('ground'); WV = { x: m.x + dx * k, gr: Math.round(g.y / TERRAIN_CELL), dir: dx >= 0 ? 1 : -1 }; } }
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
@@ -28884,6 +28984,13 @@ io.on('connection', (socket) => {
     if (S.kind === 'clap') { const br = Math.max(4, Math.min(30, +m.br || 10)), cx = +m.bx, cy = +m.by - br; out.cx = Math.round(cx); out.cy = Math.round(cy); out.rad = S.rad || 110; const sp = m.spell, SQ = SK; setTimeout(() => magicClap(room, cx, cy, SQ, sp), 90); }   // (8b) the glass breaks as the ring reaches it
     if (S.kind === 'coldsnap') { const br = Math.max(4, Math.min(30, +m.br || 10)), cx = +m.bx, cy = +m.by - br; out.cx = Math.round(cx); out.cy = Math.round(cy); out.rad = S.rad || 96; out.hold = +(S.hold || 1.5).toFixed(2); out.crust = +(S.crustS || 8).toFixed(2); out.n = magicColdSnap(room, cx, cy, SK, br + TERRAIN_CELL * 1.5); }   // (7c) the water round you to ice; every screen frosts its own body (not the caster's)
     if (FP) { out.n = magicFrostPath(room, FP, SK, m.spell); out.secs = +(SK.secs || 30).toFixed(2); out.fp = FP.pts; }   // (7a) every screen: where the frost runs (its effects)
+    if (S.kind === 'ball') { const secs = +(SK.secs || 8).toFixed(2); _magicBalls.set(id, { room, by: socket.id, spell: m.spell, x: out.x, y: out.y, until: now + secs * 1000 + 1500, S: SK, last: 0, done: false }); out.secs = secs; }   // (8d)
+    if (S.kind === 'stormblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2); _magicStormBlades.set(socket.id, { room, wpn: WPN, id, until: now + secs * 1000 + 500, S: SK }); out.wpn = WPN; out.secs = secs; }   // (8d)
+    if (PL) { const secs = +(SK.secs || 10).toFixed(2), T = TERRAIN_CELL; for (const [k, q] of _magicPools) if (q.by === socket.id) q.until = now; _magicPools.set(id, { room, by: socket.id, c: PL.c, sr: PL.sr, R: PL.R, bot: PL.bot, until: now + secs * 1000, S: SK, moved: 0 });
+      out.px = Math.round((PL.c + 0.5) * T); out.sy = PL.sr * T; out.R = PL.R * T; out.bot = (PL.bot + 1) * T; out.secs = secs; }   // (8d) every screen: where it spins
+    if (WV) { const secs = +(SK.secs || 4.5).toFixed(2), L = SK.len || 16, T = TERRAIN_CELL, x0 = WV.x + WV.dir * L * T * 0.5;
+      _magicWaves.set(id, { room, by: socket.id, x: x0, dir: WV.dir, gr: WV.gr, t0: now, at: 0, until: now + secs * 1000, S: SK, N: Math.round(L * (SK.high || 5) * 0.62 * LIQUID_MAX), put: new Map(), base: new Map(), carry: [], endAt: 0, broke: 0, out: 0, corr: magicWaveCorridor(room, x0, WV.dir, WV.gr, SK) });
+      out.wx = Math.round(x0); out.wy = WV.gr * T; out.dir = WV.dir; out.secs = secs; }   // (8d)
     if (S.kind === 'flameblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2); _magicBlades.set(socket.id, { room, wpn: WPN, id, until: now + secs * 1000 + 500 }); out.wpn = WPN; out.secs = secs; }   // (6c)
     if (MADE) { out.n = MADE.lines.length ? magicWallLines(room, MADE.lines, SK) : (MADE.sp || []).length; out.secs = +(SK.secs || 0).toFixed(2);   // (5d) grown from now — every screen is told where, for its effects (and its own body's hit)
       if (MADE.sp) out.sp = MADE.sp; if (MADE.br) out.br = MADE.br; if (S.kind === 'pillar') { out.tx = MADE.x; out.ty = MADE.y; out.cols = MADE.lines.length; } }
@@ -28976,6 +29083,22 @@ io.on('connection', (socket) => {
   socket.on('magic-blade-burn', (m) => { const room = currentAvatarRoom, q = _magicBlades.get(socket.id); if (!q || q.room !== room || !m || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now > q.until || now - (q.burnT || 0) < 120) return; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(+m.x - p.x, +m.y - p.y) > 200) return;
     q.burnT = now; igniteBox(room, +m.x, +m.y, TERRAIN_CELL * 0.5); });
+  // ⭐ (8d) BALL LIGHTNING: where its caster's game flies it (passed on) · an arc from it, its burst on a body, its pop at its end (`end`) — the charge run on here
+  socket.on('magic-ball', (m) => { const room = currentAvatarRoom, q = m && _magicBalls.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || q.done || !isFinite(m.x) || !isFinite(m.y)) return;
+    q.x = +m.x; q.y = +m.y; socket.to(room).emit('magic-ball', { id: m.id | 0, x: Math.round(q.x), y: Math.round(q.y) }); });
+  socket.on('magic-ballzap', (m) => { const room = currentAvatarRoom, q = m && _magicBalls.get(m.id | 0), now = Date.now(); if (!q || q.by !== socket.id || q.room !== room || q.done) return;
+    if (!isFinite(m.x) || !isFinite(m.y) || !isFinite(m.tx) || !isFinite(m.ty)) return; const S = q.S, burst = !!m.burst || !!m.end;
+    if (!burst && now - q.last < (S.zapMs || 700) * 0.6) return; q.last = now;
+    const lim = (S.zapR || 90) * (S.metalK || 1.6) + 40; if (Math.hypot(m.tx - m.x, m.ty - m.y) > lim) return;
+    const pl = typeof m.pl === 'string' && m.pl.length < 64 ? m.pl : null, fy = isFinite(m.fy) ? +m.fy : +m.ty, T = TERRAIN_CELL, st0 = cellsOf(room), tot0 = st0.fineTotal, ci = Math.floor(m.tx / T) * st0.rows + Math.floor(m.ty / T);
+    const wet = !!(tot0 && (st0.fineSub || 1) === 1 && st0.terrain && ci >= 0 && ci < st0.terrain.length && peekCellAt(tot0, ci) > 0);
+    const sp = magicZapSpread(room, [[+m.tx, +m.ty]].concat(pl ? [[+m.tx, fy - 2]] : []), S); let n = 0;
+    if (burst && !pl && !wet) n = igniteBox(room, +m.tx, +m.ty, 8);
+    if (burst) { q.done = true; _magicBalls.delete(m.id | 0); }
+    io.to(room).emit('magic-ballzap', { id: m.id | 0, from: socket.id, spell: q.spell || 'balllightning', x: Math.round(+m.x), y: Math.round(+m.y), tx: Math.round(+m.tx), ty: Math.round(+m.ty), pl: pl || undefined, burst: m.burst ? 1 : 0, end: m.end ? 1 : 0, wet: wet ? 1 : 0, n, liq: sp.liq, ore: sp.ore }); });
+  // ⭐ (8d) THE LIGHTNING WEAPON dipped in liquid: its charge runs through that liquid (everyone in it shocked on their own screen) and it is spent
+  socket.on('magic-storm-dip', (m) => { const room = currentAvatarRoom, q = _magicStormBlades.get(socket.id); if (!q || q.room !== room || !m || !isFinite(m.x) || !isFinite(m.y)) return; _magicStormBlades.delete(socket.id);
+    const sp = magicZapSpread(room, [[+m.x, +m.y]], q.S); io.to(room).emit('magic-storm-dip', { wpn: q.wpn, from: socket.id, spell: 'stormblade', x: Math.round(+m.x), y: Math.round(+m.y), liq: sp.liq, ore: sp.ore }); });
   socket.on('magic-blade-out', () => { const q = _magicBlades.get(socket.id); if (!q) return; _magicBlades.delete(socket.id); io.to(q.room).emit('magic-blade-out', { wpn: q.wpn }); });   // (6c round 4) quenched in liquid: out for good, on every screen
   socket.on('magic-double-pop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), id = m.id | 0, q = D && D.get(id); if (!q) return; D.delete(id); { const pd = roomDblPos[room], r = pd && pd.get(q.by); if (r && r.dbl === id) { pd.delete(q.by); if (!pd.size) delete roomDblPos[room]; } } io.to(room).emit('magic-double-pop', { id, by: socket.id }); });
   // (magic step 3d) a RUNE stepped on: the stepper's own game tells (it sees its body exactly) — believed when this socket's body was last near it

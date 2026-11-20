@@ -325,6 +325,27 @@
     //   liquid too) bodies and loose things in it are LAUNCHED up at `riseV` px a frame (on past its top); the liquid at its foot is thrown up it (`liq` units a tick), powder too.
     updraft: { name: 'Updraft', school: 'storm', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'draft', learn: 3, reach: 360, secs: 8, high: 240, wide: 4, riseV: 10, grainMs: 150, liq: 6, fx: '#dfe8f0',
       plain: { keys: [L, L, U, U, R], rune: [0, 6, 3, 1, 5] } },
+    // ⭐ STEP 8d (2026-11-21, STORM): BALL LIGHTNING, kind 'ball' (placed: it leaves the tip at `speed` px/s for the pointer, then wanders; `secs` s): its caster's game flies it (wind
+    //   spells push it: gust, whirlwind, updraft) and every `zapMs` sends a small arc to the nearest body (metal from further), or water, within `zapR` px — `dmg` health + `stunMs`;
+    //   touching a body it BURSTS (`burstDmg`, thrown back, set alight); into water it bursts and its charge runs through the water; at its end it pops (what burns there catches).
+    balllightning: { name: 'Ball lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'ball', learn: 5, reach: 360, secs: 8, speed: 70, wander: 26, r: 7,
+      zapMs: 700, zapR: 90, metalK: 1.6, dmg: 0.75, stunMs: 250, burstDmg: 2, burstR: 40, knock: 9, metalHurtK: 1.5, liqDmg: 1, liqCells: 400, oreCells: 80, fx: '#c9d6ff',
+      plain: { keys: [L, U, R, U, D], rune: [0, 4, 6, 7, 5] } },
+    // LIGHTNING WEAPON, kind 'stormblade' (on yourself, `secs` s — as the flaming weapon): the weapon in your other hand crackles with charge; its hits SHOCK (`dmg`, `stunMs`,
+    //   metal ×`metalHurtK`); a blow stopped on a metal blade or shield shocks its holder; dipped in liquid it empties into it (everyone in that water shocked, you too) and ends.
+    stormblade: { name: 'Lightning weapon', school: 'storm', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'stormblade', learn: 5, secs: 30, dmg: 1, stunMs: 300, metalHurtK: 1.5,
+      liqDmg: 1.5, liqCells: 600, oreCells: 120, fx: '#c9d6ff', plain: { keys: [L, R, U, R, D], rune: [0, 3, 4, 2, 8] } },
+    // ⭐ FROST AND WATER (the user's ideas, 2026-11-20): WHIRLPOOL, kind 'pool' (placed IN liquid at the pointer, `secs` s): stationary; the server keeps pumping the liquid from its
+    //   middle out to its rim (`pump` units a tick) so its surface dips into a funnel — moved, nothing made or lost; bodies and loose things in the liquid within its reach are drawn
+    //   in and carried round, and in its middle SUCKED DOWN to the bottom and held there spinning until it ends (the user: 'hold them and suck them downwards').
+    whirlpool: { name: 'Whirlpool', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'pool', learn: 5, reach: 400, secs: 10, maxR: 12, minR: 3, pump: 70, pull: 2.2,
+      spin: 3.2, down: 5, core: 0.35, fx: '#7fd0ff', plain: { keys: [D, R, D, L, L], rune: [2, 5, 8, 7, 6] } },
+    // WAVE, kind 'wave' (placed: it rises on the ground at the pointer and rolls AWAY from its caster along the terrain, `secs` s at most): REAL WATER, conjured — the server moves a
+    //   mound of it (`len` cells long, `high` cells at its crest) forward `speed` px/s, taking its own water back each tick and putting it down ahead, over the ground or a pool's
+    //   surface; climbs steps up to `step` cells, breaks against anything taller. Bodies and loose things are carried along and up its face, knocked down (no harm); fire under it
+    //   is put out by the water; the surface's powder at its front swept along and dropped where it breaks. When it ends its water is gone (in spray and mist): nothing left.
+    wave: { name: 'Wave', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'wave', learn: 5, reach: 360, secs: 4.5, speed: 120, len: 16, high: 5, step: 3, tickMs: 60,
+      grab: 2, carry: 60, push: 7, lift: 5, knockMs: 350, fx: '#7fd0ff', plain: { keys: [R, U, R, D, R], rune: [6, 4, 1, 5, 8] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -386,9 +407,9 @@
     chillbolt: [[R, R], [4, 5]], freeze: [[U, D], [1, 5, 7, 3, 1]],
     icewall: [[U, U], [4, 7]],   // (7d: a wall drawn up, as the stone wall)
     raincloud: [[U, L], [4, 1, 0]], snowcloud: [[U, R], [4, 1, 2]], coldsnap: [[D, D], [4, 3, 1, 5]], blizzard: [[L, L], [4, 1, 0, 3]],   // (8b: as the thunderstorm)   // (7c: up into the sky and off to one side or the other · round you, as the flame ring)
-    iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]], shapewater: [[L, R], [4, 3, 5]], waterjet: [[R, D], [4, 8]],   // (7b: grab and fling, as the rock chunk · the stream ending)   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
+    iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]], shapewater: [[L, R], [4, 3, 5]], waterjet: [[R, D], [4, 8]], whirlpool: [[D, R], [4, 5, 8, 7]], wave: [[R, U], [4, 1, 2, 5]],   // (7b: grab and fling, as the rock chunk · the stream ending)   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
-    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]], thunderclap: [[D, D], [4, 3, 1, 5]], windshield: [[D, L], [4, 7]], windshield_o: [[R, L], [4, 7, 2]], whirlwind: [[L, U], [4, 3, 0, 1]], updraft: [[U, U], [4, 1]],   // (8b: round you, as the flame ring / cold snap · the on-another turned → and on to the top right)   // (8a: the bolt ending · up into the sky, then a zigzag down)
+    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]], thunderclap: [[D, D], [4, 3, 1, 5]], windshield: [[D, L], [4, 7]], windshield_o: [[R, L], [4, 7, 2]], whirlwind: [[L, U], [4, 3, 0, 1]], updraft: [[U, U], [4, 1]], balllightning: [[D, R], [4, 7, 5]], stormblade: [[U, R], [4, 1, 2]],   // (8b: round you, as the flame ring / cold snap · the on-another turned → and on to the top right)   // (8a: the bolt ending · up into the sky, then a zigzag down)
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],
