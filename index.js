@@ -4266,8 +4266,10 @@ const _magicWhirls = new Map();   // cast id → { room, by, spell, x, y (the gr
 function magicWhirlRoom(room, x, gy, S) { const st = cellsOf(room), grid = st.terrain, ROWS = st.rows, T = TERRAIN_CELL, H = S.high || 150, rG = Math.floor(gy / T); let ht = H;
   // (rig: measured from the middle column's ground, a step up in a neighbour (a heap of sand) read as a ceiling with no room — each column now from its OWN floor: its step skipped first)
   const solid = (c, r) => { const v = peekCellAt(grid, c * ROWS + r); return v > 0 && isSolidCell(v); };
-  for (let dc = -1; dc <= 1; dc++) { const c = Math.floor(x / T) + dc; if (c < 0 || c >= st.cols) continue; let r = rG - 1, k = 0; while (k < 5 && r > 0 && solid(c, r)) { r--; k++; } if (k >= 5) continue;
-    const base = r; for (; r >= Math.max(0, base - Math.ceil(H / T)); r--) if (solid(c, r)) { ht = Math.min(ht, (base - r) * T); break; } }
+  // (8c round 6: a lone block over one of the three read as a ceiling it could not pass — the MIDDLE of the three now, so a ceiling must be over most of it)
+  const hs = []; for (let dc = -1; dc <= 1; dc++) { const c = Math.floor(x / T) + dc; if (c < 0 || c >= st.cols) continue; let r = rG - 1, k = 0; while (k < 5 && r > 0 && solid(c, r)) { r--; k++; } if (k >= 5) continue;
+    const base = r; let h = H; for (; r >= Math.max(0, base - Math.ceil(H / T)); r--) if (solid(c, r)) { h = Math.min(H, (base - r) * T); break; } hs.push(h); }
+  if (hs.length) { hs.sort((p, q) => p - q); ht = hs[Math.floor((hs.length - 1) / 2)]; } void ht;
   return Math.max(0, ht); }
 function magicWhirlTick(id, q, now) {
   const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid) return; ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, S = q.S, M = magicTemp.get(room);
