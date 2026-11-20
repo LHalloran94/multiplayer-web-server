@@ -285,8 +285,14 @@
     // CALL LIGHTNING, kind 'skystrike': a dark thundercloud gathers ON the pointer (the rain cloud's place, `down` cells), `gatherMs` later one great strike falls straight down from
     //   it onto the first thing under it (a body within `side` px of its middle — one in metal from `side` × `metalK` — or the ground); `dmg` + alight + `stunMs`. Sand where it lands
     //   FUSES to glass (a small branching tube down into it, at most `glass` cells — for good, changed not made); liquid / ore as lightning's.
-    calllightning: { name: 'Call lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'skystrike', learn: 5, reach: 400, wide: 10, down: 1, gatherMs: 900, side: 14, metalK: 1.8,
+    calllightning: { name: 'Call lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'skystrike', learn: 5, reach: 400, wide: 14, down: 1, gatherMs: 1800, formMs: 1200, side: 14, metalK: 1.8,
       dmg: 3, metalHurtK: 1.5, stunMs: 600, liqCells: 1000, liqDmg: 1.5, oreCells: 240, glass: 9, fx: '#cfe0ff', plain: { keys: [L, U, L, D, D], rune: [0, 1, 3, 7, 8] } },
+    // ⭐ 8a ROUND 2 (2026-11-20, the user: 'a similar spell that calls more of a storm, with several clouds which all randomly shoot lightning down in the area over some period,
+    //   perhaps as a channelled spell, with lesser lightning bolts also, but more of them'): THUNDERSTORM, kind 'storm', HELD (`chanS` s at most): `clouds` thunderclouds `spread` px
+    //   apart over the pointer (in sight), formed over `formMs`; then while it is held EACH cloud strikes every `gapMin`–`gapMax` ms at a random spot under it — a LESSER strike
+    //   (`dmg` + `stunMs`, no fire on a body, what burns on the ground catches; liquid / ore as lightning's, smaller). Its caster's game aims each (`magic-strike` with `st`).
+    thunderstorm: { name: 'Thunderstorm', school: 'storm', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'storm', learn: 5, chan: true, chanS: 10, reach: 400, clouds: 3, spread: 110, wide: 12, down: 1, formMs: 1400,
+      gapMin: 300, gapMax: 1000, side: 10, metalK: 1.8, dmg: 1, metalHurtK: 1.5, stunMs: 250, liqCells: 300, liqDmg: 1, oreCells: 80, fx: '#cfe0ff', plain: { keys: [L, D, L, U, U], rune: [0, 3, 7, 5, 1] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -350,7 +356,7 @@
     raincloud: [[U, L], [4, 1, 0]], snowcloud: [[U, R], [4, 1, 2]], coldsnap: [[D, D], [4, 3, 1, 5]],   // (7c: up into the sky and off to one side or the other · round you, as the flame ring)
     iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]], shapewater: [[L, R], [4, 3, 5]], waterjet: [[R, D], [4, 8]],   // (7b: grab and fling, as the rock chunk · the stream ending)   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
-    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]],   // (8a: the bolt ending · up into the sky, then a zigzag down)
+    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]],   // (8a: the bolt ending · up into the sky, then a zigzag down)
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],

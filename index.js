@@ -4219,6 +4219,15 @@ function magicSkyStrikeDo(id, q, x, y, fy, pl) {
   io.to(room).emit('magic-strike', { id, from: q.by, spell: q.spell, x: Math.round(x), y: Math.round(y), top: Math.round(q.top), pl: pl || undefined, n, gl, wet: wet ? 1 : 0, liq: sp.liq, ore: sp.ore });
   setTimeout(() => _magicStrikes.delete(id), 4000);
 }
+// (8a round 2) A THUNDERSTORM held: cast id → { room, by, spell, clouds: [{ x, y (underside), gy }], at (formed), until, n, last, S }. Each lesser strike: what burns on the ground
+//   catches (no glass), the charge runs on through liquid / ore (smaller), every screen draws it from its cloud (`cx`, `top`) and shocks its own body
+const _magicStorms = new Map();
+function magicStormStrikeDo(id, q, cl, x, y, fy, pl) {
+  const room = q.room, S = q.S, T = TERRAIN_CELL, st = cellsOf(room), tot = st.fineTotal, i = Math.floor(x / T) * st.rows + Math.floor(y / T);
+  const wet = !!(tot && (st.fineSub || 1) === 1 && i >= 0 && i < (st.terrain ? st.terrain.length : 0) && peekCellAt(tot, i) > 0); let n = 0; if (!pl && !wet) n = igniteBox(room, x, y + 2, 6);
+  const sp = magicZapSpread(room, [[x, y + 2], [x, isFinite(fy) ? fy - 2 : y]], S);
+  io.to(room).emit('magic-strike', { id, sub: ++q.n, from: q.by, spell: q.spell, small: 1, x: Math.round(x), y: Math.round(y), cx: Math.round(cl.x), top: Math.round(cl.y), pl: pl || undefined, n, wet: wet ? 1 : 0, liq: sp.liq, ore: sp.ore });
+}
 // ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
 //   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
 //   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
@@ -28683,6 +28692,9 @@ io.on('connection', (socket) => {
     // (8a) CALL LIGHTNING: its cloud where the rain cloud's goes (on the pointer, held to its reach) — no open air there, refused before anything is spent
     let SKY = null; if (S.kind === 'skystrike') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 400) + 8 ? ((S.reach || 400) + 8) / d : 1;
       SKY = magicCloudAt(room, m.x + dx * k, m.y + dy * k, S); if (!SKY) return no('room'); }
+    // (8a round 2) THE THUNDERSTORM: `clouds` thunderclouds `spread` px apart, centred where the caster pointed (held to its reach) — those with open air; none: refused
+    let STM = null; if (S.kind === 'storm') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 400) + 8 ? ((S.reach || 400) + 8) / d : 1, cx = m.x + dx * k, cy = m.y + dy * k, n = Math.max(1, S.clouds || 3);
+      STM = []; for (let i = 0; i < n; i++) { const off = (i - (n - 1) / 2) * (S.spread || 110), q = magicCloudAt(room, cx + off, cy - Math.abs(off) * 0.15, S); if (q) STM.push(q); } if (!STM.length) return no('room'); }
     let WPN = null; if (S.kind === 'flameblade') { const ob = typeof m.wpn === 'string' && roomObjects[room] && roomObjects[room].get(m.wpn); if (!ob) return no('weapon'); WPN = m.wpn; }   // (6c) the weapon in the other hand — before anything is spent
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
@@ -28727,6 +28739,9 @@ io.on('connection', (socket) => {
       if (!out.zh.length && !wet) out.n = igniteBox(room, out.tx, out.ty, 8);
       const sp = magicZapSpread(room, [[out.tx, out.ty]].concat(out.zh.map(h => [h[1], h[3] - 2])), S); out.liq = sp.liq; out.ore = sp.ore; if (wet) out.wet = 1; }
     // ⭐ (8a) CALL LIGHTNING: the cloud gathers (every screen draws it); `gatherMs` later its caster's game says what it strikes (`magic-strike`) — or, if it says nothing, the ground
+    if (STM) { _magicStorms.set(id, { room, by: socket.id, spell: m.spell, clouds: STM, at: now + (S.formMs || 1400), until: out.secs ? now + out.secs * 1000 + 500 : now + 11000, n: 0, last: 0, S: SK });
+      out.cl = STM.map(q => [Math.round(q.x), Math.round(q.y), Math.round(q.gy)]); out.w = (S.wide || 12) * TERRAIN_CELL; out.form = S.formMs || 1400;
+      setTimeout(() => _magicStorms.delete(id), (out.secs || 10) * 1000 + 4000); }
     if (SKY) { const gat = Math.max(200, S.gatherMs || 900), q = { room, by: socket.id, spell: m.spell, x: SKY.x, top: SKY.y, gy: SKY.gy, at: now + gat, done: false, S: SK };
       _magicStrikes.set(id, q); out.cx = Math.round(SKY.x); out.cy = Math.round(SKY.y); out.gy = Math.round(SKY.gy); out.w = (S.wide || 10) * TERRAIN_CELL; out.gather = gat;
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
@@ -28848,6 +28863,9 @@ io.on('connection', (socket) => {
   // ⭐ (8a) CALL LIGHTNING FALLS: its caster's game says where (`x`, `y` — the top of the body it struck, or the ground; `fy` that body's feet; `pl` the body) — straight down from
   //   its cloud, near its middle, no lower than the ground under it
   socket.on('magic-strike', (m) => {
+    if (m && m.st != null) { const q = _magicStorms.get(m.st), now = Date.now(); if (!q || q.by !== socket.id || currentAvatarRoom !== q.room || now < q.at - 400 || now > q.until || !_magicChans.has(m.st)) return;   // (8a round 2) a thunderstorm's: only while it is held
+      if (now - q.last < 30 || !isFinite(m.x) || !isFinite(m.y)) return; const cl = q.clouds[m.k | 0]; if (!cl) return; q.last = now; const S = q.S, hw = (S.wide || 12) * TERRAIN_CELL * 0.5 + (S.side || 10) * (S.metalK || 1.8) + 10;
+      const x = Math.max(cl.x - hw, Math.min(cl.x + hw, +m.x)), y = Math.max(cl.y, Math.min(cl.gy + TERRAIN_CELL, +m.y)); magicStormStrikeDo(m.st, q, cl, x, y, isFinite(m.fy) ? +m.fy : null, typeof m.pl === 'string' && m.pl.length < 64 ? m.pl : null); return; }
     const q = m && _magicStrikes.get(m.id); if (!q || q.done || q.by !== socket.id || currentAvatarRoom !== q.room || Date.now() < q.at - 400) return;
     if (!isFinite(m.x) || !isFinite(m.y)) return; const S = q.S, side = (S.side || 14) * (S.metalK || 1.8) + 20;
     const x = Math.max(q.x - side, Math.min(q.x + side, +m.x)), y = Math.max(q.top, Math.min(q.gy + TERRAIN_CELL, +m.y));
