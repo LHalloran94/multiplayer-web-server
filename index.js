@@ -4262,10 +4262,18 @@ function magicClap(room, x, y, S, sp) {
 //   lights what burns where it stands; everybody told where it is ('magic-whirl'). At its end everything it carried is FLUNG back out as the world's own grains and drops
 //   (`magicSoilSpray`, `magicWaterSplash` — moved, nothing made or lost). PROCESSOR: a few cells a tick.
 const _magicWhirls = new Map();   // cast id → { room, by, spell, x, y (the ground under it), dir, until, moving, turned, carry: [mat…], u: [units by rank], liqN, fire, igAt, S }
+// (8c round 4, the user: 'it currently goes through ceilings') THE ROOM OVER IT: how far up it can reach at x over the ground `gy` (the lowest rock over its middle three columns)
+function magicWhirlRoom(room, x, gy, S) { const st = cellsOf(room), grid = st.terrain, ROWS = st.rows, T = TERRAIN_CELL, H = S.high || 150, rG = Math.floor(gy / T); let ht = H;
+  // (rig: measured from the middle column's ground, a step up in a neighbour (a heap of sand) read as a ceiling with no room — each column now from its OWN floor: its step skipped first)
+  const solid = (c, r) => { const v = peekCellAt(grid, c * ROWS + r); return v > 0 && isSolidCell(v); };
+  for (let dc = -1; dc <= 1; dc++) { const c = Math.floor(x / T) + dc; if (c < 0 || c >= st.cols) continue; let r = rG - 1, k = 0; while (k < 5 && r > 0 && solid(c, r)) { r--; k++; } if (k >= 5) continue;
+    const base = r; for (; r >= Math.max(0, base - Math.ceil(H / T)); r--) if (solid(c, r)) { ht = Math.min(ht, (base - r) * T); break; } }
+  return Math.max(0, ht); }
 function magicWhirlTick(id, q, now) {
   const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid) return; ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, S = q.S, M = magicTemp.get(room);
-  if (q.moving) { const nx = q.x + q.dir * (S.speed || 40) * 0.1, g = magicGroundAt(room, nx, q.y - 3 * T);
-    if (g && Math.abs(g.y - q.y) <= 4 * T + 1) { q.x = nx; q.y = g.y; } else if (!q.turned) { q.dir = -q.dir; q.turned = 1; } else q.moving = false; }
+  if (q.moving) { const nx = q.x + q.dir * (S.speed || 40) * 0.1, g = magicGroundAt(room, nx, q.y - 3 * T);   // (a gap lower than `minRoom` is a wall to it)
+    if (g && Math.abs(g.y - q.y) <= 4 * T + 1 && magicWhirlRoom(room, nx, g.y, S) >= (S.minRoom || 40)) { q.x = nx; q.y = g.y; } else if (!q.turned) { q.dir = -q.dir; q.turned = 1; } else q.moving = false; }
+  q.ht = magicWhirlRoom(room, q.x, q.y, S);
   const c0 = Math.floor(q.x / T), rG = Math.floor(q.y / T), chg = []; let took = 0;
   for (let dc = -1; dc <= 1 && took < (S.grab || 2); dc++) { const c = c0 + dc; if (c < 0 || c >= COLS || q.carry.length >= (S.carry || 60)) continue;
     for (let dr = -2; dr <= 1; dr++) { const r = rG + dr, i = c * ROWS + r; if (r < 1 || r >= ROWS) continue; const v = peekCellAt(grid, i); if (!(v > 0) || !isPowderId(v) || !peekAir(grid, i - 1)) continue;
@@ -4277,11 +4285,11 @@ function magicWhirlTick(id, q, now) {
       for (let k = LIQ_T - 1; k >= 1 && q.liqN < (S.liq || 60); k--) { const n = vesselCellTake(room, i, k, Math.min(6, (S.liq || 60) - q.liqN), changed); if (n > 0) { q.u[k] += n; q.liqN += n; } } }
     if (changed.length) emitFineCells(room, [...new Set(changed)]); }
   const fs = st.fineFire; if (!q.fire && fs && fs.size) { for (let dc = -2; dc <= 2 && !q.fire; dc++) for (let dr = -5; dr <= 1; dr++) if (fs.has((c0 + dc) * ROWS + rG + dr)) { q.fire = true; break; } }
-  if (q.fire && now - (q.igAt || 0) > 300) { q.igAt = now; igniteBox(room, q.x, q.y - (S.high || 110) * 0.4, 12, (S.high || 110) * 0.45); }
-  io.to(room).emit('magic-whirl', { id, x: Math.round(q.x), y: Math.round(q.y), f: q.fire ? 1 : 0, n: q.carry.length, u: q.liqN, cm: q.carry.slice(-6) });
+  if (q.fire && now - (q.igAt || 0) > 300) { q.igAt = now; const hh = Math.min(S.high || 150, q.ht || 150); igniteBox(room, q.x, q.y - hh * 0.45, 12, hh * 0.5); }
+  io.to(room).emit('magic-whirl', { id, x: Math.round(q.x), y: Math.round(q.y), ht: q.ht, f: q.fire ? 1 : 0, n: q.carry.length, u: q.liqN, cm: q.carry.slice(-6) });
 }
 function magicWhirlEnd(id, q) {
-  _magicWhirls.delete(id); const room = q.room, S = q.S, top = q.y - (S.high || 110) * 0.7, n = q.carry.length;
+  _magicWhirls.delete(id); const room = q.room, S = q.S, top = q.y - Math.min(S.high || 150, q.ht == null ? 999 : Math.max(24, q.ht)) * 0.7, n = q.carry.length;
   for (let g = 0; g < 6 && n; g++) { const part = q.carry.filter((v, k) => k % 6 === g); if (!part.length) continue; const a = -Math.PI * (0.12 + 0.76 * (g + Math.random() * 0.8) / 6), V = (S.throwV || 280) * (0.8 + 0.4 * Math.random());
     magicSoilSpray(room, q.x, top, { m: part, o: [] }, Math.cos(a) * V, Math.sin(a) * V, { fan: 0.5 }); }
   if (q.liqN > 0) magicWaterSplash(room, q.x, top, q.u, 0, 0);
