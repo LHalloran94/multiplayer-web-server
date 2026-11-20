@@ -4062,6 +4062,87 @@ function magicJetTick(id, q, S, now) {
   q.dx = x0 + q.ax * (S.reach || 150); q.dy = y0 + q.ay * (S.reach || 150);
 }
 setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) { if (now > q.until) continue; const S = SPELLS.of(q.spell); if (S && S.kind === 'jet') { try { magicJetTick(id, q, S, now); } catch (e) { console.error('[magic jet] ' + (e && e.message)); } } } }, 50);   // (7b round 2, the user: 'very sporadically and in small amounts' — 20 a second)
+// ⭐ MAGIC 7c (2026-11-20, FROST AND WATER — kickoff §'STEP 7'): THE RAIN CLOUD / SNOW CLOUD (spells.js kind 'cloud'). Placed `up` cells over the caster's point (lower under a roof:
+//   two open rows kept under rock across its middle), it falls `cloudS` s from its underside, ten times a second: RAIN = water MADE (`ups` units a second as the world's own drops,
+//   'liquid-fly' `j` = the cast so every screen knows its drops — they put out and rinse whom they touch), burning ground where a drop lands goes out (steam on every screen,
+//   'magic-douse'), and as much as was made DRIES `drySecs` after it ends (`magicOilDry` with water's rank — the jet's way). SNOW = `cps` grains a second of real snow, flown slowly
+//   ('powder-fly' `fl` = the cast: drawn as flakes) and landed as snow cells by `powderFlyLand`, each remembered as a spell's cell (kind 'snow', the database too) that MELTS back
+//   to air `meltSecs` after the cloud ends — a grain that slid off its cell takes the nearest snow with it (`magicSnowNear`). PROCESSOR: a few drops / grains a tick.
+const MAGIC_SNOW = 8;
+const _magicClouds = new Map();   // cast id → { room, by, spell, x, y (its underside, px), w (px), gy (the ground under it), until, snow, made, acc, lt, put: [[when, cell], …], melt (when its snow goes) }
+function magicCloudAt(room, x, y, S) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return null; const T = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols, N = grid.length, cov = roomCover[room] && roomCover[room].n;
+  const air = (c, r) => c >= 0 && c < COLS && r >= 0 && r < ROWS && peekAir(grid, c * ROWS + r) && !(cov && cov.has(c * ROWS + r)); void N;
+  const c0 = Math.floor(x / T), r0 = Math.floor(y / T), hw = Math.max(1, Math.floor((S.wide || 14) / 6)); if (!air(c0, r0)) return null;
+  const rowOpen = (r) => { for (let c = c0 - hw; c <= c0 + hw; c++) if (!air(c, r)) return false; return true; };
+  let r = r0; for (let k = 0; k < (S.up || 8); k++) { if (!rowOpen(r - 3)) break; r--; }   // (its underside; three open rows above it for its body)
+  let g = r; for (let k = 0; k < 60 && air(c0, g + 1); k++) g++;   // (the ground under its middle — where the made water is dried from)
+  return { x: (c0 + 0.5) * T, y: r * T, gy: (g + 1) * T };
+}
+function magicCloudTick(id, q, S, now) {
+  const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid) return; if (!q.snow) ensureFineArrays(room, 1);
+  if (q.lt == null) { q.lt = now; q.acc = 0; } const dt = Math.min(0.3, (now - q.lt) / 1000); q.lt = now;
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
+  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  // RAIN: what has landed by now puts out the burning ground round where it came down
+  if (q.put.length) { const fs = st.fineFire, out = [], pts = []; let k = 0;
+    for (; k < q.put.length && q.put[k][0] <= now; k++) { const j = q.put[k][1]; if (!fs || !fs.size || j < 0) continue; const c = Math.floor(j / ROWS), r = j % ROWS;
+      for (let dc = -1; dc <= 1; dc++) for (let dr = -1; dr <= 2; dr++) { const i = (c + dc) * ROWS + r + dr; if (c + dc < 0 || c + dc >= COLS || r + dr < 0 || r + dr >= ROWS) continue; if (fs.delete(i)) { out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); pts.push(c + dc, r + dr); } } }
+    if (k) q.put.splice(0, k); if (out.length) { wireFanout(room, 'fire-cells', { cells: out, lift: 1 }); io.to(room).emit('magic-douse', { id, c: pts.slice(0, 80) }); q.doused = (q.doused || 0) + out.length / 2; } }
+  if (now > q.until) return;
+  const rate = q.snow ? (S.cps || 8) : (S.ups || 40); q.acc = Math.min(rate * 0.5, (q.acc || 0) + rate * dt);
+  const wire = [], w = q.w * 0.86, r0 = Math.floor((q.y - 2) / T);
+  if (q.snow) { const fly = roomPowderFly[room] || (roomPowderFly[room] = []), G = S.flakeG || 4, D = S.flakeD || 1.2;
+    while (q.acc >= 1 && fly.length < 600) { q.acc -= 1; const c = Math.floor((q.x + (Math.random() - 0.5) * w) / T), at = c * ROWS + r0; if (c < 0 || c >= COLS || !air(at)) continue;
+      const vx = (Math.random() - 0.5) * 1.6, vy = 1.2 + Math.random() * 1.4, A = powderFlyArc(ROWS, COLS, air, c + 0.5, r0 + 0.5, vx, vy, at, G, D);
+      fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v: MAGIC_SNOW, hp: 0, how: 0, hold: 0, settle: 1, mk: { room, until: q.melt } }); wire.push(at, MAGIC_SNOW, Math.round(vx * 100), Math.round(vy * 100), A.steps); q.made++; }
+    if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: G, d: D, fl: id });
+    return; }
+  const fly = roomLiqFly[room] || (roomLiqFly[room] = []);
+  while (q.acc >= 1 && fly.length < liqDropCfg.maxFly) { q.acc -= 1; const c = Math.floor((q.x + (Math.random() - 0.5) * w) / T), at = c * ROWS + r0; if (c < 0 || c >= COLS || !air(at)) continue;
+    const vx = (Math.random() - 0.5) * 0.8, vy = (S.dropV || 6) * (0.8 + 0.4 * Math.random()), A = powderFlyArc(ROWS, COLS, air, c + 0.5, r0 + 0.2, vx, vy, at, liqDropCfg.g, 0), when = now + A.steps * POWDER_FLY_DT * 1000;
+    fly.push({ at: when, land: A.land, rk: MAGIC_WATER_RK, u: 1, src: at }); wire.push(at, MAGIC_WATER_RK, Math.round(vx * 100), Math.round(vy * 100), A.steps, 1); q.made++; q.put.push([when, A.land]); }
+  if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g, j: id, jr: S.dropR || 1.6, jt: 100, rc: 1 });
+}
+setInterval(() => { if (!_magicClouds.size) return; const now = Date.now();
+  for (const [id, q] of _magicClouds) { const S = SPELLS.of(q.spell); if (!S) { _magicClouds.delete(id); continue; }
+    try { magicCloudTick(id, q, S, now); } catch (e) { console.error('[magic cloud] ' + (e && e.message)); }
+    if (now > q.until && !q.put.length) { _magicClouds.delete(id); if (!q.snow && q.made > 0) { const room = q.room, x = q.x, y = q.gy, u = q.made, R = Math.ceil(q.w / TERRAIN_CELL / 2) + 30; setTimeout(() => magicOilDry(room, x, y, u, R, MAGIC_WATER_RK), Math.max(0, q.dryMs)); } } } }, 100);
+// …a snow grain of a cloud's come down (`powderFlyLand`): remembered as a spell's cell, so it melts away on time (a restart keeps the time — the database)
+//   🟥 (7c, rig run 1: 5 cells of 51 never melted) a grain landing on a cell that is already remembered (its grain slid on — the cell is air again) must not overwrite it: the
+//   cell's `units` counts the grains owed round it, each melting the nearest unremembered snow when its time comes (`magicSnowDebt`)
+function magicSnowLanded(room, j, mk) { if (!mk || mk.room !== room) return; const M = magicTemp.get(room), T0 = M && M.get(j);
+  if (T0 && T0.kind === 'snow') { T0.units = (T0.units | 0) + 1; magicTempPut(room, j, T0); return; }
+  magicTempPut(room, j, { kind: 'snow', mat: MAGIC_SNOW, back: 0, units: 0, until: mk.until + Math.floor(Math.random() * 3000), crack: 0 }); }
+function magicSnowDebt(grid, hp, ROWS, i, M, n, cells, melt) { for (let k = 0; k < n; k++) { const j = magicSnowNear(grid, ROWS, i, M); if (j < 0) break; grid.s(j, 0); hp.s(j, 0); cells.push(j, 0); melt.push(j); } }
+// …a remembered snow cell found empty when its time came (the grain slid on): the nearest snow within 3 cells that no spell remembers, or −1
+function magicSnowNear(grid, ROWS, i, M) { let best = -1, bd = 1e9; const c0 = Math.floor(i / ROWS), r0 = i % ROWS;
+  for (let dc = -5; dc <= 5; dc++) for (let dr = -2; dr <= 6; dr++) { const j = (c0 + dc) * ROWS + r0 + dr; if (j < 0 || j >= grid.length || M.has(j) || peekCellAt(grid, j) !== MAGIC_SNOW) continue; const d = dc * dc + dr * dr; if (d < bd) { bd = d; best = j; } }
+  return best; }
+// ⭐ (7c) THE COLD SNAP round (x, y): every cell within `rad` px holding only water turns to ICE, outward from the middle ring by ring (`ringMs` a cell's distance), at most `cells` —
+//   written as the freeze writes it (kind 'ice', its water kept and given back after `secs`); every cell burning within reach goes out. → how many cells it will freeze.
+//   🟥 (rig run 2: the caster stood in a puddle and was frozen into its ice — the ice hold, 16e) 'you are untouched': water within `keep` px of the middle (the caster's body and a
+//   cell round it) is left as it is
+function magicColdSnap(room, x, y, S, keep) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return 0; const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, R = S.rad || 96;
+  const c0 = Math.max(0, Math.floor((x - R) / T)), c1 = Math.min(COLS - 1, Math.floor((x + R) / T)), r0 = Math.max(0, Math.floor((y - R) / T)), r1 = Math.min(ROWS - 1, Math.floor((y + R) / T));
+  const fs = st.fineFire, fireOut = []; if (fs && fs.size) for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const dx = (c + 0.5) * T - x, dy = (r + 0.5) * T - y; if (dx * dx + dy * dy > R * R) continue; const i = c * ROWS + r; if (fs.delete(i)) { fireOut.push(i, 0); if (st.fireAge) st.fireAge.delete(i); } }
+  if (fireOut.length) wireFanout(room, 'fire-cells', { cells: fireOut, lift: 1 });
+  const amt = st.fineAmt, tot = st.fineTotal; if (!amt || !tot || (st.fineSub || 1) !== 1 || MAGIC_WATER_RK < 0) return 0;
+  const water = (i) => { if (i < 0 || i >= N) return false; const t = peekCellAt(tot, i); if (!(t > 0)) return false; const p = amt.rp(i), b = amt.o(i); return p[b + MAGIC_WATER_RK] > 0 && p[b + MAGIC_WATER_RK] === t; };
+  const list = []; for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const dx = (c + 0.5) * T - x, dy = (r + 0.5) * T - y, d2 = dx * dx + dy * dy; if (d2 > R * R || d2 < (keep || 0) * (keep || 0)) continue; const i = c * ROWS + r; if (water(i)) list.push([d2, i]); }
+  list.sort((a, b) => a[0] - b[0]); if (list.length > (S.cells || 220)) list.length = S.cells || 220; if (!list.length) return 0;
+  const rings = new Map(); for (const [d2, i] of list) { const k = Math.floor(Math.sqrt(d2) / T); let g = rings.get(k); if (!g) rings.set(k, g = []); g.push(i); }
+  const until0 = Date.now() + (S.secs || 30) * 1000, mats = roomMats[room] || {};
+  for (const [k, ring] of rings) setTimeout(() => {
+    const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = [];
+    for (const i of ring) { if (!water(i)) continue; const p = amt.wp(i), b = amt.o(i), units = p[b + MAGIC_WATER_RK]; for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; tot.s(i, 0); fineSet(room).delete(i);
+      grid.s(i, MAGIC_ICE); s2.terrainHp.s(i, matStrengthSrv(mats, MAGIC_ICE)); cells.push(i, MAGIC_ICE); liq.push(i);
+      magicTempPut(room, i, { kind: 'ice', mat: MAGIC_ICE, back: 0, units, until: until0 + k * (S.ringMs || 22) + Math.floor(Math.random() * 1500), crack: 0 }); }
+    if (cells.length) { wireFanout(room, 'terrain-set', { cells }); emitFineCells(room, liq); }
+  }, k * (S.ringMs || 22));
+  return list.length;
+}
 // ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
 //   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
 //   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
@@ -4495,8 +4576,11 @@ const magicCfgSrv = { wake: 1, exact: 1 };   // switches back: `wake` 0 = the li
 function magicTempEnd(room, list) {
   const st = roomCells.get(room), M = magicTemp.get(room); if (!st || !st.terrain || !M) return; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal;
   const cells = [], liq = [], gone = [], woke = [], sank = [], thaw = [], tdmg = [], mats = roomMats[room] || {};
+  const melt = [];   // (7c) snow a cloud left, melted away
   for (const i of list) { const T = M.get(i); if (!T) continue; const v = peekCellAt(grid, i); if (v < 0) { T.sch = 0; continue; }
-    if (v !== T.mat) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
+    if (v !== T.mat) { if (T.kind === 'snow' && peekAir(grid, i)) magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt);   // (7c: the grain slid on — the nearest snow goes instead)
+      M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
+    if (T.kind === 'snow') { melt.push(i); const up = peekCellAt(grid, i - 1); if (i % st.rows > 0 && isPowderId(up)) powderSet(room).add(i - 1); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, i, M, T.units, cells, melt); }
     { const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) tdmg.push(i, BK[1]); } }   // (7a: a glazed cell back to its ground, with the damage it had)
     if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }
     cells.push(i, grid.g(i)); woke.push(i);
@@ -4507,6 +4591,7 @@ function magicTempEnd(room, list) {
   if (liq.length) emitFineCells(room, liq);
   if (gone.length || sank.length) io.to(room).emit('magic-wall-end', { cells: gone, sink: sank.length ? sank : undefined });   // (5d: a pillar's cells SINK — no rubble)
   if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });   // (7a)
+  if (melt.length) io.to(room).emit('magic-cells', { c: melt, spell: 'snowcloud', look: 'melt' });   // (7c)
   if (!M.size) magicTemp.delete(room);
 }
 // four times a second: cracks coming on a wall that is about to go (its strength lowered — the same crack look as a dug cell), and every cell whose time is up put back
@@ -4514,9 +4599,11 @@ setInterval(() => {
   const now = Date.now();
   for (const [room, M] of magicTemp) {
     const st = roomCells.get(room); if (!st || !st.terrain) continue; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal, mats = roomMats[room] || {};
-    const cells = [], dmg = [], liq = [], gone = [], due = new Map(), thaw = [];
+    const cells = [], dmg = [], liq = [], gone = [], due = new Map(), thaw = [], melt = [];
     for (const [i, T] of M) {
       const v = peekCellAt(grid, i); if (v < 0) continue;   // (its chunk not here yet: later)
+      // (7c) a cloud's snow grain that slid off its cell: waited for until its time, then the nearest snow nobody remembers melts instead (empty air only — snow heat turned to water is gone already)
+      if (v !== T.mat && T.kind === 'snow' && peekAir(grid, i)) { if (now < T.until) continue; magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt); M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
       if (v !== T.mat) { M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }   // (dug out, or changed by something else: not ours any more)
       if (magicCfgSrv.exact && T.until - now < 260) { if (!T.sch) { T.sch = 1; const k = T.until; let g = due.get(k); if (!g) due.set(k, g = []); g.push(i); } continue; }
       if (now >= T.until) {
@@ -4524,6 +4611,7 @@ setInterval(() => {
         if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) dmg.push(i, BK[1]); }   // (7a: the ground back with the damage it had, a powder woken)
         if (T.kind === 'ice' && T.units > 0 && amt && tot) { const p = amt.wp(i), b = amt.o(i); for (let q = 0; q < LIQ_T; q++) p[b + q] = 0; p[b + MAGIC_WATER_RK] = T.units; tot.s(i, T.units); fineSet(room).add(i); liq.push(i); }
         if (T.kind === 'wall' || T.kind === 'sink') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
+        if (T.kind === 'snow') { melt.push(i); if (i % st.rows > 0 && isPowderId(peekCellAt(grid, i - 1))) powderSet(room).add(i - 1); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, i, M, T.units, cells, melt); }   // (7c: snow above it falls into the space; the grains owed round it)
         M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {}
       } else if (T.crack && now >= T.until - T.crack) { const s = matStrengthSrv(mats, T.mat), e = T.ce || T.until, c0 = T.until - T.crack, h = Math.max(1, Math.ceil(s * Math.max(0, e - now) / Math.max(1, e - c0))); if (hp.g(i) > h) { hp.s(i, h); dmg.push(i, h); } }   // (step 3e: on the wall's one clock, `ce`)
     }
@@ -4531,6 +4619,7 @@ setInterval(() => {
     if (liq.length) emitFineCells(room, liq);
     if (gone.length) io.to(room).emit('magic-wall-end', { cells: gone });
     if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });
+    if (melt.length) io.to(room).emit('magic-cells', { c: melt, spell: 'snowcloud', look: 'melt' });   // (7c)
     for (const [k, list] of due) setTimeout(() => magicTempEnd(room, list), Math.max(0, k - now));
     if (!M.size) magicTemp.delete(room);
   }
@@ -5546,6 +5635,7 @@ function powderFlyLand() {
         cWhy('spade:landed'); }
       grid.s(j, F.v); if (st.terrainHp) st.terrainHp.s(j, F.hp || 0); set.push(j, F.v);
       if (isPowderId(F.v)) powderSet(room).add(j);
+      if (F.mk) magicSnowLanded(room, j, F.mk);   // (magic 7c) a snow cloud's grain: it melts away on time
     }
     fly.length = keep;
     if (set.length) wireFanout(room, 'terrain-set', { cells: set });
@@ -28499,6 +28589,10 @@ io.on('connection', (socket) => {
       if (!MADE) return no('ground'); }
     // (7a) THE FROST PATH: its cells worked out now, from the caster's feet towards the pointer — no ground to freeze, refused before anything is spent
     let FP = null; if (S.kind === 'frostpath') { if (!isFinite(m.tx) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160) return no('bad'); FP = magicFrostPathPlan(room, +m.bx, +m.by, +m.tx, S); if (!FP) return no('ground'); }
+    // (7c) THE CLOUD: where it forms over the caster's point (held to its reach) — no open air there, refused before anything is spent · THE COLD SNAP: round the caster's body
+    let CL = null; if (S.kind === 'cloud') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 360) + 8 ? ((S.reach || 360) + 8) / d : 1;
+      CL = magicCloudAt(room, m.x + dx * k, m.y + dy * k, S); if (!CL) return no('room'); }
+    if (S.kind === 'coldsnap' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     let WPN = null; if (S.kind === 'flameblade') { const ob = typeof m.wpn === 'string' && roomObjects[room] && roomObjects[room].get(m.wpn); if (!ob) return no('weapon'); WPN = m.wpn; }   // (6c) the weapon in the other hand — before anything is spent
     if (SC) socket._magicCharge = null;
     const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
@@ -28545,6 +28639,10 @@ io.on('connection', (socket) => {
     // ⭐ (6b) THE FLAME RING: kept here while it burns, so the ground its flames brush can be lit (`magic-fire-at`) — one a caster, a new one ends the old
     if (S.kind === 'firering') { const secs = +(SK.secs || 12).toFixed(2); for (const [k, q] of _magicAuras) if (q.by === socket.id || now > q.until) _magicAuras.delete(k); _magicAuras.set(id, { by: socket.id, room, until: now + secs * 1000 + 500 }); out.secs = secs; }
     if (S.kind === 'shard') { const secs = +(SK.secs || 20).toFixed(2); socket._magicShard = { id, until: now + 3000, secs }; out.secs = secs; }   // (7a) the caster's game makes the shard (`avatar-object-spawn` `shard`)
+    if (CL) { const K = socket._magicSecsK || 1, secs = S.cloudS || 8, until = now + secs * 1000; for (const [k, q] of _magicClouds) if (q.by === socket.id && q.spell === m.spell && now < q.until) q.until = now;   // (one of each at a time: a new one ends your last)
+      _magicClouds.set(id, { room, by: socket.id, spell: m.spell, x: CL.x, y: CL.y, gy: CL.gy, w: (S.wide || 14) * TERRAIN_CELL, until, snow: !!S.snow, made: 0, acc: 0, lt: null, put: [], melt: until + (S.meltSecs || 60) * 1000 * K, dryMs: (S.drySecs || 60) * 1000 * K });
+      out.cx = Math.round(CL.x); out.cy = Math.round(CL.y); out.w = (S.wide || 14) * TERRAIN_CELL; out.secs = secs; }   // (7c) every screen draws it there
+    if (S.kind === 'coldsnap') { const br = Math.max(4, Math.min(30, +m.br || 10)), cx = +m.bx, cy = +m.by - br; out.cx = Math.round(cx); out.cy = Math.round(cy); out.rad = S.rad || 96; out.hold = +(S.hold || 1.5).toFixed(2); out.crust = +(S.crustS || 8).toFixed(2); out.n = magicColdSnap(room, cx, cy, SK, br + TERRAIN_CELL * 1.5); }   // (7c) the water round you to ice; every screen frosts its own body (not the caster's)
     if (FP) { out.n = magicFrostPath(room, FP, SK, m.spell); out.secs = +(SK.secs || 30).toFixed(2); out.fp = FP.pts; }   // (7a) every screen: where the frost runs (its effects)
     if (S.kind === 'flameblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2); _magicBlades.set(socket.id, { room, wpn: WPN, id, until: now + secs * 1000 + 500 }); out.wpn = WPN; out.secs = secs; }   // (6c)
     if (MADE) { out.n = MADE.lines.length ? magicWallLines(room, MADE.lines, SK) : (MADE.sp || []).length; out.secs = +(SK.secs || 0).toFixed(2);   // (5d) grown from now — every screen is told where, for its effects (and its own body's hit)
