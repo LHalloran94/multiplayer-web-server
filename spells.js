@@ -253,7 +253,7 @@
     //   `wet` = what it hits is put out and rinsed (16zj `magicOnHit`).
     shapewater: { name: 'Shape water', school: 'frost', form: 'shaping', tier: 0, cd: 4, stance: 'level', kind: 'waterball', learn: 3, chan: true, chanS: 10, reach: 320, grab: 3, cells: 3, holdV: 560, speed: 620, grav: 0.35, kn: 4.5, wet: true, fx: '#7fd0ff',
       plain: { keys: [D, U, L, R, D], rune: [6, 3, 1, 2, 5] } },
-    waterjet: { name: 'Water jet', school: 'frost', form: 'stream', tier: 0, cd: 5, stance: 'level', kind: 'jet', learn: 3, chan: true, chanS: 6, reach: 150, hw: 5, ups: 24, dropV: 42, push: 40, drySecs: 60, wet: true,
+    waterjet: { name: 'Water jet', school: 'frost', form: 'stream', tier: 0, cd: 5, stance: 'level', kind: 'jet', learn: 3, chan: true, chanS: 6, reach: 150, hw: 5, ups: 60, dropV: 42, push: 40, drySecs: 60, wet: true,
       plain: { keys: [D, R, D, R, U], rune: [0, 3, 4, 8, 7] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },

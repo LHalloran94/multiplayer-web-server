@@ -4058,10 +4058,10 @@ function magicJetTick(id, q, S, now) {
   while (q.acc >= per && fly.length < liqDropCfg.maxFly) { q.acc -= per; const sp = (S.dropV || 42) * (0.9 + 0.2 * Math.random()), a = (Math.random() - 0.5) * 0.12, ca = Math.cos(a), sa = Math.sin(a), ux = q.ax * ca - q.ay * sa, uy = q.ax * sa + q.ay * ca, vx = ux * sp, vy = uy * sp;
     const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r + 0.2, vx, vy, at, liqDropCfg.g, 0);
     fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk: MAGIC_WATER_RK, u: per, src: at }); wire.push(at, MAGIC_WATER_RK, Math.round(vx * 100), Math.round(vy * 100), A.steps, per); q.made += per; }
-  if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g });
+  if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g, j: 1 });   // (7b round 2: `j` — the jet's own drops; every screen draws the stream along their arc instead, `magicCfg.jetDrops`)
   q.dx = x0 + q.ax * (S.reach || 150); q.dy = y0 + q.ay * (S.reach || 150);
 }
-setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) { if (now > q.until) continue; const S = SPELLS.of(q.spell); if (S && S.kind === 'jet') { try { magicJetTick(id, q, S, now); } catch (e) { console.error('[magic jet] ' + (e && e.message)); } } } }, 100);
+setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) { if (now > q.until) continue; const S = SPELLS.of(q.spell); if (S && S.kind === 'jet') { try { magicJetTick(id, q, S, now); } catch (e) { console.error('[magic jet] ' + (e && e.message)); } } } }, 50);   // (7b round 2, the user: 'very sporadically and in small amounts' — 20 a second)
 // ⭐ MAGIC 5a (2026-11-18, EARTH): THE GROUND CHANGED where a shot landed (spells.js kind 'change'): from the nearest cell it works on (within 3 cells) outward through the
 //   touching ones, ring by ring (`ringMs`), at most `cells` — written as the freeze writes (`grid.s` + `hp.s`, the `terrain-set` wire; a powder made is woken so it falls; lava
 //   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
@@ -28521,6 +28521,7 @@ io.on('connection', (socket) => {
       _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK || WB ? 3000 : 300), water: WB ? { u: WB.u, cx: WB.cx, cy: WB.cy } : null, x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, co: CHK.co || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });
       if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined, w: CHK.w || undefined, cs: CHK.cs, co: CHK.co || undefined };   // (round 7: `cs` its crack pattern's seed — the same chunk and boulder)   // (round 6: `w` its cells' damage — drawn cracked while held)   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
       if (WB) out.wb = { u: WB.u, n: WB.n, cx: WB.cx, cy: WB.cy, from: WB.from };   // (7b)
+      if (S.kind === 'jet') out.jg = liqDropCfg.g;   // (7b round 2) the drops' fall, so every screen draws the stream along the arc the real water flies
       out.chan = 1; out.secs = secs; if (!SC && !socket._magicNoCd) cds[m.spell] = now + secs * 1000 + cd; }
     if (S.kind === 'bolt' || shot) { let lf = S.life || 1, g = (S.grav || 0) * 1500, v = S.speed;
       // (4c) a modifier's flight: the follower slower, longer, less pulled down · the lob by its own arc (every screen works out the same) · a split: an id for each piece
