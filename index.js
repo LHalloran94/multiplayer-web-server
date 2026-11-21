@@ -3864,7 +3864,7 @@ setInterval(() => { if (!_magicChunks.size) return; const now = Date.now(); for 
 setInterval(() => { if (!_magicDoors.size) return; const now = Date.now();
   for (const [k, q] of _magicDoors) { if (now > q.until || !io.sockets.sockets.get(q.by)) { _magicDoors.delete(k); if (_magicDoorBy.get(q.by) === k) _magicDoorBy.delete(q.by); io.to(q.room).emit('magic-door-gone', { id: k }); continue; }
     if (!q.b) continue; const S = q.S || {};
-    for (const [E, F] of [[q.a, q.b], [q.b, q.a]]) { const W = magicWaterGrab(q.room, E.x, E.y + 12, { grab: 3, cells: S.flow || 6 }); if (W && W.n > 0) { magicWaterSplash(q.room, F.x, F.y + 6, W.u, F.x >= E.x ? 60 : -60, 0); q.liq = (q.liq || 0) + W.n; } } } }, 250);
+    for (const [E, F] of [[q.a, q.b], [q.b, q.a]]) { const W = magicWaterGrab(q.room, E.x, E.y + 12, { grab: 3, cells: S.flow || 6 }); if (W && W.n > 0) { if (q.pour) magicDoorPour(q.room, F.x, F.y + 10, W.u, F.x >= E.x ? 1 : -1); else magicWaterSplash(q.room, F.x, F.y + 6, W.u, F.x >= E.x ? 60 : -60, 0); q.liq = (q.liq || 0) + W.n; } } } }, 250);
 setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) if (now > q.until || !io.sockets.sockets.get(q.by)) magicChanEnd(id, now > q.until ? 'time' : 'gone'); }, 250);
 function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC_SECRET).update(pkey + '|' + life + '|' + spell).digest().readUInt32BE(0) & 0x3fffffff; }
 // ⭐ MAGIC STEP 3d (2026-11-17) — BATCH b: THE WORLD CHANGED BY A SPELL, AND PUT BACK. Each changed cell is written as the liquid reactions write theirs (`grid.s` + `hp.s`, the
@@ -4037,6 +4037,24 @@ function magicWaterGrab(room, x, y, S) {
 }
 // …and BURST where it came down (or was dropped): every unit flown out as the world's own drops from the nearest open cell (the ball's way carried on a little, the rest thrown up
 //   and out), landed as every real drop is (`roomLiqFly`, 'liquid-fly'); no open cell near, put straight into the nearest room for it. → drops made
+// (magic 10d round 3, the user: 'liquid … comes out more like a stream falling') POURED out of a doorway: from the open cell nearest its lower half, each bit leaving a little
+//   forward (`dir`) and down, falling as the world's own drops do — a stream, not a spray. No open cell near: as the splash does (put into the nearest room for it)
+function magicDoorPour(room, x, y, u, dir) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid || !Array.isArray(u)) return 0; ensureFineArrays(room, 1);
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
+  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  const c0 = Math.max(0, Math.min(COLS - 1, Math.floor(x / T))), r0 = Math.max(1, Math.min(ROWS - 2, Math.floor(y / T)));
+  let at = -1; for (let d = 0; d <= 3 && at < 0; d++) for (let dc = -d; dc <= d && at < 0; dc++) for (let dr = -d; dr <= d; dr++) { if (Math.max(Math.abs(dc), Math.abs(dr)) !== d) continue; const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS) continue; const j = c * ROWS + r; if (air(j)) { at = j; break; } }
+  if (at < 0) return magicWaterSplash(room, x, y, u, 0, 0);
+  const total = u.reduce((a, b) => a + (b | 0), 0); if (!(total > 0)) return 0;
+  const fly = roomLiqFly[room] || (roomLiqFly[room] = []), wire = [], now = Date.now(), fx = Math.floor(at / ROWS) + 0.5, fy = at % ROWS + 0.5, per = Math.max(2, Math.ceil(total / 24)); let n = 0;
+  for (let k = 0; k < LIQ_T; k++) { let left = u[k] | 0;
+    while (left > 0) { const q = Math.min(left, per); left -= q; const dvx = (dir || 1) * (0.8 + Math.random() * 1.6), dvy = 0.4 + Math.random() * 0.8;
+      const A = powderFlyArc(ROWS, COLS, air, fx, fy, dvx, dvy, at, liqDropCfg.g, 0);
+      fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, rk: k, u: q, src: at }); wire.push(at, k, Math.round(dvx * 100), Math.round(dvy * 100), A.steps, q); n++; } }
+  if (wire.length) io.to(room).emit('liquid-fly', { f: wire, g: liqDropCfg.g });
+  return n;
+}
 function magicWaterSplash(room, x, y, u, vx, vy) {
   const st = cellsOf(room), grid = st.terrain; if (!grid || !Array.isArray(u)) return 0; ensureFineArrays(room, 1);
   const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
@@ -28885,6 +28903,8 @@ io.on('connection', (socket) => {
   socket.on('magic-debug', (m) => { const was = [socket._magicAll, socket._magicOwn, socket._magicOneMind];
     socket._magicOneMind = !!(m && m.apart === 0);   // (4a: 'What you learn is kept apart for the Overworld' off)
     if (m && m.snowtop != null) magicCfgSrv.snowTop = m.snowtop ? 1 : 0;   // (8c round 2, a server-wide switch for comparing)
+    // (magic 10d round 3) 'Doorways: liquid pours out as a stream'
+    socket._magicDoorPour = !!(m && m.pour);
     socket._magicHeap = !!(m && m.boulder === 0);     // (5b round 5: 'A thrown rock chunk stays a loose boulder' off = heaped back into the ground, as before)
     socket._magicAll = !!(m && m.all); socket._magicNoCd = !!(m && m.nocd);   // (the panel's 'Know every spell' + 'No cooldowns', both for testing)
     socket._magicNoReag = !!(m && m.noreag); socket._magicOwn = !(m && m.own === 0);   // (step 2: 'Spells need no reagents (for testing)'; 'Your own version of each spell' off = the shared core only)
@@ -29084,9 +29104,9 @@ io.on('connection', (socket) => {
       if (S.kind === 'swap') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); } }
     // (magic 10d) the first doorway (the old pair ended; a short cooldown, the full one with the second) · the second: the pair open for `secs` s
     if (DR) { if (DR.end === 'a') { if (DR.old) { _magicDoors.delete(DR.old.id); io.to(DR.old.room).emit('magic-door-gone', { id: DR.old.id }); }
-        const q = { id, by: socket.id, room, a: { x: out.tx, y: out.ty }, b: null, at: now, until: now + 62000, S: SK }; _magicDoors.set(id, q); _magicDoorBy.set(socket.id, id);
+        const q = { id, by: socket.id, room, a: { x: out.tx, y: out.ty }, b: null, at: now, until: now + 62000, S: SK, pour: !!socket._magicDoorPour }; _magicDoors.set(id, q); _magicDoorBy.set(socket.id, id);
         out.door = { id, a: [q.a.x, q.a.y], b: null, left: 62000 }; if (!SC && !socket._magicNoCd) { cds[m.spell] = now + 400; out.cd = 400; } }
-      else { const q = DR.q; q.b = { x: out.tx, y: out.ty }; q.until = now + (SK.secs || 30) * 1000; out.door = { id: q.id, a: [q.a.x, q.a.y], b: [q.b.x, q.b.y], left: q.until - now }; } }
+      else { const q = DR.q; q.pour = !!socket._magicDoorPour; q.b = { x: out.tx, y: out.ty }; q.until = now + (SK.secs || 30) * 1000; out.door = { id: q.id, a: [q.a.x, q.a.y], b: [q.b.x, q.b.y], left: q.until - now }; } }
     if (MK) { out.tx = MK.x; out.ty = MK.y; const q = _magicChans.get(id); if (q) q.mark = { x: MK.x, y: MK.y }; }
     if (S.kind === 'weight') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 10).toFixed(2); }   // (magic 9b)
     if (S.kind === 'stasis') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 5).toFixed(2); out.hold = +(S.holdS || 1.5).toFixed(2); }   // (magic 9c)
