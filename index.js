@@ -29151,7 +29151,7 @@ io.on('connection', (socket) => {
     socket.to(room).emit('magic-aim', Object.assign({ id: m.id | 0, x: q.x, y: q.y, ax: +q.ax.toFixed(3), ay: +q.ay.toFixed(3) }, K ? { cx: K.cx, cy: K.cy } : {})); });
   socket.on('magic-chan-stop', (m) => { const q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id) return;
     // (magic 10b round 2) A REWIND let go: the path back (newest first, each step no longer than a body could go) to every screen with its end — none / bad: it just ends
-    { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'rewind') { const a = Array.isArray(m.pts) ? m.pts : null; let ok = !!a && a.length >= 4 && a.length <= 200 && a.length % 2 === 0 && a.every(v => isFinite(v) && Math.abs(v) < 1e7);
+    { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'rewind') { const a = Array.isArray(m.pts) ? m.pts : null; let ok = !!a && a.length >= 4 && a.length <= 320 && a.length % 2 === 0 && a.every(v => isFinite(v) && Math.abs(v) < 1e7);
       if (ok) for (let i = 2; i < a.length; i += 2) if (Math.hypot(a[i] - a[i - 2], a[i + 1] - a[i - 1]) > 900) { ok = false; break; }
       magicChanEnd(m.id | 0, 'let', ok ? { pts: a.map(v => Math.round(+v)) } : undefined); return; } }
     // (5b) a CHUNK let go: thrown (or dropped) from where its caster's game has it — soil sprays out here; a rock flies on every screen and its caster says where it lands
