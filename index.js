@@ -28955,11 +28955,9 @@ io.on('connection', (socket) => {
     if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
     if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 10a) BLINK / PASS THROUGH: where you stand (by the hand) and where you go — the caster's game found it; held to the spell's reach from the hand below
-    // (magic 10b) MARK: where the caster's feet are · RECALL: only with a mark of theirs here · REWIND: the path back (newest first), each step no longer than a body could go
+    // (magic 10b) MARK: where the caster's feet are · RECALL: only with a mark of theirs here (REWIND's path comes with its let-go: 'magic-chan-stop')
     if (S.kind === 'mark' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     let MK = null; if (S.kind === 'recall') { MK = _magicMarks.get(socket.id); if (!MK || MK.room !== room || now > MK.until) return no('nomark'); }
-    let RWP = null; if (S.kind === 'rewind') { const a = Array.isArray(m.pts) ? m.pts : []; if (a.length < 4 || a.length > 96 || a.length % 2 || !a.every(v => isFinite(v) && Math.abs(v) < 1e7) || Math.hypot(a[0] - m.x, a[1] - m.y) > 160) return no('bad');
-      for (let i = 2; i < a.length; i += 2) if (Math.hypot(a[i] - a[i - 2], a[i + 1] - a[i - 1]) > 900) return no('bad'); RWP = a.map(v => Math.round(+v)); }
     if ((S.kind === 'blink' || S.kind === 'pass') && (!isFinite(m.tx) || !isFinite(m.ty) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 9b) HEAVY / WEIGHTLESS: a loose thing nobody holds, or a player in this room near enough (yourself, the dummy on its caster's machine)
     // (magic 9c) STASIS: as the weight's (never yourself) · BARRAGE: the loose things named, each in this room, loose, nobody holding it — none: refused
@@ -29063,11 +29061,10 @@ io.on('connection', (socket) => {
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
     if (S.kind === 'lift') out.obj = m.obj;
     if (S.kind === 'blink' || S.kind === 'pass') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); }
-    // (magic 10b) a MARK kept (the last one, wherever it was, gone) · a RECALL told where the mark is (its held record too) · a REWIND's path to every screen
+    // (magic 10b) a MARK kept (the last one, wherever it was, gone) · a RECALL told where the mark is (its held record too)
     if (S.kind === 'mark') { const ex = _magicMarks.get(socket.id); out.tx = Math.round(+m.bx); out.ty = Math.round(+m.by); _magicMarks.set(socket.id, { id, room, x: out.tx, y: out.ty, at: now, until: now + (SK.secs || 600) * 1000 });
       if (ex && ex.room !== room) io.to(ex.room).emit('magic-mark-gone', { by: socket.id }); }
     if (MK) { out.tx = MK.x; out.ty = MK.y; const q = _magicChans.get(id); if (q) q.mark = { x: MK.x, y: MK.y }; }
-    if (RWP) out.pts = RWP;
     if (S.kind === 'weight') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 10).toFixed(2); }   // (magic 9b)
     if (S.kind === 'stasis') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 5).toFixed(2); out.hold = +(S.holdS || 1.5).toFixed(2); }   // (magic 9c)
     if (BRG) out.objs = BRG;   // (magic 9c) the barrage's things
@@ -29153,6 +29150,10 @@ io.on('connection', (socket) => {
     const K = q.chunk || q.water; if (K && isFinite(m.cx) && isFinite(m.cy) && Math.hypot(+m.cx - q.x, +m.cy - q.y) < (SPELLS.of(q.spell) || {}).reach + 120) { K.cx = Math.round(+m.cx); K.cy = Math.round(+m.cy); }   // (5b) where the held chunk is (7b: or the ball of water)
     socket.to(room).emit('magic-aim', Object.assign({ id: m.id | 0, x: q.x, y: q.y, ax: +q.ax.toFixed(3), ay: +q.ay.toFixed(3) }, K ? { cx: K.cx, cy: K.cy } : {})); });
   socket.on('magic-chan-stop', (m) => { const q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id) return;
+    // (magic 10b round 2) A REWIND let go: the path back (newest first, each step no longer than a body could go) to every screen with its end — none / bad: it just ends
+    { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'rewind') { const a = Array.isArray(m.pts) ? m.pts : null; let ok = !!a && a.length >= 4 && a.length <= 200 && a.length % 2 === 0 && a.every(v => isFinite(v) && Math.abs(v) < 1e7);
+      if (ok) for (let i = 2; i < a.length; i += 2) if (Math.hypot(a[i] - a[i - 2], a[i + 1] - a[i - 1]) > 900) { ok = false; break; }
+      magicChanEnd(m.id | 0, 'let', ok ? { pts: a.map(v => Math.round(+v)) } : undefined); return; } }
     // (5b) a CHUNK let go: thrown (or dropped) from where its caster's game has it — soil sprays out here; a rock flies on every screen and its caster says where it lands
     const WQ = q.water; if (WQ && isFinite(m.x) && isFinite(m.y) && isFinite(m.vx) && isFinite(m.vy)) { const S = SPELLS.of(q.spell) || {}, now = Date.now(); let x = +m.x, y = +m.y, vx = +m.vx, vy = +m.vy;   // (7b) a ball of water let go: flown on every screen, its caster says where it bursts
       if (Math.hypot(x - WQ.cx, y - WQ.cy) > 140) { x = WQ.cx; y = WQ.cy; } const vl = Math.hypot(vx, vy), vm = (S.speed || 620) * 1.1; if (vl > vm) { vx *= vm / vl; vy *= vm / vl; }
