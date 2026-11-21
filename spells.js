@@ -153,7 +153,7 @@
     // ⭐ STEP 10d (2026-11-21) SPACE: DOORWAYS (kind 'doorway') — two casts set two doorways (each at most `reach` px from you, the second at most `pair` px from the first),
     //   open together `secs` s: you, loose things, arrows and bolts go in one and out of the other keeping their speed; liquid flows through, `flow` cells' worth a tick
     //   (server `_magicDoors`). The first's cooldown is short — the full one starts with the second.
-    doorways: { name: 'Doorways', school: 'space', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'doorway', learn: 5, reach: 400, pair: 1500, secs: 30, flow: 1, fx: '#b08cff',
+    doorways: { name: 'Doorways', school: 'space', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'doorway', learn: 5, reach: 400, pair: 1500, secs: 30, flow: 6, fx: '#b08cff',
       plain: { keys: [D, D, L, U, R], rune: [3, 5, 6, 2, 1] } },
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },

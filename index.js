@@ -3864,7 +3864,7 @@ setInterval(() => { if (!_magicChunks.size) return; const now = Date.now(); for 
 setInterval(() => { if (!_magicDoors.size) return; const now = Date.now();
   for (const [k, q] of _magicDoors) { if (now > q.until || !io.sockets.sockets.get(q.by)) { _magicDoors.delete(k); if (_magicDoorBy.get(q.by) === k) _magicDoorBy.delete(q.by); io.to(q.room).emit('magic-door-gone', { id: k }); continue; }
     if (!q.b) continue; const S = q.S || {};
-    for (const [E, F] of [[q.a, q.b], [q.b, q.a]]) { const W = magicWaterGrab(q.room, E.x, E.y + 14, { grab: 2, cells: S.flow || 1 }); if (W && W.n > 0) { magicWaterSplash(q.room, F.x, F.y + 6, W.u, F.x >= E.x ? 60 : -60, 0); q.liq = (q.liq || 0) + W.n; } } } }, 250);
+    for (const [E, F] of [[q.a, q.b], [q.b, q.a]]) { const W = magicWaterGrab(q.room, E.x, E.y + 12, { grab: 3, cells: S.flow || 6 }); if (W && W.n > 0) { magicWaterSplash(q.room, F.x, F.y + 6, W.u, F.x >= E.x ? 60 : -60, 0); q.liq = (q.liq || 0) + W.n; } } } }, 250);
 setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) if (now > q.until || !io.sockets.sockets.get(q.by)) magicChanEnd(id, now > q.until ? 'time' : 'gone'); }, 250);
 function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC_SECRET).update(pkey + '|' + life + '|' + spell).digest().readUInt32BE(0) & 0x3fffffff; }
 // ⭐ MAGIC STEP 3d (2026-11-17) — BATCH b: THE WORLD CHANGED BY A SPELL, AND PUT BACK. Each changed cell is written as the liquid reactions write theirs (`grid.s` + `hp.s`, the
