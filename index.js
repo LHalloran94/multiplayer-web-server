@@ -28957,13 +28957,17 @@ io.on('connection', (socket) => {
     // (magic 10a) BLINK / PASS THROUGH: where you stand (by the hand) and where you go — the caster's game found it; held to the spell's reach from the hand below
     // (magic 10b) MARK: where the caster's feet are · RECALL: only with a mark of theirs here (REWIND's path comes with its let-go: 'magic-chan-stop')
     if (S.kind === 'mark' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    // (magic 10c) SWAP: where the caster stands · CALL BACK / REWIND A THING: a loose thing nobody holds, near enough (by where this server last had it)
+    if (S.kind === 'swap' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    if (S.kind === 'callback' || S.kind === 'rewindobj') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing');
+      if (p && now - p.t < 4000 && isFinite(ob.x) && isFinite(ob.y) && Math.hypot(ob.x - p.x, ob.y - p.y) > (S.reach || 320) + 600) return no('far'); }
     let MK = null; if (S.kind === 'recall') { MK = _magicMarks.get(socket.id); if (!MK || MK.room !== room || now > MK.until) return no('nomark'); }
     if ((S.kind === 'blink' || S.kind === 'pass') && (!isFinite(m.tx) || !isFinite(m.ty) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 9b) HEAVY / WEIGHTLESS: a loose thing nobody holds, or a player in this room near enough (yourself, the dummy on its caster's machine)
     // (magic 9c) STASIS: as the weight's (never yourself) · BARRAGE: the loose things named, each in this room, loose, nobody holding it — none: refused
-    if (S.kind === 'stasis' && (m.tgt === socket.id || (typeof m.obj !== 'string' && typeof m.tgt !== 'string'))) return no('nobody');
+    if ((S.kind === 'stasis' || S.kind === 'swap') && (m.tgt === socket.id || (typeof m.obj !== 'string' && typeof m.tgt !== 'string'))) return no('nobody');
     let BRG = null; if (S.kind === 'barrage') { const mp = roomObjects[room]; BRG = (Array.isArray(m.objs) ? m.objs : []).slice(0, S.n || 6).filter(id => typeof id === 'string' && mp && mp.get(id) && mp.get(id).loose && !(hm && hm.has(id))); if (!BRG.length) return no('nothing'); }
-    if (S.kind === 'weight' || S.kind === 'stasis') { if (typeof m.obj === 'string') { const ob = roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
+    if (S.kind === 'weight' || S.kind === 'stasis' || S.kind === 'swap') { if (typeof m.obj === 'string') { const ob = roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
       else if (m.tgt !== socket.id && m.tgt !== 'mw-test-dummy') { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;
         if (!ts || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 260) + 120)) return no('nobody'); } }
     // (4e) ON ANOTHER: a player in this room, near enough (by where their own game last said they were)
@@ -29064,6 +29068,9 @@ io.on('connection', (socket) => {
     // (magic 10b) a MARK kept (the last one, wherever it was, gone) · a RECALL told where the mark is (its held record too)
     if (S.kind === 'mark') { const ex = _magicMarks.get(socket.id); out.tx = Math.round(+m.bx); out.ty = Math.round(+m.by); _magicMarks.set(socket.id, { id, room, x: out.tx, y: out.ty, at: now, until: now + (SK.secs || 600) * 1000 });
       if (ex && ex.room !== room) io.to(ex.room).emit('magic-mark-gone', { by: socket.id }); }
+    // (magic 10c) the thing swapped / called back / rewound: its driving is the caster's from now (as a catch's) · a swap's caster's place
+    if (S.kind === 'swap' || S.kind === 'callback' || S.kind === 'rewindobj') { if (typeof m.obj === 'string') { out.obj = m.obj; const D = roomObjDrv[room] || (roomObjDrv[room] = new Map()), L = roomObjDrvAt[room] || (roomObjDrvAt[room] = new Map()); D.set(m.obj, socket.id); L.set(m.obj, Date.now()); broadcastObjSt(room); } else out.tgt = m.tgt;
+      if (S.kind === 'swap') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); } }
     if (MK) { out.tx = MK.x; out.ty = MK.y; const q = _magicChans.get(id); if (q) q.mark = { x: MK.x, y: MK.y }; }
     if (S.kind === 'weight') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 10).toFixed(2); }   // (magic 9b)
     if (S.kind === 'stasis') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 5).toFixed(2); out.hold = +(S.holdS || 1.5).toFixed(2); }   // (magic 9c)

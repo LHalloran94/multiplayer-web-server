@@ -138,8 +138,17 @@
       plain: { keys: [L, D, U, R, D], rune: [3, 2, 7, 5, 6] } },
     recall: { name: 'Recall', school: 'space', form: 'stream', tier: 1, cd: 20, stance: 'raise', kind: 'recall', alt: 'mark', chan: true, chanS: 1.5, fx: '#b08cff',
       plain: { keys: [L, D, U, R, U], rune: [3, 2, 7, 5, 8] } },
-    rewind: { name: 'Rewind yourself', school: 'space', form: 'stream', tier: 1, cd: 15, stance: 'raise', kind: 'rewind', learn: 5, chan: true, chanS: 40, backPerS: 4, backMax: 20, runMs0: 700, runPxMs: 1.1, runMin: 800, runMax: 3000, fx: '#b08cff',
+    rewind: { name: 'Rewind yourself', school: 'space', form: 'stream', tier: 1, cd: 15, stance: 'raise', kind: 'rewind', learn: 5, alts: ['rewind_o'], chan: true, chanS: 40, backPerS: 4, backMax: 20, runMs0: 700, runPxMs: 1.1, runMin: 800, runMax: 3000, fx: '#b08cff',
       plain: { keys: [R, R, L, L, U], rune: [8, 2, 0, 1, 6] } },
+    // ⭐ STEP 10c (2026-11-21) SPACE: SWAP (kind 'swap') — you and the loose thing / player nearest the pointer within `reach` change places. CALL BACK (kind 'callback') —
+    //   the last thing that left your hands, within `reach`, flies back to your hand at up to `speed` px a tick (through rock by folding). REWIND A THING (kind 'rewindobj',
+    //   rewind's variant, HELD, live): the thing nearest the pointer within `reach` runs back along its own path, at most `backMax` s.
+    swap: { name: 'Swap', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'swap', learn: 5, reach: 320, fx: '#b08cff',
+      plain: { keys: [R, R, L, D, R], rune: [6, 5, 3, 2, 0] } },
+    callback: { name: 'Call back', school: 'space', form: 'shaping', tier: 0, cd: 3, stance: 'raise', kind: 'callback', learn: 3, reach: 800, speed: 16, fx: '#b08cff',
+      plain: { keys: [D, R, U, L, R], rune: [3, 0, 8, 2, 5] } },
+    rewind_o: { name: 'Rewind a thing', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'rewindobj', alt: 'rewind', chan: true, chanS: 40, reach: 320, backMax: 20, fx: '#b08cff',
+      plain: { keys: [R, R, L, L, R], rune: [8, 2, 0, 1, 4] } },
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
     grow_o: { name: 'Grow (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mega', secs: 15, alt: 'grow', other: true, reach: 240, plain: { keys: [U, L, U, R, D], rune: [7, 3, 1, 5, 4] } },
@@ -472,6 +481,8 @@
     blink: [[U, R], [4, 5, 2]], passthrough: [[U, U], [4, 1]],
     // (10b) set down · and back up out of it, mirrored · back and up, a hook turned back
     mark: [[D, D], [4, 7, 6]], recall: [[D, U], [4, 7, 8]], rewind: [[L, U], [4, 3, 0]],
+    // (10c) this side for that side · back and down into the hand · rewind's, its first mark turned → and on to the top right
+    swap: [[L, R], [4, 3, 5]], callback: [[L, D], [4, 5, 3]], rewind_o: [[R, U], [4, 3, 0, 2]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
     closewounds: [[D, D], [4, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
