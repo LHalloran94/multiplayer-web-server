@@ -372,10 +372,10 @@
       plain: { keys: [R, L, D, R, U], rune: [3, 5, 1, 7, 6] } },
     barrage: { name: 'Barrage', school: 'force', form: 'stream', tier: 1, cd: 14, stance: 'level', kind: 'barrage', learn: 5, chan: true, chanS: 8, grab: 140, n: 6, orbit: 46, spin: 4.5, pull: 0.5, vmax: 22,
       throwV: 18, gapMs: 120, fx: '#e6e6f0', plain: { keys: [R, U, L, D, R], rune: [5, 4, 0, 6, 8] } },
-    // ⭐ STEP 9d (2026-11-21) FORCE: CATCH (kind 'catch', held ≤ `chanS` s): a disc of bent air `dist` px out from the hand, `r` px across each way: arrows, thrown things, ice
+    // ⭐ STEP 9d (2026-11-21) FORCE: CATCH (kind 'catch', held ≤ `chanS` s): (round 2) a SHELL of bent air — part of a sphere `r` px round the staff's tip, `half`° each way from its pole (the flat disc `dist` px out behind a switch): arrows, thrown things, ice
     //   shards and spell bolts flying into it (at least `minV` px a frame) STOP and hang in it, `most` at a time, slowly turning; let go, they are flung at the pointer as yours
     //   (things at `throwV`, bolts at their own speed); any other end drops them (a bolt fizzles).
-    catch: { name: 'Catch', school: 'force', form: 'stream', tier: 0, cd: 8, stance: 'level', kind: 'catch', learn: 3, chan: true, chanS: 6, dist: 30, r: 26, most: 6, minV: 3, throwV: 18, fx: '#e6e6f0',
+    catch: { name: 'Catch', school: 'force', form: 'stream', tier: 0, cd: 8, stance: 'level', kind: 'catch', learn: 3, chan: true, chanS: 15, dist: 30, r: 46, half: 60, most: 6, minV: 3, throwV: 18, fx: '#e6e6f0',
       plain: { keys: [R, D, R, U, D], rune: [5, 3, 7, 1, 4] } },
     levitate_o: { name: 'Levitate (on another)', school: 'force', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'boon', pw: 'levitate', secs: 20, alt: 'levitate', other: true, reach: 240,
       plain: { keys: [R, U, D, U, L], rune: [5, 7, 3, 1, 0] } },
