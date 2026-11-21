@@ -4381,7 +4381,7 @@ function magicWaveProf(f) { return f < 0.72 ? Math.pow(f / 0.72, 1.4) : Math.max
 //   band (then again at 0.6 s and 1.5 s, as drops land). Splashes, gusts and whirlwinds leave conjured water alone (`magicWaveHolds`) — it never leaves the band as drops.
 const _magicWaveRoom = new Map();   // room → { base: Map(cell → its water before any wave), seen: Set(cells recorded), out, box: [c0, c1, r0, r1], n (waves on), lost }
 function magicWaveLedger(room) { let R = _magicWaveRoom.get(room); if (!R) _magicWaveRoom.set(room, R = { base: new Map(), seen: new Set(), out: 0, box: null, n: 0, lost: 0, gen: 0 }); return R; }
-function magicWaveHolds(room, i) { const R = _magicWaveRoom.get(room); if (!R || !(R.out > 0) || !R.seen.has(i)) return false; const st = cellsOf(room), amt = st.fineAmt; if (!amt) return false; return amt.rp(i)[amt.o(i) + LIQ_RANK[9]] > (R.base.get(i) || 0); }
+function magicWaveHolds(room, i) { const R = _magicWaveRoom.get(room); if (!R || !(R.out > 0)) return false; if (magicWaveHeld(room, i)) return true; if (!R.seen.has(i)) return false; const st = cellsOf(room), amt = st.fineAmt; if (!amt) return false; return amt.rp(i)[amt.o(i) + LIQ_RANK[9]] > (R.base.get(i) || 0); }
 function magicWaveCorridor(room, x0, dir, gr, S) {
   const st = cellsOf(room), tot = st.fineTotal, amt = st.fineAmt, ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, WR = LIQ_RANK[9], L = S.len || 16, run = Math.ceil(((S.speed || 120) * (S.secs || 4.5)) / T) + L, R = magicWaveLedger(room);
   const ca = Math.floor(x0 / T), c0 = Math.max(0, Math.min(ca - L - 16, ca + dir * run) - 16), c1 = Math.min(COLS - 1, Math.max(ca + L + 16, ca + dir * run) + 16), r0 = Math.max(0, gr - 24), r1 = Math.min(ROWS - 1, gr + 18);
@@ -4396,10 +4396,6 @@ function magicWaveTake(room, R, lo, hi, r0, r1, cap, changed, any) {
     const w = amt.rp(i)[amt.o(i) + WR], ex = pass ? w : w - (R.base.get(i) || 0); if (ex <= 0) continue; got += vesselCellTake(room, i, WR, Math.min(ex, want - got), changed); }
   R.out -= got; return got;
 }
-function magicWaveTakeBack(room, q, changed) {
-  const R = magicWaveLedger(room), K = q.corr, T = TERRAIN_CELL, L = q.S.len || 16, cF = Math.floor(q.x / T); q.put.clear();
-  magicWaveTake(room, R, Math.max(K.c0, Math.min(cF, cF - q.dir * (L - 1)) - 14), Math.min(K.c1, Math.max(cF, cF - q.dir * (L - 1)) + 14), K.r0, K.r1, 1e9, changed, false);
-}
 function magicWaveSweepRoom(room, any) { const R = _magicWaveRoom.get(room); if (!R || R.n > 0 || !R.box) return; const ch = [];
   magicWaveTake(room, R, R.box[0], R.box[1], R.box[2], R.box[3], 1e9, ch, any); if (ch.length) emitFineCells(room, [...new Set(ch)]); R.lost = R.out; }
 function magicWaveBase(room, c, ref, S) {   // the first rock or liquid down from a little above `ref` in column c: { r, wall } (wall: rock already there — a step too tall)
@@ -4409,35 +4405,56 @@ function magicWaveBase(room, c, ref, S) {   // the first rock or liquid down fro
   for (let r = r0 + 1; r <= ref + 14; r++) if (full(r)) return { r, wall: false };
   return { r: ref + 14, wall: false };
 }
+// ⭐ (8d round 3, the user: the waves 'move in a very unsmooth and unpleasant way, jittering the whole way forward. The whole thing should move smoothly as one nice wavefront';
+//   'the wave should be bigger') A RIGID MOUND: its cells are HELD out of the world's flow (taken off the liquid's active set each tick, so they neither slump nor spread — it
+//   was put down whole, flattened by the flow for 60 ms, taken back and put down again: it pulsed up and down and spread); each tick only the cells whose share CHANGES are
+//   written (its front and back as it moves on — a few dozen, not the whole mound), so it ticks every `tickMs`. What the flow did move anyway (a cell woken by a neighbour) is
+//   taken back from above the record near it every few ticks. Its water is still the world's own on the card; every screen draws a smooth wavefront over it (16zj).
+function magicWaveSetOwn(room, q, i, t, R, changed) {   // this wave's share of cell i becomes t: the cell changed by the difference (what is there besides, kept)
+  const st = cellsOf(room), amt = st.fineAmt, tot = st.fineTotal, WR = LIQ_RANK[9], old = q.put.get(i) || 0; if (t === old) { if (t > 0) fineSet(room).delete(i); return; }
+  const p = amt.wp(i), b = amt.o(i), a = p[b + WR], all = peekCellAt(tot, i) > 0 ? tot.g(i) : 0, nw = Math.max(0, Math.min(a + t - old, LIQUID_MAX - (all - a)));
+  p[b + WR] = nw; tot.s(i, all - a + nw); R.out += nw - a; fineSyncGrid(room, i); changed.push(i);
+  if (t > 0) { q.put.set(i, t); fineSet(room).delete(i); } else { q.put.delete(i); if (nw > 0) fineSet(room).add(i); fineWakeAround(room, i); }
+}
 function magicWaveTick(id, q, now) {
   const room = q.room, st = cellsOf(room), grid = st.terrain; if (!grid || !st.fineAmt) return; ensureFineArrays(room, 1);
-  const ROWS = st.rows, T = TERRAIN_CELL, S = q.S, L = S.len || 16, WR = LIQ_RANK[9], changed = [], dt = Math.min(0.2, (now - (q.at || now)) / 1000); q.at = now;
-  magicWaveTakeBack(room, q, changed);
+  const ROWS = st.rows, T = TERRAIN_CELL, S = q.S, L = S.len || 16, changed = [], dt = Math.min(0.2, (now - (q.at || now)) / 1000), R = magicWaveLedger(room), tot = st.fineTotal; q.at = now;
   // forward, unless broken; a step taller than it can climb (or rock at its crest's height ahead) breaks it
   if (!q.endAt) { const nx = q.x + q.dir * (S.speed || 120) * dt, cN = Math.floor(nx / T) + q.dir, b = magicWaveBase(room, cN, q.gr, S);
     let wall = b.wall; if (!wall) { for (let r = b.r - 1; r >= b.r - Math.ceil((S.high || 5) * 0.8); r--) { const v = peekCellAt(grid, cN * ROWS + r); if (r < 0 || (v > 0 && isSolidCell(v) && !(v >= 249 && v <= 253))) { wall = true; break; } } }
     if (wall) { q.endAt = now; q.broke = b.wall ? 1 : 2; q.brokeAt = cN; } else { q.x = nx; q.gr = magicWaveBase(room, Math.floor(nx / T), q.gr, S).r; } }
   const age = now - q.t0, grow = Math.min(1, age / 400), fade = q.endAt ? Math.max(0, 1 - (now - q.endAt) / 320) : Math.max(0, Math.min(1, (q.until - now) / 500)), H = (S.high || 5) * grow * fade;
-  // its columns, front to tail, each on the first rock or liquid under it (its own water taken up first)
+  // its columns, front to tail, each on the first rock or water that was there (never its own) under it
   const cF = Math.floor(q.x / T), cols = [], bases = [], hs = []; let ref = q.gr;
   for (let k = L - 1; k >= 0; k--) { const c = cF - q.dir * (L - 1 - k); const b = magicWaveBase(room, c, ref, S); ref = b.wall ? ref : b.r; q.base.set(c, ref); cols.push(c); bases.push(ref); hs.push(b.wall ? 0 : H * magicWaveProf(k / (L - 1))); }
   for (const [c] of q.base) if (Math.abs(c - cF) > L + 10) q.base.delete(c);
-  let left = q.N; const R = magicWaveLedger(room);
+  // where its water should stand now (its share of each cell), then only the cells whose share changed written
+  const D = new Map(); let left = q.N;
   for (let j = 0; j < cols.length && left > 0; j++) { const c = cols[j], h = hs[j]; if (!(h > 0.05) || c < 0 || c >= st.cols) continue; let need = Math.round(h * LIQUID_MAX);
-    for (let r = bases[j] - 1; r >= 0 && need > 0 && left > 0; r--) { const i = c * ROWS + r; if (!vesselCellOpen(room, i)) break; const n = vesselCellPut(room, i, WR, Math.min(need, left, LIQUID_MAX), changed); if (n > 0) { q.put.set(i, (q.put.get(i) || 0) + n); need -= n; left -= n; R.out += n; } else if (need > 0 && peekCellAt(st.fineTotal, i) < LIQUID_MAX) break; } }
+    for (let r = bases[j] - 1; r >= 0 && need > 0 && left > 0; r--) { const i = c * ROWS + r; if (!vesselCellOpen(room, i)) break; const others = (peekCellAt(tot, i) > 0 ? tot.g(i) : 0) - (q.put.get(i) || 0), u = Math.min(need, left, LIQUID_MAX - Math.max(0, others));
+      if (u <= 0) continue; D.set(i, u); need -= u; left -= u; } }
+  for (const i of [...q.put.keys()]) if (!D.has(i)) magicWaveSetOwn(room, q, i, 0, R, changed);
+  for (const [i, u] of D) magicWaveSetOwn(room, q, i, u, R, changed);
+  // what the flow moved anyway: taken back from above the record near it (never its own held cells), every fourth tick
+  if (((q.n = (q.n || 0) + 1) & 3) === 0) { const K = q.corr, lo = Math.max(K.c0, Math.min(cF, cF - q.dir * (L - 1)) - 12), hi = Math.min(K.c1, Math.max(cF, cF - q.dir * (L - 1)) + 12), amt = st.fineAmt, WR = LIQ_RANK[9];
+    let spare = R.out; for (const v of q.put.values()) spare -= v; for (const w of _magicWaves.values()) if (w !== q && w.room === room) for (const v of w.put.values()) spare -= v;
+    for (let c = lo; c <= hi && spare > 0; c++) for (let r = K.r0; r <= K.r1 && spare > 0; r++) { const i = c * ROWS + r; if (!(peekCellAt(tot, i) > 0) || magicWaveHeld(room, i)) continue; const ex = amt.rp(i)[amt.o(i) + WR] - (R.base.get(i) || 0); if (ex <= 0) continue;
+      const n = vesselCellTake(room, i, WR, Math.min(ex, spare), changed); spare -= n; R.out -= n; } }
   // the surface's powder at its front swept up (dropped where it ends)
   if (!q.endAt && q.carry.length < (S.carry || 60)) { const M = magicTemp.get(room), cg = []; let took = 0;
     for (let dc = 0; dc <= 1 && took < (S.grab || 2); dc++) { const c = cF + q.dir * dc; if (c < 0 || c >= st.cols) continue; const b = q.base.get(c) != null ? q.base.get(c) : q.gr;
       for (let r = b; r <= b + 1; r++) { const i = c * ROWS + r; if (r < 1 || r >= ROWS) continue; const v = peekCellAt(grid, i); if (!(v > 0) || !isPowderId(v) || (M && M.has(i))) continue; grid.s(i, 0); st.terrainHp.s(i, 0); cg.push(i, 0); q.carry.push(v); took++; break; } }
     if (cg.length) { ensureTerrainHp(room); wireFanout(room, 'terrain-set', { cells: cg }); activatePowderRect(room, grid, cF - 2, q.gr - 3, cF + 2, q.gr + 3); } }
   if (changed.length) emitFineCells(room, [...new Set(changed)]);
-  io.to(room).emit('magic-wave', { id, x: Math.round(q.x), dir: q.dir, c0: cols[cols.length - 1], b: bases.slice().reverse(), h: hs.map(v => Math.round(v * 10)).reverse(), br: q.broke ? 1 : 0, n: q.carry.length });
+  // every screen: its front (to the px, for a smooth front between cells), its columns' ground and heights (tail → front), its speed
+  io.to(room).emit('magic-wave', { id, x: Math.round(q.x * 10) / 10, dir: q.dir, c0: cols[cols.length - 1], b: bases.slice().reverse(), h: hs.map(v => Math.round(v * 10)).reverse(), br: q.broke ? 1 : 0, sp: q.endAt ? 0 : (S.speed || 120), n: q.carry.length });
 }
+// a cell one of the room's waves holds now
+function magicWaveHeld(room, i) { for (const w of _magicWaves.values()) if (w.room === room && w.put.has(i)) return true; return false; }
 function magicWaveEnd(id, q) {
-  _magicWaves.delete(id); const room = q.room, changed = [], T = TERRAIN_CELL, R = magicWaveLedger(room), K = q.corr, L = q.S.len || 16, cF = Math.floor(q.x / T);
-  let n = 0; for (const v of q.put.values()) n += v;   // (what it put down last, taken back round it now — anybody's water above the record)
-  try { magicWaveTake(room, R, Math.max(K.c0, Math.min(cF, cF - q.dir * (L - 1)) - 14), Math.min(K.c1, Math.max(cF, cF - q.dir * (L - 1)) + 14), K.r0, K.r1, n, changed, false); } catch (e) {}
-  q.put.clear(); R.n = Math.max(0, R.n - 1); if (changed.length) emitFineCells(room, [...new Set(changed)]);
+  const room = q.room, changed = [], T = TERRAIN_CELL, R = magicWaveLedger(room);
+  try { for (const i of [...q.put.keys()]) magicWaveSetOwn(room, q, i, 0, R, changed); } catch (e) {}
+  _magicWaves.delete(id); q.put.clear(); R.n = Math.max(0, R.n - 1); if (changed.length) emitFineCells(room, [...new Set(changed)]);
   try { magicWaveSweepRoom(room, false); } catch (e) {}
   const y = (q.gr - (q.S.high || 5) * 0.6) * T; if (q.carry.length) magicSoilSpray(room, q.x, y, { m: q.carry, o: [] }, q.dir * 160, -120, { fan: 0.6 });
   io.to(room).emit('magic-wave-end', { id, x: Math.round(q.x), y: Math.round(q.gr * T), dir: q.dir, br: q.broke || 0, bc: q.brokeAt, out: R.out, on: R.n });
