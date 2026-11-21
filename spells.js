@@ -140,12 +140,13 @@
       plain: { keys: [L, D, U, R, U], rune: [3, 2, 7, 5, 8] } },
     rewind: { name: 'Rewind yourself', school: 'space', form: 'stream', tier: 1, cd: 15, stance: 'raise', kind: 'rewind', learn: 5, alts: ['rewind_o'], chan: true, chanS: 40, backPerS: 4, backMax: 20, runMs0: 700, runPxMs: 1.1, runMin: 800, runMax: 3000, fx: '#b08cff',
       plain: { keys: [R, R, L, L, U], rune: [8, 2, 0, 1, 6] } },
+    // (10c round 2, the user: swap's range 'increased massively' 320 → 1200; call back's 800 → 1600)
     // ⭐ STEP 10c (2026-11-21) SPACE: SWAP (kind 'swap') — you and the loose thing / player nearest the pointer within `reach` change places. CALL BACK (kind 'callback') —
     //   the last thing that left your hands, within `reach`, flies back to your hand at up to `speed` px a tick (through rock by folding). REWIND A THING (kind 'rewindobj',
     //   rewind's variant, HELD, live): the thing nearest the pointer within `reach` runs back along its own path, at most `backMax` s.
-    swap: { name: 'Swap', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'swap', learn: 5, reach: 320, fx: '#b08cff',
+    swap: { name: 'Swap', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'swap', learn: 5, reach: 1200, fx: '#b08cff',
       plain: { keys: [R, R, L, D, R], rune: [6, 5, 3, 2, 0] } },
-    callback: { name: 'Call back', school: 'space', form: 'shaping', tier: 0, cd: 3, stance: 'raise', kind: 'callback', learn: 3, reach: 800, speed: 16, fx: '#b08cff',
+    callback: { name: 'Call back', school: 'space', form: 'shaping', tier: 0, cd: 3, stance: 'raise', kind: 'callback', learn: 3, reach: 1600, speed: 16, fx: '#b08cff',
       plain: { keys: [D, R, U, L, R], rune: [3, 0, 8, 2, 5] } },
     rewind_o: { name: 'Rewind a thing', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'rewindobj', alt: 'rewind', chan: true, chanS: 40, reach: 320, backMax: 20, fx: '#b08cff',
       plain: { keys: [R, R, L, L, R], rune: [8, 2, 0, 1, 4] } },
