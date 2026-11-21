@@ -4372,7 +4372,8 @@ function magicPoolTick(q) {
 setInterval(() => { const now = Date.now(); for (const [id, q] of _magicBalls) if (now > q.until) _magicBalls.delete(id); for (const [k, q] of _magicStormBlades) if (now > q.until) _magicStormBlades.delete(k); }, 1000);
 setInterval(() => { if (!_magicPools.size) return; const now = Date.now(); for (const [id, q] of _magicPools) { if (now > q.until) { _magicPools.delete(id); continue; } try { magicPoolTick(q); } catch (e) { console.error('[magic pool] ' + (e && e.message)); _magicPools.delete(id); } } }, 100);
 // THE WAVE'S SHAPE: how high (a share of `high`) at `f` along it, 0 its tail, 1 its front — a long back rising to the crest, then a steep face
-function magicWaveProf(f) { return f < 0.72 ? Math.pow(f / 0.72, 1.4) : Math.max(0.35, 1 - Math.pow((f - 0.72) / 0.28, 2) * 0.65); }
+// (8d round 4, the user: 'the front of it is too flat') the crest near the front, a tall face (three quarters of its height), dropping over the one cell ahead (`magicWaveTick`)
+function magicWaveProf(f) { return f < 0.85 ? Math.pow(f / 0.85, 1.5) : 1 - Math.pow((f - 0.85) / 0.15, 2) * 0.25; }
 // (rig, 8d: the world's flow spread the mound further between ticks than the cells it was put on — 3752 units were left behind) THE WATER THAT WAS THERE is recorded along its
 //   way at the cast; each tick only the water ABOVE that record is taken back near it. (8d round 2, the user: several waves near each other drew 'odd, jagged' shapes, and
 //   some water stayed where there had been none) ONE LEDGER A ROOM, shared by its waves (`_magicWaveRoom`): the record (each cell recorded once — by the first wave over it, so
@@ -4424,9 +4425,12 @@ function magicWaveTick(id, q, now) {
     let wall = b.wall; if (!wall) { for (let r = b.r - 1; r >= b.r - Math.ceil((S.high || 5) * 0.8); r--) { const v = peekCellAt(grid, cN * ROWS + r); if (r < 0 || (v > 0 && isSolidCell(v) && !(v >= 249 && v <= 253))) { wall = true; break; } } }
     if (wall) { q.endAt = now; q.broke = b.wall ? 1 : 2; q.brokeAt = cN; } else { q.x = nx; q.gr = magicWaveBase(room, Math.floor(nx / T), q.gr, S).r; } }
   const age = now - q.t0, grow = Math.min(1, age / 400), fade = q.endAt ? Math.max(0, 1 - (now - q.endAt) / 320) : Math.max(0, Math.min(1, (q.until - now) / 500)), H = (S.high || 5) * grow * fade;
-  // its columns, front to tail, each on the first rock or water that was there (never its own) under it
-  const cF = Math.floor(q.x / T), cols = [], bases = [], hs = []; let ref = q.gr;
-  for (let k = L - 1; k >= 0; k--) { const c = cF - q.dir * (L - 1 - k); const b = magicWaveBase(room, c, ref, S); ref = b.wall ? ref : b.r; q.base.set(c, ref); cols.push(c); bases.push(ref); hs.push(b.wall ? 0 : H * magicWaveProf(k / (L - 1))); }
+  // its columns, front to tail, each on the first rock or water that was there (never its own) under it. (8d round 4, the user: 'still a bit jittery, particularly at its front')
+  //   each column's height from where it stands against the wave's EXACT front (`x`, the front column's middle — not whole cells), the cell ahead filling as the front comes:
+  //   its water rises and moves on a little every tick, no column popping in whole
+  const span = (L - 1) * T, cF = Math.floor(q.x / T), cols = [], bases = [], hs = []; let ref = q.gr;
+  for (let k = L; k >= -1; k--) { const c = cF - q.dir * (L - 1 - k), f = 1 - q.dir * (q.x - (c + 0.5) * T) / span, b = magicWaveBase(room, c, ref, S); ref = b.wall ? ref : b.r; q.base.set(c, ref);
+    cols.push(c); bases.push(ref); hs.push(b.wall || f < 0 ? 0 : f <= 1 ? H * magicWaveProf(f) : H * magicWaveProf(1) * Math.max(0, 1 - (f - 1) * span / T)); }
   for (const [c] of q.base) if (Math.abs(c - cF) > L + 10) q.base.delete(c);
   // where its water should stand now (its share of each cell), then only the cells whose share changed written
   const D = new Map(); let left = q.N;
