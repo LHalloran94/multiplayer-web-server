@@ -355,6 +355,17 @@
       plain: { keys: [R, R, D, U, R], rune: [3, 4, 8, 2, 5] } },
     pull: { name: 'Pull', school: 'force', form: 'burst', tier: 0, cd: 4, stance: 'level', kind: 'push', alt: 'push', toward: 1, reach: 260, cone: 18, ms: 320, push: 11, stop: 34, looseK: 1.4, knockR: 100, grains: 24, fx: '#e6e6f0',
       plain: { keys: [R, R, D, U, L], rune: [3, 4, 8, 2, 1] } },
+    // ⭐ STEP 9b (2026-11-21) FORCE: HEAVY and its variant WEIGHTLESS (`light`), kind 'weight' — on the loose thing or player nearest the pointer within `reach` px (yourself too),
+    //   `secs` s: a thing's weight / float / fall (client 16b `lbMagicWt`), a player's power 'heavy' / 'light' (their own game). LEVITATE (+ on another): a boon, the power
+    //   'levitate' (client 16zj `magicBodyForce`: hovering, at most 6 cells over the ground under you).
+    heavy: { name: 'Heavy', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', learn: 3, reach: 260, secs: 10, alts: ['weightless'], fx: '#9a7ef0',
+      plain: { keys: [R, D, L, D, D], rune: [3, 7, 6, 4, 8] } },
+    weightless: { name: 'Weightless', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', alt: 'heavy', light: 1, reach: 260, secs: 10, fx: '#ece8ff',
+      plain: { keys: [R, D, L, D, U], rune: [3, 7, 6, 4, 0] } },
+    levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 12, learn: 3, alts: ['levitate_o'],
+      plain: { keys: [R, U, D, U, R], rune: [5, 7, 3, 1, 2] } },
+    levitate_o: { name: 'Levitate (on another)', school: 'force', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'boon', pw: 'levitate', secs: 12, alt: 'levitate', other: true, reach: 240,
+      plain: { keys: [R, U, D, U, L], rune: [5, 7, 3, 1, 0] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -424,7 +435,8 @@
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],
     spikes: [[U, D], [4, 1, 5]], pillar: [[D, U], [4, 7, 1]], bridge: [[R, L], [4, 0, 2]],   // (5d: a peak ∧ · down into the ground and up · out and across)
     lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]], leap_o: [[R, U], [4, 1, 2]],
-    push: [[R, R], [4, 5]], pull: [[R, L], [4, 3]],   // (9a: sent at the pointer, the bolt ending · the same line back towards you)
+    push: [[R, R], [4, 5]], pull: [[R, L], [4, 3]],
+    heavy: [[L, D], [4, 6, 7]], weightless: [[L, U], [4, 0, 1]], levitate: [[U, D], [4, 7, 1]], levitate_o: [[R, D], [4, 7, 1, 2]],   // (9b: pressed down / lifted, mirrored, as grow and shrink · up off the ground, as the rising pillar)   // (9a: sent at the pointer, the bolt ending · the same line back towards you)
     haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
     closewounds: [[D, D], [4, 6]],
