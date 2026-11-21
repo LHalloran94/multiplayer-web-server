@@ -124,11 +124,11 @@
     feather_o: { name: 'Feather fall (on another)', school: 'storm', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'boon', pw: 'feather', secs: 20, alt: 'feather', other: true, reach: 240, plain: { keys: [L, R, D, D, R], rune: [0, 4, 8, 7, 4] } },
     haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, alts: ['haste_o'], plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
     // ⭐ STEP 10a (2026-11-21) SPACE: BLINK (kind 'blink') — to the free spot nearest the pointer, at most `blinkR` px from your middle and in sight (the caster's game finds it:
-    //   client 16zj `magicBlinkSpot`; the server holds it to `reach` px from the hand); your speed kept. PASS THROUGH (kind 'pass') — through at most `cells` cells of rock the
-    //   way the pointer points (8 ways) to the first place your body fits (16zj `magicPassSpot`); carried there over a time set by how far.
-    blink: { name: 'Blink', school: 'space', form: 'placed', tier: 0, cd: 5, stance: 'level', kind: 'blink', learn: 3, reach: 380, blinkR: 320, fx: '#b08cff',
+    //   client 16zj `magicBlinkSpot`; the server holds it to `reach` px from the hand); your speed kept. PASS THROUGH (kind 'pass') — through at most `cells` cells of rock met within `near` cells of
+    //   you, the way the pointer points (8 ways) to the first place your body fits (16zj `magicPassSpot`); carried there over a time set by how far.
+    blink: { name: 'Blink', school: 'space', form: 'placed', tier: 0, cd: 5, stance: 'level', kind: 'blink', learn: 3, reach: 540, blinkR: 480, fx: '#b08cff',
       plain: { keys: [U, U, L, U, R], rune: [4, 1, 8, 0, 7] } },
-    passthrough: { name: 'Pass through', school: 'space', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'pass', learn: 3, reach: 240, cells: 8, fx: '#b08cff',
+    passthrough: { name: 'Pass through', school: 'space', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'pass', learn: 3, reach: 380, cells: 16, near: 12, fx: '#b08cff',
       plain: { keys: [U, U, D, D, L], rune: [7, 6, 0, 3, 1] } },
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
