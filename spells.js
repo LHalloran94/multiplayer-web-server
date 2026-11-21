@@ -370,8 +370,8 @@
     //   pointer `gapMs` apart at `throwV` (px a tick), each a thrown thing.
     stasis: { name: 'Stasis', school: 'force', form: 'placed', tier: 1, cd: 12, stance: 'level', kind: 'stasis', learn: 5, reach: 300, secs: 5, holdS: 1.5, press: 0.3, fx: '#e6e6f0',
       plain: { keys: [R, L, D, R, U], rune: [3, 5, 1, 7, 6] } },
-    barrage: { name: 'Barrage', school: 'force', form: 'stream', tier: 1, cd: 14, stance: 'level', kind: 'barrage', learn: 5, chan: true, chanS: 8, grab: 140, n: 6, orbit: 50, spin: 2.4, pull: 0.25, vmax: 12,
-      throwV: 15, gapMs: 120, fx: '#e6e6f0', plain: { keys: [R, U, L, D, R], rune: [5, 4, 0, 6, 8] } },
+    barrage: { name: 'Barrage', school: 'force', form: 'stream', tier: 1, cd: 14, stance: 'level', kind: 'barrage', learn: 5, chan: true, chanS: 8, grab: 140, n: 6, orbit: 46, spin: 4.5, pull: 0.5, vmax: 22,
+      throwV: 18, gapMs: 120, fx: '#e6e6f0', plain: { keys: [R, U, L, D, R], rune: [5, 4, 0, 6, 8] } },
     levitate_o: { name: 'Levitate (on another)', school: 'force', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'boon', pw: 'levitate', secs: 20, alt: 'levitate', other: true, reach: 240,
       plain: { keys: [R, U, D, U, L], rune: [5, 7, 3, 1, 0] } },
     // the innate abilities (step 1: one each, small)
