@@ -362,9 +362,9 @@
       plain: { keys: [R, D, L, D, D], rune: [3, 7, 6, 4, 8] } },
     weightless: { name: 'Weightless', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', alt: 'heavy', light: 1, reach: 260, secs: 10, fx: '#ece8ff',
       plain: { keys: [R, D, L, D, U], rune: [3, 7, 6, 4, 0] } },
-    levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 12, learn: 3, alts: ['levitate_o'],
+    levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 20, learn: 3, alts: ['levitate_o'],
       plain: { keys: [R, U, D, U, R], rune: [5, 7, 3, 1, 2] } },
-    levitate_o: { name: 'Levitate (on another)', school: 'force', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'boon', pw: 'levitate', secs: 12, alt: 'levitate', other: true, reach: 240,
+    levitate_o: { name: 'Levitate (on another)', school: 'force', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'boon', pw: 'levitate', secs: 20, alt: 'levitate', other: true, reach: 240,
       plain: { keys: [R, U, D, U, L], rune: [5, 7, 3, 1, 0] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
