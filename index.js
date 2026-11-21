@@ -3837,10 +3837,16 @@ function magicMindKey(socket) { const k = playerKeyFor(socket.id); if (socket._m
 //   letting go (`magic-chan-stop`), its time (`chanS`; a minute at most), or its caster gone — everybody is told (`magic-chan-end`, with the cooldown, which counts from here).
 //   Where it points while held comes from its caster (`magic-aim`) and goes on to the others; the ground at its end is lit here (`magic-chan-burn`). PROCESSOR: a few a second.
 const _magicChans = new Map();
+// (magic 10b) SPACE's MARKS: one a player (socket id → { id, room, x, y, at, until }) — a new one, their death ('magic-mark-drop') or `secs` ends it
+const _magicMarks = new Map();
 function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) return; _magicChans.delete(id);
   { const ST = _magicStorms.get(id); if (ST) for (let i = 0; i < ST.clouds.length; i++) { const c = _magicClouds.get(id + (i + 1) / 10); if (c) c.until = Math.min(c.until, Date.now()); } }   // (8a round 3) a thunderstorm let go: its rain stops
   const sk = io.sockets.sockets.get(q.by); let cd = 0;
   if (sk && !sk._magicNoCd) { cd = SPELLS.cdMs(q.spell, q.cat); (sk._magicCd || (sk._magicCd = {}))[q.spell] = Date.now() + cd; }
+  // (magic 10b) A RECALL held to its end GOES to its caster's mark (every screen: rifts, their own body moved); let go / a blow before: nothing, and only a short cooldown
+  { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'recall') { const MK = _magicMarks.get(q.by);
+    if (why === 'time' && MK && MK.room === q.room && Date.now() < MK.until) extra = Object.assign({}, extra || {}, { go: 1, tx: MK.x, ty: MK.y });
+    else if (sk && !sk._magicNoCd) { cd = Math.min(cd, 2000); sk._magicCd[q.spell] = Date.now() + cd; } } }
   io.to(q.room).emit('magic-chan-end', Object.assign({ id, by: q.by, why, cd, spell: q.spell }, extra || {}));
   if (q.made > 0) { const S = SPELLS.of(q.spell) || {}, room = q.room, x = q.dx != null ? q.dx : q.x, y = q.dy != null ? q.dy : q.y, u = q.made; setTimeout(() => magicOilDry(room, x, y, u, 30, MAGIC_WATER_RK), (S.drySecs || 60) * 1000 * ((sk && sk._magicSecsK) || 1)); }   // (7b) the jet's water dries
   if (q.water && !extra) { magicWaterSplash(q.room, q.water.cx, q.water.cy, q.water.u, 0, 0); io.to(q.room).emit('magic-water-end', { id, x: q.water.cx, y: q.water.cy, drop: 1 }); return; }   // (7b) a held ball ended without its caster's throw: it falls where it was
@@ -28949,6 +28955,11 @@ io.on('connection', (socket) => {
     if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
     if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 10a) BLINK / PASS THROUGH: where you stand (by the hand) and where you go — the caster's game found it; held to the spell's reach from the hand below
+    // (magic 10b) MARK: where the caster's feet are · RECALL: only with a mark of theirs here · REWIND: the path back (newest first), each step no longer than a body could go
+    if (S.kind === 'mark' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    let MK = null; if (S.kind === 'recall') { MK = _magicMarks.get(socket.id); if (!MK || MK.room !== room || now > MK.until) return no('nomark'); }
+    let RWP = null; if (S.kind === 'rewind') { const a = Array.isArray(m.pts) ? m.pts : []; if (a.length < 4 || a.length > 96 || a.length % 2 || !a.every(v => isFinite(v) && Math.abs(v) < 1e7) || Math.hypot(a[0] - m.x, a[1] - m.y) > 160) return no('bad');
+      for (let i = 2; i < a.length; i += 2) if (Math.hypot(a[i] - a[i - 2], a[i + 1] - a[i - 1]) > 900) return no('bad'); RWP = a.map(v => Math.round(+v)); }
     if ((S.kind === 'blink' || S.kind === 'pass') && (!isFinite(m.tx) || !isFinite(m.ty) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 9b) HEAVY / WEIGHTLESS: a loose thing nobody holds, or a player in this room near enough (yourself, the dummy on its caster's machine)
     // (magic 9c) STASIS: as the weight's (never yourself) · BARRAGE: the loose things named, each in this room, loose, nobody holding it — none: refused
@@ -29052,6 +29063,11 @@ io.on('connection', (socket) => {
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
     if (S.kind === 'lift') out.obj = m.obj;
     if (S.kind === 'blink' || S.kind === 'pass') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); }
+    // (magic 10b) a MARK kept (the last one, wherever it was, gone) · a RECALL told where the mark is (its held record too) · a REWIND's path to every screen
+    if (S.kind === 'mark') { const ex = _magicMarks.get(socket.id); out.tx = Math.round(+m.bx); out.ty = Math.round(+m.by); _magicMarks.set(socket.id, { id, room, x: out.tx, y: out.ty, at: now, until: now + (SK.secs || 600) * 1000 });
+      if (ex && ex.room !== room) io.to(ex.room).emit('magic-mark-gone', { by: socket.id }); }
+    if (MK) { out.tx = MK.x; out.ty = MK.y; const q = _magicChans.get(id); if (q) q.mark = { x: MK.x, y: MK.y }; }
+    if (RWP) out.pts = RWP;
     if (S.kind === 'weight') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 10).toFixed(2); }   // (magic 9b)
     if (S.kind === 'stasis') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 5).toFixed(2); out.hold = +(S.holdS || 1.5).toFixed(2); }   // (magic 9c)
     if (BRG) out.objs = BRG;   // (magic 9c) the barrage's things
@@ -29211,6 +29227,11 @@ io.on('connection', (socket) => {
   socket.on('rune-step', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const rs = magicRunesOf(room), q = rs.find(r => r.id === (m.id | 0)); if (!q) return;
     const p = socket._avPos; if ((q.by === socket.id && !m.own) || Date.now() < q.at || (p && Date.now() - p.t < 3000 && Math.hypot(p.x - q.x, p.y - q.y) > 140)) return; magicRuneOff(room, q, socket.id); });
   // what runes there are in your room now (asked when you arrive and now and then; drawn faint — a late arrival can still see a careful trace)
+  // (magic 10b) the room's marks (a page joining, now and then) · your mark dropped (you died)
+  socket.on('magic-marks-ask', () => { const room = currentAvatarRoom; if (!room) return; const now = Date.now(), list = [];
+    for (const [by, q] of _magicMarks) { if (now > q.until || !io.sockets.sockets.get(by)) { _magicMarks.delete(by); continue; } if (q.room === room) list.push({ by, id: q.id, x: q.x, y: q.y, age: now - q.at }); }
+    socket.emit('magic-marks', { marks: list }); });
+  socket.on('magic-mark-drop', () => { const q = _magicMarks.get(socket.id); if (!q) return; _magicMarks.delete(socket.id); io.to(q.room).emit('magic-mark-gone', { by: socket.id }); });
   socket.on('magic-runes-ask', () => { const room = currentAvatarRoom; if (!room) return; const now = Date.now(); socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
   // ⭐ (8a) CALL LIGHTNING FALLS: its caster's game says where (`x`, `y` — the top of the body it struck, or the ground; `fy` that body's feet; `pl` the body) — straight down from
   //   its cloud, near its middle, no lower than the ground under it

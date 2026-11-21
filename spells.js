@@ -130,6 +130,14 @@
       plain: { keys: [U, U, L, U, R], rune: [4, 1, 8, 0, 7] } },
     passthrough: { name: 'Pass through', school: 'space', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'pass', learn: 3, reach: 380, cells: 16, near: 12, fx: '#b08cff',
       plain: { keys: [U, U, D, D, L], rune: [7, 6, 0, 3, 1] } },
+    // ⭐ STEP 10b (2026-11-21) SPACE: MARK (kind 'mark') — a sigil where you stand, one a player, `secs` s (the server's `_magicMarks`); its variant RECALL (kind 'recall',
+    //   HELD `chanS` s): held to the end you go to your mark. REWIND YOURSELF (kind 'rewind'): back along your last `back` s of path in `ms` ms.
+    mark: { name: 'Mark', school: 'space', form: 'placed', tier: 0, cd: 2, stance: 'raise', kind: 'mark', learn: 3, secs: 600, alts: ['recall'], fx: '#b08cff',
+      plain: { keys: [L, D, U, R, D], rune: [3, 2, 7, 5, 6] } },
+    recall: { name: 'Recall', school: 'space', form: 'stream', tier: 1, cd: 20, stance: 'raise', kind: 'recall', alt: 'mark', chan: true, chanS: 1.5, fx: '#b08cff',
+      plain: { keys: [L, D, U, R, U], rune: [3, 2, 7, 5, 8] } },
+    rewind: { name: 'Rewind yourself', school: 'space', form: 'self', tier: 1, cd: 15, stance: 'raise', kind: 'rewind', learn: 5, back: 3, ms: 500, fx: '#b08cff',
+      plain: { keys: [R, R, L, L, U], rune: [8, 2, 0, 1, 6] } },
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
     grow_o: { name: 'Grow (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mega', secs: 15, alt: 'grow', other: true, reach: 240, plain: { keys: [U, L, U, R, D], rune: [7, 3, 1, 5, 4] } },
@@ -460,6 +468,8 @@
     haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
     // (10a) Space's stroke runs straight through the middle (2 → 4 → 6), so no word may go 4 → 2 (it would fold into the school's line): blink up, out and up · straight up
     blink: [[U, R], [4, 5, 2]], passthrough: [[U, U], [4, 1]],
+    // (10b) set down · and back up out of it, mirrored · back and up, a hook turned back
+    mark: [[D, D], [4, 7, 6]], recall: [[D, U], [4, 7, 8]], rewind: [[L, U], [4, 3, 0]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
     closewounds: [[D, D], [4, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
