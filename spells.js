@@ -150,6 +150,11 @@
       plain: { keys: [D, R, U, L, R], rune: [3, 0, 8, 2, 5] } },
     rewind_o: { name: 'Rewind a thing', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'rewindobj', alt: 'rewind', chan: true, chanS: 40, reach: 320, backMax: 20, fx: '#b08cff',
       plain: { keys: [R, R, L, L, R], rune: [8, 2, 0, 1, 4] } },
+    // ⭐ STEP 10d (2026-11-21) SPACE: DOORWAYS (kind 'doorway') — two casts set two doorways (each at most `reach` px from you, the second at most `pair` px from the first),
+    //   open together `secs` s: you, loose things, arrows and bolts go in one and out of the other keeping their speed; liquid flows through, `flow` cells' worth a tick
+    //   (server `_magicDoors`). The first's cooldown is short — the full one starts with the second.
+    doorways: { name: 'Doorways', school: 'space', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'doorway', learn: 5, reach: 400, pair: 1500, secs: 30, flow: 1, fx: '#b08cff',
+      plain: { keys: [D, D, L, U, R], rune: [3, 5, 6, 2, 1] } },
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
     grow_o: { name: 'Grow (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mega', secs: 15, alt: 'grow', other: true, reach: 240, plain: { keys: [U, L, U, R, D], rune: [7, 3, 1, 5, 4] } },
@@ -484,6 +489,8 @@
     mark: [[D, D], [4, 7, 6]], recall: [[D, U], [4, 7, 8]], rewind: [[L, U], [4, 3, 0]],
     // (10c) this side for that side · back and down into the hand · rewind's, its first mark turned → and on to the top right
     swap: [[L, R], [4, 3, 5]], callback: [[L, D], [4, 5, 3]], rewind_o: [[R, U], [4, 3, 0, 2]],
+    // (10d) a door's outline: up its side, along the bottom, up the other side
+    doorways: [[U, D], [4, 0, 6, 8, 2]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
     closewounds: [[D, D], [4, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],

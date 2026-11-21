@@ -3839,6 +3839,8 @@ function magicMindKey(socket) { const k = playerKeyFor(socket.id); if (socket._m
 const _magicChans = new Map();
 // (magic 10b) SPACE's MARKS: one a player (socket id → { id, room, x, y, at, until }) — a new one, their death ('magic-mark-drop') or `secs` ends it
 const _magicMarks = new Map();
+// (magic 10d) SPACE's DOORWAYS: pair id → { id, by, room, a: {x, y}, b: {x, y} | null, at, until, S } · caster's socket id → their pair's id
+const _magicDoors = new Map(), _magicDoorBy = new Map();
 function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) return; _magicChans.delete(id);
   { const ST = _magicStorms.get(id); if (ST) for (let i = 0; i < ST.clouds.length; i++) { const c = _magicClouds.get(id + (i + 1) / 10); if (c) c.until = Math.min(c.until, Date.now()); } }   // (8a round 3) a thunderstorm let go: its rain stops
   const sk = io.sockets.sockets.get(q.by); let cd = 0;
@@ -3857,6 +3859,12 @@ function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) r
 //   game flies it and says where it came down (`magic-chunk-land`); not told by `until` (its caster gone), it comes down where its flight would have (`magicChunkFall`).
 const _magicChunks = new Map();
 setInterval(() => { if (!_magicChunks.size) return; const now = Date.now(); for (const [id, F] of _magicChunks) if (now > F.until) { _magicChunks.delete(id); const p = magicChunkFall(F); const P = magicPileAt(F.room, p.x, p.y, F.m, null); io.to(F.room).emit('magic-chunk-end', { id, x: Math.round(p.x), y: Math.round(p.y), n: P.length }); } }, 250);
+// (magic 10d) DOORWAYS each quarter second: a pair past its time (or its caster gone) ends; an open pair's LIQUID flows through — a cell's worth (`flow`) taken from round the
+//   lower half of each and thrown out of the other (`magicWaterGrab` → `magicWaterSplash`: the same real liquid, nothing made or lost)
+setInterval(() => { if (!_magicDoors.size) return; const now = Date.now();
+  for (const [k, q] of _magicDoors) { if (now > q.until || !io.sockets.sockets.get(q.by)) { _magicDoors.delete(k); if (_magicDoorBy.get(q.by) === k) _magicDoorBy.delete(q.by); io.to(q.room).emit('magic-door-gone', { id: k }); continue; }
+    if (!q.b) continue; const S = q.S || {};
+    for (const [E, F] of [[q.a, q.b], [q.b, q.a]]) { const W = magicWaterGrab(q.room, E.x, E.y + 14, { grab: 2, cells: S.flow || 1 }); if (W && W.n > 0) { magicWaterSplash(q.room, F.x, F.y + 6, W.u, F.x >= E.x ? 60 : -60, 0); q.liq = (q.liq || 0) + W.n; } } } }, 250);
 setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) if (now > q.until || !io.sockets.sockets.get(q.by)) magicChanEnd(id, now > q.until ? 'time' : 'gone'); }, 250);
 function magicOwnH(pkey, life, spell) { return crypto.createHmac('sha256', MAGIC_SECRET).update(pkey + '|' + life + '|' + spell).digest().readUInt32BE(0) & 0x3fffffff; }
 // ⭐ MAGIC STEP 3d (2026-11-17) — BATCH b: THE WORLD CHANGED BY A SPELL, AND PUT BACK. Each changed cell is written as the liquid reactions write theirs (`grid.s` + `hp.s`, the
@@ -28961,6 +28969,9 @@ io.on('connection', (socket) => {
     if (S.kind === 'swap' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     if (S.kind === 'callback' || S.kind === 'rewindobj') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing');
       if (p && now - p.t < 4000 && isFinite(ob.x) && isFinite(ob.y) && Math.hypot(ob.x - p.x, ob.y - p.y) > (S.reach || 320) + 600) return no('far'); }
+    // (magic 10d) DOORWAYS: the first of a pair, or the second (its caster's pair waiting, set within a minute, near enough to the first)
+    let DR = null; if (S.kind === 'doorway') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const cur = _magicDoorBy.get(socket.id), q = cur != null ? _magicDoors.get(cur) : null;
+      if (q && q.room === room && !q.b && now - q.at < 60000) { if (Math.hypot(+m.tx - q.a.x, +m.ty - q.a.y) > (S.pair || 1500) + 20) return no('far'); DR = { q, end: 'b' }; } else DR = { end: 'a', old: q }; }
     let MK = null; if (S.kind === 'recall') { MK = _magicMarks.get(socket.id); if (!MK || MK.room !== room || now > MK.until) return no('nomark'); }
     if ((S.kind === 'blink' || S.kind === 'pass') && (!isFinite(m.tx) || !isFinite(m.ty) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 9b) HEAVY / WEIGHTLESS: a loose thing nobody holds, or a player in this room near enough (yourself, the dummy on its caster's machine)
@@ -29071,6 +29082,11 @@ io.on('connection', (socket) => {
     // (magic 10c) the thing swapped / called back / rewound: its driving is the caster's from now (as a catch's) · a swap's caster's place
     if (S.kind === 'swap' || S.kind === 'callback' || S.kind === 'rewindobj') { if (typeof m.obj === 'string') { out.obj = m.obj; const D = roomObjDrv[room] || (roomObjDrv[room] = new Map()), L = roomObjDrvAt[room] || (roomObjDrvAt[room] = new Map()); D.set(m.obj, socket.id); L.set(m.obj, Date.now()); broadcastObjSt(room); } else out.tgt = m.tgt;
       if (S.kind === 'swap') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); } }
+    // (magic 10d) the first doorway (the old pair ended; a short cooldown, the full one with the second) · the second: the pair open for `secs` s
+    if (DR) { if (DR.end === 'a') { if (DR.old) { _magicDoors.delete(DR.old.id); io.to(DR.old.room).emit('magic-door-gone', { id: DR.old.id }); }
+        const q = { id, by: socket.id, room, a: { x: out.tx, y: out.ty }, b: null, at: now, until: now + 62000, S: SK }; _magicDoors.set(id, q); _magicDoorBy.set(socket.id, id);
+        out.door = { id, a: [q.a.x, q.a.y], b: null, left: 62000 }; if (!SC && !socket._magicNoCd) { cds[m.spell] = now + 400; out.cd = 400; } }
+      else { const q = DR.q; q.b = { x: out.tx, y: out.ty }; q.until = now + (SK.secs || 30) * 1000; out.door = { id: q.id, a: [q.a.x, q.a.y], b: [q.b.x, q.b.y], left: q.until - now }; } }
     if (MK) { out.tx = MK.x; out.ty = MK.y; const q = _magicChans.get(id); if (q) q.mark = { x: MK.x, y: MK.y }; }
     if (S.kind === 'weight') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 10).toFixed(2); }   // (magic 9b)
     if (S.kind === 'stasis') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 5).toFixed(2); out.hold = +(S.holdS || 1.5).toFixed(2); }   // (magic 9c)
@@ -29238,7 +29254,14 @@ io.on('connection', (socket) => {
   // (magic 10b) the room's marks (a page joining, now and then) · your mark dropped (you died)
   socket.on('magic-marks-ask', () => { const room = currentAvatarRoom; if (!room) return; const now = Date.now(), list = [];
     for (const [by, q] of _magicMarks) { if (now > q.until || !io.sockets.sockets.get(by)) { _magicMarks.delete(by); continue; } if (q.room === room) list.push({ by, id: q.id, x: q.x, y: q.y, age: now - q.at }); }
-    socket.emit('magic-marks', { marks: list }); });
+    socket.emit('magic-marks', { marks: list });
+    // (magic 10d) …and the room's doorways
+    const dl = []; for (const [k, q] of _magicDoors) if (q.room === room && now < q.until) dl.push({ id: k, by: q.by, a: [q.a.x, q.a.y], b: q.b ? [q.b.x, q.b.y] : null, left: q.until - now, age: now - q.at });
+    socket.emit('magic-doors', { doors: dl }); });
+  // (magic 10d) a bolt of mine came out of a doorway: it flies on from there (its hits are measured from there)
+  socket.on('magic-bolt-door', (m) => { const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return; const now = Date.now(); let ok = false;
+    for (const q of _magicDoors.values()) if (q.room === L.room && q.b && now < q.until + 500) for (const E of [q.a, q.b]) if (Math.hypot(m.x - E.x, m.y - E.y) < 90) ok = true;
+    if (ok) { L.x = Math.round(m.x); L.y = Math.round(m.y); } });
   socket.on('magic-mark-drop', () => { const q = _magicMarks.get(socket.id); if (!q) return; _magicMarks.delete(socket.id); io.to(q.room).emit('magic-mark-gone', { by: socket.id }); });
   socket.on('magic-runes-ask', () => { const room = currentAvatarRoom; if (!room) return; const now = Date.now(); socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
   // ⭐ (8a) CALL LIGHTNING FALLS: its caster's game says where (`x`, `y` — the top of the body it struck, or the ground; `fy` that body's feet; `pl` the body) — straight down from
