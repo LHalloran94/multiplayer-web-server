@@ -29101,6 +29101,20 @@ io.on('connection', (socket) => {
   });
   socket.on('scroll-charge-off', () => { socket._magicCharge = null; });
   // ⭐ (magic 9c) A BLOW STORED IN STASIS: whoever's game struck a thing held in stasis tells the room (each screen sums it — client 16b `lbStasisBlow`); at most 30 a second a socket
+  // ⭐ (magic 9d) CATCH: while a socket holds a catch (a held spell of kind 'catch'), a thing flying into its disc is HANDED to it — a loose thing's driving (the thrower's lease
+  //   overridden: `roomObjDrv`), a spell bolt's hits (`_magicLive` `by`), told to everybody ('magic-caught'); let go, a caught bolt flies again from where it hung, the catcher's
+  //   ('magic-flung'). A thing held by somebody's hands is never taken.
+  const magicCatching = () => { for (const q of _magicChans.values()) if (q.by === socket.id && SPELLS.of(q.spell) && SPELLS.of(q.spell).kind === 'catch') return q; return null; };
+  socket.on('magic-catch-obj', (m) => { const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !magicCatching()) return;
+    const map = roomObjects[room], o = map && map.get(m.id); if (!o || !(o.type === 'stamp' && o.loose)) return; const hm = roomObjHeld[room]; if (hm && hm.has(m.id)) return;
+    const D = roomObjDrv[room] || (roomObjDrv[room] = new Map()), L = roomObjDrvAt[room] || (roomObjDrvAt[room] = new Map()); D.set(m.id, socket.id); L.set(m.id, Date.now()); broadcastObjSt(room);
+    io.to(room).emit('magic-caught', { obj: m.id, by: socket.id, cast: m.cast | 0 }); });
+  socket.on('magic-catch-bolt', (m) => { const room = currentAvatarRoom, L = m && _magicLive.get(m.id); if (!room || !L || L.room !== room || L.by === socket.id || !magicCatching() || Date.now() > L.until) return;
+    L.from0 = L.from0 || L.by; L.by = socket.id; L.until = Date.now() + 15000; io.to(room).emit('magic-caught', { id: m.id, by: socket.id, cast: m.cast | 0 }); });
+  socket.on('magic-fling-bolt', (m) => { const room = currentAvatarRoom, L = m && _magicLive.get(m.id); if (!room || !L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y) || !isFinite(m.vx) || !isFinite(m.vy)) return;
+    const S = SPELLS.of(L.spell) || {}, v = Math.min(1500, Math.hypot(m.vx, m.vy)) || 1, k = v / (Math.hypot(m.vx, m.vy) || 1), lf = S.life || 1.2;
+    L.x = Math.round(m.x); L.y = Math.round(m.y); L.until = Date.now() + lf * 1000 + 800; L.reach = v * lf + 0.5 * (S.grav || 0) * 1500 * lf * lf + 64;
+    io.to(room).emit('magic-flung', { id: m.id, by: socket.id, x: L.x, y: L.y, vx: Math.round(m.vx * k), vy: Math.round(m.vy * k) }); });
   socket.on('magic-blow', (m) => { const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || m.id.length > 80 || !isFinite(m.vx) || !isFinite(m.vy)) return;
     const now = Date.now(); if (now - (socket._blowAt || 0) < 33) return; socket._blowAt = now;
     io.to(room).emit('magic-blow', { id: m.id, vx: Math.max(-60, Math.min(60, +m.vx)), vy: Math.max(-60, Math.min(60, +m.vy)), from: socket.id }); });
