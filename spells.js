@@ -364,6 +364,14 @@
       plain: { keys: [R, D, L, D, U], rune: [3, 7, 6, 4, 0] } },
     levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 20, learn: 3, alts: ['levitate_o'],
       plain: { keys: [R, U, D, U, R], rune: [5, 7, 3, 1, 2] } },
+    // ⭐ STEP 9c (2026-11-21) FORCE: STASIS (kind 'stasis', on the loose thing or player nearest the pointer within `reach`, never yourself): a thing stops dead for `secs` s, the
+    //   blows it takes stored and given all at once at the end (client 16b `lbStasis`); a player held at most `holdS` s, each fresh movement key `press` s off, a blow breaks it.
+    //   BARRAGE (kind 'barrage', held ≤ `chanS` s): up to `n` loose things within `grab` px orbit you (`orbit` px, `spin` rad/s; driven `pull`, `vmax`); let go, they fly at the
+    //   pointer `gapMs` apart at `throwV` (px a tick), each a thrown thing.
+    stasis: { name: 'Stasis', school: 'force', form: 'placed', tier: 1, cd: 12, stance: 'level', kind: 'stasis', learn: 5, reach: 300, secs: 5, holdS: 1.5, press: 0.3, fx: '#e6e6f0',
+      plain: { keys: [R, L, D, R, U], rune: [3, 5, 1, 7, 6] } },
+    barrage: { name: 'Barrage', school: 'force', form: 'stream', tier: 1, cd: 14, stance: 'level', kind: 'barrage', learn: 5, chan: true, chanS: 8, grab: 140, n: 6, orbit: 50, spin: 2.4, pull: 0.25, vmax: 12,
+      throwV: 15, gapMs: 120, fx: '#e6e6f0', plain: { keys: [R, U, L, D, R], rune: [5, 4, 0, 6, 8] } },
     levitate_o: { name: 'Levitate (on another)', school: 'force', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'boon', pw: 'levitate', secs: 20, alt: 'levitate', other: true, reach: 240,
       plain: { keys: [R, U, D, U, L], rune: [5, 7, 3, 1, 0] } },
     // the innate abilities (step 1: one each, small)
@@ -436,7 +444,7 @@
     spikes: [[U, D], [4, 1, 5]], pillar: [[D, U], [4, 7, 1]], bridge: [[R, L], [4, 0, 2]],   // (5d: a peak ∧ · down into the ground and up · out and across)
     lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]], leap_o: [[R, U], [4, 1, 2]],
     push: [[R, R], [4, 5]], pull: [[R, L], [4, 3]],
-    heavy: [[L, D], [4, 6, 7]], weightless: [[L, U], [4, 0, 1]], levitate: [[U, D], [4, 7, 1]], levitate_o: [[R, D], [4, 7, 1, 2]],   // (9b: pressed down / lifted, mirrored, as grow and shrink · up off the ground, as the rising pillar)   // (9a: sent at the pointer, the bolt ending · the same line back towards you)
+    heavy: [[L, D], [4, 6, 7]], weightless: [[L, U], [4, 0, 1]], levitate: [[U, D], [4, 7, 1]], levitate_o: [[R, D], [4, 7, 1, 2]], stasis: [[D, L], [4, 8, 2]], barrage: [[D, D], [4, 0, 2, 5]],   // (9b: pressed down / lifted, mirrored, as grow and shrink · up off the ground, as the rising pillar)   // (9a: sent at the pointer, the bolt ending · the same line back towards you)
     haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
     closewounds: [[D, D], [4, 6]],

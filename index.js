@@ -28949,7 +28949,10 @@ io.on('connection', (socket) => {
     if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
     if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 9b) HEAVY / WEIGHTLESS: a loose thing nobody holds, or a player in this room near enough (yourself, the dummy on its caster's machine)
-    if (S.kind === 'weight') { if (typeof m.obj === 'string') { const ob = roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
+    // (magic 9c) STASIS: as the weight's (never yourself) · BARRAGE: the loose things named, each in this room, loose, nobody holding it — none: refused
+    if (S.kind === 'stasis' && (m.tgt === socket.id || (typeof m.obj !== 'string' && typeof m.tgt !== 'string'))) return no('nobody');
+    let BRG = null; if (S.kind === 'barrage') { const mp = roomObjects[room]; BRG = (Array.isArray(m.objs) ? m.objs : []).slice(0, S.n || 6).filter(id => typeof id === 'string' && mp && mp.get(id) && mp.get(id).loose && !(hm && hm.has(id))); if (!BRG.length) return no('nothing'); }
+    if (S.kind === 'weight' || S.kind === 'stasis') { if (typeof m.obj === 'string') { const ob = roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
       else if (m.tgt !== socket.id && m.tgt !== 'mw-test-dummy') { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;
         if (!ts || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 260) + 120)) return no('nobody'); } }
     // (4e) ON ANOTHER: a player in this room, near enough (by where their own game last said they were)
@@ -29047,6 +29050,8 @@ io.on('connection', (socket) => {
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
     if (S.kind === 'lift') out.obj = m.obj;
     if (S.kind === 'weight') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 10).toFixed(2); }   // (magic 9b)
+    if (S.kind === 'stasis') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 5).toFixed(2); out.hold = +(S.holdS || 1.5).toFixed(2); }   // (magic 9c)
+    if (BRG) out.objs = BRG;   // (magic 9c) the barrage's things
     if (S.kind === 'double') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); out.dv = Math.max(-400, Math.min(400, Math.round(+m.dv || 0)));
       let D = _magicDoubles.get(room); if (!D) _magicDoubles.set(room, D = new Map()); for (const [k, q] of D) if (now > q.until) D.delete(k); D.set(id, { by: socket.id, until: now + Math.max(S.secs || 60, S.secsWalk || 6) * 1000 + 3000 }); }
     // (magic step 3d) batch b: the world changed where it was aimed — a placed thing on the ground (the point moved there), water frozen, a wall raised
@@ -29095,6 +29100,10 @@ io.on('connection', (socket) => {
     io.to(room).emit('scroll-read', { from: socket.id, id: o.id, spell: SC.spell, ms });
   });
   socket.on('scroll-charge-off', () => { socket._magicCharge = null; });
+  // ⭐ (magic 9c) A BLOW STORED IN STASIS: whoever's game struck a thing held in stasis tells the room (each screen sums it — client 16b `lbStasisBlow`); at most 30 a second a socket
+  socket.on('magic-blow', (m) => { const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || m.id.length > 80 || !isFinite(m.vx) || !isFinite(m.vy)) return;
+    const now = Date.now(); if (now - (socket._blowAt || 0) < 33) return; socket._blowAt = now;
+    io.to(room).emit('magic-blow', { id: m.id, vx: Math.max(-60, Math.min(60, +m.vx)), vy: Math.max(-60, Math.min(60, +m.vy)), from: socket.id }); });
   // (magic step 3g) a DOUBLE struck — whoever's game saw it: everybody is told it bursts (once)
   // (magic step 3h) a double STEERED by its caster: where it is, to everybody else (only its own caster's)
   socket.on('magic-dbl', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const D = _magicDoubles.get(room), q = D && D.get(m.id | 0); if (!q || q.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
