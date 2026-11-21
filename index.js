@@ -28948,6 +28948,8 @@ io.on('connection', (socket) => {
     // (magic step 3g) a LIFT names a loose thing nobody holds · a DOUBLE starts by its caster and walks no faster than a run
     if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
     if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    // (magic 10a) BLINK / PASS THROUGH: where you stand (by the hand) and where you go — the caster's game found it; held to the spell's reach from the hand below
+    if ((S.kind === 'blink' || S.kind === 'pass') && (!isFinite(m.tx) || !isFinite(m.ty) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 9b) HEAVY / WEIGHTLESS: a loose thing nobody holds, or a player in this room near enough (yourself, the dummy on its caster's machine)
     // (magic 9c) STASIS: as the weight's (never yourself) · BARRAGE: the loose things named, each in this room, loose, nobody holding it — none: refused
     if (S.kind === 'stasis' && (m.tgt === socket.id || (typeof m.obj !== 'string' && typeof m.tgt !== 'string'))) return no('nobody');
@@ -29049,6 +29051,7 @@ io.on('connection', (socket) => {
       _magicStrikes.set(id, q); out.cx = Math.round(SKY.x); out.cy = Math.round(SKY.y); out.gy = Math.round(SKY.gy); out.w = (S.wide || 10) * TERRAIN_CELL; out.gather = gat;
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
     if (S.kind === 'lift') out.obj = m.obj;
+    if (S.kind === 'blink' || S.kind === 'pass') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); }
     if (S.kind === 'weight') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 10).toFixed(2); }   // (magic 9b)
     if (S.kind === 'stasis') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 5).toFixed(2); out.hold = +(S.holdS || 1.5).toFixed(2); }   // (magic 9c)
     if (BRG) out.objs = BRG;   // (magic 9c) the barrage's things

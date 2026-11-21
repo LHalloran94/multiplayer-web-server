@@ -123,6 +123,13 @@
     feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'feather', secs: 20, learn: 3, alts: ['feather_o'], plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
     feather_o: { name: 'Feather fall (on another)', school: 'storm', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'boon', pw: 'feather', secs: 20, alt: 'feather', other: true, reach: 240, plain: { keys: [L, R, D, D, R], rune: [0, 4, 8, 7, 4] } },
     haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, alts: ['haste_o'], plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
+    // ⭐ STEP 10a (2026-11-21) SPACE: BLINK (kind 'blink') — to the free spot nearest the pointer, at most `blinkR` px from your middle and in sight (the caster's game finds it:
+    //   client 16zj `magicBlinkSpot`; the server holds it to `reach` px from the hand); your speed kept. PASS THROUGH (kind 'pass') — through at most `cells` cells of rock the
+    //   way the pointer points (8 ways) to the first place your body fits (16zj `magicPassSpot`); carried there over a time set by how far.
+    blink: { name: 'Blink', school: 'space', form: 'placed', tier: 0, cd: 5, stance: 'level', kind: 'blink', learn: 3, reach: 380, blinkR: 320, fx: '#b08cff',
+      plain: { keys: [U, U, L, U, R], rune: [4, 1, 8, 0, 7] } },
+    passthrough: { name: 'Pass through', school: 'space', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'pass', learn: 3, reach: 240, cells: 8, fx: '#b08cff',
+      plain: { keys: [U, U, D, D, L], rune: [7, 6, 0, 3, 1] } },
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
     grow_o: { name: 'Grow (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mega', secs: 15, alt: 'grow', other: true, reach: 240, plain: { keys: [U, L, U, R, D], rune: [7, 3, 1, 5, 4] } },
@@ -451,6 +458,8 @@
     push: [[R, R], [4, 5]], pull: [[R, L], [4, 3]],
     heavy: [[L, D], [4, 6, 7]], weightless: [[L, U], [4, 0, 1]], levitate: [[U, D], [4, 7, 1]], levitate_o: [[R, D], [4, 7, 1, 2]], stasis: [[D, L], [4, 8, 2]], barrage: [[D, D], [4, 0, 2, 5]], catch: [[D, R], [4, 8, 6]],   // (9b: pressed down / lifted, mirrored, as grow and shrink · up off the ground, as the rising pillar)   // (9a: sent at the pointer, the bolt ending · the same line back towards you)
     haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
+    // (10a) Space's stroke runs straight through the middle (2 → 4 → 6), so no word may go 4 → 2 (it would fold into the school's line): blink up, out and up · straight up
+    blink: [[U, R], [4, 5, 2]], passthrough: [[U, U], [4, 1]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
     closewounds: [[D, D], [4, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
