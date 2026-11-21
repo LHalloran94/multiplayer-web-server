@@ -133,12 +133,12 @@
     // ⭐ STEP 10b (2026-11-21) SPACE: MARK (kind 'mark') — a sigil where you stand, one a player, `secs` s (the server's `_magicMarks`); its variant RECALL (kind 'recall',
     //   HELD `chanS` s): held to the end you go to your mark. REWIND YOURSELF (kind 'rewind', HELD up to `chanS` s; round 2): back along your path — `backPerS` s further back for each
     //   second held, at most `backMax` s, counted from when you began casting; run back over `runMs0` + `runPxMs` × its length ms (round 3, slower)
-    //   — or, LIVE (a client switch), carried back while held, `liveK` s of your path a second.
+    //   — or, LIVE (a client switch, the default since round 4), carried back while held at the client slider's speed (× how fast you went), held up to `chanS` s.
     mark: { name: 'Mark', school: 'space', form: 'placed', tier: 0, cd: 2, stance: 'raise', kind: 'mark', learn: 3, secs: 600, alts: ['recall'], fx: '#b08cff',
       plain: { keys: [L, D, U, R, D], rune: [3, 2, 7, 5, 6] } },
     recall: { name: 'Recall', school: 'space', form: 'stream', tier: 1, cd: 20, stance: 'raise', kind: 'recall', alt: 'mark', chan: true, chanS: 1.5, fx: '#b08cff',
       plain: { keys: [L, D, U, R, U], rune: [3, 2, 7, 5, 8] } },
-    rewind: { name: 'Rewind yourself', school: 'space', form: 'stream', tier: 1, cd: 15, stance: 'raise', kind: 'rewind', learn: 5, chan: true, chanS: 8, backPerS: 4, backMax: 20, liveK: 3, runMs0: 700, runPxMs: 1.1, runMin: 800, runMax: 3000, fx: '#b08cff',
+    rewind: { name: 'Rewind yourself', school: 'space', form: 'stream', tier: 1, cd: 15, stance: 'raise', kind: 'rewind', learn: 5, chan: true, chanS: 40, backPerS: 4, backMax: 20, runMs0: 700, runPxMs: 1.1, runMin: 800, runMax: 3000, fx: '#b08cff',
       plain: { keys: [R, R, L, L, U], rune: [8, 2, 0, 1, 6] } },
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
