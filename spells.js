@@ -346,6 +346,15 @@
     //   is put out by the water; the surface's powder at its front swept along and dropped where it breaks. When it ends its water is gone (in spray and mist): nothing left.
     wave: { name: 'Wave', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'wave', learn: 5, reach: 360, secs: 4.5, speed: 130, len: 26, high: 8, step: 3, tickMs: 30,
       grab: 2, carry: 60, push: 7, lift: 5, knockMs: 350, fx: '#7fd0ff', plain: { keys: [R, U, R, D, R], rune: [6, 4, 1, 5, 8] } },
+    // ⭐ STEP 9a (2026-11-21, kickoff §'STEP 9') FORCE: PUSH and its variant PULL (one mark changed), kind 'push'. A LENS OF BENT AIR travels down a narrow cone (`cone`° each side)
+    //   from the hand to `reach` px in `ms` (PULL `toward`: it forms out at the far end and sweeps IN to the hand), stopped by rock. What it passes: a player thrown away from the
+    //   caster (`push`, a body's speed px a tick; their keys blank for `stunMs` so it carries) — PULL: tugged so they land `stop` px in front of the caster; within `knockR` px of
+    //   the hand, what is in their hands knocked out (PULL: it flies to the caster's feet); loose things × `looseK`; the liquid in the cone flung; the surface's powder in it flies
+    //   (`grains` at most — server `magicPushPowder`).
+    push: { name: 'Push', school: 'force', form: 'burst', tier: 0, cd: 4, stance: 'level', kind: 'push', learn: 3, reach: 260, cone: 18, ms: 260, push: 11, stunMs: 220, looseK: 1.4, knockR: 100, grains: 24, alts: ['pull'], fx: '#e6e6f0',
+      plain: { keys: [R, R, D, U, R], rune: [3, 4, 8, 2, 5] } },
+    pull: { name: 'Pull', school: 'force', form: 'burst', tier: 0, cd: 4, stance: 'level', kind: 'push', alt: 'push', toward: 1, reach: 260, cone: 18, ms: 320, push: 11, stop: 34, looseK: 1.4, knockR: 100, grains: 24, fx: '#e6e6f0',
+      plain: { keys: [R, R, D, U, L], rune: [3, 4, 8, 2, 1] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -415,6 +424,7 @@
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],
     spikes: [[U, D], [4, 1, 5]], pillar: [[D, U], [4, 7, 1]], bridge: [[R, L], [4, 0, 2]],   // (5d: a peak ∧ · down into the ground and up · out and across)
     lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]], leap_o: [[R, U], [4, 1, 2]],
+    push: [[R, R], [4, 5]], pull: [[R, L], [4, 3]],   // (9a: sent at the pointer, the bolt ending · the same line back towards you)
     haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
     closewounds: [[D, D], [4, 6]],

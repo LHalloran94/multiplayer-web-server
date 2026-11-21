@@ -4239,6 +4239,38 @@ function magicStormStrikeDo(id, q, cl, x, y, fy, pl) {
   const sp = magicZapSpread(room, [[x, y + 2], [x, isFinite(fy) ? fy - 2 : y]], S);
   io.to(room).emit('magic-strike', { id, sub: ++q.n, from: q.by, spell: q.spell, small: 1, x: Math.round(x), y: Math.round(y), cx: Math.round(cl.x), top: Math.round(cl.y), pl: pl || undefined, n, wet: wet ? 1 : 0, liq: sp.liq, ore: sp.ore });
 }
+// ⭐ MAGIC 9a (2026-11-21, FORCE): PUSH / PULL — THE SURFACE'S POWDER IN THE CONE FLIES. Powder with open air over it, inside the cone from (x, y) along (ax, ay) and no further
+//   than the first rock on its middle line (+ four cells), and round where that line meets the ground (3.5 cells), nearest the hand first, `grains` at most: flown as a splash's grains ('powder-fly', landed by
+//   `powderFlyLand` as ground again — moved, nothing made or lost). PUSH: away from the caster, up a little. PULL (`toward`): towards them, aimed to come down `stop` px short.
+//   PROCESSOR: the cells in the cone's box, once a cast.
+function magicPushPowder(room, x, y, ax, ay, S) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid || !isFinite(x) || !isFinite(y)) return 0;
+  const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, cov = roomCover[room] && roomCover[room].n, floorRow = Math.floor(roomFloorTop(room) / T);
+  const air = (j) => j >= 0 && j < N && peekAir(grid, j) && !(cov && cov.has(j)) && (j % ROWS) < floorRow;
+  const reach = S.reach || 260, cosH = Math.cos((S.cone || 18) * Math.PI / 180), al = Math.hypot(ax, ay) || 1, ux = ax / al, uy = ay / al;
+  let wallD = reach; for (let d = T; d <= reach; d += T / 2) { const c = Math.floor((x + ux * d) / T), r = Math.floor((y + uy * d) / T); if (c < 0 || c >= COLS || r < 0 || r >= ROWS) break; if (!air(c * ROWS + r)) { wallD = d; break; } }
+  const hx = x + ux * wallD, hy = y + uy * wallD, lim = wallD + 4 * T, c0 = Math.max(1, Math.floor((x - lim) / T)), c1 = Math.min(COLS - 2, Math.floor((x + lim) / T)), r0 = Math.max(1, Math.floor((y - lim) / T)), r1 = Math.min(ROWS - 2, Math.floor((y + lim) / T));
+  const cand = [];
+  for (let c = c0; c <= c1; c++) for (let r = r0; r <= r1; r++) { const px = (c + 0.5) * T - x, py = (r + 0.5) * T - y, d = Math.hypot(px, py); if (d > lim || d < T) continue;
+    if (px * ux + py * uy < cosH * d && !(wallD < reach && Math.hypot((c + 0.5) * T - hx, (r + 0.5) * T - hy) < 3.5 * T)) continue;
+    const i = c * ROWS + r, v = peekCellAt(grid, i); if (!isPowderId(v) || MAT_RIGID[v] || !air(i - 1)) continue; cand.push([d, i, c, r, v]); }
+  if (!cand.length) return 0;
+  cand.sort((a, b) => a[0] - b[0]);
+  const fly = roomPowderFly[room] || (roomPowderFly[room] = []), wire = [], gone = [], now = Date.now(), salt = now & 0xffff, G = powderSplashCfg.g, DR = powderSplashCfg.drag;
+  const hc = x / T, hr = y / T, stop = (S.stop || 34) / T;
+  for (let n = 0; n < Math.min(S.grains || 24, cand.length); n++) {
+    const [d, i, c, r, v] = cand[n]; if (fly.length > 600) break; const h1 = fireVar(i, salt, 81), h2 = fireVar(i, salt, 82); let vx, vy;
+    if (S.toward) { const dc = hc - (c + 0.5), dist = Math.max(0, Math.abs(dc) - stop), up = 16 + 6 * h2, t = 2 * up / G, k = (1 - Math.exp(-DR * t)) / DR;   // (cells/s: up, then sideways so it comes down short of the caster)
+      vx = Math.sign(dc) * Math.min(60, dist / Math.max(0.05, k)) * (0.85 + 0.3 * h1); vy = -up + (hr - (r + 0.5)) * 0.6; }
+    else { const s = 30 * (0.6 + 0.4 * (1 - d / reach)) * (0.8 + 0.4 * h1); vx = ux * s; vy = -Math.abs(uy) * s * 0.3 - 13 - 6 * h2; }
+    const hpv = st.terrainHp ? st.terrainHp.g(i) : 0; grid.s(i, 0); if (st.terrainHp) st.terrainHp.s(i, 0); gone.push(i, 0);
+    const A = powderFlyArc(ROWS, COLS, air, c + 0.5, r - 0.1, vx, vy, i);   // (lifted off the surface first: flown sideways from inside its own row it met the next grain at once)
+    fly.push({ at: now + A.steps * POWDER_FLY_DT * 1000, land: A.land, v, hp: hpv, how: 0, hold: 0, settle: 1 }); wire.push(i, v, Math.round(vx * 100), Math.round(vy * 100), A.steps);
+  }
+  if (gone.length) { wireFanout(room, 'terrain-set', { cells: gone }); activatePowderRect(room, grid, c0 - 1, r0 - 1, c1 + 1, r1 + 1); }
+  if (wire.length) io.to(room).emit('powder-fly', { f: wire, g: G, d: DR });
+  return wire.length / 5;
+}
 // ⭐ MAGIC 8b (2026-11-20, STORM): THE THUNDERCLAP'S GLASS — glass within `shatterR` px of the caster SHATTERS (gone; pick-ups where things cost, 'magic-shatter' for the shards on
 //   every screen), out to `rad` it CRACKS (wear, as the quake's — 'terrain-wear' + the quake's cell look). Glass a room keeps unbreakable is left. PROCESSOR: the cells in its circle.
 function magicClap(room, x, y, S, sp) {
@@ -6130,6 +6162,7 @@ function liqBlastApply(room, x, y, R, k, dir) {
     const u = vesselCellTake(room, i, rk, D[0] * 2, changed); if (!u) continue;
     let dx = (C[2] + 0.5) * T - x, dy = (C[3] + 0.2) * T - y; const dl = Math.hypot(dx, dy) || 1; dx /= dl; dy /= dl;
     if (dir) { dx = dx * 0.35 + dir.ax * 0.65; dy = dy * 0.35 + dir.ay * 0.65; const q = Math.hypot(dx, dy) || 1; dx /= q; dy /= q; }   // (a gust throws it along its way)
+    if (dir && dir.back) { dx = -dx; dy = -dy; }   // (magic 9a) PULL: thrown back towards where it came from (the caster)
     const sp = Math.min(liqBlastCfg.vmax, (liqBlastCfg.v0 + liqBlastCfg.v1 * w) * k) * D[2] * (0.7 + 0.6 * fireVar(i, salt, 61 + q));
     const vx0 = dx * sp, vy0 = dy * sp - sp * 0.35;
     const A = powderFlyArc(ROWS, COLS, air, C[2] + 0.5, C[3] + 0.2, vx0, vy0, i, liqDropCfg.g, 0);
@@ -29023,6 +29056,7 @@ io.on('connection', (socket) => {
       _magicClouds.set(id, { room, by: socket.id, spell: m.spell, x: CL.x, y: CL.y, gy: CL.gy, w: (S.wide || 14) * TERRAIN_CELL, until, snow: !!S.snow, made: 0, acc: 0, lt: null, put: [], melt: until + (S.meltSecs || 60) * 1000 * K, dryMs: (S.drySecs || 60) * 1000 * K });
       out.cx = Math.round(CL.x); out.cy = Math.round(CL.y); out.w = (S.wide || 14) * TERRAIN_CELL; out.secs = secs; }   // (7c) every screen draws it there
     if (S.kind === 'clap') { const br = Math.max(4, Math.min(30, +m.br || 10)), cx = +m.bx, cy = +m.by - br; out.cx = Math.round(cx); out.cy = Math.round(cy); out.rad = S.rad || 110; const sp = m.spell, SQ = SK; setTimeout(() => magicClap(room, cx, cy, SQ, sp), 90); }   // (8b) the glass breaks as the ring reaches it
+    if (S.kind === 'push') { const SQ = SK, px = out.x, py = out.y, pax = out.ax, pay = out.ay; setTimeout(() => magicPushPowder(room, px, py, pax, pay, SQ), Math.round((S.ms || 260) * (S.toward ? 0.15 : 0.4))); }   // (9a) the cone's powder flies as the lens passes
     if (S.kind === 'coldsnap') { const br = Math.max(4, Math.min(30, +m.br || 10)), cx = +m.bx, cy = +m.by - br; out.cx = Math.round(cx); out.cy = Math.round(cy); out.rad = S.rad || 96; out.hold = +(S.hold || 1.5).toFixed(2); out.crust = +(S.crustS || 8).toFixed(2); out.n = magicColdSnap(room, cx, cy, SK, br + TERRAIN_CELL * 1.5); }   // (7c) the water round you to ice; every screen frosts its own body (not the caster's)
     if (FP) { out.n = magicFrostPath(room, FP, SK, m.spell); out.secs = +(SK.secs || 30).toFixed(2); out.fp = FP.pts; }   // (7a) every screen: where the frost runs (its effects)
     if (S.kind === 'ball') { const secs = +(SK.secs || 8).toFixed(2); _magicBalls.set(id, { room, by: socket.id, spell: m.spell, x: out.x, y: out.y, until: now + secs * 1000 + 1500, S: SK, last: 0, done: false }); out.secs = secs; }   // (8d)
@@ -29297,7 +29331,7 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || !m || !liqDropsOn(room) || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - _liqBlastAt < 120) return; _liqBlastAt = now;
     // (magic step 3a, the gust) a blast one way only: `ax`, `ay` its way, `cone` the cosine of half its width
-    const dir = isFinite(m.ax) && isFinite(m.ay) && Math.hypot(m.ax, m.ay) > 0.1 ? { ax: +m.ax / Math.hypot(m.ax, m.ay), ay: +m.ay / Math.hypot(m.ax, m.ay), c: Math.max(-1, Math.min(0.99, isFinite(m.cone) ? +m.cone : 0.7)) } : null;
+    const dir = isFinite(m.ax) && isFinite(m.ay) && Math.hypot(m.ax, m.ay) > 0.1 ? { ax: +m.ax / Math.hypot(m.ax, m.ay), ay: +m.ay / Math.hypot(m.ax, m.ay), c: Math.max(-1, Math.min(0.99, isFinite(m.cone) ? +m.cone : 0.7)), back: m.back ? 1 : 0 } : null;   // (magic 9a: `back` — pull)
     liqBlastApply(room, +m.x, +m.y, Math.max(16, Math.min(600, +m.r || 80)), Math.max(0.3, Math.min(2, +m.k || 1)), dir);
   });
   let _liqSplashAt = 0;
