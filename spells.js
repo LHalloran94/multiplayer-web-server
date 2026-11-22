@@ -166,13 +166,13 @@
     shrink_o: { name: 'Shrink (on another)', school: 'decay', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mini', secs: 15, alt: 'shrink', other: true, reach: 240, plain: { keys: [D, R, D, L, U], rune: [1, 5, 7, 3, 0] } },
     fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
-    //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s): spell
+    //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
     //   bolts, arrows, thrown things and ice shards that come within `R` px of your body turn back the way they came, now yours (catch's hand-off).
     wardskin: { name: 'Ward skin', school: 'wards', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'wardskin', secs: 20, hp: 4, learn: 3, alts: ['wardskin_o'], fx: '#ffd86b',
       plain: { keys: [L, U, U, R, D], rune: [0, 2, 5, 4, 7] } },
     wardskin_o: { name: 'Ward skin (on another)', school: 'wards', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'wardskin', alt: 'wardskin', other: true, reach: 240, secs: 20, hp: 4, fx: '#ffd86b',
       plain: { keys: [L, U, U, R, L], rune: [0, 2, 5, 4, 3] } },
-    mirror: { name: 'Mirror ward', school: 'wards', form: 'self', tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 6, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
+    mirror: { name: 'Mirror ward', school: 'wards', form: 'self', tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 10, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
       plain: { keys: [R, D, L, U, R], rune: [2, 0, 3, 5, 8] } },
     fireward_o: { name: 'Fire ward (on another)', school: 'wards', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'fireproof', secs: 20, alt: 'fireward', other: true, reach: 240, plain: { keys: [L, D, R, U, L], rune: [0, 6, 8, 2, 1] } },
     chillbolt: { name: 'Chill bolt', school: 'frost', form: 'bolt', tier: 0, cd: 4, stance: 'level', kind: 'bolt', learn: 3, speed: 640, life: 1.1, grav: 0.05, r: 3, dmg: 0.4, slow: 0.55, slowS: 4, freezeN: 2, freezeS: 20,
