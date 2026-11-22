@@ -181,14 +181,15 @@
     //   through it, what flies into it from outside is stopped.
     wardline: { name: 'Ward line', school: 'wards', form: 'placed', tier: 0, cd: 12, stance: 'level', kind: 'wardline', learn: 3, reach: 300, secs: 30, high: 16, fx: '#ffd86b',
       plain: { keys: [D, U, L, R, U], rune: [1, 7, 6, 8, 2] } },
-    warddome: { name: 'Ward dome', school: 'wards', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'warddome', learn: 5, chan: true, chanS: 2.5, chargeS: 2.5, Rmin: 56, Rmax: 140, secs: 10, fx: '#ffd86b',
+    warddome: { name: 'Ward dome', school: 'wards', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'warddome', learn: 5, reach: 320, chan: true, chanS: 2.5, chargeS: 2.5, Rmin: 56, Rmax: 140, secs: 10, fx: '#ffd86b',
       plain: { keys: [D, R, U, L, L], rune: [1, 7, 6, 8, 5] } },
     // ⭐ STEP 11c (2026-11-22) WARDS AGAINST MAGIC: NULL CIRCLE (kind 'nullc') — a ring of gold glyphs on the ground where you point, `R` px round (18 cells across), and a faint
     //   dome of upright light lines over it, `secs` s: no spell is cast from inside it, its caster's too (the server refuses), a held spell inside ends, a spell bolt fizzles at
     //   its edge; arrows and thrown things pass (the ward dome stops everything flying). DISPEL (kind 'dispel') — a gold ring sweeping out from the pointer to `R` px in `ms`:
     //   every spell effect it reaches ends, each popping into gold motes; the cells a spell made for a time go back early. Not a pocketed thing.
     //   (11c round 3, the user: held to grow as the ward sphere, and bigger — it should stop casting over a large area) the null circle is HELD: from `Rmin` to `Rmax` px over
-    //   `chargeS` s, set (and only then at work) on let-go.
+    //   `chargeS` s, set (and only then at work) on let-go. (round 4, the user: the circle should not stop spells coming in from outside — that is the ward dome's) only
+    //   casting inside it is stopped. THE WARD DOME is cast AT THE POINTER (within `reach`): on a body there (yours, another's, the dummy) about its middle, else about the point.
     nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'nullc', learn: 5, reach: 320, secs: 60, chan: true, chanS: 3, chargeS: 3, Rmin: 96, Rmax: 240, fx: '#ffd86b',
       plain: { keys: [U, D, R, L, D], rune: [6, 8, 5, 3, 0] } },
     // ⭐ STEP 11d (2026-11-22) WARDS ON PLACES AND THINGS: ALARM (kind 'alarm') — a small gold eye sigil on the ground where you point (faint to others, as the warding rune),

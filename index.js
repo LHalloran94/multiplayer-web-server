@@ -29126,8 +29126,9 @@ io.on('connection', (socket) => {
     // (magic 11b round 3) A WARD LINE as the caster's game found it: where it stands (`tx`) and from rock to rock (`ly0`..`ly1`, at most `high` cells), near the point
     let WL = null; if (S.kind === 'wardline') { if (![m.tx, m.ty, m.ly0, m.ly1].every(v => isFinite(v))) return no('bad'); const d = Math.hypot(m.tx - m.x, m.ty - m.y);
       if (d > (S.reach || 300) + 40 || +m.ly0 > +m.ty || +m.ly1 < +m.ty || +m.ly1 - +m.ly0 > (S.high || 16) * TERRAIN_CELL + 8) return no('bad'); WL = { x: Math.round(+m.tx), y0: Math.round(+m.ly0), y1: Math.round(+m.ly1) }; }
-    // (11b round 2) THE DOME: no cells — where the caster's feet are (every screen keeps it there and stops what flies into it)
-    if (S.kind === 'warddome' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    // (11b round 2) THE DOME: no cells — every screen keeps it there and stops what flies into it · (11d round 3, the user) cast AT THE POINTER, within its reach: `bx`, `by`
+    //   the feet of the body pointed at (or under the point), `br` how far up its middle is
+    if (S.kind === 'warddome' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > (S.reach || 320) + 80)) return no('bad');
     let MADE = null; if (S.kind === 'spikes' || S.kind === 'bridge' || S.kind === 'pillar') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad');
       if (S.kind !== 'spikes' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
       MADE = S.kind === 'spikes' ? magicSpikesPlan(room, +m.x, +m.y, +m.tx, S) : S.kind === 'pillar' ? magicPillarPlan(room, +m.bx, +m.by - 2, S) : magicBridgePlan(room, +m.bx, +m.by, +m.tx, +m.ty, S);
@@ -29212,6 +29213,8 @@ io.on('connection', (socket) => {
     if (S.kind === 'lift') out.obj = m.obj;
     // (magic 11b) the ward's cells grown from now (every screen draws its light over them, by `box`)
     // (magic 11b round 3) THE DOME, HELD: where its caster's feet are and its shape (`sh` 1 = the sphere) — it grows while held; its size is set at its end (`magicChanEnd`)
+    // (11d round 3) a half-dome cast at an empty point rests on the ground under it
+    if (S.kind === 'warddome' && !m.on && !m.sh) { const g = magicGroundAt(room, +m.bx, +m.by - Math.max(4, Math.min(40, +m.br || 12))); if (g) m.by = g.y; }
     if (S.kind === 'warddome') { out.dx = Math.round(+m.bx); out.dy = Math.round(+m.by); out.sh = m.sh ? 1 : 0; out.cy = m.sh ? Math.round(+m.by - Math.max(4, Math.min(40, +m.br || 12))) : out.dy;
       const q = _magicChans.get(id); if (q) { q.at = now; q.dx = out.dx; q.dy = out.dy; q.cy = out.cy; q.sh = out.sh; } }
     // (magic 11b round 3) THE WARD LINE: every screen keeps it (its caster crosses it, nobody else)
@@ -29476,8 +29479,6 @@ io.on('connection', (socket) => {
     const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
     _magicLive.delete(m.id);
     if (Date.now() > L.until || Math.hypot(m.x - L.x, m.y - L.y) > L.reach) return;
-    // (magic 11c) ended in a NULL CIRCLE (at its edge, flying in): it fizzles — nothing lands, nothing bursts, nothing catches
-    if (magicNullAt(L.room, +m.x, +m.y)) { io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air: 1, nul: 1, spell: L.spell, from: L.by }); return; }
     // ⭐ (step 6a) A FIREBALL BURSTS wherever it ends — on what it touched, or in the air at the end of its flight: everything that burns in its reach catches (not in liquid: steam)
     if (L.burst) { const liq = m.liq ? 1 : 0, n0 = liq ? 0 : magicFireBurst(L.room, +m.x, +m.y, L.burst);
       io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air: 0, land: 'burst', r: L.burst, liq, pow: +(L.pow || 1).toFixed(2), n: n0, spell: L.spell, from: L.by, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined }); return; }
