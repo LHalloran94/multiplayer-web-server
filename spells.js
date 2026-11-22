@@ -189,13 +189,15 @@
     //   every spell effect it reaches ends, each popping into gold motes; the cells a spell made for a time go back early. Not a pocketed thing.
     //   (11c round 3, the user: held to grow as the ward sphere, and bigger — it should stop casting over a large area) the null circle is HELD: from `Rmin` to `Rmax` px over
     //   `chargeS` s, set (and only then at work) on let-go.
-    nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'nullc', learn: 5, reach: 320, secs: 60, chan: true, chanS: 3, chargeS: 3, Rmin: 96, Rmax: 240, fx: '#ffd86b',
+    nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'nullc', learn: 5, reach: 320, secs: 60, chan: true, chanS: 3, chargeS: 3, Rmin: 96, Rmax: 240, fx: '#ffd86b',
       plain: { keys: [U, D, R, L, D], rune: [6, 8, 5, 3, 0] } },
     // ⭐ STEP 11d (2026-11-22) WARDS ON PLACES AND THINGS: ALARM (kind 'alarm') — a small gold eye sigil on the ground where you point (faint to others, as the warding rune),
     //   `most` a caster, `secs` s, awake after `armS` s: another player, the test dummy or a loose thing crossing it — a chime for its owner wherever they are, an arrow at the
     //   edge of their screen and a ping on the minimap; the sigil flares on every screen. SEAL (kind 'seal') — rings of gold glyphs turning round a loose thing or a placed
     //   object, `secs` s: nobody else's magic moves it, nothing breaks it, nobody else picks it up; bodies still push it.
-    alarm: { name: 'Alarm', school: 'wards', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'alarm', learn: 3, reach: 300, secs: 600, most: 3, armS: 1, fx: '#ffd86b',
+    //   (11d round 2, the user) THE ALARM floats where you point, an orb with an eye, an hour; it goes off when anybody or anything comes within `R` px in sight of it; it can be
+    //   BROKEN (a spell, a blow, a swing, a thing thrown through it), which sets it off its own way. THE NULL CIRCLE: one a caster (a new one ends the old), `cd` 10.
+    alarm: { name: 'Alarm', school: 'wards', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'alarm', learn: 3, reach: 300, secs: 3600, most: 3, armS: 1, R: 90, fx: '#ffd86b',
       plain: { keys: [U, R, D, U, L], rune: [3, 1, 5, 4, 6] } },
     seal: { name: 'Seal', school: 'wards', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'seal', learn: 3, reach: 320, secs: 120, fx: '#ffd86b',
       plain: { keys: [D, L, U, R, R], rune: [7, 3, 1, 5, 2] } },

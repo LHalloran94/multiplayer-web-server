@@ -3934,6 +3934,8 @@ function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) r
   //   casters inside it end · any other end: none
   { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'nullc' && q.nul && (why === 'let' || why === 'time')) { const k = Math.max(0, Math.min(1, (Date.now() - (q.at || Date.now())) / 1000 / (S0.chargeS || 3)));
     const R = Math.round((S0.Rmin || 96) + ((S0.Rmax || 240) - (S0.Rmin || 96)) * k), secs = +((S0.secs || 20) * ((sk && sk._magicSecsK) || 1)).toFixed(2);
+    // (11d round 2, the user: a new one should override the existing one) one a caster
+    for (const [k3, n3] of _magicNulls) if (n3.by === q.by) { _magicNulls.delete(k3); io.to(n3.room).emit('magic-null-gone', { id: k3 }); }
     _magicNulls.set(id, { id, room: q.room, by: q.by, x: q.nul.x, y: q.nul.y, cy: q.nul.cy, R, until: Date.now() + secs * 1000 });
     extra = Object.assign({}, extra || {}, { R, tx: q.nul.x, ty: q.nul.y, cy: q.nul.cy, secs });
     setTimeout(() => { for (const [k2, q2] of _magicChans) { const s2 = io.sockets.sockets.get(q2.by); if (q2.room === q.room && s2 && magicNullHolds(q.room, s2)) magicChanEnd(k2, 'null'); } }, 0); } }
@@ -29273,15 +29275,17 @@ io.on('connection', (socket) => {
     if (S.kind === 'rune') { const rs = magicRunesOf(room), mine = rs.filter(q => q.by === socket.id); while (mine.length >= (S.most || 3)) { const q = mine.shift(); rs.splice(rs.indexOf(q), 1); io.to(room).emit('magic-rune-gone', { id: q.id }); }
       rs.push({ id, by: socket.id, x: out.tx, y: out.ty, at: now + (S.armS || 1.5) * 1000, until: now + (SK.secs || 180) * 1000, spell: m.spell, pow: powK }); }
     // ⭐ (magic 11c) THE NULL CIRCLE: on the ground under the point (none there: refused); a held spell whose caster stands in it ends now · DISPEL: from the point, its sweep
-    if (S.kind === 'nullc') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
+    if (S.kind === 'nullc') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty);
       // (round 2) a sphere about the middle of a body standing there, resting on that ground · (round 3) HELD: it grows while held and is set at its end (`magicChanEnd`)
-      out.tx = Math.round(out.tx); out.ty = g.y; out.cy = g.y - 12; out.R = S.Rmin || 96; const q = _magicChans.get(id); if (q) { q.at = now; q.nul = { x: out.tx, y: out.ty, cy: out.cy }; } }
+      //   (11d round 2, the user: it 'just seems to not cast sometimes') no ground under the point: in the air there, about the point
+      out.tx = Math.round(out.tx); out.ty = g ? g.y : Math.round(out.ty); out.cy = g ? g.y - 12 : out.ty; out.R = S.Rmin || 96; const q = _magicChans.get(id); if (q) { q.at = now; q.nul = { x: out.tx, y: out.ty, cy: out.cy }; } }
     // ⭐ (magic 11d) THE ALARM: on the ground under the point (none there: refused), `most` a caster (the oldest goes) · THE SEAL: on the thing named, here, not in somebody
     //   else's hands
-    if (S.kind === 'alarm') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
-      out.tx = Math.round(out.tx); out.ty = g.y; const secs = +(SK.secs || 600).toFixed(2), as = magicAlarmsOf(room), mine = as.filter(q => q.by === socket.id);
+    if (S.kind === 'alarm') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad');
+      // (11d round 2, the user) it floats where pointed (the caster's game kept it short of rock), watching `R` px round it
+      out.tx = Math.round(out.tx); out.ty = Math.round(out.ty); out.R = S.R || 90; const secs = +(SK.secs || 600).toFixed(2), as = magicAlarmsOf(room), mine = as.filter(q => q.by === socket.id);
       while (mine.length >= (S.most || 3)) { const q = mine.shift(); as.splice(as.indexOf(q), 1); io.to(room).emit('magic-alarm-gone', { id: q.id }); }
-      as.push({ id, by: socket.id, x: out.tx, y: out.ty, at: now + (S.armS || 1) * 1000, until: now + secs * 1000, trip: 0 }); out.secs = secs; out.arm = S.armS || 1; }
+      as.push({ id, by: socket.id, x: out.tx, y: out.ty, R: out.R, at: now + (S.armS || 1) * 1000, until: now + secs * 1000, trip: 0 }); out.secs = secs; out.arm = S.armS || 1; }
     if (S.kind === 'seal') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || ob.type !== 'stamp') return no('nothing');
       if (hm && hm.has(m.obj) && hm.get(m.obj) !== socket.id) return no('nothing'); const secs = +(SK.secs || 120).toFixed(2); _magicSeals.set(m.obj, { id, obj: m.obj, by: socket.id, room, until: now + secs * 1000 }); out.obj = m.obj; out.secs = secs; }
     if (S.kind === 'dispel') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = S.R || 120; out.ms = S.ms || 450; out.n = magicDispel(room, out.tx, out.ty, out.R, out.ms, socket.id); }
@@ -29327,6 +29331,11 @@ io.on('connection', (socket) => {
     if (!q || now < q.at || now > q.until || now - q.trip < 1200) return; const who = m.who === 'thing' ? 'thing' : m.who === 'dummy' ? 'dummy' : 'player'; if (who === 'player' && socket.id === q.by) return;
     q.trip = now; io.to(room).emit('magic-alarm-flare', { id: q.id });
     const own = io.sockets.sockets.get(q.by); if (own) own.emit('magic-alarm', { id: q.id, x: q.x, y: q.y, who, sid: socket.id, name: who === 'player' ? (socket.username || socket.displayName || '') : '', here: socketToAvatarRoom[q.by] === room ? 1 : 0 }); });
+  // ⭐ (magic 11d round 2) AN ALARM BROKEN (the striker's game says so: a spell, a blow, a swing, a thing flying through it): gone, shattering on every screen; its owner is
+  //   told the other way ('magic-alarm' `broke`)
+  socket.on('magic-alarm-break', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const as = _magicAlarms.get(room), i = as ? as.findIndex(a => a.id === (m.id | 0)) : -1; if (i < 0) return;
+    const q = as[i], now = Date.now(); if (now < q.at) return; as.splice(i, 1); io.to(room).emit('magic-alarm-gone', { id: q.id, broke: 1 });
+    const own = io.sockets.sockets.get(q.by); if (own) own.emit('magic-alarm', { id: q.id, x: q.x, y: q.y, who: 'broke', broke: 1, sid: socket.id, how: typeof m.how === 'string' ? m.how.slice(0, 12) : '', here: socketToAvatarRoom[q.by] === room ? 1 : 0 }); });
   // ⭐ (magic 11b round 3) A WARD LINE STRUCK by a body it stopped (that body's own game says where): the ripple to everybody else
   socket.on('magic-line-bump', (m) => { const room = currentAvatarRoom; if (!room || !m || !isFinite(m.y)) return; const now = Date.now(); if (now - (socket._lineT || 0) < 150) return; socket._lineT = now;
     socket.to(room).emit('magic-line-bump', { id: m.id | 0, y: Math.round(+m.y) }); });
@@ -29449,7 +29458,8 @@ io.on('connection', (socket) => {
   socket.on('magic-mark-drop', () => { const q = _magicMarks.get(socket.id); if (!q) return; _magicMarks.delete(socket.id); io.to(q.room).emit('magic-mark-gone', { by: socket.id }); });
   socket.on('magic-runes-ask', () => { const room = currentAvatarRoom; if (!room) return; const now = Date.now();
     // (magic 11d) the alarms and seals in this room too
-    { const as = (_magicAlarms.get(room) || []).filter(q => now < q.until); socket.emit('magic-alarms', { list: as.map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, arm: Math.max(0, q.at - now), left: q.until - now })) });
+    { const as = (_magicAlarms.get(room) || []).filter(q => now < q.until); socket.emit('magic-alarms', { list: as.map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, R: q.R, arm: Math.max(0, q.at - now), left: q.until - now })) });
+      socket.emit('magic-nulls', { list: [..._magicNulls.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, cy: q.cy, R: q.R, left: q.until - now })) });
       socket.emit('magic-seals', { list: [..._magicSeals.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, obj: q.obj, by: q.by, left: q.until - now })) }); } socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
   // ⭐ (8a) CALL LIGHTNING FALLS: its caster's game says where (`x`, `y` — the top of the body it struck, or the ground; `fy` that body's feet; `pl` the body) — straight down from
   //   its cloud, near its middle, no lower than the ground under it
