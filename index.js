@@ -3863,6 +3863,8 @@ function magicNullIn(room, q, x, y) {
 }
 // ⭐ (magic 11d) ALARMS: room → [{ id, by, x, y (the ground), at (awake from), until, trip (last, ms) }] · SEALS: object id → { id (cast), obj, by, room, until }
 const _magicAlarms = new Map(), _magicSeals = new Map();
+// ⭐ (magic 12a) HEALING GROVES: cast id → { id, by, room, x, y (the ground under the point), w (px across), until } — kept so an arriving page is told and a dispel ends them
+const _magicGroves = new Map();
 function magicAlarmsOf(room) { let a = _magicAlarms.get(room); if (!a) _magicAlarms.set(room, a = []); return a; }
 function magicSealOf(room, oid) { const q = typeof oid === 'string' ? _magicSeals.get(oid) : null; return q && q.room === room && Date.now() < q.until ? q : null; }
 // sealed by somebody other than `sid`: their magic does not move it, they do not pick it up
@@ -3893,6 +3895,8 @@ function magicDispel(room, cx, cy, R, ms, by) {
   // (11d) alarms, seals (by where this server last had the thing)
   { const as = _magicAlarms.get(room); if (as) for (const q of as.slice()) { const t = at(q.x, q.y); if (t >= 0) { n++; later(t, () => { const a2 = _magicAlarms.get(room), i = a2 ? a2.indexOf(q) : -1; if (i >= 0) { a2.splice(i, 1); io.to(room).emit('magic-alarm-gone', { id: q.id }); } }); } } }
   for (const [oid, q] of _magicSeals) { if (q.room !== room) continue; const ob = roomObjects[room] && roomObjects[room].get(oid); if (!ob) continue; const P = ob.loose ? magicBoulderPose(room, ob) : ob, t = at(P.x, P.y, 12); if (t >= 0) { n++; later(t, () => { if (_magicSeals.get(oid) === q) { _magicSeals.delete(oid); io.to(room).emit('magic-seal-gone', { obj: oid }); } }); } }
+  // (12a) healing groves (by their middle, half their width)
+  for (const [k, q] of _magicGroves) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - 8, q.w / 2); if (t >= 0) { n++; later(t, () => { if (_magicGroves.delete(k)) io.to(room).emit('magic-grove-gone', { id: k, why: 'dispel' }); }); } }
   // what is on a body: a flame ring, a flaming / storm weapon, a mirror ward — by where its keeper stands
   for (const q of _magicAuras.values()) { if (q.room !== room) continue; const p = sockAt(q.by), t = p ? at(p.x, p.y - 12) : -1; if (t >= 0) { n++; later(t, () => { q.until = Math.min(q.until, Date.now()); }); } }
   for (const M of [_magicBlades, _magicStormBlades]) for (const [sid, q] of M) { if (q.room !== room) continue; const p = sockAt(sid), t = p ? at(p.x, p.y - 12) : -1; if (t >= 0) { n++; later(t, () => { q.until = Math.min(q.until, Date.now()); }); } }
@@ -29291,6 +29295,12 @@ io.on('connection', (socket) => {
       as.push({ id, by: socket.id, x: out.tx, y: out.ty, R: out.R, at: now + (S.armS || 1) * 1000, until: now + secs * 1000, trip: 0 }); out.secs = secs; out.arm = S.armS || 1; }
     if (S.kind === 'seal') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || ob.type !== 'stamp') return no('nothing');
       if (hm && hm.has(m.obj) && hm.get(m.obj) !== socket.id) return no('nothing'); const secs = +(SK.secs || 120).toFixed(2); _magicSeals.set(m.obj, { id, obj: m.obj, by: socket.id, room, until: now + secs * 1000 }); out.obj = m.obj; out.secs = secs; }
+    // ⭐ (magic 12a) THE HEALING GROVE: on the ground under the point (none there: refused), `most` a caster (the oldest goes)
+    if (S.kind === 'grove') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
+      for (const [k, q] of _magicGroves) if (now > q.until) _magicGroves.delete(k);
+      const mine = [..._magicGroves.values()].filter(q => q.by === socket.id).sort((a, b) => a.id - b.id); while (mine.length >= (S.most || 2)) { const q = mine.shift(); _magicGroves.delete(q.id); io.to(q.room).emit('magic-grove-gone', { id: q.id }); }
+      out.tx = Math.round(out.tx); out.ty = g.y; out.w = (S.wide || 14) * TERRAIN_CELL; out.secs = +(SK.secs || 12).toFixed(2);
+      _magicGroves.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, until: now + out.secs * 1000 }); }
     if (S.kind === 'dispel') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = S.R || 120; out.ms = S.ms || 450; out.n = magicDispel(room, out.tx, out.ty, out.R, out.ms, socket.id); }
     io.to(room).emit('magic-cast', out);
   });
@@ -29463,7 +29473,9 @@ io.on('connection', (socket) => {
     // (magic 11d) the alarms and seals in this room too
     { const as = (_magicAlarms.get(room) || []).filter(q => now < q.until); socket.emit('magic-alarms', { list: as.map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, R: q.R, arm: Math.max(0, q.at - now), left: q.until - now })) });
       socket.emit('magic-nulls', { list: [..._magicNulls.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, cy: q.cy, R: q.R, left: q.until - now })) });
-      socket.emit('magic-seals', { list: [..._magicSeals.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, obj: q.obj, by: q.by, left: q.until - now })) }); } socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
+      socket.emit('magic-seals', { list: [..._magicSeals.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, obj: q.obj, by: q.by, left: q.until - now })) });
+      // (magic 12a) the healing groves
+      socket.emit('magic-groves', { list: [..._magicGroves.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, left: q.until - now })) }); } socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
   // ⭐ (8a) CALL LIGHTNING FALLS: its caster's game says where (`x`, `y` — the top of the body it struck, or the ground; `fy` that body's feet; `pl` the body) — straight down from
   //   its cloud, near its middle, no lower than the ground under it
   socket.on('magic-strike', (m) => {

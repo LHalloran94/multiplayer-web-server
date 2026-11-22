@@ -97,8 +97,19 @@
     //   LIFT AND THROW (7A — a thread of light to a loose thing; held while the button is, the other button throws) · A DOUBLE OF YOU (8Y — it walks on the way you were going;
     //   see-through on your own screen; struck, it bursts). hp  health it gives back · closeMs, gap  a cut's closing, between cuts · ms  the motes · reach  px (lift: how far
     //   the thing may be from you) · secs  how long it lasts · pull, vmax  how hard the thing is drawn to the pointer (px a tick) · throwV  its speed thrown · walk  px a second
-    closewounds: { name: 'Close wounds', school: 'life', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'heal', learn: 3, hp: 3, closeMs: 700, gap: 350, ms: 2600,
+    closewounds: { name: 'Close wounds', school: 'life', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'heal', learn: 3, hp: 3, closeMs: 700, gap: 350, ms: 2600, alts: ['closewounds_o'],
       plain: { keys: [U, D, U, D], rune: [7, 4, 1, 0] } },
+    // ⭐ STEP 12a (2026-11-22, kickoff §'STEP 12') LIFE — HEALING: close wounds ON ANOTHER (its Touch variant: the player nearest the pointer, `reach` px; their own game heals
+    //   itself) · CURE (kind 'cure', + on another): ends burning, the chill's slow, a daze, being frozen in — `ms` its leaves' spiral · HEALING GROVE (kind 'grove'): plants spring
+    //   up along the ground under the point, `wide` cells across, `secs` s; every body standing in it heals `hp` health every `every` s; `most` a caster (the oldest goes)
+    closewounds_o: { name: 'Close wounds (on another)', school: 'life', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'heal', alt: 'closewounds', other: true, reach: 240, hp: 3, closeMs: 700, gap: 350, ms: 2600,
+      plain: { keys: [U, R, D, L, L], rune: [7, 3, 1, 5, 8] } },
+    cure: { name: 'Cure', school: 'life', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'cure', learn: 3, ms: 1400, alts: ['cure_o'],
+      plain: { keys: [L, U, D, R, U], rune: [8, 6, 4, 0, 1] } },
+    cure_o: { name: 'Cure (on another)', school: 'life', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'cure', alt: 'cure', other: true, reach: 240, ms: 1400,
+      plain: { keys: [L, U, D, R, R], rune: [8, 6, 4, 0, 3] } },
+    grove: { name: 'Healing grove', school: 'life', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'grove', learn: 5, reach: 360, secs: 12, wide: 14, every: 2, hp: 1, most: 2,
+      plain: { keys: [D, U, R, D, L], rune: [6, 7, 3, 1, 2] } },
     lift: { name: 'Lift and throw', school: 'force', form: 'shaping', tier: 0, cd: 3, stance: 'level', kind: 'lift', learn: 3, reach: 320, secs: 10, pull: 0.16, vmax: 11, throwV: 12,
       plain: { keys: [R, R, U, L], rune: [3, 4, 5, 2] } },
     double: { name: 'A double of you', school: 'illusion', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'double', learn: 5, secs: 60, secsWalk: 6, walk: 150, jump: 420, alts: ['double_m'],
@@ -545,7 +556,8 @@
     nullcircle: [[R, D], [4, 5, 7, 3]], dispel: [[D, R], [4, 2, 6]],
     // (11d) a flag raised · a hook closed round it
     alarm: [[U, R], [4, 5, 1]], seal: [[L, D], [4, 3, 7]],
-    closewounds: [[D, D], [4, 6]],
+    // (12a) close wounds as before · on another, its first mark turned → and on to the top right · cure lifted off you (and on another) · the grove: down to the ground, along it and up
+    closewounds: [[D, D], [4, 6]], closewounds_o: [[R, D], [4, 6, 2]], cure: [[U, L], [4, 0]], cure_o: [[R, L], [4, 0, 2]], grove: [[D, R], [4, 8, 6, 3]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
