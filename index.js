@@ -3846,11 +3846,23 @@ const _magicDoors = new Map(), _magicDoorBy = new Map();
 const _magicPockets = new Map();
 // ⭐ (magic 11a) WARDS' MIRROR WARD: socket id → until (ms) — while it holds, its owner's game may take over things flying at it (catch's 'magic-catch-obj' / 'magic-catch-bolt')
 const _magicMirrors = new Map();
-// ⭐ (magic 11c) WARDS' NULL CIRCLES: cast id → { id, room, by, x, y (the ground at its middle), R, until }. Inside one (a half-disc of radius R over its ground, a little below
-//   too) no spell is cast — anybody's, its caster's too — and a held spell whose caster is inside ends (checked each quarter second)
+// ⭐ (magic 11c) WARDS' NULL CIRCLES: cast id → { id, room, by, x, y (the ground at its middle), cy (its middle), R, until }. Inside one no spell is cast — anybody's, its
+//   caster's too — and a held spell whose caster is inside ends (checked each quarter second). (round 2) A SPHERE about `cy` cut as the client's `magicDomeCut` cuts the ward
+//   dome: in the point's column, below its middle the first run of rock 3 cells deep (or running past its bottom) is the ground — nothing under it is inside; above, the same
+//   for a ceiling; where its middle is rock it sits on top of that
 const _magicNulls = new Map();
+function magicNullIn(room, q, x, y) {
+  if (Math.hypot(x - q.x, y - q.cy) > q.R) return false; const st = cellsOf(room), grid = st.terrain; if (!grid || !st.rows) return true;
+  const T = TERRAIN_CELL, ROWS = st.rows, c = Math.floor(x / T), r = Math.floor(y / T), sr = Math.floor(q.cy / T), rT = Math.floor((q.cy - q.R) / T), rB = Math.floor((q.cy + q.R) / T), floorRow = Math.floor(roomFloorTop(room) / T);
+  if (c < 0 || c >= st.cols) return false; const solid = (rr) => { if (rr >= floorRow) return true; if (rr < 0) return false; const v = peekCellAt(grid, c * ROWS + rr); return v > 0 && isSolidCell(v); };
+  let up0 = sr;
+  if (solid(sr)) { let k = sr; while (k >= rT && solid(k)) k--; if (r > k) return false; up0 = k; }
+  else if (r > sr) { for (let k = sr; k <= rB; k++) if (solid(k)) { let e = k; while (e <= rB + 3 && solid(e)) e++; if (e - k >= 3 || e > rB) { if (r >= k) return false; break; } k = e; } }
+  if (r < up0) { for (let k = up0; k >= rT; k--) if (solid(k)) { let e = k; while (e >= rT - 3 && solid(e)) e--; if (k - e >= 3 || e < rT) { if (r <= k) return false; break; } k = e; } }
+  return true;
+}
 function magicNullAt(room, x, y) { if (!_magicNulls.size || !isFinite(x) || !isFinite(y)) return null; const now = Date.now();
-  for (const q of _magicNulls.values()) if (q.room === room && now < q.until && y <= q.y + 16 && Math.hypot(x - q.x, y - q.y) <= q.R) return q; return null; }
+  for (const q of _magicNulls.values()) if (q.room === room && now < q.until && magicNullIn(room, q, x, y)) return q; return null; }
 // a player inside one: where their own game last said they were (their middle, `_avPos` is the feet)
 function magicNullHolds(room, sk) { const p = sk && sk._avPos; return !!(p && Date.now() - p.t < 4000 && magicNullAt(room, p.x, p.y - 12)); }
 setInterval(() => { if (!_magicNulls.size) return; const now = Date.now();
@@ -3862,7 +3874,7 @@ function magicDispel(room, cx, cy, R, ms, by) {
   const now = Date.now(), at = (x, y, r) => { const d = Math.hypot(x - cx, y - cy) - (r || 0); return d <= R ? Math.max(0, d) / R * ms : -1; }, later = (t, f) => { if (t <= 5) f(); else setTimeout(f, t); };
   const sockAt = (sid) => { const sk = io.sockets.sockets.get(sid), p = sk && sk._avPos; return p && Date.now() - p.t < 4000 && socketToAvatarRoom[sid] === room ? p : null; };
   let n = 0;
-  for (const [k, q] of _magicNulls) { if (q.room !== room) continue; const t = at(q.x, q.y, q.R); if (t >= 0) { n++; later(t, () => _magicNulls.delete(k)); } }
+  for (const [k, q] of _magicNulls) { if (q.room !== room) continue; const t = at(q.x, q.cy, q.R); if (t >= 0) { n++; later(t, () => _magicNulls.delete(k)); } }
   for (const [k, q] of _magicChans) { if (q.room !== room) continue; const p = sockAt(q.by), t = p ? at(p.x, p.y - 12) : at(q.x, q.y); if (t >= 0) { n++; later(t, () => magicChanEnd(k, 'dispel')); } }
   { const rs = _magicRunes.get(room); if (rs) for (const q of rs.slice()) { const t = at(q.x, q.y); if (t >= 0) { n++; later(t, () => { const rs2 = _magicRunes.get(room), i = rs2 ? rs2.indexOf(q) : -1; if (i >= 0) { rs2.splice(i, 1); io.to(room).emit('magic-rune-gone', { id: q.id }); } }); } } }
   for (const [k, q] of _magicDoors) { if (q.room !== room) continue; const ta = at(q.a.x, q.a.y), tb = q.b ? at(q.b.x, q.b.y) : -1, t = ta >= 0 && tb >= 0 ? Math.min(ta, tb) : Math.max(ta, tb); if (t < 0) continue; n++;
@@ -29238,8 +29250,9 @@ io.on('connection', (socket) => {
       rs.push({ id, by: socket.id, x: out.tx, y: out.ty, at: now + (S.armS || 1.5) * 1000, until: now + (SK.secs || 180) * 1000, spell: m.spell, pow: powK }); }
     // ⭐ (magic 11c) THE NULL CIRCLE: on the ground under the point (none there: refused); a held spell whose caster stands in it ends now · DISPEL: from the point, its sweep
     if (S.kind === 'nullc') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
-      const R = S.R || 72, secs = +(SK.secs || 20).toFixed(2); out.tx = Math.round(out.tx); out.ty = g.y; out.R = R; out.secs = secs;
-      _magicNulls.set(id, { id, room, by: socket.id, x: out.tx, y: out.ty, R, until: now + secs * 1000 });
+      // (round 2) a sphere about the middle of a body standing there, resting on that ground
+      const R = S.R || 72, secs = +(SK.secs || 20).toFixed(2); out.tx = Math.round(out.tx); out.ty = g.y; out.cy = g.y - 12; out.R = R; out.secs = secs;
+      _magicNulls.set(id, { id, room, by: socket.id, x: out.tx, y: out.ty, cy: out.cy, R, until: now + secs * 1000 });
       for (const [k, q] of _magicChans) { const sk = io.sockets.sockets.get(q.by); if (q.room === room && sk && magicNullHolds(room, sk)) magicChanEnd(k, 'null'); } }
     if (S.kind === 'dispel') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = S.R || 120; out.ms = S.ms || 450; out.n = magicDispel(room, out.tx, out.ty, out.R, out.ms, socket.id); }
     io.to(room).emit('magic-cast', out);
