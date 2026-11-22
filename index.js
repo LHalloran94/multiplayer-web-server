@@ -3894,6 +3894,15 @@ function magicVinePlan(room, x, y, S) { const st = cellsOf(room), grid = st.terr
   let tp = -1; for (let k = 0; k <= (S.up || 40) && r - k >= 0; k++) if (solid(r - k)) { tp = r - k; break; } if (tp < 0) return null;
   const y0 = (tp + 1) * T - 3; let bot = y0 + len * T; for (let rr = tp + 1; rr <= tp + 1 + len; rr++) if (rr >= ROWS || solid(rr)) { bot = Math.min(bot, rr * T - 6); break; }
   const L = Math.round(bot - y0); return L >= 24 ? { x: Math.round((c + 0.5) * T), y: y0, rp: [[0, 0, 0, 1], [0, L, 0, 1]], L } : null; }
+// (12c round 3) A SWING VINE: from the rock the point lies against (on along the aim a little, else straight up over it) to the caster's hands (`hx`, `hy`) — the rock must be
+//   higher than the hands → { x, y (its tied end), rp, L } or null
+function magicSwingPlan(room, tx, ty, hx, hy, S) { const st = cellsOf(room), grid = st.terrain; if (!grid) return null; const T = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols;
+  const solidXY = (x, y) => { const c = Math.floor(x / T), r = Math.floor(y / T); if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return false; const v = peekCellAt(grid, c * ROWS + r); return v > 0 && isSolidCell(v); };
+  const dx = tx - hx, dy = ty - hy, d = Math.hypot(dx, dy) || 1, ux = dx / d, uy = dy / d; let ax = null, ay = null;
+  for (let s = 0; s <= 24; s += 2) if (solidXY(tx + ux * s, ty + uy * s)) { ax = tx + ux * (s + 3); ay = ty + uy * (s + 3); break; }
+  if (ax == null) { const c = Math.floor(tx / T); for (let k = 0; k <= (S.up || 60); k++) { const r = Math.floor(ty / T) - k; if (r < 0) break; if (solidXY((c + 0.5) * T, (r + 0.5) * T)) { ax = tx; ay = (r + 1) * T - 3; break; } } }
+  if (ax == null || ay > hy - 16) return null; const L = Math.hypot(hx - ax, hy - ay); if (L < 24 || L > (S.reach || 520) + 120) return null;
+  return { x: Math.round(ax), y: Math.round(ay), rp: [[0, 0, 0, 1], [Math.round(hx - ax), Math.round(hy - ay), 0, 1]], L: Math.round(L) }; }
 // A TREE: the world's own (its kind from the plants growing round it), drawn column by column by the generator's `drawForm` over this ground; only into air (its roots into
 //   soft ground below its foot), never into liquid → { cells: [{ i, mat, back, row, t }], SP, hgt, base } or null
 function magicTreePlan(room, gx, gy, S, seed) {
@@ -20607,7 +20616,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       else obj.slk = clampN(data.slk, 0, 800, 0);
       if (data.rk === 'bungee' || data.rk === 'chain' || data.rk === 'cable' || data.rk === 'vine') obj.rk = data.rk; else if (data.rk) obj.rk = 'rope';
       // (magic 12c) a VINE (a spell's): when it was grown and when it withers, server ms
-      if (obj.rk === 'vine') { if (isFinite(+data.vt0)) obj.vt0 = +data.vt0; if (isFinite(+data.vEnd)) obj.vEnd = +data.vEnd; }
+      // (round 3) `vrev`: a swing vine, drawn growing from the hands up to the rock
+      if (obj.rk === 'vine') { if (isFinite(+data.vt0)) obj.vt0 = +data.vt0; if (isFinite(+data.vEnd)) obj.vEnd = +data.vEnd; if (data.vrev) obj.vrev = 1; }
       if (data.re != null) obj.re = clampN(data.re, 0, 100, 0);
       if (data.rthru) obj.rthru = 1;
       // …and a BURNING rope's state (`ropeFireTick`): `rfree` which ends are a burnt break (never re-tied), `rb` each end's
@@ -29437,9 +29447,9 @@ io.on('connection', (socket) => {
     // ⭐ (magic 12b) THE THORN HEDGE: on the ground under the point (none there: refused), `most` a caster (the oldest goes) · BARKSKIN: its time
     if (S.kind === 'bark') out.secs = +(SK.secs || 30).toFixed(2);
     // ⭐ (magic 12c) A VINE from the rock over the point (none in reach: refused), `most` a caster · A TREE on the ground under the point · REGROW (a generated world only)
-    if (S.kind === 'vine') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const V = magicVinePlan(room, out.tx, out.ty, S); if (!V) return no('rock');
+    if (S.kind === 'vine') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const V = S.swing ? (isFinite(m.bx) && isFinite(m.by) && Math.hypot(+m.bx - m.x, +m.by - m.y) < 160 ? magicSwingPlan(room, out.tx, out.ty, +m.bx, +m.by, S) : null) : magicVinePlan(room, out.tx, out.ty, S); if (!V) return no('rock');
       const mine = [..._magicVines.entries()].filter(([, q]) => q.by === socket.id).sort((a, b) => a[0] - b[0]); while (mine.length >= (S.most || 3)) { const [k, q] = mine.shift(); _magicVines.delete(k); magicObjDrop(q.room, q.oid); }
-      const secs = +(SK.secs || 180).toFixed(2), oid = 'mvine-' + id, o = magicObjAdd(room, 'platform', { look: 'rope', x: V.x, y: V.y, w: 24, h: 8, rp: V.rp, rl: V.L, rk: 'vine', vt0: now, vEnd: now + secs * 1000 }, oid, socket.id);
+      const secs = +(SK.secs || 180).toFixed(2), oid = 'mvine-' + id, o = magicObjAdd(room, 'platform', { look: 'rope', x: V.x, y: V.y, w: 24, h: 8, rp: V.rp, rl: V.L, rk: 'vine', vt0: now, vEnd: now + secs * 1000, vrev: S.swing ? 1 : 0 }, oid, socket.id);
       if (!o) return no('room'); _magicVines.set(id, { room, by: socket.id, oid, x: V.x, y: V.y, L: V.L, until: now + secs * 1000 }); out.obj = oid; out.vx = V.x; out.vy = V.y; out.L = V.L; out.secs = secs; }
     if (S.kind === 'tree') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground'); const P = magicTreePlan(room, g.x, g.y, S, id * 7919 + 13); if (!P) return no('room');
       const mine = [..._magicTrees.entries()].filter(([, q]) => q.by === socket.id).sort((a, b) => a[0] - b[0]); if (mine.length >= (S.most || 2)) { const [k, q] = mine[0]; const M = magicTemp.get(q.room); if (M) { for (const i of q.cells) { const T2 = M.get(i); if (T2 && T2.kind === 'tree') T2.until = Math.min(T2.until, now); } } }

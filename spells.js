@@ -128,8 +128,12 @@
     //   (kind 'regrow'): in a generated world, every plant cell the world grew within `R` cells of the point that is open air now comes back, out from the point over `growMs`
     //   (round 2, the user) the vine longer, and pointed at the GROUND: tied into it, along it to the nearer edge within `edge` cells, and down over it · regrow goes on along
     //   each plant it brings back (up a whole tree), at most `spread` cells out, `cap` cells · the tree's trunk thicker, no roots, its fruit falling when its leaf is cut away
-    vine: { name: 'Vine', school: 'life', form: 'placed', tier: 0, cd: 6, stance: 'level', kind: 'vine', learn: 3, reach: 360, up: 40, len: 40, edge: 14, secs: 180, most: 3,
+    // (12c round 3, the user: the swing vine, and 'improve the range of it') reach 520, the rock up to 60 cells over the point · SWING VINE (`swing`, a variant): from the rock
+    //   the pointer is against (or over it) straight to your hands — you are holding it as it lands, to swing on; `secs` s
+    vine: { name: 'Vine', school: 'life', form: 'placed', tier: 0, cd: 6, stance: 'level', kind: 'vine', learn: 3, reach: 520, up: 60, len: 40, edge: 14, secs: 180, most: 3, alts: ['vine_s'],
       plain: { keys: [U, U, D, D, R], rune: [1, 2, 4, 8, 6] } },
+    vine_s: { name: 'Swing vine', school: 'life', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'vine', alt: 'vine', swing: true, reach: 520, up: 60, secs: 60, most: 3,
+      plain: { keys: [U, U, D, L, R], rune: [1, 2, 5, 7, 6] } },
     tree: { name: 'Grow a tree', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'tree', learn: 5, reach: 300, hmin: 12, hmax: 20, growMs: 3000, secs: 300, fruitS: 20, fruits: 3, fruitHeal: 2, most: 2,
       plain: { keys: [D, R, U, U, L], rune: [7, 6, 3, 4, 2] } },
     regrow: { name: 'Regrow the land', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'regrow', learn: 5, reach: 300, R: 15, growMs: 2000,
@@ -588,6 +592,8 @@
     entangle: [[L, U], [4, 3, 1]], thorns: [[L, D], [4, 5, 8]], barkskin: [[U, U], [4, 3, 0]],
     // (12c) the vine up to the rock, then hanging down · the tree into the soil, then straight up · regrow out and up
     vine: [[U, D], [4, 2, 8]], tree: [[D, U], [4, 8, 2]], regrow: [[U, R], [4, 5, 2]],
+    // (12c round 3) the swing vine: up to the rock, then swinging down to the side
+    vine_s: [[D, L], [4, 2, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
