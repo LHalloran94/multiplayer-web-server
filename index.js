@@ -4995,18 +4995,6 @@ function magicWardWallPlan(room, x, y, S) {
     lines.push({ cells: a, mat: MAGIC_WARD_MAT }, { cells: b, mat: MAGIC_WARD_MAT }); }
   return lines.length ? { lines, box: [cL * T, (r - up + 1) * T, (cL + W) * T, (r + H - up + 1) * T] } : null;
 }
-// (magic 11b) WARD DOME (the wall's variant): a half-dome of ward light round the caster, radius `R` cells about their feet — grown from the ground on both sides up to its top;
-//   a cell already rock is passed over (-2), not a stop (uneven ground). → { lines, box } or null
-function magicWardDomePlan(room, bx, by, S) {
-  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, fr = Math.floor(roomFloorTop(room) / T);
-  const R = S.R || 6, cx = bx / T, cy = by / T, rF = Math.floor((by - 1) / T), left = [], right = [];
-  for (let c = Math.floor(cx - R - 1); c <= Math.ceil(cx + R + 1); c++) for (let r = Math.floor(cy - R - 1); r <= rF; r++) {
-    if (c < 0 || c >= COLS || r < 1 || r >= fr) continue; const dx = c + 0.5 - cx, dy = r + 0.5 - cy, d = Math.hypot(dx, dy); if (Math.abs(d - R) > 0.7) continue;
-    const a = Math.atan2(-dy, dx), i = c * ROWS + r, q = [a, magicOpen(grid, i) ? i : -2]; (dx < 0 ? left : right).push(q); }
-  left.sort((p, q) => q[0] - p[0]); right.sort((p, q) => p[0] - q[0]);
-  const lines = [left, right].filter(L => L.some(q => q[1] >= 0)).map(L => ({ cells: L.map(q => q[1]), mat: MAGIC_WARD_MAT }));
-  return lines.length ? { lines, box: [(cx - R - 1) * T, (cy - R - 1) * T, (cx + R + 1) * T, by] } : null;
-}
 // (step 3f) PUT BACK the cells whose time is up, at THEIR moment (scheduled by the sweep below — a crumble is smooth, not in quarter-second lumps): ice gives back its water, a wall's
 //   rubble falls; the liquid round each is WOKEN (`fineWakeAround`) so it flows into the space — a wall that stood under water left a hole the water never filled
 const magicCfgSrv = { wake: 1, exact: 1, snowTop: 1 };   // (8c round 2: `snowTop` 0 = a pile of spell snow melts cell by cell where each cell is, as before — the panel's switch, sent by 'magic-debug')   // switches back: `wake` 0 = the liquid round a put-back cell is not woken · `exact` 0 = put back by the quarter-second sweep
@@ -29074,7 +29062,8 @@ io.on('connection', (socket) => {
     //   'otherwise it is basically the same thing as the stone wall'); the bridge from the caster's feet towards the pointer
     // (magic 11b) THE WARD WALL where the caster's game put it · THE DOME round the caster's feet — nowhere for it: refused before anything is spent
     let WWL = null; if (S.kind === 'wardwall') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 300) + 8 ? ((S.reach || 300) + 8) / d : 1; WWL = magicWardWallPlan(room, m.x + dx * k, m.y + dy * k, S); if (!WWL) return no('room'); }
-    if (S.kind === 'warddome') { if (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160) return no('bad'); WWL = magicWardDomePlan(room, +m.bx, +m.by, S); if (!WWL) return no('room'); }
+    // (11b round 2) THE DOME: no cells — where the caster's feet are (every screen keeps it there and stops what flies into it)
+    if (S.kind === 'warddome' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     let MADE = null; if (S.kind === 'spikes' || S.kind === 'bridge' || S.kind === 'pillar') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad');
       if (S.kind !== 'spikes' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
       MADE = S.kind === 'spikes' ? magicSpikesPlan(room, +m.x, +m.y, +m.tx, S) : S.kind === 'pillar' ? magicPillarPlan(room, +m.bx, +m.by - 2, S) : magicBridgePlan(room, +m.bx, +m.by, +m.tx, +m.ty, S);
@@ -29158,6 +29147,7 @@ io.on('connection', (socket) => {
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
     if (S.kind === 'lift') out.obj = m.obj;
     // (magic 11b) the ward's cells grown from now (every screen draws its light over them, by `box`)
+    if (S.kind === 'warddome') { out.dx = Math.round(+m.bx); out.dy = Math.round(+m.by); out.R = SK.R || 64; out.secs = +(SK.secs || 10).toFixed(2); }
     if (WWL) { out.n = magicWallLines(room, WWL.lines, Object.assign({}, SK, { ward: 1, crackS: 0 })); out.box = WWL.box.map(v => Math.round(v)); out.secs = +(SK.secs || 15).toFixed(2); }
     // (magic 11a) WARD SKIN: how much it soaks and for how long (every screen keeps it on that body) · MIRROR WARD: kept while it holds
     if (S.kind === 'wardskin') { out.hp = SK.hp || 4; out.secs = +(SK.secs || 20).toFixed(2); }
