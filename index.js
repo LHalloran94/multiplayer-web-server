@@ -3865,6 +3865,80 @@ function magicNullIn(room, q, x, y) {
 const _magicAlarms = new Map(), _magicSeals = new Map();
 // ⭐ (magic 12a) HEALING GROVES: cast id → { id, by, room, x, y (the ground under the point), w (px across), until } — kept so an arriving page is told and a dispel ends them
 const _magicGroves = new Map();
+// ⭐⭐ (magic 12c) GROWING. VINES: cast id → { room, by, oid, x, y, L, until } · TREES: cast id → { room, by, cells: [cell], until, fruits: [object id] }
+const _magicVines = new Map(), _magicTrees = new Map();
+const MAGIC_FLORA = require('./worldgen2/flora.js'), MAGIC_WGC = require('./worldgen2/cells.js'), MAGIC_PLANT = new Set(MATGEN.PLANT_IDS);
+let _magicTreeSp = null; const magicTreeSpecies = () => _magicTreeSp || (_magicTreeSp = MAGIC_FLORA.buildSpecies(MAGIC_WGC.M));
+// the generator's material numbers → the game's (as worldgen2.js's own table, built from the names)
+const MAGIC_GXL = new Uint8Array(256); MAGIC_WGC.MATS.forEach(([k], i) => { if (i) { const v = MATGEN.NAME_TO_ID[k]; if (v != null) MAGIC_GXL[i] = v; } });
+function magicObjAdd(room, type, data, oid, by) { const obj = buildWorldObject(type, data, oid, by, by, room); if (!obj) return null;
+  ensureObjectsLoaded(room); objIndex(room, obj); emitObjToChunks(room, obj, 'avatar-object-add', obj); return obj; }
+function magicObjDrop(room, oid) { const map = roomObjects[room], o = map && map.get(oid); if (!o) return; objUnindex(room, o); emitObjToChunks(room, o, 'avatar-object-removed', { id: oid }); }
+// A VINE: from the rock over the point (3 px into it, so its end is tied there) down to just over the ground under it → { x, y, L } or null
+function magicVinePlan(room, x, y, S) { const st = cellsOf(room), grid = st.terrain; if (!grid) return null; const T = TERRAIN_CELL, ROWS = st.rows, c = Math.floor(x / T); if (c < 0 || c >= st.cols) return null;
+  const solid = (r) => { if (r < 0) return false; const v = peekCellAt(grid, c * ROWS + r); return v > 0 && isSolidCell(v); };
+  let r = Math.floor(y / T); if (solid(r)) return null; let top = -1; for (let k = 0; k <= (S.up || 30) && r - k >= 0; k++) if (solid(r - k)) { top = r - k; break; } if (top < 0) return null;
+  const y0 = (top + 1) * T - 3; let bot = y0 + (S.len || 26) * T; for (let rr = top + 1; rr <= top + 1 + (S.len || 26); rr++) if (rr >= ROWS || solid(rr)) { bot = Math.min(bot, rr * T - 6); break; }
+  const L = Math.round(bot - y0); return L >= 24 ? { x: Math.round((c + 0.5) * T), y: y0, L } : null; }
+// A TREE: the world's own (its kind from the plants growing round it), drawn column by column by the generator's `drawForm` over this ground; only into air (its roots into
+//   soft ground below its foot), never into liquid → { cells: [{ i, mat, back, row, t }], SP, hgt, base } or null
+function magicTreePlan(room, gx, gy, S, seed) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return null; const T = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols, M = MAGIC_WGC.M, mats = roomMats[room] || {}, tot = st.fineTotal;
+  const base = Math.round(gy / T), a = Math.floor(gx / T), cnt = {};
+  for (let c = a - 40; c <= a + 40; c += 2) for (let r = base - 32; r <= base + 4; r += 2) { if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const v = peekCellAt(grid, c * ROWS + r); if (v > 0) cnt[v] = (cnt[v] || 0) + 1; }
+  const g = (k) => cnt[MAGIC_GXL[M[k]]] || 0, key = g('needle') > 6 ? 'conifer' : g('frond') > 6 ? 'palm' : g('cactus') > 4 ? 'cactus' : 'broadleaf';
+  const SPS = magicTreeSpecies(), SP = SPS.find(q => q.key === key) || SPS.find(q => q.key === 'broadleaf'); const rnd = (k) => { const x = Math.sin(seed * 12.9898 + k * 78.233) * 43758.5453; return x - Math.floor(x); };
+  const hgt = Math.round((S.hmin || 12) + ((S.hmax || 20) - (S.hmin || 12)) * rnd(1)), reach = Math.max(3, Math.round(hgt * 0.8) + 2), r0 = Math.max(0, base - hgt * 2 - 4), rN = Math.min(ROWS - r0, hgt * 2 + Math.round(hgt * 0.35) + 8);
+  const cells = [], top = base - hgt, gm = S.growMs || 3000;
+  for (let dx = -reach; dx <= reach; dx++) { const c = a + dx; if (c < 0 || c >= COLS) continue; const orig = new Array(rN), out = new Array(rN);
+    for (let k = 0; k < rN; k++) { const v = peekCellAt(grid, c * ROWS + r0 + k); orig[k] = v; out[k] = v === 0 ? 0 : 250; }
+    MAGIC_FLORA.drawForm(SP, M, out, r0, rN, a, base, hgt, dx, seed | 0, null);
+    for (let k = 0; k < rN; k++) { if (out[k] === 0 || out[k] === 250 || out[k] === (orig[k] === 0 ? 0 : 250)) continue; const row = r0 + k, i = c * ROWS + row, o0 = orig[k], mat = MAGIC_GXL[out[k]]; if (!mat) continue;
+      const ok = o0 === 0 ? !(tot && peekCellAt(tot, i) > 0) : (row > base && o0 > 0 && isSolidCell(o0) && matStrengthSrv(mats, o0) <= 2 && !MAGIC_PLANT.has(o0)); if (!ok) continue;
+      const trunk = out[k] === SP.trunk, t = row > base ? (row - base) * 60 : trunk ? (base - row) / Math.max(1, hgt) * gm * 0.55 : gm * 0.45 + Math.hypot(dx, row - (top - 2)) / Math.max(1, hgt) * gm * 0.55;
+      cells.push({ i, mat, back: o0, row, t, trunk }); } }
+  return cells.length ? { cells, SP, hgt, base, top } : null; }
+// grown cell by cell as planned, each a timed cell (`magicTemp` kind 'tree' — back to what it was after `secs`; the leaves go first, then the trunk from the top down)
+function magicTreeGrow(room, plan, secs) { const st = cellsOf(room), grid = st.terrain, hp = st.terrainHp, mats = roomMats[room] || {}, t0 = Date.now(), until = t0 + secs * 1000; plan.cells.sort((p, q) => p.t - q.t); let k = 0;
+  const tick = () => { const s2 = cellsOf(room); if (s2.terrain !== grid) return; const el = Date.now() - t0, out = [];
+    while (k < plan.cells.length && plan.cells[k].t <= el) { const q = plan.cells[k++]; if (peekCellAt(grid, q.i) !== q.back) continue; grid.s(q.i, q.mat); hp.s(q.i, matStrengthSrv(mats, q.mat)); out.push(q.i, q.mat);
+      magicTempPut(room, q.i, { kind: 'tree', mat: q.mat, back: q.back, units: q.back > 0 ? matStrengthSrv(mats, q.back) : 0, until: until + (q.trunk ? 900 + Math.max(0, q.row - plan.top) * 45 : Math.round(q.t % 600)), crack: 0, ce: 0 }); }
+    if (out.length) wireFanout(room, 'terrain-set', { cells: out }); if (k < plan.cells.length) setTimeout(tick, 80); };
+  tick(); return until; }
+// FRUIT under the crown: leaf cells with open air under them, spread across it
+function magicTreeFruit(id) { const q = _magicTrees.get(id); if (!q) return; const st = cellsOf(q.room), grid = st.terrain, M = magicTemp.get(q.room); if (!grid || !M) return; const T = TERRAIN_CELL, ROWS = st.rows;
+  const spots = []; for (const i of q.cells) { const t = M.get(i); if (!t || t.kind !== 'tree' || q.trunkMat === t.mat || peekCellAt(grid, i) !== t.mat) continue; if (peekCellAt(grid, i + 1) === 0) spots.push(i); }
+  if (!spots.length) return; spots.sort((a, b) => a - b); const n = Math.min(q.S.fruits || 3, spots.length);
+  for (let f = 0; f < n; f++) { const i = spots[Math.floor((f + 0.5) * spots.length / n)], c = Math.floor(i / ROWS), r = i % ROWS, oid = 'mfruit-' + id + '-' + f;
+    const o = magicObjAdd(q.room, 'region', { x: (c + 0.5) * T, y: (r + 1) * T + 4, w: 24, h: 24, part: 'powerup', pw: 'heart', pheal: q.S.fruitHeal || 2, pdur: 'death', pback: 0, fruit: 1 }, oid, q.by); if (o) q.fruits.push(oid); } }
+// a tree (or a stand of its cells) CUT LOOSE: its magic cells crumble to nothing (no fallen log, no wood) — what is left of the region falls as usual
+function magicTreeCrumble(room, region) { const M = magicTemp.get(room); if (!M || !_magicTrees.size) return region; const st = roomCells.get(room), grid = st && st.terrain; if (!grid) return region;
+  const keep = [], gone = [], cells = []; for (const i of region) { const T = M.get(i); if (T && T.kind === 'tree') { grid.s(i, T.back > 0 ? T.back : 0); if (st.terrainHp) st.terrainHp.s(i, T.back > 0 ? T.units | 0 : 0); cells.push(i, grid.g(i)); gone.push(i); M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} } else keep.push(i); }
+  if (cells.length) { wireFanout(room, 'terrain-set', { cells }); io.to(room).emit('magic-cells', { c: gone.slice(0, 120), spell: 'tree', look: 'wither' }); } return keep; }
+// a magic tree's cell near (x, y) that is no longer there (cut): what was cut from it gives nothing
+function magicTreeCutNear(room, x, y, rad) { const M = magicTemp.get(room); if (!M || !_magicTrees.size) return false; const st = cellsOf(room), ROWS = st.rows, T = TERRAIN_CELL, c0 = Math.floor(x / T), r0 = Math.floor(y / T);
+  for (let dc = -rad; dc <= rad; dc++) for (let dr = -rad; dr <= rad; dr++) { const T2 = M.get((c0 + dc) * ROWS + r0 + dr); if (T2 && T2.kind === 'tree') return true; } return false; }
+// REGROW: the plant cells the generator made within R cells of (x, y) that are open air now (no liquid) come back, out from the middle over `growMs` → how many (−1: not a generated world)
+function magicRegrow(room, x, y, S) { const st = cellsOf(room), grid = st.terrain, gen = _genRooms.get(room); if (!grid || !grid.seedFn || !gen) return -1;
+  const T = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols, R = S.R || 15, c0 = Math.floor(x / T), r0 = Math.floor(y / T), G = grid.geom, tot = st.fineTotal, pages = new Map(), plan = [];
+  const pOf = (i) => G.K >= 0 ? ((i >>> G.K6) * G.cy + ((i >>> 6) & G.PGM)) : G.pageOf[i], kOf = (i) => G.K >= 0 ? (((i & 63) << 6) | ((i >>> G.K) & 63)) : G.offOf[i];
+  for (let dc = -R; dc <= R; dc++) for (let dr = -R; dr <= R; dr++) { const d = Math.hypot(dc, dr); if (d > R) continue; const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue; const i = c * ROWS + r;
+    if (peekCellAt(grid, i) !== 0 || (tot && peekCellAt(tot, i) > 0)) continue; const p = pOf(i); let pg = pages.get(p);
+    if (!pg) { pg = { t: new Uint8Array(CHUNK_CELLS), h: new Uint8Array(CHUNK_CELLS) }; genPageCached(gen, p, G, pg.t, pg.h); pages.set(p, pg); }
+    const k = kOf(i), v = pg.t[k]; if (v > 0 && MAGIC_PLANT.has(v)) plan.push({ i, v, h: pg.h[k], t: d / R * (S.growMs || 2000) }); }
+  plan.sort((p, q) => p.t - q.t); const t0 = Date.now(); let k = 0;
+  const tick = () => { const s2 = cellsOf(room); if (s2.terrain !== grid) return; const el = Date.now() - t0, out = [], fx = [];
+    while (k < plan.length && plan[k].t <= el) { const q = plan[k++]; if (peekCellAt(grid, q.i) !== 0 || (tot && peekCellAt(tot, q.i) > 0)) continue; grid.s(q.i, q.v); if (s2.terrainHp) s2.terrainHp.s(q.i, q.h); out.push(q.i, q.v); fx.push(q.i); }
+    if (out.length) { wireFanout(room, 'terrain-set', { cells: out }); io.to(room).emit('magic-cells', { c: fx.slice(0, 120), spell: 'regrow', look: 'regrow' }); }
+    if (k < plan.length) setTimeout(tick, 90); };
+  if (plan.length) tick(); return plan.length; }
+// once a second: vines past their time go; a tree whose cells are all gone (its time, cut, dispelled) takes its fruit with it
+setInterval(() => { const now = Date.now();
+  for (const [id, q] of _magicVines) if (now > q.until) { _magicVines.delete(id); magicObjDrop(q.room, q.oid); }
+  for (const [id, q] of _magicTrees) { const M = magicTemp.get(q.room); let live = false; if (M) for (const i of q.cells) { const t = M.get(i); if (t && t.kind === 'tree') { live = true; break; } }
+    if (!live && now > q.t0 + 4000) { _magicTrees.delete(id); for (const f of q.fruits) magicObjDrop(q.room, f); } } }, 1000);
+// once a minute: a vine left over from before a restart (it is kept with the room's things), past its time
+setInterval(() => { const now = Date.now(); for (const room of Object.keys(roomObjects)) { const map = roomObjects[room]; if (!map) continue; for (const o of [...map.values()]) if (o.look === 'rope' && o.rk === 'vine' && o.vEnd && now > o.vEnd + 2000) magicObjDrop(room, o.id); } }, 60000);
 // ⭐ (magic 12b) ENTANGLE'S SNARES: cast id → { id, by, room, x, y (the ground), R, until } · THORN HEDGES: cast id → { id, by, room, x, y (the ground), w, h, until, burnAt }
 const _magicSnares = new Map(), _magicHedges = new Map();
 // (12b) any fire lit at (x, y, r) — a firebolt, kindle, a flame stream, a fire wall, lightning — sets a thorn hedge there burning: gone in `burnS` s
@@ -3901,6 +3975,8 @@ function magicDispel(room, cx, cy, R, ms, by) {
   // (11d) alarms, seals (by where this server last had the thing)
   { const as = _magicAlarms.get(room); if (as) for (const q of as.slice()) { const t = at(q.x, q.y); if (t >= 0) { n++; later(t, () => { const a2 = _magicAlarms.get(room), i = a2 ? a2.indexOf(q) : -1; if (i >= 0) { a2.splice(i, 1); io.to(room).emit('magic-alarm-gone', { id: q.id }); } }); } } }
   for (const [oid, q] of _magicSeals) { if (q.room !== room) continue; const ob = roomObjects[room] && roomObjects[room].get(oid); if (!ob) continue; const P = ob.loose ? magicBoulderPose(room, ob) : ob, t = at(P.x, P.y, 12); if (t >= 0) { n++; later(t, () => { if (_magicSeals.get(oid) === q) { _magicSeals.delete(oid); io.to(room).emit('magic-seal-gone', { obj: oid }); } }); } }
+  // (12c) vines
+  for (const [k, q] of _magicVines) { if (q.room !== room) continue; const t = at(q.x, q.y + q.L / 2, q.L / 2); if (t >= 0) { n++; later(t, () => { if (_magicVines.delete(k)) magicObjDrop(room, q.oid); }); } }
   // (12b) entangle's snares, thorn hedges
   for (const [k, q] of _magicSnares) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - 4, q.R); if (t >= 0) { n++; later(t, () => { if (_magicSnares.delete(k)) io.to(room).emit('magic-snare-gone', { id: k, why: 'dispel' }); }); } }
   for (const [k, q] of _magicHedges) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - q.h / 2, q.w / 2); if (t >= 0) { n++; later(t, () => { if (_magicHedges.delete(k)) io.to(room).emit('magic-hedge-gone', { id: k, why: 'dispel' }); }); } }
@@ -5072,7 +5148,8 @@ const magicCfgSrv = { wake: 1, exact: 1, snowTop: 1 };   // (8c round 2: `snowTo
 function magicTempEnd(room, list) {
   const st = roomCells.get(room), M = magicTemp.get(room); if (!st || !st.terrain || !M) return; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal;
   const cells = [], liq = [], gone = [], woke = [], sank = [], thaw = [], tdmg = [], mats = roomMats[room] || {};
-  const melt = [], imelt = [];   // (7c) snow a cloud left, melted away · (7d) an ice wall's cells melted
+  // (7c) snow a cloud left, melted away · (7d) an ice wall's cells melted · (12c) a spell's tree gone
+  const melt = [], imelt = [], wither = [];
   for (const i of list) { const T = M.get(i); if (!T) continue; const v = peekCellAt(grid, i); if (v < 0) { T.sch = 0; continue; }
     if (v !== T.mat && !magicSnowIced(T, v)) { if (T.kind === 'snow' && peekAir(grid, i)) magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt);   // (7c: the grain slid on — the nearest snow goes instead)
       M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
@@ -5081,6 +5158,7 @@ function magicTempEnd(room, list) {
     { const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) tdmg.push(i, BK[1]); } }   // (7a: a glazed cell back to its ground, with the damage it had)
     if (magicTempLiq(T, amt, tot, i)) { fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }   // (the freeze's ice: its water back)
     if (T.kind === 'melt') imelt.push(i);
+    if (T.kind === 'tree') wither.push(i);
     if (magicSnowIced(T, v)) magicSnowIceBack(room, i, liq, T);   // (7c round 2)
     cells.push(i, grid.g(i)); woke.push(i);
     if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat); else if (T.kind === 'sink') sank.push(Math.floor(i / st.rows), i % st.rows, T.mat);
@@ -5092,6 +5170,7 @@ function magicTempEnd(room, list) {
   if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });   // (7a)
   if (melt.length) io.to(room).emit('magic-cells', { c: melt, spell: 'snowcloud', look: 'melt' });   // (7c)
   if (imelt.length) io.to(room).emit('magic-cells', { c: imelt, spell: 'icewall', look: 'icemelt' });   // (7d)
+  if (wither.length) io.to(room).emit('magic-cells', { c: wither.slice(0, 160), spell: 'tree', look: 'wither' });
   if (!M.size) magicTemp.delete(room);
 }
 // four times a second: cracks coming on a wall that is about to go (its strength lowered — the same crack look as a dug cell), and every cell whose time is up put back
@@ -6946,7 +7025,7 @@ setInterval(bodyOwnTick, 50);
 const ropeFireCfg = { on: 1, snapMs: 1500, pxPerS: 60, minLen: 4, reach: 36, gap: 6, zone: 80, f0: 16 };
 const roomRopeBurn = {};                                  // room → Set of rope ids with a catch pending or an end alight
 let ropeSnapSeq = 0;
-function ropeBurnable(o) { return !!o && o.look === 'rope' && (!o.rk || o.rk === 'rope' || o.rk === 'bungee'); }
+function ropeBurnable(o) { return !!o && o.look === 'rope' && (!o.rk || o.rk === 'rope' || o.rk === 'bungee' || o.rk === 'vine'); }
 function ropeFireReg(room, id) { (roomRopeBurn[room] || (roomRopeBurn[room] = new Set())).add(id); }
 function ropeSeedOf(str) { let h = 2166136261; for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967296; }
 function ropeFront(b, now) { const tau = Math.max(0, ((b.out || now) - b.t) / 1000); return (b.f0 || 0) + b.v * tau; }
@@ -7669,6 +7748,8 @@ function fallFinish(room, st, region, peek, byFire) {
     if (lit.length) wireFanout(room, 'fire-cells', { cells: lit });
     return false;
   }
+  // (magic 12c) a spell's tree cut loose crumbles away instead of falling as a log
+  if (_magicTrees.size) { const keep = magicTreeCrumble(room, region); if (keep.length !== region.length) { if (keep.length < fallCfg.min) return true; return !!fallCut(room, keep); } }
   return !!fallCut(room, region);
 }
 // ⭐ (2026-10-26, tools piece 5 round 6 — the midpoint rule, the user's) A TREE CUT FROM ITS WOOD. Only WOOD holds a tree up: from `start` the walk goes through
@@ -20280,6 +20361,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // …except where the KIND decides: a shield lasts until it has saved you.
       if (obj.pw === 'shield') obj.pdur = 'death';
       if (obj.pdur === 'timed') obj.psec = clampN(data.psec, 2, 300, 15);
+      // (magic 12c) a FRUIT a spell's tree bears: drawn as one; taken, it is gone (`pback` 0)
+      if (data.fruit) obj.fruit = 1;
       obj.pback = clampN(data.pback, 0, 600, 10);        // seconds until it comes back; 0 = never
     }
     // ⭐⭐ #177 — A VORTEX. The card is one line ("things that suck in basically"), and the whole of it is a
@@ -20484,7 +20567,9 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       // 🟥 NAMED HERE OR IT DOES NOT SURVIVE — this rebuilds field by field and drops what it does not mention.
       if (isFinite(+data.rl) && +data.rl > 0) obj.rl = clampN(data.rl, 8, 20000, 64);
       else obj.slk = clampN(data.slk, 0, 800, 0);
-      if (data.rk === 'bungee' || data.rk === 'chain' || data.rk === 'cable') obj.rk = data.rk; else if (data.rk) obj.rk = 'rope';
+      if (data.rk === 'bungee' || data.rk === 'chain' || data.rk === 'cable' || data.rk === 'vine') obj.rk = data.rk; else if (data.rk) obj.rk = 'rope';
+      // (magic 12c) a VINE (a spell's): when it was grown and when it withers, server ms
+      if (obj.rk === 'vine') { if (isFinite(+data.vt0)) obj.vt0 = +data.vt0; if (isFinite(+data.vEnd)) obj.vEnd = +data.vEnd; }
       if (data.re != null) obj.re = clampN(data.re, 0, 100, 0);
       if (data.rthru) obj.rthru = 1;
       // …and a BURNING rope's state (`ropeFireTick`): `rfree` which ends are a burnt break (never re-tied), `rb` each end's
@@ -27893,6 +27978,8 @@ io.on('connection', (socket) => {
       if (!Array.isArray(e)) continue;
       const x = +e[0], y = +e[1], mat = e[2] | 0, vx = +e[3] || 0, lk = e[4] | 0;
       if (!isFinite(x) || !isFinite(y) || mat < 1 || mat > TERRAIN_MAT_HI) continue;
+      // (magic 12c) cut from a spell's tree: nothing (no wood from nothing)
+      if (MAGIC_PLANT.has(mat) && magicTreeCutNear(currentAvatarRoom, x, y, 2)) continue;
       spawnDrop(currentAvatarRoom, Math.max(0, Math.min(dims.cols * TERRAIN_CELL, x)), Math.max(0, Math.min(dims.rows * TERRAIN_CELL, y)), [[mat, 1]], 0,
         { vx: Math.max(-0.3, Math.min(0.3, vx)), lone: 1, hold, lk: lk >= 1 && lk <= TERRAIN_MAT_HI && lk !== mat ? lk : 0 });
     }
@@ -27910,6 +27997,8 @@ io.on('connection', (socket) => {
       const k = Math.min(64, n); clean.push([m, k]); total += k;
     }
     if (!clean.length || total > 64) return;      // 64 = the largest brush (7×7 = 49 cells) with room to spare
+    // (magic 12c) dug out of a spell's tree: its plant matter gives nothing
+    if (magicTreeCutNear(currentAvatarRoom, cx, cy, 4)) { for (let q = clean.length - 1; q >= 0; q--) if (MAGIC_PLANT.has(clean[q][0])) clean.splice(q, 1); if (!clean.length) return; }
     dropWhy = 'dig';
     spawnDrop(currentAvatarRoom, cx, cy, clean);
   });
@@ -29309,6 +29398,16 @@ io.on('connection', (socket) => {
       if (hm && hm.has(m.obj) && hm.get(m.obj) !== socket.id) return no('nothing'); const secs = +(SK.secs || 120).toFixed(2); _magicSeals.set(m.obj, { id, obj: m.obj, by: socket.id, room, until: now + secs * 1000 }); out.obj = m.obj; out.secs = secs; }
     // ⭐ (magic 12b) THE THORN HEDGE: on the ground under the point (none there: refused), `most` a caster (the oldest goes) · BARKSKIN: its time
     if (S.kind === 'bark') out.secs = +(SK.secs || 30).toFixed(2);
+    // ⭐ (magic 12c) A VINE from the rock over the point (none in reach: refused), `most` a caster · A TREE on the ground under the point · REGROW (a generated world only)
+    if (S.kind === 'vine') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const V = magicVinePlan(room, out.tx, out.ty, S); if (!V) return no('rock');
+      const mine = [..._magicVines.entries()].filter(([, q]) => q.by === socket.id).sort((a, b) => a[0] - b[0]); while (mine.length >= (S.most || 3)) { const [k, q] = mine.shift(); _magicVines.delete(k); magicObjDrop(q.room, q.oid); }
+      const secs = +(SK.secs || 180).toFixed(2), oid = 'mvine-' + id, o = magicObjAdd(room, 'platform', { look: 'rope', x: V.x, y: V.y, w: 24, h: 8, rp: [[0, 0, 0, 1], [0, V.L, 0, 1]], rl: V.L, rk: 'vine', vt0: now, vEnd: now + secs * 1000 }, oid, socket.id);
+      if (!o) return no('room'); _magicVines.set(id, { room, by: socket.id, oid, x: V.x, y: V.y, L: V.L, until: now + secs * 1000 }); out.obj = oid; out.vx = V.x; out.vy = V.y; out.L = V.L; out.secs = secs; }
+    if (S.kind === 'tree') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground'); const P = magicTreePlan(room, g.x, g.y, S, id * 7919 + 13); if (!P) return no('room');
+      const mine = [..._magicTrees.entries()].filter(([, q]) => q.by === socket.id).sort((a, b) => a[0] - b[0]); if (mine.length >= (S.most || 2)) { const [k, q] = mine[0]; const M = magicTemp.get(q.room); if (M) { for (const i of q.cells) { const T2 = M.get(i); if (T2 && T2.kind === 'tree') T2.until = Math.min(T2.until, now); } } }
+      const secs = +(SK.secs || 300).toFixed(2), until = magicTreeGrow(room, P, secs); _magicTrees.set(id, { room, by: socket.id, cells: P.cells.map(q => q.i), until, t0: now, fruits: [], S, trunkMat: MAGIC_GXL[P.SP.trunk] });
+      setTimeout(() => magicTreeFruit(id), (S.fruitS || 20) * 1000); out.tx = g.x; out.ty = g.y; out.h = P.hgt; out.n = P.cells.length; out.ms = S.growMs || 3000; out.secs = secs; out.sp = P.SP.key; }
+    if (S.kind === 'regrow') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const n = magicRegrow(room, out.tx, out.ty, S); if (n < 0) return no('nogen'); out.n = n; out.R = (S.R || 15) * TERRAIN_CELL; out.ms = S.growMs || 2000; }
     // ⭐ (magic 12a) THE HEALING GROVE: on the ground under the point (none there: refused), `most` a caster (the oldest goes)
     if (S.kind === 'grove') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
       for (const [k, q] of _magicGroves) if (now > q.until) _magicGroves.delete(k);

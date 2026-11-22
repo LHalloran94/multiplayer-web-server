@@ -121,6 +121,17 @@
       R: 72, holdS: 2, press: 0.3, snareS: 6, plain: { keys: [D, D, U, L, R], rune: [7, 8, 4, 3, 0] } },
     thorns: { name: 'Thorn hedge', school: 'life', form: 'bolt', tier: 0, cd: 12, stance: 'level', kind: 'bolt', seed: 'hedge', lob: true, lobG: 1100, learn: 3, reach: 400, speed: 520, life: 1.6, grav: 0.4, r: 3.5, dmg: 0,
       secs: 30, wide: 30, high: 4, growMs: 1500, slowK: 0.5, thornDmg: 0.25, every: 0.5, burnS: 2, most: 2, plain: { keys: [R, D, D, U, L], rune: [3, 6, 8, 5, 1] } },
+    // ⭐ STEP 12c (2026-11-23, kickoff §'STEP 12') LIFE — GROWING: VINE (kind 'vine'): a rope that is a vine, grown DOWN from the first rock at most `up` cells above the
+    //   pointer, at most `len` cells long (to just over the ground under it), `secs` s, `most` a caster — climbed, swung on and burnt as a rope · GROW A TREE (kind 'tree'):
+    //   one of the world's own trees (its kind from the plants round it) `hmin`–`hmax` cells tall out of the ground under the point over `growMs`; real plant cells that go
+    //   back after `secs` s (a cut one gives nothing); after `fruitS` s `fruits` glowing fruits hang under its crown, each healing `fruitHeal` half-hearts · REGROW THE LAND
+    //   (kind 'regrow'): in a generated world, every plant cell the world grew within `R` cells of the point that is open air now comes back, out from the point over `growMs`
+    vine: { name: 'Vine', school: 'life', form: 'placed', tier: 0, cd: 6, stance: 'level', kind: 'vine', learn: 3, reach: 360, up: 30, len: 26, secs: 180, most: 3,
+      plain: { keys: [U, U, D, D, R], rune: [1, 2, 4, 8, 6] } },
+    tree: { name: 'Grow a tree', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'tree', learn: 5, reach: 300, hmin: 12, hmax: 20, growMs: 3000, secs: 300, fruitS: 20, fruits: 3, fruitHeal: 2, most: 2,
+      plain: { keys: [D, R, U, U, L], rune: [7, 6, 3, 4, 2] } },
+    regrow: { name: 'Regrow the land', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'regrow', learn: 5, reach: 300, R: 15, growMs: 2000,
+      plain: { keys: [R, U, L, D, D], rune: [5, 4, 0, 1, 7] } },
     barkskin: { name: 'Barkskin', school: 'life', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'bark', learn: 5, secs: 30, hurtK: 0.5, fireK: 1.5, moveK: 0.85,
       plain: { keys: [L, D, U, U, R], rune: [5, 8, 7, 3, 0] } },
     lift: { name: 'Lift and throw', school: 'force', form: 'shaping', tier: 0, cd: 3, stance: 'level', kind: 'lift', learn: 3, reach: 320, secs: 10, pull: 0.16, vmax: 11, throwV: 12,
@@ -573,6 +584,8 @@
     closewounds: [[D, D], [4, 6]], closewounds_o: [[R, D], [4, 6, 2]], cure: [[U, L], [4, 0]], cure_o: [[R, L], [4, 0, 2]], grove: [[D, R], [4, 8, 6, 3]],
     // (12b) entangle round and up · the thorn hedge out along and down · barkskin raised over you, as the ward skin's keys
     entangle: [[L, U], [4, 3, 1]], thorns: [[L, D], [4, 5, 8]], barkskin: [[U, U], [4, 3, 0]],
+    // (12c) the vine up to the rock, then hanging down · the tree into the soil, then straight up · regrow out and up
+    vine: [[U, D], [4, 2, 8]], tree: [[D, U], [4, 8, 2]], regrow: [[U, R], [4, 5, 2]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],

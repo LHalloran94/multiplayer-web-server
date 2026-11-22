@@ -413,4 +413,5 @@ function drawFlora(W, C, columnInfo, ci, c, r0, rN, out, seed, M, waterE, hasBod
   }
 }
 
-module.exports = { buildSpecies, drawFlora, fits, waterAt };
+// (magic 12c, 2026-11-23) `drawForm` too: the GROW A TREE spell draws one of the world's own trees, column by column, the way the generator does
+module.exports = { buildSpecies, drawFlora, fits, waterAt, drawForm };
