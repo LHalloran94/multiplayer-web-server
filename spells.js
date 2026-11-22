@@ -126,7 +126,9 @@
     //   one of the world's own trees (its kind from the plants round it) `hmin`–`hmax` cells tall out of the ground under the point over `growMs`; real plant cells that go
     //   back after `secs` s (a cut one gives nothing); after `fruitS` s `fruits` glowing fruits hang under its crown, each healing `fruitHeal` half-hearts · REGROW THE LAND
     //   (kind 'regrow'): in a generated world, every plant cell the world grew within `R` cells of the point that is open air now comes back, out from the point over `growMs`
-    vine: { name: 'Vine', school: 'life', form: 'placed', tier: 0, cd: 6, stance: 'level', kind: 'vine', learn: 3, reach: 360, up: 30, len: 26, secs: 180, most: 3,
+    //   (round 2, the user) the vine longer, and pointed at the GROUND: tied into it, along it to the nearer edge within `edge` cells, and down over it · regrow goes on along
+    //   each plant it brings back (up a whole tree), at most `spread` cells out, `cap` cells · the tree's trunk thicker, no roots, its fruit falling when its leaf is cut away
+    vine: { name: 'Vine', school: 'life', form: 'placed', tier: 0, cd: 6, stance: 'level', kind: 'vine', learn: 3, reach: 360, up: 40, len: 40, edge: 14, secs: 180, most: 3,
       plain: { keys: [U, U, D, D, R], rune: [1, 2, 4, 8, 6] } },
     tree: { name: 'Grow a tree', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'tree', learn: 5, reach: 300, hmin: 12, hmax: 20, growMs: 3000, secs: 300, fruitS: 20, fruits: 3, fruitHeal: 2, most: 2,
       plain: { keys: [D, R, U, U, L], rune: [7, 6, 3, 4, 2] } },
