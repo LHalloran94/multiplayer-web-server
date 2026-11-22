@@ -3865,6 +3865,12 @@ function magicNullIn(room, q, x, y) {
 const _magicAlarms = new Map(), _magicSeals = new Map();
 // ⭐ (magic 12a) HEALING GROVES: cast id → { id, by, room, x, y (the ground under the point), w (px across), until } — kept so an arriving page is told and a dispel ends them
 const _magicGroves = new Map();
+// ⭐ (magic 12b) ENTANGLE'S SNARES: cast id → { id, by, room, x, y (the ground), R, until } · THORN HEDGES: cast id → { id, by, room, x, y (the ground), w, h, until, burnAt }
+const _magicSnares = new Map(), _magicHedges = new Map();
+// (12b) any fire lit at (x, y, r) — a firebolt, kindle, a flame stream, a fire wall, lightning — sets a thorn hedge there burning: gone in `burnS` s
+function magicHedgeFire(room, x, y, r) { if (!_magicHedges.size) return; const now = Date.now();
+  for (const q of _magicHedges.values()) { if (q.room !== room || now > q.until || q.burnAt) continue; if (Math.abs(x - q.x) > q.w / 2 + (r || 0) + 4 || y < q.y - q.h - (r || 0) - 4 || y > q.y + (r || 0) + 8) continue;
+    q.burnAt = now; q.until = Math.min(q.until, now + (q.burnS || 2) * 1000); io.to(room).emit('magic-hedge-burn', { id: q.id }); } }
 function magicAlarmsOf(room) { let a = _magicAlarms.get(room); if (!a) _magicAlarms.set(room, a = []); return a; }
 function magicSealOf(room, oid) { const q = typeof oid === 'string' ? _magicSeals.get(oid) : null; return q && q.room === room && Date.now() < q.until ? q : null; }
 // sealed by somebody other than `sid`: their magic does not move it, they do not pick it up
@@ -3895,6 +3901,9 @@ function magicDispel(room, cx, cy, R, ms, by) {
   // (11d) alarms, seals (by where this server last had the thing)
   { const as = _magicAlarms.get(room); if (as) for (const q of as.slice()) { const t = at(q.x, q.y); if (t >= 0) { n++; later(t, () => { const a2 = _magicAlarms.get(room), i = a2 ? a2.indexOf(q) : -1; if (i >= 0) { a2.splice(i, 1); io.to(room).emit('magic-alarm-gone', { id: q.id }); } }); } } }
   for (const [oid, q] of _magicSeals) { if (q.room !== room) continue; const ob = roomObjects[room] && roomObjects[room].get(oid); if (!ob) continue; const P = ob.loose ? magicBoulderPose(room, ob) : ob, t = at(P.x, P.y, 12); if (t >= 0) { n++; later(t, () => { if (_magicSeals.get(oid) === q) { _magicSeals.delete(oid); io.to(room).emit('magic-seal-gone', { obj: oid }); } }); } }
+  // (12b) entangle's snares, thorn hedges
+  for (const [k, q] of _magicSnares) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - 4, q.R); if (t >= 0) { n++; later(t, () => { if (_magicSnares.delete(k)) io.to(room).emit('magic-snare-gone', { id: k, why: 'dispel' }); }); } }
+  for (const [k, q] of _magicHedges) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - q.h / 2, q.w / 2); if (t >= 0) { n++; later(t, () => { if (_magicHedges.delete(k)) io.to(room).emit('magic-hedge-gone', { id: k, why: 'dispel' }); }); } }
   // (12a) healing groves (by their middle, half their width)
   for (const [k, q] of _magicGroves) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - 8, q.w / 2); if (t >= 0) { n++; later(t, () => { if (_magicGroves.delete(k)) io.to(room).emit('magic-grove-gone', { id: k, why: 'dispel' }); }); } }
   // what is on a body: a flame ring, a flaming / storm weapon, a mirror ward — by where its keeper stands
@@ -13360,6 +13369,7 @@ function fineFireSet(room) { const s = cellsOf(room); if (!s.fineFire) { s.fineF
 // ⭐ `ry` (optional) makes it a RECTANGLE — a burning OBJECT lights the ground around its own box, and a crate
 // is rarely square. Omitted, it is the brush's square exactly as before.
 function igniteBox(room, x, y, r, ry) {
+  magicHedgeFire(room, x, y, r);
   const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt;
   if (!grid || !amt || (st.fineSub || 1) !== 1) return 0;
   const ROWS = st.rows, COLS = st.cols, pad = r + TERRAIN_CELL, padY = (ry === undefined ? r : ry) + TERRAIN_CELL;
@@ -29187,9 +29197,11 @@ io.on('connection', (socket) => {
       // (4c) a modifier's flight: the follower slower, longer, less pulled down · the lob by its own arc (every screen works out the same) · a split: an id for each piece
       if (MD && m.mod === 'mod_follow') { lf *= MD.lifeK || 1; v *= MD.speedK || 1; g *= MD.gravK != null ? MD.gravK : 1; }
       if (MD && m.mod === 'mod_arc') { const A = SPELLS.arcAim(S, MD, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
+      // (12b) a LOBBED spell (entangle's seed) comes down on the pointer without the modifier: every screen works out the same arc
+      else if (S.lob && isFinite(out.tx)) { const A = SPELLS.arcAim(S, { g: S.lobG || 1100 }, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
       const ids = [id]; if (MD && m.mod === 'mod_split') { for (let i = 1; i < (MD.n || 3); i++) ids.push(++_magicSeq); out.ids = ids; }
       const SKf = S.freezeN ? Object.assign({}, SK, { cells: S.freezeN, secs: (S.freezeS || 20) * (socket._magicSecsK || 1), ringMs: 60 }) : SK;   // (4e round 2: the chill bolt's freeze — a cell or two)
-      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (MD && m.mod === 'mod_split' ? 0.6 : 1)).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0 });
+      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (MD && m.mod === 'mod_split' ? 0.6 : 1)).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.seed ? 'seed' : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0 });
       while (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     // ⭐ (step 6a) KINDLE: what burns at the caster's point (short of the first rock on the way — their game's) catches, no further than its reach (held to it above)
@@ -29295,6 +29307,13 @@ io.on('connection', (socket) => {
       as.push({ id, by: socket.id, x: out.tx, y: out.ty, R: out.R, at: now + (S.armS || 1) * 1000, until: now + secs * 1000, trip: 0 }); out.secs = secs; out.arm = S.armS || 1; }
     if (S.kind === 'seal') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || ob.type !== 'stamp') return no('nothing');
       if (hm && hm.has(m.obj) && hm.get(m.obj) !== socket.id) return no('nothing'); const secs = +(SK.secs || 120).toFixed(2); _magicSeals.set(m.obj, { id, obj: m.obj, by: socket.id, room, until: now + secs * 1000 }); out.obj = m.obj; out.secs = secs; }
+    // ⭐ (magic 12b) THE THORN HEDGE: on the ground under the point (none there: refused), `most` a caster (the oldest goes) · BARKSKIN: its time
+    if (S.kind === 'hedge') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
+      for (const [k, q] of _magicHedges) if (now > q.until) _magicHedges.delete(k);
+      const mine = [..._magicHedges.values()].filter(q => q.by === socket.id).sort((a, b) => a.id - b.id); while (mine.length >= (S.most || 2)) { const q = mine.shift(); _magicHedges.delete(q.id); io.to(q.room).emit('magic-hedge-gone', { id: q.id }); }
+      out.tx = Math.round(out.tx); out.ty = g.y; out.w = (S.wide || 10) * TERRAIN_CELL; out.h = (S.high || 3) * TERRAIN_CELL; out.secs = +(SK.secs || 30).toFixed(2);
+      _magicHedges.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, h: out.h, until: now + out.secs * 1000, burnAt: 0, burnS: S.burnS || 2 }); }
+    if (S.kind === 'bark') out.secs = +(SK.secs || 30).toFixed(2);
     // ⭐ (magic 12a) THE HEALING GROVE: on the ground under the point (none there: refused), `most` a caster (the oldest goes)
     if (S.kind === 'grove') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
       for (const [k, q] of _magicGroves) if (now > q.until) _magicGroves.delete(k);
@@ -29336,6 +29355,11 @@ io.on('connection', (socket) => {
     L.x = Math.round(m.x); L.y = Math.round(m.y); L.until = Date.now() + lf * 1000 + 800; L.reach = v * lf + 0.5 * (S.grav || 0) * 1500 * lf * lf + 64;
     io.to(room).emit('magic-flung', { id: m.id, by: socket.id, x: L.x, y: L.y, vx: Math.round(m.vx * k), vy: Math.round(m.vy * k) }); });
   // ⭐ (magic 11a) A WARD SKIN STRUCK (or ended — `hp` 0, `q` quietly: its keeper died): its keeper's own game says what is left and where the blow came from; to everybody else
+  // ⭐ (magic 12b) MY BODY HELD BY ROOTS (on, how long) or let go — the others draw the roots on me · a hedge I stand in while burning catches
+  socket.on('magic-root', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const now = Date.now(); if (now - (socket._rootT || 0) < 40) return; socket._rootT = now;
+    socket.to(room).emit('magic-root', { from: socket.id, on: m.on ? 1 : 0, ms: Math.max(0, Math.min(5000, +m.ms || 0)), sn: m.sn | 0 }); });
+  socket.on('magic-hedge-fire', (m) => { const room = currentAvatarRoom, q = m && _magicHedges.get(m.id | 0); if (!room || !q || q.room !== room) return; const p = socket._avPos;
+    if (p && Date.now() - p.t < 4000 && Math.abs(p.x - q.x) <= q.w / 2 + 30) magicHedgeFire(room, p.x, p.y - 4, 4); });
   socket.on('magic-ward', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const now = Date.now(); if (now - (socket._wardT || 0) < 40) return; socket._wardT = now;
     socket.to(room).emit('magic-ward', { to: socket.id, hp: Math.max(0, Math.min(40, Math.round((+m.hp || 0) * 100) / 100)), a: isFinite(m.a) ? +(+m.a).toFixed(2) : null, q: m.q ? 1 : 0 }); });
   // ⭐ (magic 11d) AN ALARM CROSSED (the crosser's game says so: its own body, its test dummy, a loose thing it drives): its owner is told wherever they are (a chime, an
@@ -29475,7 +29499,10 @@ io.on('connection', (socket) => {
       socket.emit('magic-nulls', { list: [..._magicNulls.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, cy: q.cy, R: q.R, left: q.until - now })) });
       socket.emit('magic-seals', { list: [..._magicSeals.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, obj: q.obj, by: q.by, left: q.until - now })) });
       // (magic 12a) the healing groves
-      socket.emit('magic-groves', { list: [..._magicGroves.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, left: q.until - now })) }); } socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
+      socket.emit('magic-groves', { list: [..._magicGroves.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, left: q.until - now })) });
+      // (magic 12b) entangle's snares, the thorn hedges
+      socket.emit('magic-snares', { list: [..._magicSnares.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, R: q.R, left: q.until - now })) });
+      socket.emit('magic-hedges', { list: [..._magicHedges.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, h: q.h, left: q.until - now, burn: q.burnAt ? now - q.burnAt : -1 })) }); } socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
   // ⭐ (8a) CALL LIGHTNING FALLS: its caster's game says where (`x`, `y` — the top of the body it struck, or the ground; `fy` that body's feet; `pl` the body) — straight down from
   //   its cloud, near its middle, no lower than the ground under it
   socket.on('magic-strike', (m) => {
@@ -29505,7 +29532,12 @@ io.on('connection', (socket) => {
     else if (L.land === 'wall') { const g = magicGroundAt(L.room, +m.x, +m.y); if (g && Math.abs(g.y - m.y) <= 3 * TERRAIN_CELL) { land = 'wall'; tx = g.x; ty = g.y; n = magicWall(L.room, g.x, g.y, L.SK); air = 0; } else air = 1; }
     // ⭐ (6b) A WALL OF FIRE where its ember came down (on ground, as the stone wall's) — in liquid it went out: steam, nothing stands
     let FW = null; if (L.land === 'firewall') { if (m.liq) { land = 'firewall'; air = 0; FW = { liq: 1 }; } else { const g = magicGroundAt(L.room, +m.x, +m.y); if (g && Math.abs(g.y - m.y) <= 3 * TERRAIN_CELL) { land = 'firewall'; tx = g.x; ty = g.y; air = 0; FW = magicFireWallAt(L.room, g.x, g.y, L.SK); n = FW.n; } else air = 1; } }
-    io.to(L.room).emit('magic-end', Object.assign({ id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell, from: L.by },
+    // ⭐ (12b) ENTANGLE'S SEED: roots on the ground under where it came down (a body it struck: the ground under that body) — none near: it falls in the air
+    let SN = null; if (L.land === 'seed') { const g = magicGroundAt(L.room, +m.x, +m.y - 2), S0 = L.SK || {};
+      if (g && g.y - m.y <= 6 * TERRAIN_CELL && m.y - g.y <= 3 * TERRAIN_CELL) { land = 'seed'; tx = g.x; ty = g.y; air = 0; const secs = +((S0.snareS || 6)).toFixed(2), R = S0.R || 24;
+        _magicSnares.set(m.id, { id: m.id, by: L.by, room: L.room, x: tx, y: ty, R, until: Date.now() + secs * 1000 }); for (const [k, q] of _magicSnares) if (Date.now() > q.until) _magicSnares.delete(k);
+        SN = { R, secs, hold: S0.holdS || 2 }; } else air = 1; }
+    io.to(L.room).emit('magic-end', Object.assign({ id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell, from: L.by }, SN || {},
       land === 'tunnel' ? { ax: +(+L.ax).toFixed(3), ay: +(+L.ay).toFixed(3), len: Math.round(m.len || 0), ms: Math.round(m.ms || 0) } : {}, FW || {}));
   });
   socket.on('arrow-catch', ({ id, to }) => {

@@ -110,6 +110,17 @@
       plain: { keys: [L, U, D, R, R], rune: [8, 6, 4, 0, 3] } },
     grove: { name: 'Healing grove', school: 'life', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'grove', learn: 5, reach: 360, secs: 12, wide: 14, every: 2, hp: 1, most: 2,
       plain: { keys: [D, U, R, D, L], rune: [6, 7, 3, 1, 2] } },
+    // ⭐ STEP 12b (2026-11-22, kickoff §'STEP 12') LIFE — HOLDING AND GUARDING: ENTANGLE (a bolt that is a SEED, `seed`: no blow; LOBBED onto the pointer, `lob` — every screen
+    //   the same arc, `lobG` its gravity; where it lands roots burst out `R` px round and hold every body there `holdS` s at most (walk and jump, not turn, punch or cast), each
+    //   fresh movement key `press` s off, fire frees; the roots stay `snareS` s and catch each body that walks in, once) · THORN HEDGE (kind 'hedge'): brambles `wide` × `high`
+    //   cells on the ground under the point, `secs` s; anyone in it but its caster slowed × `slowK` and scratched `dmg` health every `every` s; any fire burns it away in `burnS` s ·
+    //   BARKSKIN (kind 'bark'): `secs` s — harm × `hurtK`, fire × `fireK`, your pace × `moveK`
+    entangle: { name: 'Entangle', school: 'life', form: 'bolt', tier: 0, cd: 8, stance: 'level', kind: 'bolt', seed: true, lob: true, lobG: 1100, learn: 3, reach: 400, speed: 520, life: 1.6, grav: 0.4, r: 3, dmg: 0,
+      R: 24, holdS: 2, press: 0.3, snareS: 6, plain: { keys: [D, D, U, L, R], rune: [7, 8, 4, 3, 0] } },
+    thorns: { name: 'Thorn hedge', school: 'life', form: 'placed', tier: 0, cd: 12, stance: 'level', kind: 'hedge', learn: 3, reach: 360, secs: 30, wide: 10, high: 3, slowK: 0.5, dmg: 0.25, every: 0.5, burnS: 2, most: 2,
+      plain: { keys: [R, D, D, U, L], rune: [3, 6, 8, 5, 1] } },
+    barkskin: { name: 'Barkskin', school: 'life', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'bark', learn: 5, secs: 30, hurtK: 0.5, fireK: 1.5, moveK: 0.85,
+      plain: { keys: [L, D, U, U, R], rune: [5, 8, 7, 3, 0] } },
     lift: { name: 'Lift and throw', school: 'force', form: 'shaping', tier: 0, cd: 3, stance: 'level', kind: 'lift', learn: 3, reach: 320, secs: 10, pull: 0.16, vmax: 11, throwV: 12,
       plain: { keys: [R, R, U, L], rune: [3, 4, 5, 2] } },
     double: { name: 'A double of you', school: 'illusion', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'double', learn: 5, secs: 60, secsWalk: 6, walk: 150, jump: 420, alts: ['double_m'],
@@ -558,6 +569,8 @@
     alarm: [[U, R], [4, 5, 1]], seal: [[L, D], [4, 3, 7]],
     // (12a) close wounds as before · on another, its first mark turned → and on to the top right · cure lifted off you (and on another) · the grove: down to the ground, along it and up
     closewounds: [[D, D], [4, 6]], closewounds_o: [[R, D], [4, 6, 2]], cure: [[U, L], [4, 0]], cure_o: [[R, L], [4, 0, 2]], grove: [[D, R], [4, 8, 6, 3]],
+    // (12b) entangle round and up · the thorn hedge out along and down · barkskin raised over you, as the ward skin's keys
+    entangle: [[L, U], [4, 3, 1]], thorns: [[L, D], [4, 5, 8]], barkskin: [[U, U], [4, 3, 0]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
