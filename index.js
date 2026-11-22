@@ -3870,6 +3870,9 @@ function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) r
   { const ST = _magicStorms.get(id); if (ST) for (let i = 0; i < ST.clouds.length; i++) { const c = _magicClouds.get(id + (i + 1) / 10); if (c) c.until = Math.min(c.until, Date.now()); } }   // (8a round 3) a thunderstorm let go: its rain stops
   const sk = io.sockets.sockets.get(q.by); let cd = 0;
   if (sk && !sk._magicNoCd) { cd = SPELLS.cdMs(q.spell, q.cat); (sk._magicCd || (sk._magicCd = {}))[q.spell] = Date.now() + cd; }
+  // (magic 11b round 3) A WARD DOME let go (or held to its most): set where it was cast, as big as it grew — `Rmin` → `Rmax` px over `chargeS` s held; any other end: none
+  { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'warddome' && (why === 'let' || why === 'time')) { const k = Math.max(0, Math.min(1, (Date.now() - (q.at || Date.now())) / 1000 / (S0.chargeS || 2.5)));
+    extra = Object.assign({}, extra || {}, { R: Math.round((S0.Rmin || 56) + ((S0.Rmax || 140) - (S0.Rmin || 56)) * k), dx: q.dx, dy: q.dy, cy: q.cy, sh: q.sh || 0, secs: S0.secs || 10 }); } }
   // (magic 10b) A RECALL held to its end GOES to its caster's mark (every screen: rifts, their own body moved); let go / a blow before: nothing, and only a short cooldown
   { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'recall') { const MK = _magicMarks.get(q.by);
     if (why === 'time' && MK && MK.room === q.room && Date.now() < MK.until) extra = Object.assign({}, extra || {}, { go: 1, tx: MK.x, ty: MK.y });
@@ -4921,7 +4924,7 @@ function magicWallSide(room, x, y, dir, S) {
 //   end first. `S.sink`: the cells are kind 'sink' (the pillar SINKS back the way it rose: no cracks, no rubble). `S.crackS` 0 = no cracks.
 function magicWallLines(room, lines, S) {
   const st = cellsOf(room), grid = st.terrain; if (!lines.length || !grid) return 0;
-  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS != null ? S.crackS : 6) * 1000, gap = S.crumbleMs || 30, mats = roomMats[room] || {}, kind = S.sink ? 'sink' : S.melts ? 'melt' : S.ward ? 'ward' : 'wall', rowMs = S.rowMs || 70, waitN = S.waitN || 0;
+  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS != null ? S.crackS : 6) * 1000, gap = S.crumbleMs || 30, mats = roomMats[room] || {}, kind = S.sink ? 'sink' : S.melts ? 'melt' : 'wall', rowMs = S.rowMs || 70, waitN = S.waitN || 0;
   const avoid = new Set(); let total = 0; for (const L of lines) { L.k = 0; L.w = 0; total += L.cells.length; for (const i of L.cells) if (i >= 0) avoid.add(i); }
   const tick = (h) => {
     const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = [], t2 = s2.fineTotal, el = h * rowMs; let live = false;
@@ -4984,24 +4987,13 @@ function magicBridgePlan(room, bx, by, tx, ty, S) {
     lines.push({ cells: cs, mat }); }
   return { lines, br: { c0, r0, s, dir, sl: +sl.toFixed(3), n, ms: S.rowMs || 40 } };
 }
-// ⭐ (magic 11b) WARD WALL: an upright pane `wide` × `high` cells of WARD LIGHT with its middle where the caster's game put it (anywhere in reach, in the air too — the user), grown
-//   from the middle up and down, stopped by rock (liquid pushed aside). → { lines, box: [x0, y0, x1, y1] px } or null (the middle not open)
-function magicWardWallPlan(room, x, y, S) {
-  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, fr = Math.floor(roomFloorTop(room) / T);
-  const W = S.wide || 1, H = S.high || 6, cL = Math.round(x / T - W / 2), r = Math.floor(y / T), up = H - Math.floor(H / 2), lines = [];
-  if (r < 1 || r >= fr) return null;
-  for (let k = 0; k < W; k++) { const c = cL + k; if (c < 0 || c >= COLS) continue; if (!magicOpen(grid, c * ROWS + r)) continue;
-    const a = [], b = []; for (let h = 0; h < up; h++) a.push(r - h >= 1 ? c * ROWS + r - h : -1); for (let h = 1; h <= H - up; h++) b.push(r + h < fr ? c * ROWS + r + h : -1);
-    lines.push({ cells: a, mat: MAGIC_WARD_MAT }, { cells: b, mat: MAGIC_WARD_MAT }); }
-  return lines.length ? { lines, box: [cL * T, (r - up + 1) * T, (cL + W) * T, (r + H - up + 1) * T] } : null;
-}
 // (step 3f) PUT BACK the cells whose time is up, at THEIR moment (scheduled by the sweep below — a crumble is smooth, not in quarter-second lumps): ice gives back its water, a wall's
 //   rubble falls; the liquid round each is WOKEN (`fineWakeAround`) so it flows into the space — a wall that stood under water left a hole the water never filled
 const magicCfgSrv = { wake: 1, exact: 1, snowTop: 1 };   // (8c round 2: `snowTop` 0 = a pile of spell snow melts cell by cell where each cell is, as before — the panel's switch, sent by 'magic-debug')   // switches back: `wake` 0 = the liquid round a put-back cell is not woken · `exact` 0 = put back by the quarter-second sweep
 function magicTempEnd(room, list) {
   const st = roomCells.get(room), M = magicTemp.get(room); if (!st || !st.terrain || !M) return; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal;
   const cells = [], liq = [], gone = [], woke = [], sank = [], thaw = [], tdmg = [], mats = roomMats[room] || {};
-  const melt = [], imelt = [], wend = [];   // (7c) snow a cloud left, melted away · (7d) an ice wall's cells melted · (11b) ward light gone
+  const melt = [], imelt = [];   // (7c) snow a cloud left, melted away · (7d) an ice wall's cells melted
   for (const i of list) { const T = M.get(i); if (!T) continue; const v = peekCellAt(grid, i); if (v < 0) { T.sch = 0; continue; }
     if (v !== T.mat && !magicSnowIced(T, v)) { if (T.kind === 'snow' && peekAir(grid, i)) magicSnowDebt(grid, hp, st.rows, i, M, 1 + (T.units | 0), cells, melt);   // (7c: the grain slid on — the nearest snow goes instead)
       M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} continue; }
@@ -5009,7 +5001,7 @@ function magicTempEnd(room, list) {
     if (T.kind === 'snow') { melt.push(i); const up = peekCellAt(grid, i - 1); if (i % st.rows > 0 && isPowderId(up)) powderSet(room).add(i - 1); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, i, M, T.units, cells, melt); }
     { const BK = magicTempBack(T, mats); grid.s(i, BK[0]); hp.s(i, BK[1]); if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) tdmg.push(i, BK[1]); } }   // (7a: a glazed cell back to its ground, with the damage it had)
     if (magicTempLiq(T, amt, tot, i)) { fineSet(room).add(i); liq.push(i); fineSyncGrid(room, i); }   // (the freeze's ice: its water back)
-    if (T.kind === 'melt') imelt.push(i); if (T.kind === 'ward') wend.push(i);
+    if (T.kind === 'melt') imelt.push(i);
     if (magicSnowIced(T, v)) magicSnowIceBack(room, i, liq, T);   // (7c round 2)
     cells.push(i, grid.g(i)); woke.push(i);
     if (T.kind === 'wall') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat); else if (T.kind === 'sink') sank.push(Math.floor(i / st.rows), i % st.rows, T.mat);
@@ -5021,7 +5013,6 @@ function magicTempEnd(room, list) {
   if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });   // (7a)
   if (melt.length) io.to(room).emit('magic-cells', { c: melt, spell: 'snowcloud', look: 'melt' });   // (7c)
   if (imelt.length) io.to(room).emit('magic-cells', { c: imelt, spell: 'icewall', look: 'icemelt' });   // (7d)
-  if (wend.length) io.to(room).emit('magic-cells', { c: wend, spell: 'wardwall', look: 'wardend' });   // (11b) sparkles, no rubble
   if (!M.size) magicTemp.delete(room);
 }
 // four times a second: cracks coming on a wall that is about to go (its strength lowered — the same crack look as a dug cell), and every cell whose time is up put back
@@ -5029,7 +5020,7 @@ setInterval(() => {
   const now = Date.now(), _mw0 = performance.now(); let _mwN = 0;   // (8b, DIAGNOSTIC — the user saw lag as a blizzard's snow melted; not reproduced in a page room: a slow sweep is logged)
   for (const [room, M] of magicTemp) {
     const st = roomCells.get(room); if (!st || !st.terrain) continue; const grid = st.terrain, hp = st.terrainHp, amt = st.fineAmt, tot = st.fineTotal, mats = roomMats[room] || {};
-    const cells = [], dmg = [], liq = [], gone = [], due = new Map(), thaw = [], melt = [], imelt = [], wend = [];
+    const cells = [], dmg = [], liq = [], gone = [], due = new Map(), thaw = [], melt = [], imelt = [];
     for (const [i, T] of M) {
       // (8c round 2, the user's [melt watch]: with a big pile this sweep took ~21 ms each quarter second with nothing due — every record was looked up in the world) a record
       //   is only looked at once its time (less its crack time) is near; a cell dug out meanwhile is found then
@@ -5045,7 +5036,6 @@ setInterval(() => {
         if (T.kind === 'glaze') { thaw.push(i); if (isPowderId(BK[0])) powderSet(room).add(i); if (BK[1] < matStrengthSrv(mats, BK[0])) dmg.push(i, BK[1]); }   // (7a: the ground back with the damage it had, a powder woken)
         if (magicTempLiq(T, amt, tot, i)) { fineSet(room).add(i); liq.push(i); }
         if (T.kind === 'melt') imelt.push(i);   // (7d)
-        if (T.kind === 'ward') wend.push(i);   // (11b)
         if (magicSnowIced(T, v)) magicSnowIceBack(room, i, liq, T);   // (7c round 2)
         if (T.kind === 'wall' || T.kind === 'sink') gone.push(Math.floor(i / st.rows), i % st.rows, T.mat);
         if (T.kind === 'snow') { melt.push(i); if (i % st.rows > 0 && isPowderId(peekCellAt(grid, i - 1))) powderSet(room).add(i - 1); if (T.units > 0) magicSnowDebt(grid, hp, st.rows, i, M, T.units, cells, melt); }   // (7c: snow above it falls into the space; the grains owed round it)
@@ -5058,7 +5048,6 @@ setInterval(() => {
     if (thaw.length) io.to(room).emit('magic-cells', { c: thaw, spell: 'frostpath', look: 'thaw' });
     if (melt.length) io.to(room).emit('magic-cells', { c: melt, spell: 'snowcloud', look: 'melt' });   // (7c)
     if (imelt.length) io.to(room).emit('magic-cells', { c: imelt, spell: 'icewall', look: 'icemelt' });   // (7d)
-    if (wend.length) io.to(room).emit('magic-cells', { c: wend, spell: 'wardwall', look: 'wardend' });   // (11b)
     _mwN += cells.length / 2;
     for (const [k, list] of due) setTimeout(() => magicTempEnd(room, list), Math.max(0, k - now));
     if (!M.size) magicTemp.delete(room);
@@ -10531,11 +10520,9 @@ function liqBaseSrv(mats, v) {
   const b = d.base | 0;
   return LIQ_RANK[b] === undefined ? v : b;
 }
-// (magic 11b) WARD LIGHT (248): the ward wall's and dome's cells — the toughest there is, and never broken while they last (they go back to air on their own clock)
-const MAGIC_WARD_MAT = 248;
-function matStrengthSrv(mats, v) { if (v === MAGIC_WARD_MAT) return 9; if (v < CUSTOM_MAT_MIN) return BUILTIN_STRENGTH[v] || 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
+function matStrengthSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return BUILTIN_STRENGTH[v] || 1; const d = mats[v]; return d ? ((d.strength | 0) || 1) : 1; }
 const BUILTIN_UNBREAKABLE = new Set([7, 13]);          // built-in conveyor belts are unbreakable (matches client TERRAIN_MATS)
-function matBreakableSrv(mats, v) { if (v === MAGIC_WARD_MAT) return false; if (v < CUSTOM_MAT_MIN) return !BUILTIN_UNBREAKABLE.has(v); const d = mats[v]; return !d || d.breakable !== false; }
+function matBreakableSrv(mats, v) { if (v < CUSTOM_MAT_MIN) return !BUILTIN_UNBREAKABLE.has(v); const d = mats[v]; return !d || d.breakable !== false; }
 // Carve one cell with breakable/strength semantics (mirrors the client's carveCellHp). Returns true if cleared.
 // `hard` (the editor Carve tool) removes any cell outright; without it (gameplay slam) the rules apply.
 function carveCellSrv(grid, hp, mats, i, hard) {
@@ -16477,7 +16464,7 @@ const TERRAIN_MAT_HI = 255;                          // grid is Uint8 → materi
 // material. That was a latent bug before the window existed (an uninstalled custom mat did the same thing) and
 // it threw every frame the first time the window was switched on. Allocating up to 255 would make it reachable
 // by an ordinary player creating enough blocks. 250..254 are left spare on purpose.
-const CUSTOM_MAT_HI = 247;   // (2026-11-19: 249 is a boulder's rock, `BODY_STONE` — was 249) · (2026-11-22, magic 11b: 248 is WARD LIGHT, `MAGIC_WARD_MAT` — was 248)
+const CUSTOM_MAT_HI = 248;   // (2026-11-19: 249 is a boulder's rock, `BODY_STONE` — was 249)
 // ---- Custom material registry (Stage 6 feature A): per-room map of custom mat id → opaque appearance/property def.
 // The server stores + dedups + assigns ids; it does NOT interpret the def physically (the client clones a base mat).
 // ⚠️ MOVED 18 → 90 by the world-redesign port (increment 1): ids 18..89 are now the generator's 72 materials.
@@ -29060,8 +29047,9 @@ io.on('connection', (socket) => {
     // (5d) SPIKES / PILLAR / BRIDGE: their cells worked out now — nowhere to put them, refused before anything is spent. (5d round 2, the user) the SPIKES start on the ground under
     //   the CATALYST'S TIP (the cast's own x, y — they began under the player 'in a dodgy way') and run towards the pointer; the PILLAR rises under the CASTER'S FEET (`bx`, `by` —
     //   'otherwise it is basically the same thing as the stone wall'); the bridge from the caster's feet towards the pointer
-    // (magic 11b) THE WARD WALL where the caster's game put it · THE DOME round the caster's feet — nowhere for it: refused before anything is spent
-    let WWL = null; if (S.kind === 'wardwall') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 300) + 8 ? ((S.reach || 300) + 8) / d : 1; WWL = magicWardWallPlan(room, m.x + dx * k, m.y + dy * k, S); if (!WWL) return no('room'); }
+    // (magic 11b round 3) A WARD LINE as the caster's game found it: where it stands (`tx`) and from rock to rock (`ly0`..`ly1`, at most `high` cells), near the point
+    let WL = null; if (S.kind === 'wardline') { if (![m.tx, m.ty, m.ly0, m.ly1].every(v => isFinite(v))) return no('bad'); const d = Math.hypot(m.tx - m.x, m.ty - m.y);
+      if (d > (S.reach || 300) + 40 || +m.ly0 > +m.ty || +m.ly1 < +m.ty || +m.ly1 - +m.ly0 > (S.high || 16) * TERRAIN_CELL + 8) return no('bad'); WL = { x: Math.round(+m.tx), y0: Math.round(+m.ly0), y1: Math.round(+m.ly1) }; }
     // (11b round 2) THE DOME: no cells — where the caster's feet are (every screen keeps it there and stops what flies into it)
     if (S.kind === 'warddome' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     let MADE = null; if (S.kind === 'spikes' || S.kind === 'bridge' || S.kind === 'pillar') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad');
@@ -29147,8 +29135,11 @@ io.on('connection', (socket) => {
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
     if (S.kind === 'lift') out.obj = m.obj;
     // (magic 11b) the ward's cells grown from now (every screen draws its light over them, by `box`)
-    if (S.kind === 'warddome') { out.dx = Math.round(+m.bx); out.dy = Math.round(+m.by); out.R = SK.R || 64; out.secs = +(SK.secs || 10).toFixed(2); }
-    if (WWL) { out.n = magicWallLines(room, WWL.lines, Object.assign({}, SK, { ward: 1, crackS: 0 })); out.box = WWL.box.map(v => Math.round(v)); out.secs = +(SK.secs || 15).toFixed(2); }
+    // (magic 11b round 3) THE DOME, HELD: where its caster's feet are and its shape (`sh` 1 = the sphere) — it grows while held; its size is set at its end (`magicChanEnd`)
+    if (S.kind === 'warddome') { out.dx = Math.round(+m.bx); out.dy = Math.round(+m.by); out.sh = m.sh ? 1 : 0; out.cy = m.sh ? Math.round(+m.by - Math.max(4, Math.min(40, +m.br || 12))) : out.dy;
+      const q = _magicChans.get(id); if (q) { q.at = now; q.dx = out.dx; q.dy = out.dy; q.cy = out.cy; q.sh = out.sh; } }
+    // (magic 11b round 3) THE WARD LINE: every screen keeps it (its caster crosses it, nobody else)
+    if (WL) { out.lx = WL.x; out.ly0 = WL.y0; out.ly1 = WL.y1; out.secs = +(SK.secs || 30).toFixed(2); }
     // (magic 11a) WARD SKIN: how much it soaks and for how long (every screen keeps it on that body) · MIRROR WARD: kept while it holds
     if (S.kind === 'wardskin') { out.hp = SK.hp || 4; out.secs = +(SK.secs || 20).toFixed(2); }
     if (S.kind === 'mirror') { out.secs = +(SK.secs || 6).toFixed(2); _magicMirrors.set(socket.id, now + out.secs * 1000 + 300); }
@@ -29243,6 +29234,9 @@ io.on('connection', (socket) => {
   // ⭐ (magic 11a) A WARD SKIN STRUCK (or ended — `hp` 0, `q` quietly: its keeper died): its keeper's own game says what is left and where the blow came from; to everybody else
   socket.on('magic-ward', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const now = Date.now(); if (now - (socket._wardT || 0) < 40) return; socket._wardT = now;
     socket.to(room).emit('magic-ward', { to: socket.id, hp: Math.max(0, Math.min(40, Math.round((+m.hp || 0) * 100) / 100)), a: isFinite(m.a) ? +(+m.a).toFixed(2) : null, q: m.q ? 1 : 0 }); });
+  // ⭐ (magic 11b round 3) A WARD LINE STRUCK by a body it stopped (that body's own game says where): the ripple to everybody else
+  socket.on('magic-line-bump', (m) => { const room = currentAvatarRoom; if (!room || !m || !isFinite(m.y)) return; const now = Date.now(); if (now - (socket._lineT || 0) < 150) return; socket._lineT = now;
+    socket.to(room).emit('magic-line-bump', { id: m.id | 0, y: Math.round(+m.y) }); });
   socket.on('magic-blow', (m) => { const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || m.id.length > 80 || !isFinite(m.vx) || !isFinite(m.vy)) return;
     const now = Date.now(); if (now - (socket._blowAt || 0) < 33) return; socket._blowAt = now;
     io.to(room).emit('magic-blow', { id: m.id, vx: Math.max(-60, Math.min(60, +m.vx)), vy: Math.max(-60, Math.min(60, +m.vy)), from: socket.id }); });
