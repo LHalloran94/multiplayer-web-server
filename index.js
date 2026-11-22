@@ -3841,6 +3841,29 @@ const _magicChans = new Map();
 const _magicMarks = new Map();
 // (magic 10d) SPACE's DOORWAYS: pair id → { id, by, room, a: {x, y}, b: {x, y} | null, at, until, S } · caster's socket id → their pair's id
 const _magicDoors = new Map(), _magicDoorBy = new Map();
+// ⭐ (magic 10e) SPACE's POCKET: the one loose thing a player has folded away, by PLAYER KEY (the slot is theirs across reconnects) and kept in `magic_meta` as 'pocket:<key>'
+//   (a restart keeps it — the thing is out of the world and its chunk's save, so this is the only record of it): { room (where it came from), obj (its whole record), at } or null
+const _magicPockets = new Map();
+function magicPocketGet(pk) { if (!pk) return null; if (_magicPockets.has(pk)) return _magicPockets.get(pk); let q = null;
+  try { const r = db.prepare('SELECT v FROM magic_meta WHERE k = ?').get('pocket:' + pk); if (r) q = JSON.parse(r.v); } catch (e) { q = null; } _magicPockets.set(pk, q); return q; }
+function magicPocketPut(pk, q) { if (!pk) return; _magicPockets.set(pk, q);
+  try { if (q) db.prepare('INSERT OR REPLACE INTO magic_meta (k, v) VALUES (?, ?)').run('pocket:' + pk, JSON.stringify(q)); else db.prepare('DELETE FROM magic_meta WHERE k = ?').run('pocket:' + pk); } catch (e) {} }
+// what its owner's game is told: full or not, here (this room) or not, and enough to find room for it where it is unfolded
+function magicPocketSay(pk, room) { const q = magicPocketGet(pk); if (!q || !q.obj) return { full: 0 };
+  return { full: 1, here: q.room === room ? 1 : 0, id: q.obj.id, look: q.obj.look || null, content: q.obj.content || null, item: q.obj.item || null, w: q.obj.w || 16, h: q.obj.h || 16 }; }
+// TAKEN OUT of the world (as the rock chunk takes a boulder: its cells out of the ground, its state, cover, drivers) at its pose now, and into the pocket
+function magicPocketFold(room, obj, pk) { const map = roomObjects[room]; if (!map || map.get(obj.id) !== obj) return false; const P = magicBoulderPose(room, obj);
+  bodyUnstamp(room, obj.id, true); objStOf(room).delete(obj.id); coverDrop(room, obj.id); { const dm = roomObjDrv[room]; if (dm) dm.delete(obj.id); const dl = roomObjDrvAt[room]; if (dl) dl.delete(obj.id); }
+  objUnindex(room, obj); _magicBoulders.delete(obj.id);
+  emitObjToChunks(room, obj, 'avatar-object-removed', { id: obj.id, pocket: 1 }); broadcastObjSt(room);
+  const rec = Object.assign({}, obj, { x: Math.round(P.x), y: Math.round(P.y), angle: +(+P.a || 0).toFixed(4) }); delete rec.ch; delete rec.chs; for (const k of Object.keys(rec)) if (k[0] === '_') delete rec[k];
+  magicPocketPut(pk, { room, obj: rec, at: Date.now() }); return true; }
+// UNFOLDED with its box's middle at (x, y) in the room it came from, its driving given to `by` (it falls from there) → the object
+function magicPocketUnfold(room, q, x, y, by, pk) { const obj = Object.assign({}, q.obj, { x: Math.round(x), y: Math.round(y) });
+  if (roomObjects[room] && roomObjects[room].has(obj.id)) obj.id = obj.id + '-u' + (Date.now() % 1e8).toString(36);
+  magicPocketPut(pk, null); objIndex(room, obj); emitObjToChunks(room, obj, 'avatar-object-add', obj);
+  if (by) { const D = roomObjDrv[room] || (roomObjDrv[room] = new Map()), L = roomObjDrvAt[room] || (roomObjDrvAt[room] = new Map()); D.set(obj.id, by); L.set(obj.id, Date.now()); }
+  broadcastObjSt(room); return obj; }
 function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) return; _magicChans.delete(id);
   { const ST = _magicStorms.get(id); if (ST) for (let i = 0; i < ST.clouds.length; i++) { const c = _magicClouds.get(id + (i + 1) / 10); if (c) c.until = Math.min(c.until, Date.now()); } }   // (8a round 3) a thunderstorm let go: its rain stops
   const sk = io.sockets.sockets.get(q.by); let cd = 0;
@@ -28992,6 +29015,12 @@ io.on('connection', (socket) => {
     // (magic 10d) DOORWAYS: the first of a pair, or the second (its caster's pair waiting, set within a minute, near enough to the first)
     let DR = null; if (S.kind === 'doorway') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const cur = _magicDoorBy.get(socket.id), q = cur != null ? _magicDoors.get(cur) : null;
       if (q && q.room === room && !q.b && now - q.at < 60000) { if (Math.hypot(+m.tx - q.a.x, +m.ty - q.a.y) > (S.pair || 1500) + 20) return no('far'); DR = { q, end: 'b' }; } else DR = { end: 'a', old: q }; }
+    // (magic 10e) POCKET: empty — a loose thing nobody holds (not a grappling hook: its rope), near enough, folded away · full — unfolded where pointed, only in the room it came from
+    let PK = null; if (S.kind === 'pocket') { const pk = playerKeyFor(socket.id), cur = magicPocketGet(pk);
+      if (cur && cur.obj) { if (cur.room !== room) return no('elsewhere'); if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); PK = { out: cur, pk }; }
+      else { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null;
+        if (!ob || ob.type !== 'stamp' || !ob.loose || ob.eq || (hm && hm.has(m.obj)) || (HELD.is(ob.look) && HELD.LOOKS[ob.look].hook) || ob.look === 'rope') return no('nothing');
+        const P0 = magicBoulderPose(room, ob); if (p && now - p.t < 4000 && Math.hypot(P0.x - p.x, P0.y - p.y) > (S.reach || 320) + 600) return no('far'); PK = { into: ob, pk }; } }
     let MK = null; if (S.kind === 'recall') { MK = _magicMarks.get(socket.id); if (!MK || MK.room !== room || now > MK.until) return no('nomark'); }
     if ((S.kind === 'blink' || S.kind === 'pass') && (!isFinite(m.tx) || !isFinite(m.ty) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 9b) HEAVY / WEIGHTLESS: a loose thing nobody holds, or a player in this room near enough (yourself, the dummy on its caster's machine)
@@ -29107,6 +29136,15 @@ io.on('connection', (socket) => {
         const q = { id, by: socket.id, room, a: { x: out.tx, y: out.ty }, b: null, at: now, until: now + 62000, S: SK, pour: !!socket._magicDoorPour }; _magicDoors.set(id, q); _magicDoorBy.set(socket.id, id);
         out.door = { id, a: [q.a.x, q.a.y], b: null, left: 62000 }; if (!SC && !socket._magicNoCd) { cds[m.spell] = now + 400; out.cd = 400; } }
       else { const q = DR.q; q.pour = !!socket._magicDoorPour; q.b = { x: out.tx, y: out.ty }; q.until = now + (SK.secs || 30) * 1000; out.door = { id: q.id, a: [q.a.x, q.a.y], b: [q.b.x, q.b.y], left: q.until - now }; } }
+    // (magic 10e) THE POCKET: folding — every screen shows it folding away for `ms` (its caster holds it still), then it is taken out of the world · unfolding — put back where
+    //   pointed (sent before this cast, so every screen has it to grow out of the rift), its caster's game lets it fall
+    if (PK && PK.into) { const ob = PK.into, by = socket.id, pk = PK.pk, ms = S.foldMs || 450; out.obj = ob.id; out.fold = 1; out.ms = ms;
+      { bodyUnstamp(room, ob.id, true); const D = roomObjDrv[room] || (roomObjDrv[room] = new Map()), L = roomObjDrvAt[room] || (roomObjDrvAt[room] = new Map()); D.set(ob.id, by); L.set(ob.id, now); broadcastObjSt(room); }
+      setTimeout(() => { const mp = roomObjects[room], o2 = mp && mp.get(ob.id), hm2 = roomObjHeld[room]; let ok = false;
+        if (o2 && !(hm2 && hm2.has(ob.id)) && !(magicPocketGet(pk) || {}).obj) ok = magicPocketFold(room, o2, pk);
+        const s2 = io.sockets.sockets.get(by); if (s2) s2.emit('magic-pocket', magicPocketSay(pk, socketToAvatarRoom[by])); if (ok) io.to(room).emit('magic-pocket-by', { by, full: 1 }); }, ms); }
+    if (PK && PK.out) { const o2 = magicPocketUnfold(room, PK.out, out.tx, out.ty, socket.id, PK.pk); out.obj = o2.id; out.unfold = 1; out.ms = S.foldMs || 450;
+      socket.emit('magic-pocket', magicPocketSay(PK.pk, room)); io.to(room).emit('magic-pocket-by', { by: socket.id, full: 0 }); }
     if (MK) { out.tx = MK.x; out.ty = MK.y; const q = _magicChans.get(id); if (q) q.mark = { x: MK.x, y: MK.y }; }
     if (S.kind === 'weight') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 10).toFixed(2); }   // (magic 9b)
     if (S.kind === 'stasis') { if (typeof m.obj === 'string') out.obj = m.obj; else out.tgt = m.tgt; out.secs = +(SK.secs || 5).toFixed(2); out.hold = +(S.holdS || 1.5).toFixed(2); }   // (magic 9c)
@@ -29277,7 +29315,15 @@ io.on('connection', (socket) => {
     socket.emit('magic-marks', { marks: list });
     // (magic 10d) …and the room's doorways
     const dl = []; for (const [k, q] of _magicDoors) if (q.room === room && now < q.until) dl.push({ id: k, by: q.by, a: [q.a.x, q.a.y], b: q.b ? [q.b.x, q.b.y] : null, left: q.until - now, age: now - q.at });
-    socket.emit('magic-doors', { doors: dl }); });
+    socket.emit('magic-doors', { doors: dl });
+    // (magic 10e) …your own pocket, and who here has something in theirs
+    socket.emit('magic-pocket', magicPocketSay(playerKeyFor(socket.id), room)); const pf = [];
+    for (const sid in socketToAvatarRoom) if (socketToAvatarRoom[sid] === room && sid !== socket.id) { const q = magicPocketGet(playerKeyFor(sid)); if (q && q.obj) pf.push(sid); }
+    socket.emit('magic-pockets', { by: pf }); });
+  // (magic 10e) you died: what is in your pocket falls out where you died (near where your game last said you were), if you are in the room it came from
+  socket.on('magic-pocket-drop', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const pk = playerKeyFor(socket.id), q = magicPocketGet(pk); if (!q || !q.obj || q.room !== room) return;
+    const p = socket._avPos; let x = +m.x, y = +m.y; if (!isFinite(x) || !isFinite(y) || (p && Math.hypot(x - p.x, y - p.y) > 300)) { if (!p) return; x = p.x; y = p.y - 20; }
+    const o2 = magicPocketUnfold(room, q, x, y, null, pk); socket.emit('magic-pocket', magicPocketSay(pk, room)); io.to(room).emit('magic-pocket-by', { by: socket.id, full: 0, drop: o2.id }); });
   // (magic 10d) a bolt of mine came out of a doorway: it flies on from there (its hits are measured from there)
   socket.on('magic-bolt-door', (m) => { const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return; const now = Date.now(); let ok = false;
     for (const q of _magicDoors.values()) if (q.room === L.room && q.b && now < q.until + 500) for (const E of [q.a, q.b]) if (Math.hypot(m.x - E.x, m.y - E.y) < 90) ok = true;

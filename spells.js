@@ -155,6 +155,10 @@
     //   (server `_magicDoors`). The first's cooldown is short — the full one starts with the second.
     doorways: { name: 'Doorways', school: 'space', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'doorway', learn: 5, reach: 400, pair: 1500, secs: 30, flow: 6, fx: '#b08cff',
       plain: { keys: [D, D, L, U, R], rune: [3, 5, 6, 2, 1] } },
+    // ⭐ STEP 10e (2026-11-22) SPACE: POCKET (kind 'pocket') — empty: the loose thing nearest the pointer within `reach` folds away into nothing over `foldMs` (the server keeps it,
+    //   one a player — `_magicPockets`); full: cast again and it unfolds where you point (within `reach`, where it fits), in the world it came from. You die: it falls out there.
+    pocket: { name: 'Pocket', school: 'space', form: 'touch', tier: 1, cd: 6, stance: 'level', kind: 'pocket', learn: 5, reach: 320, foldMs: 450, fx: '#b08cff',
+      plain: { keys: [L, L, D, L, R], rune: [5, 7, 4, 3, 6] } },
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
     grow_o: { name: 'Grow (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mega', secs: 15, alt: 'grow', other: true, reach: 240, plain: { keys: [U, L, U, R, D], rune: [7, 3, 1, 5, 4] } },
@@ -491,6 +495,8 @@
     swap: [[L, R], [4, 3, 5]], callback: [[L, D], [4, 5, 3]], rewind_o: [[R, U], [4, 3, 0, 2]],
     // (10d) a door's outline: up its side, along the bottom, up the other side
     doorways: [[U, D], [4, 0, 6, 8, 2]],
+    // (10e) down into it and away — folded into a corner
+    pocket: [[D, R], [4, 8, 6]],
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
     closewounds: [[D, D], [4, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
