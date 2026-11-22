@@ -183,6 +183,14 @@
       plain: { keys: [D, U, L, R, U], rune: [1, 7, 6, 8, 2] } },
     warddome: { name: 'Ward dome', school: 'wards', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'warddome', learn: 5, chan: true, chanS: 2.5, chargeS: 2.5, Rmin: 56, Rmax: 140, secs: 10, fx: '#ffd86b',
       plain: { keys: [D, R, U, L, L], rune: [1, 7, 6, 8, 5] } },
+    // ⭐ STEP 11c (2026-11-22) WARDS AGAINST MAGIC: NULL CIRCLE (kind 'nullc') — a ring of gold glyphs on the ground where you point, `R` px round (18 cells across), and a faint
+    //   dome of upright light lines over it, `secs` s: no spell is cast from inside it, its caster's too (the server refuses), a held spell inside ends, a spell bolt fizzles at
+    //   its edge; arrows and thrown things pass (the ward dome stops everything flying). DISPEL (kind 'dispel') — a gold ring sweeping out from the pointer to `R` px in `ms`:
+    //   every spell effect it reaches ends, each popping into gold motes; the cells a spell made for a time go back early. Not a pocketed thing.
+    nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'nullc', learn: 5, reach: 320, secs: 20, R: 72, fx: '#ffd86b',
+      plain: { keys: [U, D, R, L, D], rune: [6, 8, 5, 3, 0] } },
+    dispel: { name: 'Dispel', school: 'wards', form: 'placed', tier: 1, cd: 15, stance: 'level', kind: 'dispel', learn: 5, reach: 320, R: 120, ms: 450, fx: '#ffd86b',
+      plain: { keys: [R, U, D, L, U], rune: [8, 4, 0, 1, 2] } },
     fireward_o: { name: 'Fire ward (on another)', school: 'wards', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'fireproof', secs: 20, alt: 'fireward', other: true, reach: 240, plain: { keys: [L, D, R, U, L], rune: [0, 6, 8, 2, 1] } },
     chillbolt: { name: 'Chill bolt', school: 'frost', form: 'bolt', tier: 0, cd: 4, stance: 'level', kind: 'bolt', learn: 3, speed: 640, life: 1.1, grav: 0.05, r: 3, dmg: 0.4, slow: 0.55, slowS: 4, freezeN: 2, freezeS: 20,
       plain: { keys: [D, D, R, U, R], rune: [2, 4, 3, 6, 7] } },
@@ -520,6 +528,8 @@
     wardskin: [[U, U], [4, 1]], wardskin_o: [[R, U], [4, 1, 2]], mirror: [[L, R], [4, 3, 5]],
     // (11b) a line stood up · round you, as the flame ring
     wardline: [[D, U], [4, 7, 1]], warddome: [[D, D], [4, 3, 1, 5]],
+    // (11c) a ring on the ground · a slash through the middle
+    nullcircle: [[R, D], [4, 5, 7, 3]], dispel: [[D, R], [4, 2, 6]],
     closewounds: [[D, D], [4, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],

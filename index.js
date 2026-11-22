@@ -3846,6 +3846,42 @@ const _magicDoors = new Map(), _magicDoorBy = new Map();
 const _magicPockets = new Map();
 // ⭐ (magic 11a) WARDS' MIRROR WARD: socket id → until (ms) — while it holds, its owner's game may take over things flying at it (catch's 'magic-catch-obj' / 'magic-catch-bolt')
 const _magicMirrors = new Map();
+// ⭐ (magic 11c) WARDS' NULL CIRCLES: cast id → { id, room, by, x, y (the ground at its middle), R, until }. Inside one (a half-disc of radius R over its ground, a little below
+//   too) no spell is cast — anybody's, its caster's too — and a held spell whose caster is inside ends (checked each quarter second)
+const _magicNulls = new Map();
+function magicNullAt(room, x, y) { if (!_magicNulls.size || !isFinite(x) || !isFinite(y)) return null; const now = Date.now();
+  for (const q of _magicNulls.values()) if (q.room === room && now < q.until && y <= q.y + 16 && Math.hypot(x - q.x, y - q.y) <= q.R) return q; return null; }
+// a player inside one: where their own game last said they were (their middle, `_avPos` is the feet)
+function magicNullHolds(room, sk) { const p = sk && sk._avPos; return !!(p && Date.now() - p.t < 4000 && magicNullAt(room, p.x, p.y - 12)); }
+setInterval(() => { if (!_magicNulls.size) return; const now = Date.now();
+  for (const [k, q] of _magicNulls) if (now > q.until) _magicNulls.delete(k);
+  for (const [id, q] of _magicChans) { const sk = io.sockets.sockets.get(q.by); if (sk && magicNullHolds(q.room, sk)) magicChanEnd(id, 'null'); } }, 250);
+// ⭐ (magic 11c) DISPEL: what this server keeps that the ring reaches — each ends at its moment (the ring sweeping out over `ms`, by how far it is from the middle); every screen
+//   ends its own drawn effects from the same cast (the client's `magicDispelFx`)
+function magicDispel(room, cx, cy, R, ms, by) {
+  const now = Date.now(), at = (x, y, r) => { const d = Math.hypot(x - cx, y - cy) - (r || 0); return d <= R ? Math.max(0, d) / R * ms : -1; }, later = (t, f) => { if (t <= 5) f(); else setTimeout(f, t); };
+  const sockAt = (sid) => { const sk = io.sockets.sockets.get(sid), p = sk && sk._avPos; return p && Date.now() - p.t < 4000 && socketToAvatarRoom[sid] === room ? p : null; };
+  let n = 0;
+  for (const [k, q] of _magicNulls) { if (q.room !== room) continue; const t = at(q.x, q.y, q.R); if (t >= 0) { n++; later(t, () => _magicNulls.delete(k)); } }
+  for (const [k, q] of _magicChans) { if (q.room !== room) continue; const p = sockAt(q.by), t = p ? at(p.x, p.y - 12) : at(q.x, q.y); if (t >= 0) { n++; later(t, () => magicChanEnd(k, 'dispel')); } }
+  { const rs = _magicRunes.get(room); if (rs) for (const q of rs.slice()) { const t = at(q.x, q.y); if (t >= 0) { n++; later(t, () => { const rs2 = _magicRunes.get(room), i = rs2 ? rs2.indexOf(q) : -1; if (i >= 0) { rs2.splice(i, 1); io.to(room).emit('magic-rune-gone', { id: q.id }); } }); } } }
+  for (const [k, q] of _magicDoors) { if (q.room !== room) continue; const ta = at(q.a.x, q.a.y), tb = q.b ? at(q.b.x, q.b.y) : -1, t = ta >= 0 && tb >= 0 ? Math.min(ta, tb) : Math.max(ta, tb); if (t < 0) continue; n++;
+    later(t, () => { if (!_magicDoors.has(k)) return; _magicDoors.delete(k); if (_magicDoorBy.get(q.by) === k) _magicDoorBy.delete(q.by); io.to(room).emit('magic-door-gone', { id: k, why: 'dispel' }); }); }
+  for (const [sid, q] of _magicMarks) { if (q.room !== room) continue; const t = at(q.x, q.y); if (t >= 0) { n++; later(t, () => { if (_magicMarks.get(sid) === q) { _magicMarks.delete(sid); io.to(room).emit('magic-mark-gone', { by: sid, why: 'dispel' }); } }); } }
+  // the placed things that end on their own clock (clouds, whirlwinds, updrafts, ball lightning, whirlpools, waves): their time is up now
+  const T = TERRAIN_CELL, ends = (M, pos) => { for (const q of M.values()) { if (q.room !== room || !(q.until > now)) continue; const P = pos(q), t = P ? at(P[0], P[1], P[2]) : -1; if (t >= 0) { n++; later(t, () => { q.until = Math.min(q.until, Date.now()); }); } } };
+  ends(_magicClouds, (q) => [q.x, q.y, (q.w || 0) / 2]); ends(_magicWhirls, (q) => [q.x, q.y - 30]); ends(_magicDrafts, (q) => [q.x, q.gy - 40]); ends(_magicBalls, (q) => [q.x, q.y]);
+  ends(_magicPools, (q) => [(q.c + 0.5) * T, q.sr * T, (q.R || 0) * T]); ends(_magicWaves, (q) => [q.x, q.gr * T]);
+  // what is on a body: a flame ring, a flaming / storm weapon, a mirror ward — by where its keeper stands
+  for (const q of _magicAuras.values()) { if (q.room !== room) continue; const p = sockAt(q.by), t = p ? at(p.x, p.y - 12) : -1; if (t >= 0) { n++; later(t, () => { q.until = Math.min(q.until, Date.now()); }); } }
+  for (const M of [_magicBlades, _magicStormBlades]) for (const [sid, q] of M) { if (q.room !== room) continue; const p = sockAt(sid), t = p ? at(p.x, p.y - 12) : -1; if (t >= 0) { n++; later(t, () => { q.until = Math.min(q.until, Date.now()); }); } }
+  for (const [sid] of _magicMirrors) { const p = sockAt(sid), t = p ? at(p.x, p.y - 12) : -1; if (t >= 0) { n++; later(t, () => _magicMirrors.delete(sid)); } }
+  // THE CELLS a spell made for a time (ice, stone and ice walls, the frost path, a cloud's snow): put back now, each as the ring reaches it
+  { const M = magicTemp.get(room), st = cellsOf(room); if (M && st && st.rows) { const due = new Map();
+    for (const [i, Q] of M) { const c = Math.floor(i / st.rows), r = i % st.rows, t = at((c + 0.5) * T, (r + 0.5) * T); if (t < 0) continue; const k = Math.round(t / 60) * 60; let g = due.get(k); if (!g) due.set(k, g = []); g.push(i); Q.until = Math.min(Q.until, now + k); Q.crack = 0; Q.sch = 1; }
+    for (const [k, list] of due) { n += list.length; later(k, () => magicTempEnd(room, list)); } } }
+  return n;
+}
 function magicPocketGet(pk) { if (!pk) return null; if (_magicPockets.has(pk)) return _magicPockets.get(pk); let q = null;
   try { const r = db.prepare('SELECT v FROM magic_meta WHERE k = ?').get('pocket:' + pk); if (r) q = JSON.parse(r.v); } catch (e) { q = null; } _magicPockets.set(pk, q); return q; }
 function magicPocketPut(pk, q) { if (!pk) return; _magicPockets.set(pk, q);
@@ -29007,6 +29043,8 @@ io.on('connection', (socket) => {
     if (!SC && left > 120 && !socket._magicNoCd) return no('cooldown', left);
     if (!isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return no('bad');
     const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 520) return no('far');
+    // (magic 11c) INSIDE A NULL CIRCLE nothing is cast — the catalyst's tip or the caster's body in one (its caster too)
+    if (magicNullAt(room, +m.x, +m.y) || magicNullHolds(room, socket)) return no('null');
     // (magic step 3g) a LIFT names a loose thing nobody holds · a DOUBLE starts by its caster and walks no faster than a run
     if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
     if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
@@ -29198,6 +29236,12 @@ io.on('connection', (socket) => {
     if (S.kind === 'change' && !shot) out.n = magicChange(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK, m.spell);
     if (S.kind === 'rune') { const rs = magicRunesOf(room), mine = rs.filter(q => q.by === socket.id); while (mine.length >= (S.most || 3)) { const q = mine.shift(); rs.splice(rs.indexOf(q), 1); io.to(room).emit('magic-rune-gone', { id: q.id }); }
       rs.push({ id, by: socket.id, x: out.tx, y: out.ty, at: now + (S.armS || 1.5) * 1000, until: now + (SK.secs || 180) * 1000, spell: m.spell, pow: powK }); }
+    // ⭐ (magic 11c) THE NULL CIRCLE: on the ground under the point (none there: refused); a held spell whose caster stands in it ends now · DISPEL: from the point, its sweep
+    if (S.kind === 'nullc') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
+      const R = S.R || 72, secs = +(SK.secs || 20).toFixed(2); out.tx = Math.round(out.tx); out.ty = g.y; out.R = R; out.secs = secs;
+      _magicNulls.set(id, { id, room, by: socket.id, x: out.tx, y: out.ty, R, until: now + secs * 1000 });
+      for (const [k, q] of _magicChans) { const sk = io.sockets.sockets.get(q.by); if (q.room === room && sk && magicNullHolds(room, sk)) magicChanEnd(k, 'null'); } }
+    if (S.kind === 'dispel') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = S.R || 120; out.ms = S.ms || 450; out.n = magicDispel(room, out.tx, out.ty, out.R, out.ms, socket.id); }
     io.to(room).emit('magic-cast', out);
   });
   // ⭐ (magic step 2h, the user: "go back to scrolls being one-handed … you activate it and then it burns and is consumed and your hand glows … and you fire it from there") A SCROLL READ:
@@ -29370,6 +29414,8 @@ io.on('connection', (socket) => {
     const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
     _magicLive.delete(m.id);
     if (Date.now() > L.until || Math.hypot(m.x - L.x, m.y - L.y) > L.reach) return;
+    // (magic 11c) ended in a NULL CIRCLE (at its edge, flying in): it fizzles — nothing lands, nothing bursts, nothing catches
+    if (magicNullAt(L.room, +m.x, +m.y)) { io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air: 1, nul: 1, spell: L.spell, from: L.by }); return; }
     // ⭐ (step 6a) A FIREBALL BURSTS wherever it ends — on what it touched, or in the air at the end of its flight: everything that burns in its reach catches (not in liquid: steam)
     if (L.burst) { const liq = m.liq ? 1 : 0, n0 = liq ? 0 : magicFireBurst(L.room, +m.x, +m.y, L.burst);
       io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air: 0, land: 'burst', r: L.burst, liq, pow: +(L.pow || 1).toFixed(2), n: n0, spell: L.spell, from: L.by, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined }); return; }
