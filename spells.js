@@ -174,6 +174,13 @@
       plain: { keys: [L, U, U, R, L], rune: [0, 2, 5, 4, 3] } },
     mirror: { name: 'Mirror ward', school: 'wards', form: 'self', tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 10, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
       plain: { keys: [R, D, L, U, R], rune: [2, 0, 3, 5, 8] } },
+    // ⭐ STEP 11b (2026-11-22) WARDS: WARD WALL (kind 'wardwall') — an upright pane `wide` × `high` cells of WARD LIGHT (material 248: solid to everything, never broken,
+    //   see-through) where you point (anywhere in `reach`, the air too), `secs` s, grown a cell every `rowMs` from its middle. WARD DOME (its variant, kind 'warddome') — a
+    //   half-dome of it round you, radius `R` cells about your feet. Both go in sparkles (a cell every `crumbleMs`, the far ends first).
+    wardwall: { name: 'Ward wall', school: 'wards', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'wardwall', learn: 3, reach: 300, secs: 15, wide: 1, high: 6, rowMs: 35, crumbleMs: 25, thruLiq: true, alts: ['warddome'], fx: '#ffd86b',
+      plain: { keys: [D, U, L, R, U], rune: [1, 7, 6, 8, 2] } },
+    warddome: { name: 'Ward dome', school: 'wards', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'warddome', alt: 'wardwall', secs: 10, R: 8, rowMs: 25, crumbleMs: 15, thruLiq: true, fx: '#ffd86b',
+      plain: { keys: [D, R, U, L, L], rune: [1, 7, 6, 8, 5] } },
     fireward_o: { name: 'Fire ward (on another)', school: 'wards', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'fireproof', secs: 20, alt: 'fireward', other: true, reach: 240, plain: { keys: [L, D, R, U, L], rune: [0, 6, 8, 2, 1] } },
     chillbolt: { name: 'Chill bolt', school: 'frost', form: 'bolt', tier: 0, cd: 4, stance: 'level', kind: 'bolt', learn: 3, speed: 640, life: 1.1, grav: 0.05, r: 3, dmg: 0.4, slow: 0.55, slowS: 4, freezeN: 2, freezeS: 20,
       plain: { keys: [D, D, R, U, R], rune: [2, 4, 3, 6, 7] } },
@@ -509,6 +516,8 @@
     rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
     // (11a) raised over you · the on-another's one more mark to the top right · back the way it came
     wardskin: [[U, U], [4, 1]], wardskin_o: [[R, U], [4, 1, 2]], mirror: [[L, R], [4, 3, 5]],
+    // (11b) a pane stood up · round you, as the flame ring
+    wardwall: [[D, U], [4, 7, 1]], warddome: [[D, D], [4, 3, 1, 5]],
     closewounds: [[D, D], [4, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
