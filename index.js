@@ -3844,6 +3844,8 @@ const _magicDoors = new Map(), _magicDoorBy = new Map();
 // ⭐ (magic 10e) SPACE's POCKET: the one loose thing a player has folded away, by PLAYER KEY (the slot is theirs across reconnects) and kept in `magic_meta` as 'pocket:<key>'
 //   (a restart keeps it — the thing is out of the world and its chunk's save, so this is the only record of it): { room (where it came from), obj (its whole record), at } or null
 const _magicPockets = new Map();
+// ⭐ (magic 11a) WARDS' MIRROR WARD: socket id → until (ms) — while it holds, its owner's game may take over things flying at it (catch's 'magic-catch-obj' / 'magic-catch-bolt')
+const _magicMirrors = new Map();
 function magicPocketGet(pk) { if (!pk) return null; if (_magicPockets.has(pk)) return _magicPockets.get(pk); let q = null;
   try { const r = db.prepare('SELECT v FROM magic_meta WHERE k = ?').get('pocket:' + pk); if (r) q = JSON.parse(r.v); } catch (e) { q = null; } _magicPockets.set(pk, q); return q; }
 function magicPocketPut(pk, q) { if (!pk) return; _magicPockets.set(pk, q);
@@ -29124,6 +29126,9 @@ io.on('connection', (socket) => {
       _magicStrikes.set(id, q); out.cx = Math.round(SKY.x); out.cy = Math.round(SKY.y); out.gy = Math.round(SKY.gy); out.w = (S.wide || 10) * TERRAIN_CELL; out.gather = gat;
       setTimeout(() => { if (!q.done) magicSkyStrikeDo(id, q, q.x, Math.min(q.gy, q.top + 60 * TERRAIN_CELL), null, null); }, gat + 1500); }
     if (S.kind === 'lift') out.obj = m.obj;
+    // (magic 11a) WARD SKIN: how much it soaks and for how long (every screen keeps it on that body) · MIRROR WARD: kept while it holds
+    if (S.kind === 'wardskin') { out.hp = SK.hp || 4; out.secs = +(SK.secs || 20).toFixed(2); }
+    if (S.kind === 'mirror') { out.secs = +(SK.secs || 6).toFixed(2); _magicMirrors.set(socket.id, now + out.secs * 1000 + 300); }
     if (S.kind === 'blink' || S.kind === 'pass') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); }
     // (magic 10b) a MARK kept (the last one, wherever it was, gone) · a RECALL told where the mark is (its held record too)
     if (S.kind === 'mark') { const ex = _magicMarks.get(socket.id); out.tx = Math.round(+m.bx); out.ty = Math.round(+m.by); _magicMarks.set(socket.id, { id, room, x: out.tx, y: out.ty, at: now, until: now + (SK.secs || 600) * 1000 });
@@ -29201,7 +29206,7 @@ io.on('connection', (socket) => {
   // ⭐ (magic 9d) CATCH: while a socket holds a catch (a held spell of kind 'catch'), a thing flying into its disc is HANDED to it — a loose thing's driving (the thrower's lease
   //   overridden: `roomObjDrv`), a spell bolt's hits (`_magicLive` `by`), told to everybody ('magic-caught'); let go, a caught bolt flies again from where it hung, the catcher's
   //   ('magic-flung'). A thing held by somebody's hands is never taken.
-  const magicCatching = () => { for (const q of _magicChans.values()) if (q.by === socket.id && SPELLS.of(q.spell) && SPELLS.of(q.spell).kind === 'catch') return q; return null; };
+  const magicCatching = () => { for (const q of _magicChans.values()) if (q.by === socket.id && SPELLS.of(q.spell) && SPELLS.of(q.spell).kind === 'catch') return q; const mu = _magicMirrors.get(socket.id); if (mu && Date.now() < mu) return { mirror: 1 }; return null; };   // (11a: a mirror ward too)
   socket.on('magic-catch-obj', (m) => { const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || !magicCatching()) return;
     const map = roomObjects[room], o = map && map.get(m.id); if (!o || !(o.type === 'stamp' && o.loose)) return; const hm = roomObjHeld[room]; if (hm && hm.has(m.id)) return;
     const D = roomObjDrv[room] || (roomObjDrv[room] = new Map()), L = roomObjDrvAt[room] || (roomObjDrvAt[room] = new Map()); D.set(m.id, socket.id); L.set(m.id, Date.now()); broadcastObjSt(room);
@@ -29212,6 +29217,9 @@ io.on('connection', (socket) => {
     const S = SPELLS.of(L.spell) || {}, v = Math.min(1500, Math.hypot(m.vx, m.vy)) || 1, k = v / (Math.hypot(m.vx, m.vy) || 1), lf = S.life || 1.2;
     L.x = Math.round(m.x); L.y = Math.round(m.y); L.until = Date.now() + lf * 1000 + 800; L.reach = v * lf + 0.5 * (S.grav || 0) * 1500 * lf * lf + 64;
     io.to(room).emit('magic-flung', { id: m.id, by: socket.id, x: L.x, y: L.y, vx: Math.round(m.vx * k), vy: Math.round(m.vy * k) }); });
+  // ⭐ (magic 11a) A WARD SKIN STRUCK (or ended — `hp` 0, `q` quietly: its keeper died): its keeper's own game says what is left and where the blow came from; to everybody else
+  socket.on('magic-ward', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const now = Date.now(); if (now - (socket._wardT || 0) < 40) return; socket._wardT = now;
+    socket.to(room).emit('magic-ward', { to: socket.id, hp: Math.max(0, Math.min(40, Math.round((+m.hp || 0) * 100) / 100)), a: isFinite(m.a) ? +(+m.a).toFixed(2) : null, q: m.q ? 1 : 0 }); });
   socket.on('magic-blow', (m) => { const room = currentAvatarRoom; if (!room || !m || typeof m.id !== 'string' || m.id.length > 80 || !isFinite(m.vx) || !isFinite(m.vy)) return;
     const now = Date.now(); if (now - (socket._blowAt || 0) < 33) return; socket._blowAt = now;
     io.to(room).emit('magic-blow', { id: m.id, vx: Math.max(-60, Math.min(60, +m.vx)), vy: Math.max(-60, Math.min(60, +m.vy)), from: socket.id }); });
