@@ -189,8 +189,16 @@
     //   every spell effect it reaches ends, each popping into gold motes; the cells a spell made for a time go back early. Not a pocketed thing.
     //   (11c round 3, the user: held to grow as the ward sphere, and bigger — it should stop casting over a large area) the null circle is HELD: from `Rmin` to `Rmax` px over
     //   `chargeS` s, set (and only then at work) on let-go.
-    nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'nullc', learn: 5, reach: 320, secs: 20, chan: true, chanS: 3, chargeS: 3, Rmin: 96, Rmax: 240, fx: '#ffd86b',
+    nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'nullc', learn: 5, reach: 320, secs: 60, chan: true, chanS: 3, chargeS: 3, Rmin: 96, Rmax: 240, fx: '#ffd86b',
       plain: { keys: [U, D, R, L, D], rune: [6, 8, 5, 3, 0] } },
+    // ⭐ STEP 11d (2026-11-22) WARDS ON PLACES AND THINGS: ALARM (kind 'alarm') — a small gold eye sigil on the ground where you point (faint to others, as the warding rune),
+    //   `most` a caster, `secs` s, awake after `armS` s: another player, the test dummy or a loose thing crossing it — a chime for its owner wherever they are, an arrow at the
+    //   edge of their screen and a ping on the minimap; the sigil flares on every screen. SEAL (kind 'seal') — rings of gold glyphs turning round a loose thing or a placed
+    //   object, `secs` s: nobody else's magic moves it, nothing breaks it, nobody else picks it up; bodies still push it.
+    alarm: { name: 'Alarm', school: 'wards', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'alarm', learn: 3, reach: 300, secs: 600, most: 3, armS: 1, fx: '#ffd86b',
+      plain: { keys: [U, R, D, U, L], rune: [3, 1, 5, 4, 6] } },
+    seal: { name: 'Seal', school: 'wards', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'seal', learn: 3, reach: 320, secs: 120, fx: '#ffd86b',
+      plain: { keys: [D, L, U, R, R], rune: [7, 3, 1, 5, 2] } },
     dispel: { name: 'Dispel', school: 'wards', form: 'placed', tier: 1, cd: 15, stance: 'level', kind: 'dispel', learn: 5, reach: 320, R: 120, ms: 450, fx: '#ffd86b',
       plain: { keys: [R, U, D, L, U], rune: [8, 4, 0, 1, 2] } },
     fireward_o: { name: 'Fire ward (on another)', school: 'wards', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'fireproof', secs: 20, alt: 'fireward', other: true, reach: 240, plain: { keys: [L, D, R, U, L], rune: [0, 6, 8, 2, 1] } },
@@ -532,6 +540,8 @@
     wardline: [[D, U], [4, 7, 1]], warddome: [[D, D], [4, 3, 1, 5]],
     // (11c) a ring on the ground · a slash through the middle
     nullcircle: [[R, D], [4, 5, 7, 3]], dispel: [[D, R], [4, 2, 6]],
+    // (11d) a flag raised · a hook closed round it
+    alarm: [[U, R], [4, 5, 1]], seal: [[L, D], [4, 3, 7]],
     closewounds: [[D, D], [4, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
