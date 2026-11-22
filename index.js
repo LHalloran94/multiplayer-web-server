@@ -3939,13 +3939,13 @@ function magicTreeFruit(id) { const q = _magicTrees.get(id); if (!q) return; con
   const spots = []; for (const i of q.cells) { const t = M.get(i); if (!t || t.kind !== 'tree' || q.trunkMat === t.mat || peekCellAt(grid, i) !== t.mat) continue; if (peekCellAt(grid, i + 1) === 0) spots.push(i); }
   if (!spots.length) return; spots.sort((a, b) => a - b); const n = Math.min(q.S.fruits || 3, spots.length);
   for (let f = 0; f < n; f++) { const i = spots[Math.floor((f + 0.5) * spots.length / n)], c = Math.floor(i / ROWS), r = i % ROWS, oid = 'mfruit-' + id + '-' + f;
-    const x = (c + 0.5) * T, y = (r + 1) * T + 4, o = magicObjAdd(q.room, 'region', { x, y, w: 24, h: 24, part: 'powerup', pw: 'heart', pheal: q.S.fruitHeal || 2, pdur: 'death', pback: 0, fruit: 1 }, oid, q.by);
+    const x = (c + 0.5) * T, y = (r + 1) * T + 4, o = magicObjAdd(q.room, 'region', { x, y, w: 24, h: 24, part: 'powerup', pw: 'heart', pheal: q.S.fruitHeal || 2, pdur: 'death', pback: 0, fruit: 1, fEnd: q.until + 1500 }, oid, q.by);
     if (o) q.fruits.push({ oid, sup: i, mat: peekCellAt(grid, i), x, y }); } }
 // (12c round 2, the user: 'if you chop the tree down the fruits stay hanging in the air') a fruit whose leaf is gone FALLS to the ground under it: every screen sees it drop
 //   ('magic-fruit-fall'), and it lies there, still to be picked up
 function magicFruitFall(q, f) { const g = magicGroundAt(q.room, f.x, f.y); magicObjDrop(q.room, f.oid); f.sup = -1; if (!g) { f.gone = 1; return; }
   const y1 = g.y - 12; io.to(q.room).emit('magic-fruit-fall', { x: Math.round(f.x), y0: Math.round(f.y), y1: Math.round(y1) }); const oid = f.oid + 'g', o0 = f;
-  setTimeout(() => { if (!_magicTrees.has(q.id)) return; const o = magicObjAdd(q.room, 'region', { x: o0.x, y: y1, w: 24, h: 24, part: 'powerup', pw: 'heart', pheal: q.S.fruitHeal || 2, pdur: 'death', pback: 0, fruit: 1 }, oid, q.by); if (o) { o0.oid = oid; o0.y = y1; } }, 420); }
+  setTimeout(() => { if (!_magicTrees.has(q.id)) return; const o = magicObjAdd(q.room, 'region', { x: o0.x, y: y1, w: 24, h: 24, part: 'powerup', pw: 'heart', pheal: q.S.fruitHeal || 2, pdur: 'death', pback: 0, fruit: 1, fEnd: q.until + 1500 }, oid, q.by); if (o) { o0.oid = oid; o0.y = y1; } }, 420); }
 // a tree (or a stand of its cells) CUT LOOSE: its magic cells crumble to nothing (no fallen log, no wood) — what is left of the region falls as usual
 function magicTreeCrumble(room, region) { const M = magicTemp.get(room); if (!M || !_magicTrees.size) return region; const st = roomCells.get(room), grid = st && st.terrain; if (!grid) return region;
   const keep = [], gone = [], cells = []; for (const i of region) { const T = M.get(i); if (T && T.kind === 'tree') { grid.s(i, T.back > 0 ? T.back : 0); if (st.terrainHp) st.terrainHp.s(i, T.back > 0 ? T.units | 0 : 0); cells.push(i, grid.g(i)); gone.push(i); M.delete(i); try { _magicTempDel.run(room, i); } catch (e) {} } else keep.push(i); }
@@ -3984,8 +3984,11 @@ setInterval(() => { const now = Date.now();
     if (!live && now > q.t0 + 4000) { _magicTrees.delete(id); for (const f of q.fruits) magicObjDrop(q.room, f.oid); continue; }
     // (round 2) fruit whose leaf has been cut away falls
     const st = cellsOf(q.room), grid = st && st.terrain; if (grid) for (const f of q.fruits) if (f.sup >= 0 && !f.gone) { const map = roomObjects[q.room], ob = map && map.get(f.oid); if (!ob) { f.sup = -1; continue; } if (peekCellAt(grid, f.sup) !== f.mat) magicFruitFall(q, f); } } }, 1000);
-// once a minute: a vine left over from before a restart (it is kept with the room's things), past its time
-setInterval(() => { const now = Date.now(); for (const room of Object.keys(roomObjects)) { const map = roomObjects[room]; if (!map) continue; for (const o of [...map.values()]) if (o.look === 'rope' && o.rk === 'vine' && o.vEnd && now > o.vEnd + 2000) magicObjDrop(room, o.id); } }, 60000);
+// every 5 s (round 4 — the user: a fruit still hanging after a refresh; the tree's record is the server's memory, and a restart lost it): a vine or a FRUIT left over
+//   (kept with the room's things) past its time goes — a fruit by its own `fEnd`, or one made before that was kept, whose tree this server no longer knows
+setInterval(() => { const now = Date.now(); for (const room of Object.keys(roomObjects)) { const map = roomObjects[room]; if (!map) continue; for (const o of [...map.values()]) {
+  if (o.look === 'rope' && o.rk === 'vine' && o.vEnd && now > o.vEnd + 2000) magicObjDrop(room, o.id);
+  else if (o.fruit && (o.fEnd ? now > o.fEnd : !_magicTrees.has(+(/^mfruit-(\d+)-/.exec(String(o.id)) || [])[1]))) magicObjDrop(room, o.id); } } }, 5000);
 // ⭐ (magic 12b) ENTANGLE'S SNARES: cast id → { id, by, room, x, y (the ground), R, until } · THORN HEDGES: cast id → { id, by, room, x, y (the ground), w, h, until, burnAt }
 const _magicSnares = new Map(), _magicHedges = new Map();
 // (12b) any fire lit at (x, y, r) — a firebolt, kindle, a flame stream, a fire wall, lightning — sets a thorn hedge there burning: gone in `burnS` s
@@ -20409,7 +20412,8 @@ function buildWorldObject(type, data, id, ownerId, ownerName, room) {
       if (obj.pw === 'shield') obj.pdur = 'death';
       if (obj.pdur === 'timed') obj.psec = clampN(data.psec, 2, 300, 15);
       // (magic 12c) a FRUIT a spell's tree bears: drawn as one; taken, it is gone (`pback` 0)
-      if (data.fruit) obj.fruit = 1;
+      // (round 4) …and when it goes (its tree's end; kept with it, so a restart cannot leave it hanging)
+      if (data.fruit) { obj.fruit = 1; if (isFinite(+data.fEnd)) obj.fEnd = +data.fEnd; }
       obj.pback = clampN(data.pback, 0, 600, 10);        // seconds until it comes back; 0 = never
     }
     // ⭐⭐ #177 — A VORTEX. The card is one line ("things that suck in basically"), and the whole of it is a
