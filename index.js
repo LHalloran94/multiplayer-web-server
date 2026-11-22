@@ -3921,6 +3921,13 @@ function magicChanEnd(id, why, extra) { const q = _magicChans.get(id); if (!q) r
   // (magic 11b round 3) A WARD DOME let go (or held to its most): set where it was cast, as big as it grew — `Rmin` → `Rmax` px over `chargeS` s held; any other end: none
   { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'warddome' && (why === 'let' || why === 'time')) { const k = Math.max(0, Math.min(1, (Date.now() - (q.at || Date.now())) / 1000 / (S0.chargeS || 2.5)));
     extra = Object.assign({}, extra || {}, { R: Math.round((S0.Rmin || 56) + ((S0.Rmax || 140) - (S0.Rmin || 56)) * k), dx: q.dx, dy: q.dy, cy: q.cy, sh: q.sh || 0, secs: S0.secs || 10 }); } }
+  // (magic 11c round 3) A NULL CIRCLE let go (or held to its most): set where it was cast, as big as it grew; from then nothing is cast inside it and the held spells of
+  //   casters inside it end · any other end: none
+  { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'nullc' && q.nul && (why === 'let' || why === 'time')) { const k = Math.max(0, Math.min(1, (Date.now() - (q.at || Date.now())) / 1000 / (S0.chargeS || 3)));
+    const R = Math.round((S0.Rmin || 96) + ((S0.Rmax || 240) - (S0.Rmin || 96)) * k), secs = +((S0.secs || 20) * ((sk && sk._magicSecsK) || 1)).toFixed(2);
+    _magicNulls.set(id, { id, room: q.room, by: q.by, x: q.nul.x, y: q.nul.y, cy: q.nul.cy, R, until: Date.now() + secs * 1000 });
+    extra = Object.assign({}, extra || {}, { R, tx: q.nul.x, ty: q.nul.y, cy: q.nul.cy, secs });
+    setTimeout(() => { for (const [k2, q2] of _magicChans) { const s2 = io.sockets.sockets.get(q2.by); if (q2.room === q.room && s2 && magicNullHolds(q.room, s2)) magicChanEnd(k2, 'null'); } }, 0); } }
   // (magic 10b) A RECALL held to its end GOES to its caster's mark (every screen: rifts, their own body moved); let go / a blow before: nothing, and only a short cooldown
   { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'recall') { const MK = _magicMarks.get(q.by);
     if (why === 'time' && MK && MK.room === q.room && Date.now() < MK.until) extra = Object.assign({}, extra || {}, { go: 1, tx: MK.x, ty: MK.y });
@@ -29250,10 +29257,8 @@ io.on('connection', (socket) => {
       rs.push({ id, by: socket.id, x: out.tx, y: out.ty, at: now + (S.armS || 1.5) * 1000, until: now + (SK.secs || 180) * 1000, spell: m.spell, pow: powK }); }
     // ⭐ (magic 11c) THE NULL CIRCLE: on the ground under the point (none there: refused); a held spell whose caster stands in it ends now · DISPEL: from the point, its sweep
     if (S.kind === 'nullc') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
-      // (round 2) a sphere about the middle of a body standing there, resting on that ground
-      const R = S.R || 72, secs = +(SK.secs || 20).toFixed(2); out.tx = Math.round(out.tx); out.ty = g.y; out.cy = g.y - 12; out.R = R; out.secs = secs;
-      _magicNulls.set(id, { id, room, by: socket.id, x: out.tx, y: out.ty, cy: out.cy, R, until: now + secs * 1000 });
-      for (const [k, q] of _magicChans) { const sk = io.sockets.sockets.get(q.by); if (q.room === room && sk && magicNullHolds(room, sk)) magicChanEnd(k, 'null'); } }
+      // (round 2) a sphere about the middle of a body standing there, resting on that ground · (round 3) HELD: it grows while held and is set at its end (`magicChanEnd`)
+      out.tx = Math.round(out.tx); out.ty = g.y; out.cy = g.y - 12; out.R = S.Rmin || 96; const q = _magicChans.get(id); if (q) { q.at = now; q.nul = { x: out.tx, y: out.ty, cy: out.cy }; } }
     if (S.kind === 'dispel') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = S.R || 120; out.ms = S.ms || 450; out.n = magicDispel(room, out.tx, out.ty, out.R, out.ms, socket.id); }
     io.to(room).emit('magic-cast', out);
   });

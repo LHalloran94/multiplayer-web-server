@@ -187,7 +187,9 @@
     //   dome of upright light lines over it, `secs` s: no spell is cast from inside it, its caster's too (the server refuses), a held spell inside ends, a spell bolt fizzles at
     //   its edge; arrows and thrown things pass (the ward dome stops everything flying). DISPEL (kind 'dispel') — a gold ring sweeping out from the pointer to `R` px in `ms`:
     //   every spell effect it reaches ends, each popping into gold motes; the cells a spell made for a time go back early. Not a pocketed thing.
-    nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'nullc', learn: 5, reach: 320, secs: 20, R: 72, fx: '#ffd86b',
+    //   (11c round 3, the user: held to grow as the ward sphere, and bigger — it should stop casting over a large area) the null circle is HELD: from `Rmin` to `Rmax` px over
+    //   `chargeS` s, set (and only then at work) on let-go.
+    nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'nullc', learn: 5, reach: 320, secs: 20, chan: true, chanS: 3, chargeS: 3, Rmin: 96, Rmax: 240, fx: '#ffd86b',
       plain: { keys: [U, D, R, L, D], rune: [6, 8, 5, 3, 0] } },
     dispel: { name: 'Dispel', school: 'wards', form: 'placed', tier: 1, cd: 15, stance: 'level', kind: 'dispel', learn: 5, reach: 320, R: 120, ms: 450, fx: '#ffd86b',
       plain: { keys: [R, U, D, L, U], rune: [8, 4, 0, 1, 2] } },
