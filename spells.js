@@ -115,10 +115,12 @@
     //   fresh movement key `press` s off, fire frees; the roots stay `snareS` s and catch each body that walks in, once) · THORN HEDGE (kind 'hedge'): brambles `wide` × `high`
     //   cells on the ground under the point, `secs` s; anyone in it but its caster slowed × `slowK` and scratched `dmg` health every `every` s; any fire burns it away in `burnS` s ·
     //   BARKSKIN (kind 'bark'): `secs` s — harm × `hurtK`, fire × `fireK`, your pace × `moveK`
-    entangle: { name: 'Entangle', school: 'life', form: 'bolt', tier: 0, cd: 8, stance: 'level', kind: 'bolt', seed: true, lob: true, lobG: 1100, learn: 3, reach: 400, speed: 520, life: 1.6, grav: 0.4, r: 3, dmg: 0,
-      R: 24, holdS: 2, press: 0.3, snareS: 6, plain: { keys: [D, D, U, L, R], rune: [7, 8, 4, 3, 0] } },
-    thorns: { name: 'Thorn hedge', school: 'life', form: 'placed', tier: 0, cd: 12, stance: 'level', kind: 'hedge', learn: 3, reach: 360, secs: 30, wide: 10, high: 3, slowK: 0.5, dmg: 0.25, every: 0.5, burnS: 2, most: 2,
-      plain: { keys: [R, D, D, U, L], rune: [3, 6, 8, 5, 1] } },
+    // (12b round 2, the user: roots over a much larger piece of ground; the hedge a seed you shoot that grows out over a wide area; the caster caught and scratched too)
+    //   `seed` = what grows where it lands ('roots' / 'hedge') · the hedge grows out from where it landed to `wide` cells across over `growMs`
+    entangle: { name: 'Entangle', school: 'life', form: 'bolt', tier: 0, cd: 8, stance: 'level', kind: 'bolt', seed: 'roots', lob: true, lobG: 1100, learn: 3, reach: 400, speed: 520, life: 1.6, grav: 0.4, r: 3, dmg: 0,
+      R: 72, holdS: 2, press: 0.3, snareS: 6, plain: { keys: [D, D, U, L, R], rune: [7, 8, 4, 3, 0] } },
+    thorns: { name: 'Thorn hedge', school: 'life', form: 'bolt', tier: 0, cd: 12, stance: 'level', kind: 'bolt', seed: 'hedge', lob: true, lobG: 1100, learn: 3, reach: 400, speed: 520, life: 1.6, grav: 0.4, r: 3.5, dmg: 0,
+      secs: 30, wide: 30, high: 4, growMs: 1500, slowK: 0.5, thornDmg: 0.25, every: 0.5, burnS: 2, most: 2, plain: { keys: [R, D, D, U, L], rune: [3, 6, 8, 5, 1] } },
     barkskin: { name: 'Barkskin', school: 'life', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'bark', learn: 5, secs: 30, hurtK: 0.5, fireK: 1.5, moveK: 0.85,
       plain: { keys: [L, D, U, U, R], rune: [5, 8, 7, 3, 0] } },
     lift: { name: 'Lift and throw', school: 'force', form: 'shaping', tier: 0, cd: 3, stance: 'level', kind: 'lift', learn: 3, reach: 320, secs: 10, pull: 0.16, vmax: 11, throwV: 12,

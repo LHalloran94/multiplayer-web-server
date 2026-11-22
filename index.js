@@ -29308,11 +29308,6 @@ io.on('connection', (socket) => {
     if (S.kind === 'seal') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || ob.type !== 'stamp') return no('nothing');
       if (hm && hm.has(m.obj) && hm.get(m.obj) !== socket.id) return no('nothing'); const secs = +(SK.secs || 120).toFixed(2); _magicSeals.set(m.obj, { id, obj: m.obj, by: socket.id, room, until: now + secs * 1000 }); out.obj = m.obj; out.secs = secs; }
     // ⭐ (magic 12b) THE THORN HEDGE: on the ground under the point (none there: refused), `most` a caster (the oldest goes) · BARKSKIN: its time
-    if (S.kind === 'hedge') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
-      for (const [k, q] of _magicHedges) if (now > q.until) _magicHedges.delete(k);
-      const mine = [..._magicHedges.values()].filter(q => q.by === socket.id).sort((a, b) => a.id - b.id); while (mine.length >= (S.most || 2)) { const q = mine.shift(); _magicHedges.delete(q.id); io.to(q.room).emit('magic-hedge-gone', { id: q.id }); }
-      out.tx = Math.round(out.tx); out.ty = g.y; out.w = (S.wide || 10) * TERRAIN_CELL; out.h = (S.high || 3) * TERRAIN_CELL; out.secs = +(SK.secs || 30).toFixed(2);
-      _magicHedges.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, h: out.h, until: now + out.secs * 1000, burnAt: 0, burnS: S.burnS || 2 }); }
     if (S.kind === 'bark') out.secs = +(SK.secs || 30).toFixed(2);
     // ⭐ (magic 12a) THE HEALING GROVE: on the ground under the point (none there: refused), `most` a caster (the oldest goes)
     if (S.kind === 'grove') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
@@ -29502,7 +29497,7 @@ io.on('connection', (socket) => {
       socket.emit('magic-groves', { list: [..._magicGroves.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, left: q.until - now })) });
       // (magic 12b) entangle's snares, the thorn hedges
       socket.emit('magic-snares', { list: [..._magicSnares.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, R: q.R, left: q.until - now })) });
-      socket.emit('magic-hedges', { list: [..._magicHedges.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, h: q.h, left: q.until - now, burn: q.burnAt ? now - q.burnAt : -1 })) }); } socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
+      socket.emit('magic-hedges', { list: [..._magicHedges.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, h: q.h, left: q.until - now, burn: q.burnAt ? now - q.burnAt : -1, age: now - (q.t0 || now), grow: q.grow || 1500 })) }); } socket.emit('magic-runes', { runes: magicRunesOf(room).filter(q => now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, age: now - (q.at - 1500), spell: q.spell })) }); });
   // ⭐ (8a) CALL LIGHTNING FALLS: its caster's game says where (`x`, `y` — the top of the body it struck, or the ground; `fy` that body's feet; `pl` the body) — straight down from
   //   its cloud, near its middle, no lower than the ground under it
   socket.on('magic-strike', (m) => {
@@ -29533,10 +29528,17 @@ io.on('connection', (socket) => {
     // ⭐ (6b) A WALL OF FIRE where its ember came down (on ground, as the stone wall's) — in liquid it went out: steam, nothing stands
     let FW = null; if (L.land === 'firewall') { if (m.liq) { land = 'firewall'; air = 0; FW = { liq: 1 }; } else { const g = magicGroundAt(L.room, +m.x, +m.y); if (g && Math.abs(g.y - m.y) <= 3 * TERRAIN_CELL) { land = 'firewall'; tx = g.x; ty = g.y; air = 0; FW = magicFireWallAt(L.room, g.x, g.y, L.SK); n = FW.n; } else air = 1; } }
     // ⭐ (12b) ENTANGLE'S SEED: roots on the ground under where it came down (a body it struck: the ground under that body) — none near: it falls in the air
-    let SN = null; if (L.land === 'seed') { const g = magicGroundAt(L.room, +m.x, +m.y - 2), S0 = L.SK || {};
-      if (g && g.y - m.y <= 6 * TERRAIN_CELL && m.y - g.y <= 3 * TERRAIN_CELL) { land = 'seed'; tx = g.x; ty = g.y; air = 0; const secs = +((S0.snareS || 6)).toFixed(2), R = S0.R || 24;
-        _magicSnares.set(m.id, { id: m.id, by: L.by, room: L.room, x: tx, y: ty, R, until: Date.now() + secs * 1000 }); for (const [k, q] of _magicSnares) if (Date.now() > q.until) _magicSnares.delete(k);
-        SN = { R, secs, hold: S0.holdS || 2 }; } else air = 1; }
+    //   (round 2) …or the THORN HEDGE's: brambles growing out from there along the ground, `wide` cells across over `growMs` (`most` a caster: the oldest goes)
+    let SN = null; if (L.land === 'seed') { const g = magicGroundAt(L.room, +m.x, +m.y - 2), S0 = L.SK || {}, now2 = Date.now();
+      if (g && g.y - m.y <= 6 * TERRAIN_CELL && m.y - g.y <= 3 * TERRAIN_CELL) { land = 'seed'; tx = g.x; ty = g.y; air = 0;
+        if (S0.seed === 'hedge') { const secs = +((S0.secs || 30)).toFixed(2), w = (S0.wide || 30) * TERRAIN_CELL, h = (S0.high || 4) * TERRAIN_CELL;
+          for (const [k, q] of _magicHedges) if (now2 > q.until) _magicHedges.delete(k);
+          const mine = [..._magicHedges.values()].filter(q => q.by === L.by).sort((a, b) => a.id - b.id); while (mine.length >= (S0.most || 2)) { const q = mine.shift(); _magicHedges.delete(q.id); io.to(q.room).emit('magic-hedge-gone', { id: q.id }); }
+          _magicHedges.set(m.id, { id: m.id, by: L.by, room: L.room, x: tx, y: ty, w, h, until: now2 + secs * 1000, burnAt: 0, burnS: S0.burnS || 2, t0: now2, grow: S0.growMs || 1500 });
+          SN = { sk: 'hedge', w, h, secs, grow: S0.growMs || 1500 }; }
+        else { const secs = +((S0.snareS || 6)).toFixed(2), R = S0.R || 72;
+          _magicSnares.set(m.id, { id: m.id, by: L.by, room: L.room, x: tx, y: ty, R, until: now2 + secs * 1000 }); for (const [k, q] of _magicSnares) if (now2 > q.until) _magicSnares.delete(k);
+          SN = { sk: 'roots', R, secs, hold: S0.holdS || 2 }; } } else air = 1; }
     io.to(L.room).emit('magic-end', Object.assign({ id: m.id, x: Math.round(m.x), y: Math.round(m.y), air, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined, land, tx, ty, n, spell: L.spell, from: L.by }, SN || {},
       land === 'tunnel' ? { ax: +(+L.ax).toFixed(3), ay: +(+L.ay).toFixed(3), len: Math.round(m.len || 0), ms: Math.round(m.ms || 0) } : {}, FW || {}));
   });
