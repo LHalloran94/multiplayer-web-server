@@ -29520,7 +29520,7 @@ io.on('connection', (socket) => {
   // ⭐ (magic 11a) A WARD SKIN STRUCK (or ended — `hp` 0, `q` quietly: its keeper died): its keeper's own game says what is left and where the blow came from; to everybody else
   // ⭐ (magic 12b) MY BODY HELD BY ROOTS (on, how long) or let go — the others draw the roots on me · a hedge I stand in while burning catches
   // ⭐ (magic 13a) WHAT AILS A BODY (its own game says): poisoned, sick with plague — to the others, to draw it (`k` which, `ms` how long — 0 ended)
-  socket.on('magic-ail', (m) => { const room = currentAvatarRoom; if (!room || !m || (m.k !== 'poison' && m.k !== 'plague')) return; const now = Date.now(); if (now - (socket._ailT || 0) < 40) return; socket._ailT = now;
+  socket.on('magic-ail', (m) => { const room = currentAvatarRoom; if (!room || !m || ['poison', 'plague', 'curse', 'wither'].indexOf(m.k) < 0) return; const now = Date.now(); if (now - (socket._ailT || 0) < 40) return; socket._ailT = now;
     socket.to(room).emit('magic-ail', { from: socket.id, k: m.k, ms: Math.max(0, Math.min(30000, +m.ms || 0)) }); });
   // (13a) PLAGUE PASSED ON: my game found a body near me while I am sick — that player's game is told (same room, near where they last said they were)
   socket.on('magic-plague-give', (m) => { const room = currentAvatarRoom; if (!room || !m || typeof m.to !== 'string') return; const ts = io.sockets.sockets.get(m.to); if (!ts || ts.id === socket.id || socketToAvatarRoom[ts.id] !== room) return;

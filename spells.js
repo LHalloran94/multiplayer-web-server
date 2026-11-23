@@ -222,6 +222,16 @@
       plain: { keys: [D, U, D, U, R], rune: [6, 3, 7, 5, 8] } },
     plague: { name: 'Plague', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'plague', learn: 5, other: true, reach: 240, secs: 15, dmg: 0.25, every: 2, spreadR: 44, immuneS: 20,
       plain: { keys: [R, L, D, L, R], rune: [8, 3, 2, 6, 1] } },
+    // ⭐ STEP 13b (2026-11-23, kickoff §'STEP 13') DECAY — WITHERING. CURSE OF WEAKNESS (kind 'curse', on another): `secs` s — the blows they land on others do `weakK` (each victim's game
+    //   halves a blow from a cursed striker, 16e `pvpHurt`), their natural healing stops; dispel ends it, cure does not. WITHER (kind 'wither', on another): `secs` s aged — greyed, dry
+    //   cracked skin, ash falling off them, `slowK` their pace; cure and dispel end it. BONE SPEAR (kind 'bolt' + `bone`): a shard of bone flying until it hits; it PIERCES — through up
+    //   to `pierce` bodies, `dmg` and a deep puncture that bleeds in each — and sticks in rock, crumbling after a while.
+    curse: { name: 'Curse of weakness', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'curse', learn: 5, other: true, reach: 260, secs: 20, weakK: 0.5,
+      plain: { keys: [R, U, L, D, U], rune: [6, 4, 2, 1, 0] } },
+    wither: { name: 'Wither', school: 'decay', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'wither', learn: 3, other: true, reach: 260, secs: 10, slowK: 0.65,
+      plain: { keys: [D, D, U, R, D], rune: [0, 3, 7, 5, 2] } },
+    bonespear: { name: 'Bone spear', school: 'decay', form: 'bolt', tier: 1, cd: 6, stance: 'level', kind: 'bolt', learn: 5, speed: 760, life: 8, grav: 0.06, r: 3, dmg: 2, pierce: 3, bone: true, stuckS: 6,
+      plain: { keys: [R, R, D, R, U], rune: [3, 1, 5, 8, 6] } },
     fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
     //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
@@ -614,6 +624,8 @@
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
     // (13a) the venom bolt, the bolt ending · the cloud down and rolling out low · the pods down into the soil and up out of it · plague, its first mark → (towards them) and spreading out
     venombolt: [[R, R], [4, 5]], pcloud: [[D, L], [4, 3, 6]], spores: [[D, U], [4, 8, 5]], plague: [[R, L], [4, 3, 2]],
+    // (13b) the curse laid over them, on to the top right · wither pulled down, then up and off to them · the bone spear, the bolt ending (a tier up: as great firebolt)
+    curse: [[R, U], [4, 0, 2]], wither: [[R, U], [4, 8, 2]], bonespear: [[R, R], [4, 5]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
