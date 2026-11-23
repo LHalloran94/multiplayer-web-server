@@ -266,6 +266,19 @@
       plain: { keys: [R, D, U, U, R], rune: [8, 5, 1, 3, 7] } },
     leeches: { name: 'Leeches', school: 'blood', form: 'bolt', tier: 0, cd: 10, stance: 'level', kind: 'bolt', leech: true, learn: 3, speed: 460, life: 3, grav: 0.3, r: 3.5, dmg: 0.25, n: 3, secs: 10, feed: 0.25, every: 1,
       plain: { keys: [R, D, R, U, U], rune: [6, 7, 4, 5, 2] } },
+    // ⭐ STEP 14c (2026-11-23) BLOOD — BLOOD SHIELD (kind 'bshield', on yourself): `cost` off you, a hardened crimson shell soaking the next `hp` half-hearts of harm for `secs` s (the
+    //   ward skin's soak, client 16zj `magicWardSoak`). BLOOD SPIKES (kind 'bspikes', placed): crimson spikes burst up out of the ground under the point along `wide` cells, one after
+    //   another from the caster's side; a body standing on one is cut, bleeds, takes `dmg` and is tossed (`toss`); they melt after `secs` s. BLOOD GRIP (kind 'grip', HELD, on another):
+    //   a rope of blood drags them towards you — at most `drag` px, they still steer; it breaks past `reach` + `slack` or out of sight. BLOOD WHIP (kind 'whip', HELD): `cost` off you,
+    //   a lash of your blood `len` px long trailing the pointer; its tip cuts whom it whips (`dmg`, each body at most every `gap` s).
+    bloodshield: { name: 'Blood shield', school: 'blood', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'bshield', learn: 5, cost: 2, hp: 3, secs: 20,
+      plain: { keys: [R, D, D, D, U], rune: [2, 3, 6, 7, 4] } },
+    bloodspikes: { name: 'Blood spikes', school: 'blood', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'bspikes', learn: 5, reach: 320, wide: 10, dmg: 1.5, toss: 6, secs: 2.2,
+      plain: { keys: [R, D, D, L, R], rune: [0, 3, 7, 8, 5] } },
+    bloodgrip: { name: 'Blood grip', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'grip', learn: 5, other: true, chan: true, chanS: 3, reach: 280, slack: 60, drag: 90,
+      fx: '#b3121f', plain: { keys: [R, D, L, L, L], rune: [8, 7, 3, 1, 2] } },
+    bloodwhip: { name: 'Blood whip', school: 'blood', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'whip', learn: 3, chan: true, chanS: 5, cost: 1, len: 100, dmg: 1, gap: 0.45,
+      fx: '#b3121f', plain: { keys: [R, D, R, L, R], rune: [6, 4, 2, 1, 3] } },
     fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
     //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
@@ -668,6 +681,8 @@
     bloodbolt: [[R, R], [4, 5]], lifedrain: [[L, D], [4, 3, 6]], transfusion: [[U, R], [4, 1, 2]],
     // (14b) haemorrhage: out to them and up, opened · blood boil: rising straight up · leeches: out and up onto them
     haemorrhage: [[L, U], [4, 0, 1]], bloodboil: [[U, U], [4, 1]], leeches: [[R, U], [4, 2]],
+    // (14c) the shield laid down round you · spikes down into the ground and up · the grip reached out and drawn back · the whip cracked out and up
+    bloodshield: [[D, D], [4, 6]], bloodspikes: [[D, U], [4, 0, 5]], bloodgrip: [[L, L], [4, 0, 2]], bloodwhip: [[R, L], [4, 8, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
