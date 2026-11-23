@@ -3865,6 +3865,12 @@ function magicNullIn(room, q, x, y) {
 const _magicAlarms = new Map(), _magicSeals = new Map();
 // ⭐ (magic 12a) HEALING GROVES: cast id → { id, by, room, x, y (the ground under the point), w (px across), until } — kept so an arriving page is told and a dispel ends them
 const _magicGroves = new Map();
+// ⭐ (magic 13a) POISON CLOUDS: cast id → { id, by, room, x, y (the ground under the point), w, h (px), until } · SPORE PODS: cast id → { id, by, room, x, y (the ground), until, armAt }
+const _magicPClouds = new Map(), _magicSpores = new Map();
+// (13a) any fire lit at (x, y, r) inside a poison cloud sets it off: gone, a flash on every screen (each game hurts its own body in it), what can burn there lit
+function magicPCloudFire(room, x, y, r) { if (!_magicPClouds.size) return; const now = Date.now();
+  for (const [k, q] of _magicPClouds) { if (q.room !== room || now > q.until) continue; if (Math.abs(x - q.x) > q.w / 2 + (r || 0) + 4 || y < q.y - q.h - (r || 0) - 4 || y > q.y + (r || 0) + 8) continue;
+    _magicPClouds.delete(k); io.to(room).emit('magic-pcloud-boom', { id: k }); setTimeout(() => { try { igniteBox(room, q.x, q.y - q.h / 2, q.w / 2, q.h / 2); } catch (e) {} }, 60); } }
 // ⭐⭐ (magic 12c) GROWING. VINES: cast id → { room, by, oid, x, y, L, until } · TREES: cast id → { room, by, cells: [cell], until, fruits: [object id] }
 const _magicVines = new Map(), _magicTrees = new Map();
 const MAGIC_FLORA = require('./worldgen2/flora.js'), MAGIC_WGC = require('./worldgen2/cells.js'), MAGIC_PLANT = new Set(MATGEN.PLANT_IDS);
@@ -4030,6 +4036,9 @@ function magicDispel(room, cx, cy, R, ms, by) {
   // (12b) entangle's snares, thorn hedges
   for (const [k, q] of _magicSnares) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - 4, q.R); if (t >= 0) { n++; later(t, () => { if (_magicSnares.delete(k)) io.to(room).emit('magic-snare-gone', { id: k, why: 'dispel' }); }); } }
   for (const [k, q] of _magicHedges) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - q.h / 2, q.w / 2); if (t >= 0) { n++; later(t, () => { if (_magicHedges.delete(k)) io.to(room).emit('magic-hedge-gone', { id: k, why: 'dispel' }); }); } }
+  // (13a) poison clouds, spore pods
+  for (const [k, q] of _magicPClouds) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - q.h / 2, q.w / 2); if (t >= 0) { n++; later(t, () => { if (_magicPClouds.delete(k)) io.to(room).emit('magic-pcloud-gone', { id: k, why: 'dispel' }); }); } }
+  for (const [k, q] of _magicSpores) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - 6, 12); if (t >= 0) { n++; later(t, () => { if (_magicSpores.delete(k)) io.to(room).emit('magic-spore-gone', { id: k, why: 'dispel' }); }); } }
   // (12a) healing groves (by their middle, half their width)
   for (const [k, q] of _magicGroves) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - 8, q.w / 2); if (t >= 0) { n++; later(t, () => { if (_magicGroves.delete(k)) io.to(room).emit('magic-grove-gone', { id: k, why: 'dispel' }); }); } }
   // what is on a body: a flame ring, a flaming / storm weapon, a mirror ward — by where its keeper stands
@@ -13501,6 +13510,7 @@ function fineFireSet(room) { const s = cellsOf(room); if (!s.fineFire) { s.fineF
 // is rarely square. Omitted, it is the brush's square exactly as before.
 function igniteBox(room, x, y, r, ry) {
   magicHedgeFire(room, x, y, r);
+  magicPCloudFire(room, x, y, Math.max(r, ry || 0));
   const st = cellsOf(room), grid = st.terrain, amt = st.fineAmt;
   if (!grid || !amt || (st.fineSub || 1) !== 1) return 0;
   const ROWS = st.rows, COLS = st.cols, pad = r + TERRAIN_CELL, padY = (ry === undefined ? r : ry) + TERRAIN_CELL;
@@ -29466,6 +29476,13 @@ io.on('connection', (socket) => {
       const mine = [..._magicGroves.values()].filter(q => q.by === socket.id).sort((a, b) => a.id - b.id); while (mine.length >= (S.most || 2)) { const q = mine.shift(); _magicGroves.delete(q.id); io.to(q.room).emit('magic-grove-gone', { id: q.id }); }
       out.tx = Math.round(out.tx); out.ty = g.y; out.w = (S.wide || 14) * TERRAIN_CELL; out.secs = +(SK.secs || 12).toFixed(2);
       _magicGroves.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, until: now + out.secs * 1000 }); }
+    // ⭐ (magic 13a) THE POISON CLOUD: on the ground under the point (none: refused), `most` a caster (the oldest goes) · SPORE PODS: the same, `most` a caster
+    if (S.kind === 'pcloud' || S.kind === 'spores') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
+      const M = S.kind === 'pcloud' ? _magicPClouds : _magicSpores, gone = S.kind === 'pcloud' ? 'magic-pcloud-gone' : 'magic-spore-gone'; for (const [k, q] of M) if (now > q.until) M.delete(k);
+      const mine = [...M.values()].filter(q => q.by === socket.id).sort((a, b) => a.id - b.id); while (mine.length >= (S.most || 2)) { const q = mine.shift(); M.delete(q.id); io.to(q.room).emit(gone, { id: q.id }); }
+      out.tx = Math.round(out.tx); out.ty = g.y; out.secs = +(SK.secs || 10).toFixed(2);
+      if (S.kind === 'pcloud') { out.w = (S.wide || 16) * TERRAIN_CELL; out.h = (S.high || 4) * TERRAIN_CELL; M.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, h: out.h, until: now + out.secs * 1000 }); }
+      else M.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, until: now + out.secs * 1000, armAt: now + (S.armS || 1.2) * 1000 }); }
     if (S.kind === 'dispel') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = S.R || 120; out.ms = S.ms || 450; out.n = magicDispel(room, out.tx, out.ty, out.R, out.ms, socket.id); }
     io.to(room).emit('magic-cast', out);
   });
@@ -29502,6 +29519,20 @@ io.on('connection', (socket) => {
     io.to(room).emit('magic-flung', { id: m.id, by: socket.id, x: L.x, y: L.y, vx: Math.round(m.vx * k), vy: Math.round(m.vy * k) }); });
   // ⭐ (magic 11a) A WARD SKIN STRUCK (or ended — `hp` 0, `q` quietly: its keeper died): its keeper's own game says what is left and where the blow came from; to everybody else
   // ⭐ (magic 12b) MY BODY HELD BY ROOTS (on, how long) or let go — the others draw the roots on me · a hedge I stand in while burning catches
+  // ⭐ (magic 13a) WHAT AILS A BODY (its own game says): poisoned, sick with plague — to the others, to draw it (`k` which, `ms` how long — 0 ended)
+  socket.on('magic-ail', (m) => { const room = currentAvatarRoom; if (!room || !m || (m.k !== 'poison' && m.k !== 'plague')) return; const now = Date.now(); if (now - (socket._ailT || 0) < 40) return; socket._ailT = now;
+    socket.to(room).emit('magic-ail', { from: socket.id, k: m.k, ms: Math.max(0, Math.min(30000, +m.ms || 0)) }); });
+  // (13a) PLAGUE PASSED ON: my game found a body near me while I am sick — that player's game is told (same room, near where they last said they were)
+  socket.on('magic-plague-give', (m) => { const room = currentAvatarRoom; if (!room || !m || typeof m.to !== 'string') return; const ts = io.sockets.sockets.get(m.to); if (!ts || ts.id === socket.id || socketToAvatarRoom[ts.id] !== room) return;
+    const a = socket._avPos, b = ts._avPos; if (a && b && Date.now() - a.t < 4000 && Date.now() - b.t < 4000 && Math.hypot(a.x - b.x, a.y - b.y) > 160) return;
+    ts.emit('magic-plague-got', { from: socket.id, ms: Math.max(1000, Math.min(20000, +m.ms || 15000)) }); });
+  // (13a) A POISON CLOUD SET OFF by a burning body in it (that body's game says so)
+  socket.on('magic-pcloud-fire', (m) => { const room = currentAvatarRoom, q = m && _magicPClouds.get(m.id | 0); if (!room || !q || q.room !== room) return; const p = socket._avPos;
+    if (p && Date.now() - p.t < 4000 && Math.abs(p.x - q.x) <= q.w / 2 + 30) magicPCloudFire(room, p.x, p.y - 4, 4); });
+  // (13a) SPORE PODS TRIPPED by a body near them (its game says so — or its dummy's): gone, a burst on every screen, each game poisons its own body in reach
+  socket.on('magic-spore-trip', (m) => { const room = currentAvatarRoom, q = m && _magicSpores.get(m.id | 0); if (!room || !q || q.room !== room) return; const now = Date.now(); if (now < q.armAt) return;
+    const p = socket._avPos; if (!m.dm && p && now - p.t < 4000 && Math.hypot(p.x - q.x, p.y - q.y) > 120) return;
+    _magicSpores.delete(q.id); io.to(room).emit('magic-spore-burst', { id: q.id, x: q.x, y: q.y, by: q.by }); });
   socket.on('magic-root', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const now = Date.now(); if (now - (socket._rootT || 0) < 40) return; socket._rootT = now;
     socket.to(room).emit('magic-root', { from: socket.id, on: m.on ? 1 : 0, ms: Math.max(0, Math.min(5000, +m.ms || 0)), sn: m.sn | 0 }); });
   socket.on('magic-hedge-fire', (m) => { const room = currentAvatarRoom, q = m && _magicHedges.get(m.id | 0); if (!room || !q || q.room !== room) return; const p = socket._avPos;
@@ -29644,6 +29675,9 @@ io.on('connection', (socket) => {
     { const as = (_magicAlarms.get(room) || []).filter(q => now < q.until); socket.emit('magic-alarms', { list: as.map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, R: q.R, arm: Math.max(0, q.at - now), left: q.until - now })) });
       socket.emit('magic-nulls', { list: [..._magicNulls.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, cy: q.cy, R: q.R, left: q.until - now })) });
       socket.emit('magic-seals', { list: [..._magicSeals.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, obj: q.obj, by: q.by, left: q.until - now })) });
+      // (magic 13a) poison clouds, spore pods
+      socket.emit('magic-pclouds', { list: [..._magicPClouds.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, h: q.h, left: q.until - now })) });
+      socket.emit('magic-spores', { list: [..._magicSpores.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, left: q.until - now, arm: Math.max(0, q.armAt - now) })) });
       // (magic 12a) the healing groves
       socket.emit('magic-groves', { list: [..._magicGroves.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, left: q.until - now })) });
       // (magic 12b) entangle's snares, the thorn hedges

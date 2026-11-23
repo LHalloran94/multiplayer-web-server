@@ -208,6 +208,20 @@
     grow_o: { name: 'Grow (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mega', secs: 15, alt: 'grow', other: true, reach: 240, plain: { keys: [U, L, U, R, D], rune: [7, 3, 1, 5, 4] } },
     shrink: { name: 'Shrink', school: 'decay', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mini', secs: 15, learn: 5, alts: ['shrink_o'], plain: { keys: [D, R, D, L, D], rune: [1, 5, 7, 3, 4] } },
     shrink_o: { name: 'Shrink (on another)', school: 'decay', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mini', secs: 15, alt: 'shrink', other: true, reach: 240, plain: { keys: [D, R, D, L, U], rune: [1, 5, 7, 3, 0] } },
+    // ⭐ STEP 13a (2026-11-23, kickoff §'STEP 13') DECAY — POISON. POISONED (a body's own game: `poison` s, `poisonDmg` health every `poisonEvery` s; cure ends it; the others told to draw it).
+    //   VENOM BOLT (kind 'bolt' + `poison`): a dripping glob; what it hits is poisoned. POISON CLOUD (kind 'pcloud', placed): a cloud `wide` cells across, `high` cells deep, on the ground under
+    //   the point, following each column's ground; every body in it poisoned (`poisonS` s, kept up while in it); FIRE in it (any fire lit there, a burning body) sets it off — a flash, `boomDmg`
+    //   and alight. SPORE PODS (kind 'spores', placed): mushrooms on the ground, armed after `armS` s; a body (not its caster's, but the dummy) within `trip` px bursts them: a small cloud
+    //   (`puffW` cells, `puffS` s) and `poisonS` s of poison to bodies within `R`. PLAGUE (kind 'plague', on another): sick `secs` s (`dmg` every `every` s); every second it is passed to
+    //   any body within `spreadR` px; once it ends, `immuneS` s before it can be caught again.
+    venombolt: { name: 'Venom bolt', school: 'decay', form: 'bolt', tier: 0, cd: 3, stance: 'level', kind: 'bolt', learn: 3, speed: 520, life: 1.25, grav: 0.14, r: 3.5, dmg: 0.25, poison: 8, poisonDmg: 0.25, poisonEvery: 1,
+      plain: { keys: [D, L, D, R, R], rune: [1, 3, 7, 8, 5] } },
+    pcloud: { name: 'Poison cloud', school: 'decay', form: 'placed', tier: 1, cd: 18, stance: 'level', kind: 'pcloud', learn: 5, reach: 360, secs: 10, wide: 16, high: 4, most: 2, poisonS: 3, boomDmg: 1,
+      plain: { keys: [D, D, L, R, L], rune: [3, 6, 7, 8, 5] } },
+    spores: { name: 'Spore pods', school: 'decay', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'spores', learn: 3, reach: 360, secs: 90, most: 3, armS: 1.2, trip: 22, R: 44, puffW: 7, puffS: 4, poisonS: 6,
+      plain: { keys: [D, U, D, U, R], rune: [6, 3, 7, 5, 8] } },
+    plague: { name: 'Plague', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'plague', learn: 5, other: true, reach: 240, secs: 15, dmg: 0.25, every: 2, spreadR: 44, immuneS: 20,
+      plain: { keys: [R, L, D, L, R], rune: [8, 3, 2, 6, 1] } },
     fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
     //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
@@ -598,6 +612,8 @@
     // (12c round 3) the swing vine: up to the rock, then swinging down to the side
     vine_s: [[D, L], [4, 2, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
+    // (13a) the venom bolt, the bolt ending · the cloud down and rolling out low · the pods down into the soil and up out of it · plague, its first mark → (towards them) and spreading out
+    venombolt: [[R, R], [4, 5]], pcloud: [[D, L], [4, 3, 6]], spores: [[D, U], [4, 8, 5]], plague: [[R, L], [4, 3, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
