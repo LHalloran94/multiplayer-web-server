@@ -30,6 +30,9 @@
     wards:      { name: 'Wards',           col: '#ffd86b', keys: [L, L], rune: [0, 2, 8] },
     life:       { name: 'Life',            col: '#8be28b', keys: [U, D], rune: [7, 4, 1] },
     decay:      { name: 'Decay',           col: '#a9b860', keys: [D, L], rune: [1, 3, 7] },
+    // (2026-11-23, the user: blood its own school, after Decay) the last free pair of keys; its stroke passes through no other point on the way (2 → 3 → 7), and no
+    //   school starts 2 → 3. ⚠️ a TRAIL form after it would fold back (7 → 3) — no Blood spell is a trail
+    blood:      { name: 'Blood',           col: '#b3121f', keys: [R, D], rune: [2, 3, 7] },
     alteration: { name: 'Alteration',      col: '#f0b0d0', keys: [U, R], rune: [3, 7, 5] },
     illusion:   { name: 'Illusion',        col: '#ff9be0', keys: [L, U], rune: [2, 0, 6] },
     knowing:    { name: 'Knowing',         col: '#8fe8e0', keys: [U, L], rune: [6, 2, 8] },
