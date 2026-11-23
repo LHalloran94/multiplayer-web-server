@@ -29533,6 +29533,10 @@ io.on('connection', (socket) => {
   socket.on('magic-spore-trip', (m) => { const room = currentAvatarRoom, q = m && _magicSpores.get(m.id | 0); if (!room || !q || q.room !== room) return; const now = Date.now(); if (now < q.armAt) return;
     const p = socket._avPos; if (!m.dm && p && now - p.t < 4000 && Math.hypot(p.x - q.x, p.y - q.y) > 120) return;
     _magicSpores.delete(q.id); io.to(room).emit('magic-spore-burst', { id: q.id, x: q.x, y: q.y, by: q.by }); });
+  // (magic 13b round 3) A BONE SPEAR STUCK IN A BODY (its own game says where): to the others, to draw it — `ang` its line, `ex`/`ey` where it went in (× the radius from the
+  //   middle), `pin` pinned to rock `pd` × the radius beyond the middle, `ms` how long (0: gone)
+  socket.on('magic-lodge', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const now = Date.now(); if (now - (socket._lodgeT || 0) < 40) return; socket._lodgeT = now; const f = (v, a) => Math.max(-a, Math.min(a, +v || 0));
+    socket.to(room).emit('magic-lodge', { from: socket.id, ang: +f(m.ang, 7).toFixed(3), ex: +f(m.ex, 1.5).toFixed(3), ey: +f(m.ey, 1.5).toFixed(3), pin: m.pin ? 1 : 0, pd: +f(m.pd, 4).toFixed(3), ms: Math.max(0, Math.min(8000, +m.ms || 0)) }); });
   socket.on('magic-root', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const now = Date.now(); if (now - (socket._rootT || 0) < 40) return; socket._rootT = now;
     socket.to(room).emit('magic-root', { from: socket.id, on: m.on ? 1 : 0, ms: Math.max(0, Math.min(5000, +m.ms || 0)), sn: m.sn | 0 }); });
   socket.on('magic-hedge-fire', (m) => { const room = currentAvatarRoom, q = m && _magicHedges.get(m.id | 0); if (!room || !q || q.room !== room) return; const p = socket._avPos;
