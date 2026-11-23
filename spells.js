@@ -256,6 +256,16 @@
       fx: '#b3121f', plain: { keys: [R, D, L, L, U], rune: [8, 5, 3, 7, 1] } },
     transfusion: { name: 'Transfusion', school: 'blood', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'transfuse', learn: 3, other: true, reach: 240, cost: 2, hp: 2, ms: 1400,
       plain: { keys: [R, D, U, R, R], rune: [6, 3, 1, 5, 2] } },
+    // ⭐ STEP 14b (2026-11-23) BLOOD — HAEMORRHAGE (kind 'haem', on another): `secs` s their open wounds pour (none open: `cuts` cuts open first); their own game takes `dmg` every
+    //   `every` s, `moveK` × as often while they move; cure or close wounds stops it. BLOOD BOIL (kind 'boil', on another): their blood heats for `ms` (flushed, bubbling in the skin,
+    //   steaming), then bursts in red mist — `dmg` off them. LEECHES (kind 'bolt' + `leech`): a knot of `n` leeches flies; where it strikes a body they latch on for `secs` s and
+    //   feed — `feed` off them and to its caster every `every` s, a trickle of drops running between; cure knocks them off.
+    haemorrhage: { name: 'Haemorrhage', school: 'blood', form: 'touch', tier: 1, cd: 16, stance: 'level', kind: 'haem', learn: 5, other: true, reach: 260, secs: 8, dmg: 0.25, every: 1, moveK: 2, cuts: 2,
+      plain: { keys: [R, D, L, U, L], rune: [2, 3, 7, 4, 0] } },
+    bloodboil: { name: 'Blood boil', school: 'blood', form: 'touch', tier: 1, cd: 14, stance: 'level', kind: 'boil', learn: 5, other: true, reach: 260, ms: 1400, dmg: 2.5,
+      plain: { keys: [R, D, U, U, R], rune: [8, 5, 1, 3, 7] } },
+    leeches: { name: 'Leeches', school: 'blood', form: 'bolt', tier: 0, cd: 10, stance: 'level', kind: 'bolt', leech: true, learn: 3, speed: 460, life: 3, grav: 0.3, r: 3.5, dmg: 0.25, n: 3, secs: 10, feed: 0.25, every: 1,
+      plain: { keys: [R, D, R, U, U], rune: [6, 7, 4, 5, 2] } },
     fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
     //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
@@ -656,6 +666,8 @@
     weather: [[D, D], [4, 1, 2]],
     // (14a) blood: the bolt as every bolt · the drain reached out, then drawn back down to you (a tier up: the underline) · the transfusion up and over to them
     bloodbolt: [[R, R], [4, 5]], lifedrain: [[L, D], [4, 3, 6]], transfusion: [[U, R], [4, 1, 2]],
+    // (14b) haemorrhage: out to them and up, opened · blood boil: rising straight up · leeches: out and up onto them
+    haemorrhage: [[L, U], [4, 0, 1]], bloodboil: [[U, U], [4, 1]], leeches: [[R, U], [4, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
