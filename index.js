@@ -4778,7 +4778,21 @@ setInterval(() => { if (!_magicWaves.size) return; const now = Date.now();
 //   taken out of the fine liquid). FOR GOOD: a cell for a cell, nothing made (the user: moved / changed matter stays). MEND takes a rock cell's damage away (its strength full,
 //   its kept wear gone — `wearDel`; the client's `terrain-set` resets the cracks). GREASE (`oil`) is the exception — oil MADE, so it dries away (`magicOilDry`).
 //   PROCESSOR: a few dozen cells a cast.
-const MAGIC_WOODY = new Set([28, 40, 91, 92]);   // (wood, driftwood, timber, charcoal: not mended — wood keeps its own cuts and notches)
+const MAGIC_WOODY = new Set([28, 40, 91, 92]);
+// ⭐ (magic 13c) ROT: every WOOD cell (wood, driftwood, timber — not charcoal) within `R` cells of (x, y) turns to PEAT (20) and every PLANT cell goes, in rings by distance over
+//   `ms` ms — for good (as digging). Each ring sent as terrain-set, and 'magic-rot-cells' (`w` the rotted, `p` the plants gone) for each screen's mould and flakes. → cells to change
+const MAGIC_PEAT = 20;
+function magicRot(room, x, y, S) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); if (!grid) return 0; const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, R = S.R || 8, c0 = Math.floor(x / T), r0 = Math.floor(y / T), mats = roomMats[room] || {};
+  const rings = []; let n = 0;
+  for (let dc = -R; dc <= R; dc++) for (let dr = -R; dr <= R; dr++) { const d = Math.hypot(dc, dr); if (d > R) continue; const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue;
+    const i = c * ROWS + r, v = peekCellAt(grid, i); if (!(v > 0)) continue; const kind = MAGIC_WOODY.has(v) && v !== 92 ? 1 : isPlantId(v) ? 2 : 0; if (!kind) continue;
+    const k = Math.min(9, Math.floor(d / (R + 0.01) * 10)); (rings[k] || (rings[k] = [])).push([i, kind]); n++; }
+  rings.forEach((ring, k) => { if (!ring) return; setTimeout(() => { const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], w = [], p = [];
+    for (const [i, kind] of ring) { const v = peekCellAt(grid, i); if (kind === 1 ? !(MAGIC_WOODY.has(v) && v !== 92) : !isPlantId(v)) continue; const to = kind === 1 ? MAGIC_PEAT : 0;
+      grid.s(i, to); s2.terrainHp.s(i, to ? matStrengthSrv(mats, to) : 0); if (typeof wearDel === 'function') wearDel(room, i); cells.push(i, to); (kind === 1 ? w : p).push(i); }
+    if (cells.length) { wireFanout(room, 'terrain-set', { cells }); io.to(room).emit('magic-rot-cells', { w, p }); } }, k * ((S.ms || 2000) / 10)); });
+  return n; }   // (wood, driftwood, timber, charcoal: not mended — wood keeps its own cuts and notches)
 function wearHas(room, wi) { const W = wearOf(room); if (!W.n) return false; const m = W.by.get(wearChunkOf(worldGeom(room), wi)); return !!(m && m.has(wi)); }
 function wearDel(room, wi) { const W = wearOf(room), ch = wearChunkOf(worldGeom(room), wi), m = W.by.get(ch); if (!m || !m.has(wi)) return; m.delete(wi); W.n--; if (!m.size) W.by.delete(ch); try { _delWear.run(room, wi); } catch (e) {} }
 function magicChange(room, x, y, S, sp) {
@@ -29476,6 +29490,8 @@ io.on('connection', (socket) => {
       const mine = [..._magicGroves.values()].filter(q => q.by === socket.id).sort((a, b) => a.id - b.id); while (mine.length >= (S.most || 2)) { const q = mine.shift(); _magicGroves.delete(q.id); io.to(q.room).emit('magic-grove-gone', { id: q.id }); }
       out.tx = Math.round(out.tx); out.ty = g.y; out.w = (S.wide || 14) * TERRAIN_CELL; out.secs = +(SK.secs || 12).toFixed(2);
       _magicGroves.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, until: now + out.secs * 1000 }); }
+    // ⭐ (magic 13c) ROT about the point (nothing there to rot: it is cast all the same — the mould is seen)
+    if (S.kind === 'rot') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = (S.R || 8) * TERRAIN_CELL; out.ms = S.ms || 2000; out.n = magicRot(room, out.tx, out.ty, S); }
     // ⭐ (magic 13a) THE POISON CLOUD: on the ground under the point (none: refused), `most` a caster (the oldest goes) · SPORE PODS: the same, `most` a caster
     if (S.kind === 'pcloud' || S.kind === 'spores') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
       const M = S.kind === 'pcloud' ? _magicPClouds : _magicSpores, gone = S.kind === 'pcloud' ? 'magic-pcloud-gone' : 'magic-spore-gone'; for (const [k, q] of M) if (now > q.until) M.delete(k);

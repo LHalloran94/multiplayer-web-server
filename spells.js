@@ -228,12 +228,17 @@
     //   'stabs into the other player like an arrow', with its own use) It STICKS IN whom it hits for `lodgeS` s, bleeding them `bleed` a second, a wound where it went in; with rock
     //   within `pinR` × their radius behind them along its line it goes on through and PINS them to it for `pinS` s (each fresh movement key −0.3 s), a wound where it came out
     //   too. In rock it sticks and crumbles after `stuckS` s.
+    // ⭐ STEP 13c (2026-11-23) DECAY — ROT. ROT (kind 'rot', placed): mould creeps out from the point over `ms` ms to `R` cells: WOOD turns to PEAT (crumbly, a spade digs it) and
+    //   PLANTS wither away — for good, as digging is. RUST (kind 'rust', on another): their worn METAL pieces (plate, mail) rust — each one's condition × `rustK` (it comes back
+    //   as worn gear does); rust flakes peel off them on every screen. (The bone spear: taken out, 2026-11-23 — its code in 16zj stays, unused.)
+    rot: { name: 'Rot', school: 'decay', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'rot', learn: 3, reach: 360, R: 8, ms: 2000,
+      plain: { keys: [D, R, D, R, L], rune: [7, 4, 6, 8, 5] } },
+    rust: { name: 'Rust', school: 'decay', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'rust', learn: 3, other: true, reach: 260, rustK: 0.5,
+      plain: { keys: [R, D, U, U, L], rune: [2, 5, 4, 7, 6] } },
     curse: { name: 'Curse of weakness', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'curse', learn: 5, other: true, reach: 260, secs: 20, weakK: 0.5,
       plain: { keys: [R, U, L, D, U], rune: [6, 4, 2, 1, 0] } },
     wither: { name: 'Wither', school: 'decay', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'wither', learn: 3, other: true, reach: 260, secs: 10, slowK: 0.65,
       plain: { keys: [D, D, U, R, D], rune: [0, 3, 7, 5, 2] } },
-    bonespear: { name: 'Bone spear', school: 'decay', form: 'bolt', tier: 1, cd: 6, stance: 'level', kind: 'bolt', learn: 5, speed: 760, life: 8, grav: 0.06, r: 3, dmg: 2, bone: true, stuckS: 6, lodgeS: 4, bleed: 0.25, pinR: 2.4, pinS: 1.6, press: 0.3,
-      plain: { keys: [R, R, D, R, U], rune: [3, 1, 5, 8, 6] } },
     fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
     //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
@@ -627,7 +632,9 @@
     // (13a) the venom bolt, the bolt ending · the cloud down and rolling out low · the pods down into the soil and up out of it · plague, its first mark → (towards them) and spreading out
     venombolt: [[R, R], [4, 5]], pcloud: [[D, L], [4, 3, 6]], spores: [[D, U], [4, 8, 5]], plague: [[R, L], [4, 3, 2]],
     // (13b) the curse laid over them, on to the top right · wither pulled down, then up and off to them · the bone spear, the bolt ending (a tier up: as great firebolt)
-    curse: [[R, U], [4, 0, 2]], wither: [[R, U], [4, 8, 2]], bonespear: [[R, R], [4, 5]],
+    curse: [[R, U], [4, 0, 2]], wither: [[R, U], [4, 8, 2]],
+    // (13c) rot spreading down and along the ground · rust laid straight on them, to the top right
+    rot: [[D, R], [4, 6, 8]], rust: [[R, D], [4, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
