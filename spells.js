@@ -244,6 +244,18 @@
       plain: { keys: [R, U, L, D, U], rune: [6, 4, 2, 1, 0] } },
     wither: { name: 'Wither', school: 'decay', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'wither', learn: 3, other: true, reach: 260, secs: 10, slowK: 0.65,
       plain: { keys: [D, D, U, R, D], rune: [0, 3, 7, 5, 2] } },
+    // ⭐ STEP 14a (2026-11-23, kickoff §'STEP 13' plan line 'STEP 14 BLOOD') BLOOD — its own school. Blood is the wound system's DRAWN blood (client 16o: its colours by the look
+    //   picked, its drops and stains) — there is no blood liquid. `cost` = health (half-hearts, of 10) its caster's own game takes as it is cast, never below 1 (with 1 left: refused).
+    //   BLOOD BOLT (kind 'bolt' + `blood`): while prepared, drops are pulled out of your body into an orb at the catalyst; it flies trailing drops that splatter where they land.
+    //   LIFE DRAIN (kind 'drain', HELD — `chan`, `chanS` at most — on another): their blood pulled out of them in arcing streams of drops into you; their own game takes `dmg`
+    //   every `every` s and yours gains as much; it breaks once they are past `reach` + `slack` px or out of sight. TRANSFUSION (kind 'transfuse', on another): your blood streams
+    //   into them over `ms` — `cost` off you, `hp` back to them (their own game).
+    bloodbolt: { name: 'Blood bolt', school: 'blood', form: 'bolt', tier: 0, cd: 3, stance: 'level', kind: 'bolt', blood: true, cost: 2, learn: 3, speed: 620, life: 3, grav: 0.1, r: 4, dmg: 2.5,
+      plain: { keys: [R, D, R, R, U], rune: [2, 3, 7, 5, 1] } },
+    lifedrain: { name: 'Life drain', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'drain', learn: 5, other: true, chan: true, chanS: 5, reach: 260, slack: 60, dmg: 0.5, every: 0.5,
+      fx: '#b3121f', plain: { keys: [R, D, L, L, U], rune: [8, 5, 3, 7, 1] } },
+    transfusion: { name: 'Transfusion', school: 'blood', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'transfuse', learn: 3, other: true, reach: 240, cost: 2, hp: 2, ms: 1400,
+      plain: { keys: [R, D, U, R, R], rune: [6, 3, 1, 5, 2] } },
     fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
     //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
@@ -642,6 +654,8 @@
     rot: [[D, R], [4, 6, 8]], rust: [[R, D], [4, 2]],
     // (13c round 2) weathering: cracks running up through the rock and off to the side
     weather: [[D, D], [4, 1, 2]],
+    // (14a) blood: the bolt as every bolt · the drain reached out, then drawn back down to you (a tier up: the underline) · the transfusion up and over to them
+    bloodbolt: [[R, R], [4, 5]], lifedrain: [[L, D], [4, 3, 6]], transfusion: [[U, R], [4, 1, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
