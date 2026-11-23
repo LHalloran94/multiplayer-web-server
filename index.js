@@ -4791,8 +4791,46 @@ function magicRot(room, x, y, S) {
   rings.forEach((ring, k) => { if (!ring) return; setTimeout(() => { const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], w = [], p = [];
     for (const [i, kind] of ring) { const v = peekCellAt(grid, i); if (kind === 1 ? !(MAGIC_WOODY.has(v) && v !== 92) : !isPlantId(v)) continue; const to = kind === 1 ? MAGIC_PEAT : 0;
       grid.s(i, to); s2.terrainHp.s(i, to ? matStrengthSrv(mats, to) : 0); if (typeof wearDel === 'function') wearDel(room, i); cells.push(i, to); (kind === 1 ? w : p).push(i); }
-    if (cells.length) { wireFanout(room, 'terrain-set', { cells }); io.to(room).emit('magic-rot-cells', { w, p }); } }, k * ((S.ms || 2000) / 10)); });
-  return n; }   // (wood, driftwood, timber, charcoal: not mended — wood keeps its own cuts and notches)
+    if (cells.length) { wireFanout(room, 'terrain-set', { cells }); io.to(room).emit('magic-rot-cells', { w, p }); } for (const i of p) goneP.push(i); }, k * ((S.ms || 2000) / 10)); });
+  // (round 2, the user: 'it can get rid of leaves but then leave other leaves hanging in mid-air') once the last ring is done: every clump of plants touching what went, that
+  //   touches no solid ground, wood or peat any more, rots away too (as `p`)
+  const goneP = []; setTimeout(() => { const s2 = cellsOf(room); if (s2.terrain !== grid || !goneP.length) return; const seen = new Set(), cells = [], p = [], N = grid.length;
+    const nb8 = (i) => { const c = Math.floor(i / ROWS), r = i % ROWS, o = []; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) { if (!a && !b) continue; const cc = c + a, rr = r + b; if (cc >= 0 && cc < COLS && rr >= 0 && rr < ROWS) o.push(cc * ROWS + rr); } return o; };
+    const holds = (j) => { const v = peekCellAt(grid, j); return v > 0 && isSolidCell(v) && !isPlantId(v); };
+    for (const g of goneP) for (const s0 of nb8(g)) { if (seen.has(s0) || !isPlantId(peekCellAt(grid, s0))) continue; const comp = [s0], mark = new Set([s0]); seen.add(s0); let held = false;
+      for (let q = 0; q < comp.length && comp.length < 4000; q++) { const i = comp[q], c = Math.floor(i / ROWS), r = i % ROWS;
+        for (const j of [i - ROWS, i + ROWS, r > 0 ? i - 1 : -1, r + 1 < ROWS ? i + 1 : -1]) if (j >= 0 && j < N && holds(j)) held = true;
+        if (held) break; for (const j of nb8(i)) if (!mark.has(j) && isPlantId(peekCellAt(grid, j))) { mark.add(j); seen.add(j); comp.push(j); } }
+      if (held || comp.length >= 4000) continue;
+      for (const i of comp) { grid.s(i, 0); s2.terrainHp.s(i, 0); if (typeof wearDel === 'function') wearDel(room, i); cells.push(i, 0); p.push(i); } }
+    if (cells.length) { for (let q = 0; q < cells.length; q += 512) wireFanout(room, 'terrain-set', { cells: cells.slice(q, q + 512) }); io.to(room).emit('magic-rot-cells', { w: [], p: p.slice(0, 600) }); } }, (S.ms || 2000) + 120);
+  return n; }
+// ⭐ (magic 13c round 2) WEATHERING: every breakable rock cell within `R` cells of (x, y), reached by a front going out over the first 60% of `ms`, is cracked a little more each of
+//   `steps` steps (kept wear — `wearPut`, sent as a blow's), by how weak it is (2 / (1 + strength)), its own luck (fixed at the cast) and whether a face of it is open to the air
+//   (×1.8); a cell open to the air cracked past `breakW`, and among the unluckiest (luck over `weakL`), breaks away (gone, its rubble a pick-up as a quake's — `magicRubbleBits`; 'magic-weather-bits' for each screen's grit),
+//   at most `loose` a cast. PROCESSOR: a few hundred cells a step, fourteen steps.
+function magicWeather(room, x, y, S) {
+  const st = cellsOf(room), grid = st.terrain; if (!grid) return 0; ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, mats = roomMats[room] || {}, floorRow = Math.floor(roomFloorTop(room) / T);
+  const W = wearOf(room), geom = worldGeom(room), oldW = (i) => { const m = W.by.get(wearChunkOf(geom, i)), e = m && m.get(i); return e ? e[0] | 0 : 0; };
+  const rock = (i) => { if (i < 0 || i >= N || i % ROWS >= floorRow) return false; const v = peekCellAt(grid, i); return v > 0 && isSolidCell(v) && !isBodyId(v) && !isPlantId(v) && !MAGIC_WOODY.has(v) && !isPowderId(v); };
+  const R = S.R || 7, c0 = Math.floor(x / T), r0 = Math.floor(y / T), list = [];
+  for (let dc = -R; dc <= R; dc++) for (let dr = -R; dr <= R; dr++) { const d = Math.hypot(dc, dr); if (d > R) continue; const c = c0 + dc, r = r0 + dr; if (c < 0 || c >= COLS || r < 0 || r >= ROWS) continue;
+    const i = c * ROWS + r; if (!rock(i)) continue; const v = peekCellAt(grid, i); if (!matBreakableSrv(mats, v)) continue; list.push([i, d, 2 / (1 + matStrengthSrv(mats, v)), 0.45 + Math.random() * 1.1]); }
+  const steps = S.steps || 14, ms = S.ms || 5000; let left = S.loose || 30;
+  for (let k = 1; k <= steps; k++) setTimeout(() => { if (cellsOf(room).terrain !== grid) return; const front = R * Math.min(1, k / (steps * 0.6)), out = [], brk = [], set = [];
+    for (const q of list) { const i = q[0]; if (q[1] > front || !rock(i)) continue; const v = peekCellAt(grid, i), r = i % ROWS;
+      const air = [i - ROWS, i + ROWS, r > 0 ? i - 1 : -1, r + 1 < ROWS ? i + 1 : -1].some(j => j >= 0 && j < N && peekAir(grid, j)), w0 = oldW(i);
+      const nw = Math.min(59, w0 + Math.max(1, Math.round((S.crack || 8) * q[2] * q[3] * (air ? 1.8 : 1) * (1 - 0.45 * q[1] / (R + 1)))));
+      if (nw > w0) { wearPut(room, i, nw, v, [Math.round(x), Math.round(y)]); out.push(i, nw); }
+      if (air && nw >= (S.breakW || 50) && q[3] > (S.weakL || 1.05) && left > 0) { brk.push([i, v]); left--; } }
+    for (const [i] of brk) { grid.s(i, 0); st.terrainHp.s(i, 0); wearDel(room, i); set.push(i, 0); }
+    // (no struck point on the wire: a blow's chips and clink every step would be a pick, not weathering)
+    for (let q = 0; q < out.length; q += 128) io.to(room).emit('terrain-wear', { c: out.slice(q, q + 128) });
+    if (set.length) { wireFanout(room, 'terrain-set', { cells: set }); io.to(room).emit('magic-weather-bits', { c: brk.map(q => q[0]) }); magicRubbleBits(room, brk, 0, 0);
+      const cs = brk.map(q => Math.floor(q[0] / ROWS)), rs = brk.map(q => q[0] % ROWS), a0 = Math.min(...cs), b0 = Math.min(...rs), a1 = Math.max(...cs), b1 = Math.max(...rs);
+      activatePowderRect(room, grid, a0 - 1, b0 - 2, a1 + 1, b1 + 1); try { fallCheck(room, a0, b0, a1, b1); } catch (e) {} }
+  }, k * ms / steps);
+  return list.length; }   // (wood, driftwood, timber, charcoal: not mended — wood keeps its own cuts and notches)
 function wearHas(room, wi) { const W = wearOf(room); if (!W.n) return false; const m = W.by.get(wearChunkOf(worldGeom(room), wi)); return !!(m && m.has(wi)); }
 function wearDel(room, wi) { const W = wearOf(room), ch = wearChunkOf(worldGeom(room), wi), m = W.by.get(ch); if (!m || !m.has(wi)) return; m.delete(wi); W.n--; if (!m.size) W.by.delete(ch); try { _delWear.run(room, wi); } catch (e) {} }
 function magicChange(room, x, y, S, sp) {
@@ -29492,6 +29530,8 @@ io.on('connection', (socket) => {
       _magicGroves.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, until: now + out.secs * 1000 }); }
     // ⭐ (magic 13c) ROT about the point (nothing there to rot: it is cast all the same — the mould is seen)
     if (S.kind === 'rot') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = (S.R || 8) * TERRAIN_CELL; out.ms = S.ms || 2000; out.n = magicRot(room, out.tx, out.ty, S); }
+    // ⭐ (magic 13c round 2) WEATHERING about the point
+    if (S.kind === 'weather') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = (S.R || 7) * TERRAIN_CELL; out.ms = S.ms || 5000; out.n = magicWeather(room, out.tx, out.ty, S); }
     // ⭐ (magic 13a) THE POISON CLOUD: on the ground under the point (none: refused), `most` a caster (the oldest goes) · SPORE PODS: the same, `most` a caster
     if (S.kind === 'pcloud' || S.kind === 'spores') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
       const M = S.kind === 'pcloud' ? _magicPClouds : _magicSpores, gone = S.kind === 'pcloud' ? 'magic-pcloud-gone' : 'magic-spore-gone'; for (const [k, q] of M) if (now > q.until) M.delete(k);

@@ -231,8 +231,13 @@
     // ⭐ STEP 13c (2026-11-23) DECAY — ROT. ROT (kind 'rot', placed): mould creeps out from the point over `ms` ms to `R` cells: WOOD turns to PEAT (crumbly, a spade digs it) and
     //   PLANTS wither away — for good, as digging is. RUST (kind 'rust', on another): their worn METAL pieces (plate, mail) rust — each one's condition × `rustK` (it comes back
     //   as worn gear does); rust flakes peel off them on every screen. (The bone spear: taken out, 2026-11-23 — its code in 16zj stays, unused.)
-    rot: { name: 'Rot', school: 'decay', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'rot', learn: 3, reach: 360, R: 8, ms: 2000,
+    //   (round 2, the user: 'the rot range should be bigger' — 8 → 14 cells; leaves it left hanging in mid-air rot away too)
+    //   WEATHERING (kind 'weather', placed — the plan's 'crumble'; the user picked the weathering kind, as Earth's 'Rock to sand' is the instant one): cracks creep through the
+    //   rock round the point over `ms` ms (wear, as a pick's, softer rock faster, faces open to the air faster still), and the weakest pieces on its faces break away as rubble.
+    rot: { name: 'Rot', school: 'decay', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'rot', learn: 3, reach: 360, R: 14, ms: 3000,
       plain: { keys: [D, R, D, R, L], rune: [7, 4, 6, 8, 5] } },
+    weather: { name: 'Weathering', school: 'decay', form: 'placed', tier: 0, cd: 14, stance: 'level', kind: 'weather', learn: 4, reach: 360, R: 7, ms: 5000, steps: 14, crack: 6, breakW: 50, loose: 14, weakL: 1.05,
+      plain: { keys: [D, D, R, L, D], rune: [1, 4, 7, 3, 5] } },
     rust: { name: 'Rust', school: 'decay', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'rust', learn: 3, other: true, reach: 260, rustK: 0.5,
       plain: { keys: [R, D, U, U, L], rune: [2, 5, 4, 7, 6] } },
     curse: { name: 'Curse of weakness', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'curse', learn: 5, other: true, reach: 260, secs: 20, weakK: 0.5,
@@ -635,6 +640,8 @@
     curse: [[R, U], [4, 0, 2]], wither: [[R, U], [4, 8, 2]],
     // (13c) rot spreading down and along the ground · rust laid straight on them, to the top right
     rot: [[D, R], [4, 6, 8]], rust: [[R, D], [4, 2]],
+    // (13c round 2) weathering: cracks running up through the rock and off to the side
+    weather: [[D, D], [4, 1, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
