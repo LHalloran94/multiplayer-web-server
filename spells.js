@@ -269,13 +269,13 @@
     // ⭐ STEP 14c (2026-11-23) BLOOD — BLOOD SHIELD (kind 'bshield', on yourself): `cost` off you, a hardened crimson shell soaking the next `hp` half-hearts of harm for `secs` s (the
     //   ward skin's soak, client 16zj `magicWardSoak`). BLOOD SPIKES (kind 'bspikes', placed): crimson spikes burst up out of the ground under the point along `wide` cells, one after
     //   another from the caster's side; a body standing on one is cut, bleeds, takes `dmg` and is tossed (`toss`); they melt after `secs` s. BLOOD GRIP (kind 'grip', HELD, on another):
-    //   a rope of blood drags them towards you — at most `drag` px, they still steer; it breaks past `reach` + `slack` or out of sight. BLOOD WHIP (kind 'whip', HELD): `cost` off you,
+    //   a rope of blood HOLDS them where they are (round 2, the user: hold, not pull) for at most `holdS` s, each fresh movement key they press `press` s off; it breaks past `reach` + `slack` or out of sight. BLOOD WHIP (kind 'whip', HELD): `cost` off you,
     //   a lash of your blood `len` px long trailing the pointer; its tip cuts whom it whips (`dmg`, each body at most every `gap` s).
     bloodshield: { name: 'Blood shield', school: 'blood', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'bshield', learn: 5, cost: 2, hp: 3, secs: 20,
       plain: { keys: [R, D, D, D, U], rune: [2, 3, 6, 7, 4] } },
     bloodspikes: { name: 'Blood spikes', school: 'blood', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'bspikes', learn: 5, reach: 320, wide: 10, dmg: 1.5, toss: 6, secs: 2.2,
       plain: { keys: [R, D, D, L, R], rune: [0, 3, 7, 8, 5] } },
-    bloodgrip: { name: 'Blood grip', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'grip', learn: 5, other: true, chan: true, chanS: 3, reach: 280, slack: 60, drag: 90,
+    bloodgrip: { name: 'Blood grip', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'grip', learn: 5, other: true, chan: true, chanS: 10, reach: 280, slack: 60, holdS: 10, press: 0.6,
       fx: '#b3121f', plain: { keys: [R, D, L, L, L], rune: [8, 7, 3, 1, 2] } },
     bloodwhip: { name: 'Blood whip', school: 'blood', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'whip', learn: 3, chan: true, chanS: 5, cost: 1, len: 100, dmg: 1, gap: 0.45,
       fx: '#b3121f', plain: { keys: [R, D, R, L, R], rune: [6, 4, 2, 1, 3] } },
