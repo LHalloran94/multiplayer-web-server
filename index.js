@@ -29781,6 +29781,7 @@ io.on('connection', (socket) => {
           const mine = [..._magicHedges.values()].filter(q => q.by === L.by).sort((a, b) => a.id - b.id); while (mine.length >= (S0.most || 2)) { const q = mine.shift(); _magicHedges.delete(q.id); io.to(q.room).emit('magic-hedge-gone', { id: q.id }); }
           _magicHedges.set(m.id, { id: m.id, by: L.by, room: L.room, x: tx, y: ty, w, h, until: now2 + secs * 1000, burnAt: 0, burnS: S0.burnS || 2, t0: now2, grow: S0.growMs || 1500 });
           SN = { sk: 'hedge', w, h, secs, grow: S0.growMs || 1500 }; }
+        else if (S0.seed === 'bspikes') SN = { sk: 'bspikes' };   // (magic 14c round 3) blood spikes: every screen bursts them along the ground from here
         else { const secs = +((S0.snareS || 6)).toFixed(2), R = S0.R || 72;
           _magicSnares.set(m.id, { id: m.id, by: L.by, room: L.room, x: tx, y: ty, R, until: now2 + secs * 1000 }); for (const [k, q] of _magicSnares) if (now2 > q.until) _magicSnares.delete(k);
           SN = { sk: 'roots', R, secs, hold: S0.holdS || 2 }; } } else air = 1; }

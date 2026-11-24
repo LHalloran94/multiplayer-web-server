@@ -267,13 +267,13 @@
     leeches: { name: 'Leeches', school: 'blood', form: 'bolt', tier: 0, cd: 10, stance: 'level', kind: 'bolt', leech: true, learn: 3, speed: 460, life: 3, grav: 0.3, r: 3.5, dmg: 0.25, n: 3, secs: 10, feed: 0.25, every: 1,
       plain: { keys: [R, D, R, U, U], rune: [6, 7, 4, 5, 2] } },
     // ⭐ STEP 14c (2026-11-23) BLOOD — BLOOD SHIELD (kind 'bshield', on yourself): `cost` off you, a hardened crimson shell soaking the next `hp` half-hearts of harm for `secs` s (the
-    //   ward skin's soak, client 16zj `magicWardSoak`). BLOOD SPIKES (kind 'bspikes', placed): crimson spikes burst up out of the ground under the point along `wide` cells, one after
-    //   another from the caster's side; a body standing on one is cut, bleeds, takes `dmg` and is tossed (`toss`); they melt after `secs` s. BLOOD GRIP (kind 'grip', HELD, on another):
+    //   ward skin's soak, client 16zj `magicWardSoak`). BLOOD SPIKES (a lobbed glob — kind 'bolt' + `seed` 'bspikes', round 3, the user: 'some projectile so that it can land somewhere definitive and then spread from there'):
+    //   where it lands crimson spikes burst up along the ground `wide` cells, out from that spot each way; a body standing on one is cut, bleeds, takes `dmg` and is tossed (`toss`); they melt after `secs` s. BLOOD GRIP (kind 'grip', HELD, on another):
     //   a rope of blood HOLDS them where they are (round 2, the user: hold, not pull) for at most `holdS` s, each fresh movement key they press `press` s off; it breaks past `reach` + `slack` or out of sight. BLOOD WHIP (kind 'whip', HELD): `cost` off you,
     //   a lash of your blood `len` px long trailing the pointer; its tip cuts whom it whips (`dmg`, each body at most every `gap` s).
     bloodshield: { name: 'Blood shield', school: 'blood', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'bshield', learn: 5, cost: 2, hp: 3, secs: 20,
       plain: { keys: [R, D, D, D, U], rune: [2, 3, 6, 7, 4] } },
-    bloodspikes: { name: 'Blood spikes', school: 'blood', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'bspikes', learn: 5, reach: 320, wide: 10, dmg: 1.5, toss: 6, secs: 2.2,
+    bloodspikes: { name: 'Blood spikes', school: 'blood', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'bolt', seed: 'bspikes', lob: true, lobG: 1100, learn: 5, reach: 400, speed: 520, life: 1.8, grav: 0.4, r: 3.5, dmg: 0, wide: 10, spikeDmg: 1.5, toss: 6, secs: 2.2,
       plain: { keys: [R, D, D, L, R], rune: [0, 3, 7, 8, 5] } },
     bloodgrip: { name: 'Blood grip', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'grip', learn: 5, other: true, chan: true, chanS: 10, reach: 280, slack: 60, holdS: 10, press: 0.6,
       fx: '#b3121f', plain: { keys: [R, D, L, L, L], rune: [8, 7, 3, 1, 2] } },
