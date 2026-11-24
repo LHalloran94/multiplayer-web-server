@@ -100,17 +100,13 @@
     //   LIFT AND THROW (7A — a thread of light to a loose thing; held while the button is, the other button throws) · A DOUBLE OF YOU (8Y — it walks on the way you were going;
     //   see-through on your own screen; struck, it bursts). hp  health it gives back · closeMs, gap  a cut's closing, between cuts · ms  the motes · reach  px (lift: how far
     //   the thing may be from you) · secs  how long it lasts · pull, vmax  how hard the thing is drawn to the pointer (px a tick) · throwV  its speed thrown · walk  px a second
-    closewounds: { name: 'Close wounds', school: 'life', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'heal', learn: 3, hp: 3, closeMs: 700, gap: 350, ms: 2600, alts: ['closewounds_o'],
+    closewounds: { name: 'Close wounds', school: 'life', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'heal', learn: 3, hp: 3, closeMs: 700, gap: 350, ms: 2600, aim: 'self', reach: 240,
       plain: { keys: [U, D, U, D], rune: [7, 4, 1, 0] } },
     // ⭐ STEP 12a (2026-11-22, kickoff §'STEP 12') LIFE — HEALING: close wounds ON ANOTHER (its Touch variant: the player nearest the pointer, `reach` px; their own game heals
     //   itself) · CURE (kind 'cure', + on another): ends burning, the chill's slow, a daze, being frozen in — `ms` its leaves' spiral · HEALING GROVE (kind 'grove'): plants spring
     //   up along the ground under the point, `wide` cells across, `secs` s; every body standing in it heals `hp` health every `every` s; `most` a caster (the oldest goes)
-    closewounds_o: { name: 'Close wounds (on another)', school: 'life', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'heal', alt: 'closewounds', other: true, reach: 240, hp: 3, closeMs: 700, gap: 350, ms: 2600,
-      plain: { keys: [U, R, D, L, L], rune: [7, 3, 1, 5, 8] } },
-    cure: { name: 'Cure', school: 'life', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'cure', learn: 3, ms: 1400, alts: ['cure_o'],
+    cure: { name: 'Cure', school: 'life', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'cure', learn: 3, ms: 1400, aim: 'self', reach: 240,
       plain: { keys: [L, U, D, R, U], rune: [8, 6, 4, 0, 1] } },
-    cure_o: { name: 'Cure (on another)', school: 'life', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'cure', alt: 'cure', other: true, reach: 240, ms: 1400,
-      plain: { keys: [L, U, D, R, R], rune: [8, 6, 4, 0, 3] } },
     grove: { name: 'Healing grove', school: 'life', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'grove', learn: 5, reach: 360, secs: 12, wide: 14, every: 2, hp: 1, most: 2,
       plain: { keys: [D, U, R, D, L], rune: [6, 7, 3, 1, 2] } },
     // ⭐ STEP 12b (2026-11-22, kickoff §'STEP 12') LIFE — HOLDING AND GUARDING: ENTANGLE (a bolt that is a SEED, `seed`: no blow; LOBBED onto the pointer, `lob` — every screen
@@ -162,11 +158,9 @@
     //   grant a pickup uses (client 16a `powerGrant`) — each player's own game holds their own, everybody sees it by the powers' mask on the position packet. On yourself = the
     //   form 'On yourself'; ON ANOTHER = its variant with 'Touch' (`other`): the player nearest your pointer within `reach` px of you (the server checks they are there).
     //   CHILL BOLT: a frost bolt that SLOWS whoever it hits (`slow` × their speed for `slowS` s — the new 'slow' power, 01_state `POWERUP_KINDS.slow`).
-    leap: { name: 'Leap', school: 'force', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'boots', secs: 20, learn: 3, alts: ['leap_o'], plain: { keys: [R, U, U, D, R], rune: [6, 4, 2, 5, 8] } },
-    leap_o: { name: 'Leap (on another)', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'boon', pw: 'boots', secs: 20, alt: 'leap', other: true, reach: 240, plain: { keys: [R, U, U, D, L], rune: [6, 4, 2, 5, 3] } },
-    feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'feather', secs: 20, learn: 3, alts: ['feather_o'], plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
-    feather_o: { name: 'Feather fall (on another)', school: 'storm', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'boon', pw: 'feather', secs: 20, alt: 'feather', other: true, reach: 240, plain: { keys: [L, R, D, D, R], rune: [0, 4, 8, 7, 4] } },
-    haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, alts: ['haste_o'], plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
+    leap: { name: 'Leap', school: 'force', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'boots', secs: 20, learn: 3, aim: 'self', reach: 240, plain: { keys: [R, U, U, D, R], rune: [6, 4, 2, 5, 8] } },
+    feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'feather', secs: 20, learn: 3, aim: 'self', reach: 240, plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
+    haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, aim: 'self', reach: 240, plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
     // ⭐ STEP 10a (2026-11-21) SPACE: BLINK (kind 'blink') — to the free spot nearest the pointer, at most `blinkR` px from your middle and in sight (the caster's game finds it:
     //   client 16zj `magicBlinkSpot`; the server holds it to `reach` px from the hand); your speed kept. PASS THROUGH (kind 'pass') — through at most `cells` cells of rock met within `near` cells of
     //   you, the way the pointer points (8 ways) to the first place your body fits (16zj `magicPassSpot`); carried there over a time set by how far.
@@ -203,17 +197,14 @@
     //   one a player — `_magicPockets`); full: cast again and it unfolds where you point (within `reach`, where it fits), in the world it came from. You die: it falls out there.
     pocket: { name: 'Pocket', school: 'space', form: 'touch', tier: 1, cd: 6, stance: 'level', kind: 'pocket', learn: 5, reach: 320, foldMs: 450, fx: '#b08cff',
       plain: { keys: [L, L, D, L, R], rune: [5, 7, 4, 3, 6] } },
-    haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
-    grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
-    grow_o: { name: 'Grow (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mega', secs: 15, alt: 'grow', other: true, reach: 240, plain: { keys: [U, L, U, R, D], rune: [7, 3, 1, 5, 4] } },
+    grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, aim: 'self', reach: 240, plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
     // ⭐ STEP 15a (2026-11-24) ALTERATION — boons through the pickups' own grant (16a `powerGrant`), each with its look on every screen (16zj §'STEP 15a'):
     //   STONE SKIN (+ on another): the powerup 'stone' — nothing hurts or moves you, slow, a low jump, you sink; granite grows up the skin (the position packet's
     //   `PW_STONE_SPELL_BIT` tells a spell's stone from a pickup's) · FINS: swim faster, the water's lift off (stay at any depth), less drag · NIGHT EYES: your own view's
     //   darkness lifted to a cold grey-green (the light's floor, on the card), glowing slit eyes on your face for everybody else
-    stoneskin: { name: 'Stone skin', school: 'alteration', form: 'self', tier: 1, cd: 25, stance: 'raise', kind: 'boon', pw: 'stone', secs: 15, learn: 5, alts: ['stoneskin_o'], fx: '#a8a49a', plain: { keys: [D, D, U, D, D], rune: [1, 0, 3, 6, 8] } },
-    stoneskin_o: { name: 'Stone skin (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 25, stance: 'level', kind: 'boon', pw: 'stone', secs: 15, alt: 'stoneskin', other: true, reach: 240, fx: '#a8a49a', plain: { keys: [D, D, U, D, R], rune: [1, 0, 3, 6, 7] } },
-    fins: { name: 'Fins', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'fins', secs: 30, learn: 3, fx: '#5fc8c0', plain: { keys: [L, R, L, R, D], rune: [3, 1, 5, 8, 6] } },
-    nighteyes: { name: 'Night eyes', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'nighteyes', secs: 30, learn: 3, fx: '#c8f070', plain: { keys: [U, L, R, U, U], rune: [6, 0, 4, 8, 2] } },
+    stoneskin: { name: 'Stone skin', school: 'alteration', form: 'self', tier: 1, cd: 25, stance: 'raise', kind: 'boon', pw: 'stone', secs: 15, learn: 5, aim: 'self', reach: 240, fx: '#a8a49a', plain: { keys: [D, D, U, D, D], rune: [1, 0, 3, 6, 8] } },
+    fins: { name: 'Fins', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'fins', secs: 30, aim: 'self', reach: 240, learn: 3, fx: '#5fc8c0', plain: { keys: [L, R, L, R, D], rune: [3, 1, 5, 8, 6] } },
+    nighteyes: { name: 'Night eyes', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'nighteyes', secs: 30, aim: 'self', reach: 240, learn: 3, fx: '#c8f070', plain: { keys: [U, L, R, U, U], rune: [6, 0, 4, 8, 2] } },
     // ⭐ STEP 15b (2026-11-24, kickoff §'STEP 15 — ALTERATION') GASEOUS FORM (boon 'gas', `secs` s: a drifting mist the size of the smallest body — it squeezes through gaps, floats on the
     //   movement keys, is not solid to anybody, nothing in its hands; if it ends where the body does not fit, you are CRUSHED) · RUBBER BODY (boon 'rubber': you bounce off the ground
     //   and walls — hold down to land soft — blows throw you `knockK` further and hurt `hurtK`) · PETRIFY (a bolt: whom it hits is stone where they stand for at most `holdS` s,
@@ -222,9 +213,8 @@
     gaseous: { name: 'Gaseous form', school: 'alteration', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'boon', pw: 'gas', secs: 15, aim: 'self', reach: 240, warnS: 3, high: 72, learn: 5, fx: '#c8d4e0', plain: { keys: [U, U, L, R, U], rune: [0, 7, 3, 5, 1] } },
     rubber: { name: 'Rubber body', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'rubber', secs: 15, aim: 'self', reach: 240, learn: 3, knockK: 1.6, hurtK: 0.5, fx: '#e8508a', plain: { keys: [D, U, D, U, R], rune: [7, 1, 8, 2, 5] } },
     petrify: { name: 'Petrify', school: 'alteration', form: 'bolt', tier: 1, cd: 10, stance: 'level', kind: 'bolt', petrify: true, aim: 'me', holdS: 6, press: 0.3, learn: 5, speed: 560, life: 1.2, grav: 0.08, r: 3.5, dmg: 0, fx: '#a8a49a', plain: { keys: [R, D, D, R, D], rune: [3, 4, 7, 8, 6] } },
-    jelly: { name: 'Jelly', school: 'alteration', form: 'touch', tier: 1, cd: 15, stance: 'level', kind: 'boon', pw: 'jelly', secs: 5, aim: 'pick', reach: 240, learn: 5, fx: '#7ee08a', plain: { keys: [L, R, L, D, R], rune: [2, 4, 6, 8, 5] } },
-    shrink: { name: 'Shrink', school: 'decay', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mini', secs: 15, learn: 5, alts: ['shrink_o'], plain: { keys: [D, R, D, L, D], rune: [1, 5, 7, 3, 4] } },
-    shrink_o: { name: 'Shrink (on another)', school: 'decay', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mini', secs: 15, alt: 'shrink', other: true, reach: 240, plain: { keys: [D, R, D, L, U], rune: [1, 5, 7, 3, 0] } },
+    jelly: { name: 'Jelly', school: 'alteration', form: 'touch', tier: 1, cd: 15, stance: 'level', kind: 'boon', pw: 'jelly', secs: 8, aim: 'pick', reach: 240, learn: 5, fx: '#7ee08a', plain: { keys: [L, R, L, D, R], rune: [2, 4, 6, 8, 5] } },
+    shrink: { name: 'Shrink', school: 'decay', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mini', secs: 15, learn: 5, aim: 'self', reach: 240, plain: { keys: [D, R, D, L, D], rune: [1, 5, 7, 3, 4] } },
     // ⭐ STEP 13a (2026-11-23, kickoff §'STEP 13') DECAY — POISON. POISONED (a body's own game: `poison` s, `poisonDmg` health every `poisonEvery` s; cure ends it; the others told to draw it).
     //   VENOM BOLT (kind 'bolt' + `poison`): a dripping glob that flies until it hits something (round 2, the user: it vanished — `life` 8); what it hits is poisoned. POISON CLOUD (kind 'pcloud', placed): a cloud spreading out from the point over `grow` s, as a gas, to `wide` cells across, `high` cells deep (round 2: taller, wider), on the ground under
     //   the point, following each column's ground; every body in it poisoned (`poisonS` s, kept up while in it); FIRE in it (any fire lit there, a burning body) sets it off — a flash, `boomDmg`
@@ -296,14 +286,12 @@
       fx: '#b3121f', plain: { keys: [R, D, L, L, L], rune: [8, 7, 3, 1, 2] } },
     bloodwhip: { name: 'Blood whip', school: 'blood', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'whip', learn: 3, chan: true, chanS: 5, cost: 1, len: 100, dmg: 1, gap: 0.45,
       fx: '#b3121f', plain: { keys: [R, D, R, L, R], rune: [6, 4, 2, 1, 3] } },
-    fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, alts: ['fireward_o'], plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
+    fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, aim: 'self', reach: 240, plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
     //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
     //   bolts, arrows, thrown things and ice shards that come within `R` px of your body turn back the way they came, now yours (catch's hand-off).
-    wardskin: { name: 'Ward skin', school: 'wards', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'wardskin', secs: 20, hp: 4, learn: 3, alts: ['wardskin_o'], fx: '#ffd86b',
+    wardskin: { name: 'Ward skin', school: 'wards', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'wardskin', secs: 20, hp: 4, learn: 3, aim: 'self', reach: 240, fx: '#ffd86b',
       plain: { keys: [L, U, U, R, D], rune: [0, 2, 5, 4, 7] } },
-    wardskin_o: { name: 'Ward skin (on another)', school: 'wards', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'wardskin', alt: 'wardskin', other: true, reach: 240, secs: 20, hp: 4, fx: '#ffd86b',
-      plain: { keys: [L, U, U, R, L], rune: [0, 2, 5, 4, 3] } },
     mirror: { name: 'Mirror ward', school: 'wards', form: 'self', tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 10, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
       plain: { keys: [R, D, L, U, R], rune: [2, 0, 3, 5, 8] } },
     // ⭐ STEP 11b (2026-11-22; round 3, the user: the wall had no purpose of its own — 'I like the ward line option') WARDS: WARD LINE (kind 'wardline') — a line of light where
@@ -336,7 +324,6 @@
       plain: { keys: [D, L, U, R, R], rune: [7, 3, 1, 5, 2] } },
     dispel: { name: 'Dispel', school: 'wards', form: 'placed', tier: 1, cd: 15, stance: 'level', kind: 'dispel', learn: 5, reach: 320, R: 120, ms: 450, fx: '#ffd86b',
       plain: { keys: [R, U, D, L, U], rune: [8, 4, 0, 1, 2] } },
-    fireward_o: { name: 'Fire ward (on another)', school: 'wards', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'fireproof', secs: 20, alt: 'fireward', other: true, reach: 240, plain: { keys: [L, D, R, U, L], rune: [0, 6, 8, 2, 1] } },
     chillbolt: { name: 'Chill bolt', school: 'frost', form: 'bolt', tier: 0, cd: 4, stance: 'level', kind: 'bolt', learn: 3, speed: 640, life: 1.1, grav: 0.05, r: 3, dmg: 0.4, slow: 0.55, slowS: 4, freezeN: 2, freezeS: 20,
       plain: { keys: [D, D, R, U, R], rune: [2, 4, 3, 6, 7] } },
     // ⭐ STEP 5a (2026-11-18 — EARTH, the user: 'all the spells should go in'; 'how the earth spells change the world sound right': moved / changed matter STAYS, made matter goes).
@@ -509,10 +496,8 @@
       plain: { keys: [L, D, R, D, L], rune: [0, 3, 1, 5, 7] } },
     // WIND SHIELD, kind 'windshield' (on yourself, `secs` s; the Touch variant on another): wind circling the body bends ARROWS, THROWN THINGS, ICE SHARDS and SPELL BOLTS that come
     //   within `R` px of it aside (turned along the wind, `k` how hard) — never its own owner's. Seen by motes and leaves circling and faint curved streaks.
-    windshield: { name: 'Wind shield', school: 'storm', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'windshield', learn: 3, secs: 12, R: 44, k: 24, alts: ['windshield_o'], fx: '#dfe8f0',
+    windshield: { name: 'Wind shield', school: 'storm', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'windshield', learn: 3, secs: 12, R: 44, k: 24, aim: 'self', reach: 240, fx: '#dfe8f0',
       plain: { keys: [L, R, D, L, U], rune: [0, 5, 7, 3, 1] } },
-    windshield_o: { name: 'Wind shield (on another)', school: 'storm', form: 'touch', tier: 0, cd: 14, stance: 'level', kind: 'windshield', alt: 'windshield', other: true, reach: 240, secs: 12, R: 44, k: 24, fx: '#dfe8f0',
-      plain: { keys: [L, R, D, L, R], rune: [0, 5, 7, 3, 4] } },
     // ⭐ (8b, FROST — the user 2026-11-20: 'we should build the blizzard in Frost also') BLIZZARD, kind 'blizzard', HELD (`chanS` s at most): `clouds` snow clouds `spread` px apart
     //   over the pointer (in sight), formed from vapour out of the staff as the thunderstorm's; once formed each SNOWS (`cps` grains a second of real snow, as the snow cloud — melted
     //   `meltSecs` after) blown by a WIND away from the caster (`wind` cells a step on each flake); under them (and `lee` px downwind) bodies are pushed by the wind (`windPush`),
@@ -569,7 +554,7 @@
       plain: { keys: [R, D, L, D, D], rune: [3, 7, 6, 4, 8] } },
     weightless: { name: 'Weightless', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', alt: 'heavy', light: 1, reach: 260, secs: 10, fx: '#ece8ff',
       plain: { keys: [R, D, L, D, U], rune: [3, 7, 6, 4, 0] } },
-    levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 20, learn: 3, alts: ['levitate_o'],
+    levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 20, learn: 3, aim: 'self', reach: 240,
       plain: { keys: [R, U, D, U, R], rune: [5, 7, 3, 1, 2] } },
     // ⭐ STEP 9c (2026-11-21) FORCE: STASIS (kind 'stasis', on the loose thing or player nearest the pointer within `reach`, never yourself): a thing stops dead for `secs` s, the
     //   blows it takes stored and given all at once at the end (client 16b `lbStasis`); a player held at most `holdS` s, each fresh movement key `press` s off, a blow breaks it.
@@ -584,8 +569,6 @@
     //   (things at `throwV`, bolts at their own speed); any other end drops them (a bolt fizzles).
     catch: { name: 'Catch', school: 'force', form: 'stream', tier: 0, cd: 8, stance: 'level', kind: 'catch', learn: 3, chan: true, chanS: 15, dist: 30, r: 46, half: 60, most: 6, minV: 3, throwV: 18, fx: '#e6e6f0',
       plain: { keys: [R, D, R, U, D], rune: [5, 3, 7, 1, 4] } },
-    levitate_o: { name: 'Levitate (on another)', school: 'force', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'boon', pw: 'levitate', secs: 20, alt: 'levitate', other: true, reach: 240,
-      plain: { keys: [R, U, D, U, L], rune: [5, 7, 3, 1, 0] } },
     // the innate abilities (step 1: one each, small)
     glow:  { name: 'Glow',  school: 'light', innate: true, cd: 1.5, kind: 'glow', secs: 20 },
     spark: { name: 'Spark', school: 'fire',  innate: true, cd: 1.5, kind: 'spark' },
@@ -648,16 +631,16 @@
     icewall: [[U, U], [4, 7]],   // (7d: a wall drawn up, as the stone wall)
     raincloud: [[U, L], [4, 1, 0]], snowcloud: [[U, R], [4, 1, 2]], coldsnap: [[D, D], [4, 3, 1, 5]], blizzard: [[L, L], [4, 1, 0, 3]],   // (8b: as the thunderstorm)   // (7c: up into the sky and off to one side or the other · round you, as the flame ring)
     iceshard: [[R, R], [4, 5]], frostpath: [[L, D], [4, 6, 8]], shapewater: [[L, R], [4, 3, 5]], waterjet: [[R, D], [4, 8]], whirlpool: [[D, R], [4, 5, 8, 7]], wave: [[R, U], [4, 1, 2, 5]],   // (7b: grab and fling, as the rock chunk · the stream ending)   // (7a: a bolt, one up for its tier, as great firebolt · laid along the ground, as the fire strip)
-    gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]], feather_o: [[R, U], [4, 6, 2]],
-    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]], thunderclap: [[D, D], [4, 3, 1, 5]], windshield: [[D, L], [4, 7]], windshield_o: [[R, L], [4, 7, 2]], whirlwind: [[L, U], [4, 3, 0, 1]], updraft: [[U, U], [4, 1]], balllightning: [[D, R], [4, 7, 5]], stormblade: [[U, R], [4, 1, 2]],   // (8b: round you, as the flame ring / cold snap · the on-another turned → and on to the top right)   // (8a: the bolt ending · up into the sky, then a zigzag down)
+    gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]],
+    lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]], thunderclap: [[D, D], [4, 3, 1, 5]], windshield: [[D, L], [4, 7]], whirlwind: [[L, U], [4, 3, 0, 1]], updraft: [[U, U], [4, 1]], balllightning: [[D, R], [4, 7, 5]], stormblade: [[U, R], [4, 1, 2]],   // (8b: round you, as the flame ring / cold snap · the on-another turned → and on to the top right)   // (8a: the bolt ending · up into the sky, then a zigzag down)
     stonewall: [[U, U], [4, 7]],
     crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],
     spikes: [[U, D], [4, 1, 5]], pillar: [[D, U], [4, 7, 1]], bridge: [[R, L], [4, 0, 2]],   // (5d: a peak ∧ · down into the ground and up · out and across)
-    lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]], leap_o: [[R, U], [4, 1, 2]],
+    lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]],
     push: [[R, R], [4, 5]], pull: [[R, L], [4, 3]],
-    heavy: [[L, D], [4, 6, 7]], weightless: [[L, U], [4, 0, 1]], levitate: [[U, D], [4, 7, 1]], levitate_o: [[R, D], [4, 7, 1, 2]], stasis: [[D, L], [4, 8, 2]], barrage: [[D, D], [4, 0, 2, 5]], catch: [[D, R], [4, 8, 6]],   // (9b: pressed down / lifted, mirrored, as grow and shrink · up off the ground, as the rising pillar)   // (9a: sent at the pointer, the bolt ending · the same line back towards you)
-    haste: [[L, L], [3, 5]], haste_o: [[R, L], [3, 5, 2]],
+    heavy: [[L, D], [4, 6, 7]], weightless: [[L, U], [4, 0, 1]], levitate: [[U, D], [4, 7, 1]], stasis: [[D, L], [4, 8, 2]], barrage: [[D, D], [4, 0, 2, 5]], catch: [[D, R], [4, 8, 6]],   // (9b: pressed down / lifted, mirrored, as grow and shrink · up off the ground, as the rising pillar)   // (9a: sent at the pointer, the bolt ending · the same line back towards you)
+    haste: [[L, L], [3, 5]],
     // (10a) Space's stroke runs straight through the middle (2 → 4 → 6), so no word may go 4 → 2 (it would fold into the school's line): blink up, out and up · straight up
     blink: [[U, R], [4, 5, 2]], passthrough: [[U, U], [4, 1]],
     // (10b) set down · and back up out of it, mirrored · back and up, a hook turned back
@@ -668,9 +651,9 @@
     doorways: [[U, D], [4, 0, 6, 8, 2]],
     // (10e) down into it and away — folded into a corner
     pocket: [[D, R], [4, 8, 6]],
-    rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]], fireward_o: [[R, L], [4, 6, 2]],
+    rune: [[D, L], [4, 7]], fireward: [[U, L], [4, 6]],
     // (11a) raised over you · the on-another's one more mark to the top right · back the way it came
-    wardskin: [[U, U], [4, 1]], wardskin_o: [[R, U], [4, 1, 2]], mirror: [[L, R], [4, 3, 5]],
+    wardskin: [[U, U], [4, 1]], mirror: [[L, R], [4, 3, 5]],
     // (11b) a line stood up · round you, as the flame ring
     wardline: [[D, U], [4, 7, 1]], warddome: [[D, D], [4, 3, 1, 5]],
     // (11c) a ring on the ground · a slash through the middle
@@ -678,16 +661,16 @@
     // (11d) a flag raised · a hook closed round it
     alarm: [[U, R], [4, 5, 1]], seal: [[L, D], [4, 3, 7]],
     // (12a) close wounds as before · on another, its first mark turned → and on to the top right · cure lifted off you (and on another) · the grove: down to the ground, along it and up
-    closewounds: [[D, D], [4, 6]], closewounds_o: [[R, D], [4, 6, 2]], cure: [[U, L], [4, 0]], cure_o: [[R, L], [4, 0, 2]], grove: [[D, R], [4, 8, 6, 3]],
+    closewounds: [[D, D], [4, 6]], cure: [[U, L], [4, 0]], grove: [[D, R], [4, 8, 6, 3]],
     // (12b) entangle round and up · the thorn hedge out along and down · barkskin raised over you, as the ward skin's keys
     entangle: [[L, U], [4, 3, 1]], thorns: [[L, D], [4, 5, 8]], barkskin: [[U, U], [4, 3, 0]],
     // (12c) the vine up to the rock, then hanging down · the tree into the soil, then straight up · regrow out and up
     vine: [[U, D], [4, 2, 8]], tree: [[D, U], [4, 8, 2]], regrow: [[U, R], [4, 5, 2]],
     // (12c round 3) the swing vine: up to the rock, then swinging down to the side
     vine_s: [[D, L], [4, 2, 6]],
-    grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
+    grow: [[L, U], [4, 1]], shrink: [[L, D], [4, 7]],
     // (15a) stone closing over you, from the top down the side (on another: and across to them) · fins: the stroke side to side, a fin's curve · night eyes: up to the eyes, across them
-    stoneskin: [[D, D], [4, 0, 3]], stoneskin_o: [[D, R], [4, 0, 3, 5]], fins: [[R, L], [4, 3, 0]], nighteyes: [[U, U], [4, 0, 2]], gaseous: [[U, L], [4, 1, 0]], rubber: [[D, U], [4, 7, 8]], petrify: [[R, D], [4, 5, 8]], jelly: [[L, R], [4, 3, 6]],
+    stoneskin: [[D, D], [4, 0, 3]], fins: [[R, L], [4, 3, 0]], nighteyes: [[U, U], [4, 0, 2]], gaseous: [[U, L], [4, 1, 0]], rubber: [[D, U], [4, 7, 8]], petrify: [[R, D], [4, 5, 8]], jelly: [[L, R], [4, 3, 6]],
     // (13a) the venom bolt, the bolt ending · the cloud down and rolling out low · the pods down into the soil and up out of it · plague, its first mark → (towards them) and spreading out
     venombolt: [[R, R], [4, 5]], pcloud: [[D, L], [4, 3, 6]], spores: [[D, U], [4, 8, 5]], plague: [[R, L], [4, 3, 2]],
     // (13b) the curse laid over them, on to the top right · wither pulled down, then up and off to them · the bone spear, the bolt ending (a tier up: as great firebolt)
@@ -706,7 +689,7 @@
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
-  SPELLS.shrink.school = 'alteration'; SPELLS.shrink_o.school = 'alteration';   // (grow and shrink one school — the user)
+  SPELLS.shrink.school = 'alteration';   // (grow and shrink one school — the user)
   const wordOf = (S) => S.word || FORMS[S.form] || { keys: [], rune: [] };
   // (step 3h, the user: "add a contents page to the master tome … the tabs should probably just be for each school and the spells should be arranged by schools") its first page
   //   is the CONTENTS (`contents`: no spell — the client lists the schools and their spells there, each a link), then the spells school by school, in the schools' order
