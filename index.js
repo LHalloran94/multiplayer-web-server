@@ -4042,7 +4042,7 @@ function magicDispel(room, cx, cy, R, ms, by) {
   // (12a) healing groves (by their middle, half their width)
   for (const [k, q] of _magicGroves) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y - 8, q.w / 2); if (t >= 0) { n++; later(t, () => { if (_magicGroves.delete(k)) io.to(room).emit('magic-grove-gone', { id: k, why: 'dispel' }); }); } }
   // what is on a body: a flame ring, a flaming / storm weapon, a mirror ward — by where its keeper stands
-  for (const q of _magicAuras.values()) { if (q.room !== room) continue; const p = sockAt(q.by), t = p ? at(p.x, p.y - 12) : -1; if (t >= 0) { n++; later(t, () => { q.until = Math.min(q.until, Date.now()); }); } }
+  for (const q of _magicAuras.values()) { if (q.room !== room) continue; const p = sockAt(q.at || q.by), t = p ? at(p.x, p.y - 12) : -1; if (t >= 0) { n++; later(t, () => { q.until = Math.min(q.until, Date.now()); }); } }
   for (const M of [_magicBlades, _magicStormBlades]) for (const [sid, q] of M) { if (q.room !== room) continue; const p = sockAt(sid), t = p ? at(p.x, p.y - 12) : -1; if (t >= 0) { n++; later(t, () => { q.until = Math.min(q.until, Date.now()); }); } }
   for (const [sid] of _magicMirrors) { const p = sockAt(sid), t = p ? at(p.x, p.y - 12) : -1; if (t >= 0) { n++; later(t, () => _magicMirrors.delete(sid)); } }
   // THE CELLS a spell made for a time (ice, stone and ice walls, the frost path, a cloud's snow): put back now, each as the ring reaches it
@@ -29350,7 +29350,7 @@ io.on('connection', (socket) => {
     //   the feet of the body pointed at (or under the point), `br` how far up its middle is
     if (S.kind === 'warddome' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > (S.reach || 320) + 80)) return no('bad');
     let MADE = null; if (S.kind === 'spikes' || S.kind === 'bridge' || S.kind === 'pillar') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad');
-      if (S.kind !== 'spikes' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+      if (S.kind !== 'spikes' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > (S.aim ? (S.reach || 240) + 80 : 160))) return no('bad');   // (magic 15b round 8: an aimed pillar — under the body pointed at)
       MADE = S.kind === 'spikes' ? magicSpikesPlan(room, +m.x, +m.y, +m.tx, S) : S.kind === 'pillar' ? magicPillarPlan(room, +m.bx, +m.by - 2, S) : magicBridgePlan(room, +m.bx, +m.by, +m.tx, +m.ty, S);
       if (!MADE) return no('ground'); }
     // (7a) THE FROST PATH: its cells worked out now, from the caster's feet towards the pointer — no ground to freeze, refused before anything is spent
@@ -29443,7 +29443,7 @@ io.on('connection', (socket) => {
     if (WL) { out.lx = WL.x; out.ly0 = WL.y0; out.ly1 = WL.y1; out.secs = +(SK.secs || 30).toFixed(2); }
     // (magic 11a) WARD SKIN: how much it soaks and for how long (every screen keeps it on that body) · MIRROR WARD: kept while it holds
     if (S.kind === 'wardskin') { out.hp = SK.hp || 4; out.secs = +(SK.secs || 20).toFixed(2); }
-    if (S.kind === 'mirror') { out.secs = +(SK.secs || 6).toFixed(2); _magicMirrors.set(socket.id, now + out.secs * 1000 + 300); }
+    if (S.kind === 'mirror') { out.secs = +(SK.secs || 6).toFixed(2); _magicMirrors.set(S.aim && typeof m.tgt === 'string' && m.tgt !== 'mw-test-dummy' ? m.tgt : socket.id, now + out.secs * 1000 + 300); }   // (magic 15b round 8: on whom the pointer chose — its keeper's game catches)
     if (S.kind === 'blink' || S.kind === 'pass') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); }
     // (magic 10b) a MARK kept (the last one, wherever it was, gone) · a RECALL told where the mark is (its held record too)
     if (S.kind === 'mark') { const ex = _magicMarks.get(socket.id); out.tx = Math.round(+m.bx); out.ty = Math.round(+m.by); _magicMarks.set(socket.id, { id, room, x: out.tx, y: out.ty, at: now, until: now + (SK.secs || 600) * 1000 });
@@ -29477,7 +29477,7 @@ io.on('connection', (socket) => {
     if (S.kind === 'wall' && !shot) out.n = magicWall(room, out.tx, out.ty, SK);
     if (S.kind === 'firewall' && !shot) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; Object.assign(out, magicFireWallAt(room, g.x, g.y, SK)); }   // (6b)
     // ⭐ (6b) THE FLAME RING: kept here while it burns, so the ground its flames brush can be lit (`magic-fire-at`) — one a caster, a new one ends the old
-    if (S.kind === 'firering') { const secs = +(SK.secs || 12).toFixed(2); for (const [k, q] of _magicAuras) if (q.by === socket.id || now > q.until) _magicAuras.delete(k); _magicAuras.set(id, { by: socket.id, room, until: now + secs * 1000 + 500 }); out.secs = secs; }
+    if (S.kind === 'firering') { const secs = +(SK.secs || 12).toFixed(2); for (const [k, q] of _magicAuras) if (q.by === socket.id || now > q.until) _magicAuras.delete(k); _magicAuras.set(id, { by: socket.id, at: S.aim && typeof m.tgt === 'string' && m.tgt !== 'mw-test-dummy' ? m.tgt : socket.id, room, until: now + secs * 1000 + 500 }); out.secs = secs; }
     if (S.kind === 'shard') { const secs = +(SK.secs || 20).toFixed(2); socket._magicShard = { id, until: now + 3000, secs }; out.secs = secs; }   // (7a) the caster's game makes the shard (`avatar-object-spawn` `shard`)
     if (CL) { const K = socket._magicSecsK || 1, secs = S.cloudS || 8, until = now + secs * 1000; for (const [k, q] of _magicClouds) if (q.by === socket.id && q.spell === m.spell && now < q.until) q.until = now;   // (one of each at a time: a new one ends your last)
       _magicClouds.set(id, { room, by: socket.id, spell: m.spell, x: CL.x, y: CL.y, gy: CL.gy, w: (S.wide || 14) * TERRAIN_CELL, until, snow: !!S.snow, made: 0, acc: 0, lt: null, put: [], melt: until + (S.meltSecs || 60) * 1000 * K, dryMs: (S.drySecs || 60) * 1000 * K });
@@ -29487,13 +29487,13 @@ io.on('connection', (socket) => {
     if (S.kind === 'coldsnap') { const br = Math.max(4, Math.min(30, +m.br || 10)), cx = +m.bx, cy = +m.by - br; out.cx = Math.round(cx); out.cy = Math.round(cy); out.rad = S.rad || 96; out.hold = +(S.hold || 1.5).toFixed(2); out.crust = +(S.crustS || 8).toFixed(2); out.n = magicColdSnap(room, cx, cy, SK, br + TERRAIN_CELL * 1.5); }   // (7c) the water round you to ice; every screen frosts its own body (not the caster's)
     if (FP) { out.n = magicFrostPath(room, FP, SK, m.spell); out.secs = +(SK.secs || 30).toFixed(2); out.fp = FP.pts; }   // (7a) every screen: where the frost runs (its effects)
     if (S.kind === 'ball') { const secs = +(SK.secs || 8).toFixed(2); _magicBalls.set(id, { room, by: socket.id, spell: m.spell, x: out.x, y: out.y, until: now + secs * 1000 + 1500, S: SK, last: 0, done: false }); out.secs = secs; }   // (8d)
-    if (S.kind === 'stormblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2); _magicStormBlades.set(socket.id, { room, wpn: WPN, id, until: now + secs * 1000 + 500, S: SK }); out.wpn = WPN; out.secs = secs; }   // (8d)
+    if (S.kind === 'stormblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2), hold = (roomObjHeld[room] && roomObjHeld[room].get(WPN)) || socket.id; _magicStormBlades.set(hold, { room, wpn: WPN, id, until: now + secs * 1000 + 500, S: SK }); out.wpn = WPN; out.secs = secs; out.hold = hold; }   // (magic 15b round 8: kept by whoever HOLDS it — another's weapon too)   // (8d)
     if (PL) { const secs = +(SK.secs || 10).toFixed(2), T = TERRAIN_CELL; for (const [k, q] of _magicPools) if (q.by === socket.id) q.until = now; _magicPools.set(id, { room, by: socket.id, c: PL.c, sr: PL.sr, R: PL.R, bot: PL.bot, until: now + secs * 1000, S: SK, moved: 0 });
       out.px = Math.round((PL.c + 0.5) * T); out.sy = PL.sr * T; out.R = PL.R * T; out.bot = (PL.bot + 1) * T; out.secs = secs; }   // (8d) every screen: where it spins
     if (WV) { const secs = +(SK.secs || 4.5).toFixed(2), L = SK.len || 16, T = TERRAIN_CELL, x0 = WV.x + WV.dir * L * T * 0.5;
       _magicWaves.set(id, { room, by: socket.id, x: x0, dir: WV.dir, gr: WV.gr, t0: now, at: 0, until: now + secs * 1000, S: SK, N: Math.round(L * (SK.high || 5) * 0.62 * LIQUID_MAX), put: new Map(), base: new Map(), carry: [], endAt: 0, broke: 0, out: 0, corr: magicWaveCorridor(room, x0, WV.dir, WV.gr, SK) });
       out.wx = Math.round(x0); out.wy = WV.gr * T; out.dir = WV.dir; out.secs = secs; }   // (8d)
-    if (S.kind === 'flameblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2); _magicBlades.set(socket.id, { room, wpn: WPN, id, until: now + secs * 1000 + 500 }); out.wpn = WPN; out.secs = secs; }   // (6c)
+    if (S.kind === 'flameblade' && WPN) { const secs = +(SK.secs || 30).toFixed(2), hold = (roomObjHeld[room] && roomObjHeld[room].get(WPN)) || socket.id; _magicBlades.set(hold, { room, wpn: WPN, id, until: now + secs * 1000 + 500 }); out.wpn = WPN; out.secs = secs; out.hold = hold; }   // (magic 15b round 8: kept by whoever HOLDS it)   // (6c)
     if (MADE) { out.n = MADE.lines.length ? magicWallLines(room, MADE.lines, SK) : (MADE.sp || []).length; out.secs = +(SK.secs || 0).toFixed(2);   // (5d) grown from now — every screen is told where, for its effects (and its own body's hit)
       if (MADE.sp) out.sp = MADE.sp; if (MADE.br) out.br = MADE.br; if (S.kind === 'pillar') { out.tx = MADE.x; out.ty = MADE.y; out.cols = MADE.lines.length; } }
     if (S.kind === 'change' && !shot) out.n = magicChange(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y, SK, m.spell);

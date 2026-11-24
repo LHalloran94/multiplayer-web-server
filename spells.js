@@ -78,7 +78,7 @@
       plain: { keys: [L, L, R, U], rune: [3, 1, 5, 7] } },
     lightorb: { name: 'Light orb', school: 'light', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'orb', learn: 3, stay: true, reach: 420, secs: 60, pow: 2, rr: 230, alts: ['lightorb_f'],
       plain: { keys: [L, D, D, L], rune: [1, 4, 7, 6] } },
-    lightorb_f: { name: 'Light orb (following)', school: 'light', form: 'self', tier: 0, cd: 4, stance: 'level', kind: 'orb', alt: 'lightorb', stay: false, secs: 60, pow: 1.6, rr: 170,
+    lightorb_f: { name: 'Light orb (following)', school: 'light', form: 'self', aim: 'self', reach: 240, tier: 0, cd: 4, stance: 'level', kind: 'orb', alt: 'lightorb', stay: false, secs: 60, pow: 1.6, rr: 170,
       plain: { keys: [L, D, D, D], rune: [1, 4, 7, 8] } },
     // ⭐ STEP 3d (2026-11-17), BATCH b — the server changes the world; what it changes goes back by itself (server `magicTemp`, kept in the database so a restart does not strand it):
     //   FREEZE (4A: clear blue ice) — the WATER at the pointer turns to ice cell by cell, outward from where it struck; walkable; melts back to the same water after `secs`.
@@ -137,7 +137,7 @@
       plain: { keys: [D, R, U, U, L], rune: [7, 6, 3, 4, 2] } },
     regrow: { name: 'Regrow the land', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'regrow', learn: 5, reach: 300, R: 15, growMs: 2000,
       plain: { keys: [R, U, L, D, D], rune: [5, 4, 0, 1, 7] } },
-    barkskin: { name: 'Barkskin', school: 'life', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'bark', learn: 5, secs: 30, hurtK: 0.5, fireK: 1.5, moveK: 0.85,
+    barkskin: { name: 'Barkskin', school: 'life', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'bark', learn: 5, secs: 30, hurtK: 0.5, fireK: 1.5, moveK: 0.85,
       plain: { keys: [L, D, U, U, R], rune: [5, 8, 7, 3, 0] } },
     lift: { name: 'Lift and throw', school: 'force', form: 'shaping', tier: 0, cd: 3, stance: 'level', kind: 'lift', learn: 3, reach: 320, secs: 10, pull: 0.16, vmax: 11, throwV: 12,
       plain: { keys: [R, R, U, L], rune: [3, 4, 5, 2] } },
@@ -278,7 +278,7 @@
     //   where it lands crimson spikes burst up along the ground `wide` cells, out from that spot each way; a body standing on one is cut, bleeds, takes `dmg` and is tossed (`toss`); they melt after `secs` s. BLOOD GRIP (kind 'grip', HELD, on another):
     //   a rope of blood HOLDS them where they are (round 2, the user: hold, not pull) for at most `holdS` s, each fresh movement key they press `press` s off; it breaks past `reach` + `slack` or out of sight. BLOOD WHIP (kind 'whip', HELD): `cost` off you,
     //   a lash of your blood `len` px long trailing the pointer; its tip cuts whom it whips (`dmg`, each body at most every `gap` s).
-    bloodshield: { name: 'Blood shield', school: 'blood', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'bshield', learn: 5, cost: 2, hp: 3, secs: 20,
+    bloodshield: { name: 'Blood shield', school: 'blood', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'bshield', learn: 5, cost: 2, hp: 3, secs: 20,
       plain: { keys: [R, D, D, D, U], rune: [2, 3, 6, 7, 4] } },
     bloodspikes: { name: 'Blood spikes', school: 'blood', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'bolt', seed: 'bspikes', lob: true, lobG: 1100, learn: 5, reach: 400, speed: 520, life: 1.8, grav: 0.4, r: 3.5, dmg: 0, wide: 10, spikeDmg: 1.5, toss: 6, secs: 2.2,
       plain: { keys: [R, D, D, L, R], rune: [0, 3, 7, 8, 5] } },
@@ -292,7 +292,7 @@
     //   bolts, arrows, thrown things and ice shards that come within `R` px of your body turn back the way they came, now yours (catch's hand-off).
     wardskin: { name: 'Ward skin', school: 'wards', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'wardskin', secs: 20, hp: 4, learn: 3, aim: 'self', reach: 240, fx: '#ffd86b',
       plain: { keys: [L, U, U, R, D], rune: [0, 2, 5, 4, 7] } },
-    mirror: { name: 'Mirror ward', school: 'wards', form: 'self', tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 10, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
+    mirror: { name: 'Mirror ward', school: 'wards', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 10, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
       plain: { keys: [R, D, L, U, R], rune: [2, 0, 3, 5, 8] } },
     // ⭐ STEP 11b (2026-11-22; round 3, the user: the wall had no purpose of its own — 'I like the ward line option') WARDS: WARD LINE (kind 'wardline') — a line of light where
     //   you point, from rock to rock (at most `high` cells), `secs` s: no other player crosses it (each game stops its own body at it; the test dummy too); you, things,
@@ -386,7 +386,7 @@
     //     most `slope`: 1 = 45°), `len` columns, `rowMs` a column; rock it meets ends it (joined). `skip` = how far the ground may go on before it begins.
     spikes: { name: 'Stone spikes', school: 'earth', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'spikes', learn: 3, n: 5, first: 0, gap: 4, step: 3, high: 6.5, base: 1.1, warnMs: 140, waveMs: 70,
       secs: 4, dmg: 1.5, kn: 7, fx: '#d9b27a', look: 'spike', plain: { keys: [D, U, U, D, U], rune: [6, 4, 8, 5, 2] } },
-    pillar: { name: 'Rising pillar', school: 'earth', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'pillar', learn: 3, wide: 3, high: 16, rowMs: 90, waitN: 12, secs: 30, crackS: 0, crumbleMs: 90, sink: true,
+    pillar: { name: 'Rising pillar', school: 'earth', form: 'self', aim: 'self', reach: 240, tier: 0, cd: 8, stance: 'raise', kind: 'pillar', learn: 3, wide: 3, high: 16, rowMs: 90, waitN: 12, secs: 30, crackS: 0, crumbleMs: 90, sink: true,
       thruLiq: true, warnMs: 300, fx: '#d9b27a', look: 'pillar', plain: { keys: [D, U, D, U, U], rune: [8, 7, 4, 1, 2] } },
     bridge: { name: 'Bridge', school: 'earth', form: 'shaping', tier: 0, cd: 8, stance: 'level', kind: 'bridge', learn: 3, len: 32, thick: 2, slope: 1, skip: 12, rowMs: 40, secs: 40, crackS: 4, crumbleMs: 30,
       thruLiq: true, fx: '#d9b27a', look: 'bridge', plain: { keys: [D, U, R, L, R], rune: [3, 4, 5, 8, 6] } },
@@ -415,7 +415,7 @@
       plain: { keys: [U, L, R, L, R], rune: [6, 7, 5, 3, 1] } },
     firestrip: { name: 'Wall of fire (along the ground)', school: 'fire', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'firewall', alt: 'firewall', reach: 360, secs: 8, wide: 12, high: 5, speed: 560, life: 3, grav: 0.35, r: 4.5,
       plain: { keys: [U, L, R, L, D], rune: [6, 7, 5, 3, 0] } },
-    flamering: { name: 'Flame ring', school: 'fire', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'firering', learn: 3, secs: 12, n: 5, orbit: 1.9, turnS: 1.5, fr: 6,
+    flamering: { name: 'Flame ring', school: 'fire', form: 'self', aim: 'self', reach: 240, tier: 0, cd: 14, stance: 'raise', kind: 'firering', learn: 3, secs: 12, n: 5, orbit: 1.9, turnS: 1.5, fr: 6,
       plain: { keys: [U, D, D, L, R], rune: [6, 3, 1, 5, 8] } },
     flamepillars: { name: 'Flame pillars', school: 'fire', form: 'stream', tier: 1, cd: 8, stance: 'raise', kind: 'pillars', learn: 5, chan: true, chanS: 6, reach: 140, gapMs: 190, near: 34, far: 120, high: 120, highJ: 34, hw: 8, lift: 9,
       plain: { keys: [U, D, U, D, U], rune: [6, 4, 0, 5, 2] } },
@@ -426,7 +426,7 @@
     //   that burns catches (server `magic-blade-burn`), torch light; everybody sees it. In liquid its flames are out until it comes out.
     heat: { name: 'Heat', school: 'fire', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'heat', learn: 3, chan: true, chanS: 10, reach: 140, half: 0.42, growMs: 2500, melt: 16,
       plain: { keys: [U, L, U, L, R], rune: [6, 3, 2, 7, 0] } },
-    flameblade: { name: 'Flaming weapon', school: 'fire', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'flameblade', learn: 5, secs: 30,
+    flameblade: { name: 'Flaming weapon', school: 'fire', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'flameblade', learn: 5, secs: 30,
       plain: { keys: [U, R, U, R, D], rune: [6, 1, 2, 4, 8] } },
     // ⭐ STEP 7a (2026-11-20, kickoff §'STEP 7' — FROST AND WATER; the user took every suggestion).
     //   ICE SHARD, kind 'shard': a REAL OBJECT (server/held.js `iceshard`, an arrow's kind) made at the catalyst's tip by its caster's game and flown as an arrow is (16w's flight):
@@ -525,7 +525,7 @@
       plain: { keys: [L, U, R, U, D], rune: [0, 4, 6, 7, 5] } },
     // LIGHTNING WEAPON, kind 'stormblade' (on yourself, `secs` s — as the flaming weapon): the weapon in your other hand crackles with charge; its hits SHOCK (`dmg`, `stunMs`,
     //   metal ×`metalHurtK`); a blow stopped on a metal blade or shield shocks its holder; dipped in liquid it empties into it (everyone in that water shocked, you too) and ends.
-    stormblade: { name: 'Lightning weapon', school: 'storm', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'stormblade', learn: 5, secs: 30, dmg: 1, stunMs: 300, metalHurtK: 1.5,
+    stormblade: { name: 'Lightning weapon', school: 'storm', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'stormblade', learn: 5, secs: 30, dmg: 1, stunMs: 300, metalHurtK: 1.5,
       liqDmg: 1.5, liqCells: 600, oreCells: 120, fx: '#c9d6ff', plain: { keys: [L, R, U, R, D], rune: [0, 3, 4, 2, 8] } },
     // ⭐ FROST AND WATER (the user's ideas, 2026-11-20): WHIRLPOOL, kind 'pool' (placed IN liquid at the pointer, `secs` s): stationary; the server keeps pumping the liquid from its
     //   middle out to its rim (`pump` units a tick) so its surface dips into a funnel — moved, nothing made or lost; bodies and loose things in the liquid within its reach are drawn
