@@ -206,6 +206,14 @@
     haste_o: { name: 'Haste (on another)', school: 'space', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'boon', pw: 'speed', secs: 15, alt: 'haste', other: true, reach: 240, plain: { keys: [R, R, R, D, R], rune: [3, 5, 2, 0, 4] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, alts: ['grow_o'], plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
     grow_o: { name: 'Grow (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mega', secs: 15, alt: 'grow', other: true, reach: 240, plain: { keys: [U, L, U, R, D], rune: [7, 3, 1, 5, 4] } },
+    // ⭐ STEP 15a (2026-11-24) ALTERATION — boons through the pickups' own grant (16a `powerGrant`), each with its look on every screen (16zj §'STEP 15a'):
+    //   STONE SKIN (+ on another): the powerup 'stone' — nothing hurts or moves you, slow, a low jump, you sink; granite grows up the skin (the position packet's
+    //   `PW_STONE_SPELL_BIT` tells a spell's stone from a pickup's) · FINS: swim faster, the water's lift off (stay at any depth), less drag · NIGHT EYES: your own view's
+    //   darkness lifted to a cold grey-green (the light's floor, on the card), glowing slit eyes on your face for everybody else
+    stoneskin: { name: 'Stone skin', school: 'alteration', form: 'self', tier: 1, cd: 25, stance: 'raise', kind: 'boon', pw: 'stone', secs: 8, learn: 5, alts: ['stoneskin_o'], fx: '#a8a49a', plain: { keys: [D, D, U, D, D], rune: [1, 0, 3, 6, 8] } },
+    stoneskin_o: { name: 'Stone skin (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 25, stance: 'level', kind: 'boon', pw: 'stone', secs: 8, alt: 'stoneskin', other: true, reach: 240, fx: '#a8a49a', plain: { keys: [D, D, U, D, R], rune: [1, 0, 3, 6, 7] } },
+    fins: { name: 'Fins', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'fins', secs: 30, learn: 3, fx: '#5fc8c0', plain: { keys: [L, R, L, R, D], rune: [3, 1, 5, 8, 6] } },
+    nighteyes: { name: 'Night eyes', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'nighteyes', secs: 30, learn: 3, fx: '#c8f070', plain: { keys: [U, L, R, U, U], rune: [6, 0, 4, 8, 2] } },
     shrink: { name: 'Shrink', school: 'decay', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mini', secs: 15, learn: 5, alts: ['shrink_o'], plain: { keys: [D, R, D, L, D], rune: [1, 5, 7, 3, 4] } },
     shrink_o: { name: 'Shrink (on another)', school: 'decay', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mini', secs: 15, alt: 'shrink', other: true, reach: 240, plain: { keys: [D, R, D, L, U], rune: [1, 5, 7, 3, 0] } },
     // ⭐ STEP 13a (2026-11-23, kickoff §'STEP 13') DECAY — POISON. POISONED (a body's own game: `poison` s, `poisonDmg` health every `poisonEvery` s; cure ends it; the others told to draw it).
@@ -669,6 +677,8 @@
     // (12c round 3) the swing vine: up to the rock, then swinging down to the side
     vine_s: [[D, L], [4, 2, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
+    // (15a) stone closing over you, from the top down the side (on another: and across to them) · fins: the stroke side to side, a fin's curve · night eyes: up to the eyes, across them
+    stoneskin: [[D, D], [4, 0, 3]], stoneskin_o: [[D, R], [4, 0, 3, 5]], fins: [[R, L], [4, 3, 0]], nighteyes: [[U, U], [4, 0, 2]],
     // (13a) the venom bolt, the bolt ending · the cloud down and rolling out low · the pods down into the soil and up out of it · plague, its first mark → (towards them) and spreading out
     venombolt: [[R, R], [4, 5]], pcloud: [[D, L], [4, 3, 6]], spores: [[D, U], [4, 8, 5]], plague: [[R, L], [4, 3, 2]],
     // (13b) the curse laid over them, on to the top right · wither pulled down, then up and off to them · the bone spear, the bolt ending (a tier up: as great firebolt)
