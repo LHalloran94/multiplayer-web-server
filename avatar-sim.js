@@ -53,6 +53,8 @@
     CARRY_DX: 22,          // BLOB_R * 1.1
     CARRY_DY: 38,          // BLOB_R * 1.9
     PUSH_SPEED_MIN: 3.0,
+    // (magic 15c) spider climb: up a wall, down a wall, along a ceiling — px a step (× the body's `speedMul`)
+    CLIMB_VY: 2.6, CLIMB_DOWN_VY: 3.2, CLIMB_VX: 2.8,
     TICK_HZ: 60,           // simulation rate
     SNAPSHOT_HZ: 30        // broadcast rate
   };
@@ -288,6 +290,70 @@
     if (input.seq != null) s.lastSeq = input.seq;
   }
 
+  // ---- ⭐ CLIMBING (magic 15c, 2026-11-25 — SPIDER CLIMB): clinging to walls AND ceilings ----
+  // Called right AFTER `stepMovement` (which has already applied gravity and moved the body) and BEFORE the terrain collision pass, which
+  // then resolves the move this sets — as the gas float does on the client. It REPLACES this step's velocity (and the move already made by
+  // it) while the body clings. `solidAt(x, y)` -> bool is injected, as in `resolveOwnCollision`, so this file stays terrain-agnostic; the
+  // world's edges count as walls here too. `on` = the body may climb this step (the caller's power and its exclusions).
+  // THE RULE (the user, 2026-11-25): on a WALL — touch it in the air or push into it on the ground and you stick (no slide, no fall);
+  // toward the wall climbs up, down climbs down, nothing hangs, the away key lets go, a fresh jump wall-jumps off it; climbing past its top
+  // throws you up and over the lip. On a CEILING — reach it rising (or holding jump) and you stick; left / right crawl along it, down
+  // drops you. In a corner both hold. State on the body: `climbW` (-1 left wall · 1 right · 0), `climbC` (on a ceiling), `climbCool`
+  // (steps before it may cling again), `climbPJ` (the jump key last step — `prevJump` is already this step's by now).
+  function climbStep(s, input, solidAt, on) {
+    const pj = !!s.climbPJ; s.climbPJ = !!input.jump;
+    if (s.climbCool > 0) s.climbCool--;
+    if (!on || s.grabbedBy) { s.climbW = 0; s.climbC = false; return 0; }
+    const hw = bodyW(s) / 2, bh = bodyH(s), m = 3, WW = boundsW(s);
+    const sol = (x, y) => x < 0 || x > WW || !!solidAt(x, y);
+    const side = (d) => { let n = 0; const x = s.x + d * (hw + m); for (const f of [0.22, 0.52, 0.82]) if (sol(x, s.y - bh * f)) n++; return n; };
+    const nL = side(-1), nR = side(1);
+    let nC = 0; for (const f of [-0.6, 0, 0.6]) if (sol(s.x + hw * f, s.y - bh - m)) nC++;
+    const L = !!input.left, R = !!input.right, D = !!input.down, J = !!input.jump, fresh = J && !pj;
+    const cool = s.climbCool > 0;
+    // ── the wall: kept while it is there, taken in the air or by pushing into it
+    let w = s.climbW || 0;
+    if (w && (w < 0 ? nL : nR) < 2) {
+      // past its top while climbing: up and over the lip
+      if ((w < 0 ? L : R) && s.vy <= 0 && !nC) { s.vy = Math.min(s.vy, -5.5); s.vx = w * 2.5; }
+      w = 0;
+    }
+    if (w && (w < 0 ? R : L)) { w = 0; s.climbCool = 6; }
+    if (!w && !cool) {
+      if (nL >= 2 && (L || !s.onGround) && !R) w = -1;
+      else if (nR >= 2 && (R || !s.onGround) && !L) w = 1;
+      if (w && s.onGround && !(w < 0 ? L : R)) w = 0;
+    }
+    // ── the ceiling
+    let c = !!s.climbC;
+    if (c && nC < 2) c = false;
+    if (c && D && !w) { c = false; s.climbCool = 10; }
+    if (!c && !cool && nC >= 2 && !s.onGround && (s.vy <= 0.5 || J || w)) c = true;
+    // ── a wall-jump off a wall (never off the ceiling alone)
+    if (w && fresh && !s.onGround) {
+      s.vy = jumpVyOf(s); s.vx = -w * maxVxOf(s) * 1.4; s.facingLeft = w > 0; s.hasDoubleJump = true;
+      s.climbW = 0; s.climbC = false; s.climbCool = 12; s.jumpBuffer = 0; return 0;
+    }
+    s.climbW = w; s.climbC = c;
+    if (!w && !c) return 0;
+    const k = s.speedMul || 1, upV = C.CLIMB_VY * k, dnV = C.CLIMB_DOWN_VY * k, xV = C.CLIMB_VX * k;
+    // what this step's move should have been, put in place of the one `stepMovement` made
+    let vx, vy;
+    if (w) {
+      vy = (w < 0 ? L : R) ? -upV : D ? dnV : 0;
+      if (c && vy < 0) vy = 0;
+      vx = c ? ((w < 0 ? R : L) ? -w * xV : w * 0.8) : w * 0.8;   // pressed into the wall so the collision keeps it flush
+      s.facingLeft = w < 0;
+    } else {
+      vy = 0;                                                      // held where it is (pressing up into the rock read as a low ceiling: the body squashed)
+      vx = L ? -xV : R ? xV : 0;
+      if (vx) s.facingLeft = vx < 0;
+    }
+    s.x += vx - s.vx; s.y += vy - s.vy; s.vx = vx; s.vy = vy;
+    s.onGround = false; s.coyote = 0; s.jumpBuffer = 0; s.hasDoubleJump = true; s.wallSlideDir = 0;
+    return w ? (c ? 3 : 1) : 2;
+  }
+
   // ---- Grab / throw resolution + carried pinning (server-authoritative) ----
   function resolveGrabThrow(list, byId) {
     for (const s of list) {
@@ -445,7 +511,7 @@
 
   return {
     C, STAGE_LAYOUTS, layoutIndex, platformsFor, floorY, setBounds, boundsW, boundsH,
-    createState, stepMovement, resolveGrabThrow, resolveCollisions, resolveOwnCollision, snapshot, applySnapshot,
+    createState, stepMovement, climbStep, resolveGrabThrow, resolveCollisions, resolveOwnCollision, snapshot, applySnapshot,
     // ⭐ EXPORTED so the client asks THIS FILE what a body's dimensions are, rather than keeping a second
     // opinion. The clamp, the exponents and the mass law are physics and belong to the sim; a client that
     // computed its own would be the two-lists-of-materials bug in another costume.

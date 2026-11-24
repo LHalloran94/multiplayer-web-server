@@ -214,6 +214,12 @@
     rubber: { name: 'Rubber body', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'rubber', secs: 15, aim: 'self', reach: 240, learn: 3, knockK: 1.6, hurtK: 0.5, fx: '#e8508a', plain: { keys: [D, U, D, U, R], rune: [7, 1, 8, 2, 5] } },
     petrify: { name: 'Petrify', school: 'alteration', form: 'bolt', tier: 1, cd: 10, stance: 'level', kind: 'bolt', petrify: true, aim: 'me', holdS: 6, press: 0.3, learn: 5, speed: 560, life: 1.2, grav: 0.08, r: 3.5, dmg: 0, fx: '#a8a49a', plain: { keys: [R, D, D, R, D], rune: [3, 4, 7, 8, 6] } },
     jelly: { name: 'Jelly', school: 'alteration', form: 'touch', tier: 1, cd: 15, stance: 'level', kind: 'boon', pw: 'jelly', secs: 8, aim: 'pick', reach: 240, learn: 5, fx: '#7ee08a', plain: { keys: [L, R, L, D, R], rune: [2, 4, 6, 8, 5] } },
+    // ⭐ STEP 15c (2026-11-25, kickoff §'STEP 15 — ALTERATION') SPIDER CLIMB (boon 'spider', `secs` s: you cling to rock walls and ceilings — toward a wall climbs it, down climbs
+    //   down, the away key lets go, Space wall-jumps; on a ceiling left / right crawl, down drops; the rule is the shared sim's `climbStep`; eight legs on every screen) · MEND GEAR
+    //   (kind 'mendgear': every piece the body has back to full condition at once, char and rust gone, its cuts, dents and cracks knitting shut over `ms` ms — a band of light up
+    //   each worn piece on every screen; the wearer's own game sets the condition). Client 16zj §'STEP 15c'.
+    spider: { name: 'Spider climb', school: 'alteration', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'boon', pw: 'spider', secs: 20, aim: 'self', reach: 240, learn: 5, fx: '#8a6ab8', plain: { keys: [R, U, R, U, L], rune: [8, 4, 0, 3, 6, 7] } },
+    mendgear: { name: 'Mend gear', school: 'alteration', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'mendgear', aim: 'self', reach: 240, learn: 3, ms: 1600, fx: '#f0d890', plain: { keys: [D, R, U, R, D], rune: [3, 7, 5, 1, 2] } },
     shrink: { name: 'Shrink', school: 'decay', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mini', secs: 15, learn: 5, aim: 'self', reach: 240, plain: { keys: [D, R, D, L, D], rune: [1, 5, 7, 3, 4] } },
     // ⭐ STEP 13a (2026-11-23, kickoff §'STEP 13') DECAY — POISON. POISONED (a body's own game: `poison` s, `poisonDmg` health every `poisonEvery` s; cure ends it; the others told to draw it).
     //   VENOM BOLT (kind 'bolt' + `poison`): a dripping glob that flies until it hits something (round 2, the user: it vanished — `life` 8); what it hits is poisoned. POISON CLOUD (kind 'pcloud', placed): a cloud spreading out from the point over `grow` s, as a gas, to `wide` cells across, `high` cells deep (round 2: taller, wider), on the ground under
@@ -671,6 +677,8 @@
     grow: [[L, U], [4, 1]], shrink: [[L, D], [4, 7]],
     // (15a) stone closing over you, from the top down the side (on another: and across to them) · fins: the stroke side to side, a fin's curve · night eyes: up to the eyes, across them
     stoneskin: [[D, D], [4, 0, 3]], fins: [[R, L], [4, 3, 0]], nighteyes: [[U, U], [4, 0, 2]], gaseous: [[U, L], [4, 1, 0]], rubber: [[D, U], [4, 7, 8]], petrify: [[R, D], [4, 5, 8]], jelly: [[L, R], [4, 3, 6]],
+    // (15c) spider climb: along to the wall and up it (a tier up) · mend gear: a stitch down and across, drawn shut
+    spider: [[R, U], [4, 1, 2]], mendgear: [[D, R], [4, 6, 3]],
     // (13a) the venom bolt, the bolt ending · the cloud down and rolling out low · the pods down into the soil and up out of it · plague, its first mark → (towards them) and spreading out
     venombolt: [[R, R], [4, 5]], pcloud: [[D, L], [4, 3, 6]], spores: [[D, U], [4, 8, 5]], plague: [[R, L], [4, 3, 2]],
     // (13b) the curse laid over them, on to the top right · wither pulled down, then up and off to them · the bone spear, the bolt ending (a tier up: as great firebolt)
