@@ -214,6 +214,15 @@
     stoneskin_o: { name: 'Stone skin (on another)', school: 'alteration', form: 'touch', tier: 1, cd: 25, stance: 'level', kind: 'boon', pw: 'stone', secs: 15, alt: 'stoneskin', other: true, reach: 240, fx: '#a8a49a', plain: { keys: [D, D, U, D, R], rune: [1, 0, 3, 6, 7] } },
     fins: { name: 'Fins', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'fins', secs: 30, learn: 3, fx: '#5fc8c0', plain: { keys: [L, R, L, R, D], rune: [3, 1, 5, 8, 6] } },
     nighteyes: { name: 'Night eyes', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'nighteyes', secs: 30, learn: 3, fx: '#c8f070', plain: { keys: [U, L, R, U, U], rune: [6, 0, 4, 8, 2] } },
+    // ⭐ STEP 15b (2026-11-24, kickoff §'STEP 15 — ALTERATION') GASEOUS FORM (boon 'gas', `secs` s: a drifting mist the size of the smallest body — it squeezes through gaps, floats on the
+    //   movement keys, is not solid to anybody, nothing in its hands; if it ends where the body does not fit, you are CRUSHED) · RUBBER BODY (boon 'rubber': you bounce off the ground
+    //   and walls — hold down to land soft — blows throw you `knockK` further and hurt `hurtK`) · PETRIFY (a bolt: whom it hits is stone where they stand for at most `holdS` s,
+    //   each fresh movement key `press` s off, a blow breaks it — the stasis hold, client 16zj) · JELLY (on another, boon 'jelly': a wobbling see-through jelly, slower, no casting,
+    //   striking or using). Client 16zj §'STEP 15b'.
+    gaseous: { name: 'Gaseous form', school: 'alteration', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'boon', pw: 'gas', secs: 8, learn: 5, fx: '#c8d4e0', plain: { keys: [U, U, L, R, U], rune: [0, 7, 3, 5, 1] } },
+    rubber: { name: 'Rubber body', school: 'alteration', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'boon', pw: 'rubber', secs: 15, learn: 3, knockK: 1.6, hurtK: 0.5, fx: '#e8508a', plain: { keys: [D, U, D, U, R], rune: [7, 1, 8, 2, 5] } },
+    petrify: { name: 'Petrify', school: 'alteration', form: 'bolt', tier: 1, cd: 10, stance: 'level', kind: 'bolt', petrify: true, holdS: 2, press: 0.35, learn: 5, speed: 560, life: 1.2, grav: 0.08, r: 3.5, dmg: 0, fx: '#a8a49a', plain: { keys: [R, D, D, R, D], rune: [3, 4, 7, 8, 6] } },
+    jelly: { name: 'Jelly', school: 'alteration', form: 'touch', tier: 1, cd: 15, stance: 'level', kind: 'boon', pw: 'jelly', secs: 5, other: true, reach: 240, learn: 5, fx: '#7ee08a', plain: { keys: [L, R, L, D, R], rune: [2, 4, 6, 8, 5] } },
     shrink: { name: 'Shrink', school: 'decay', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mini', secs: 15, learn: 5, alts: ['shrink_o'], plain: { keys: [D, R, D, L, D], rune: [1, 5, 7, 3, 4] } },
     shrink_o: { name: 'Shrink (on another)', school: 'decay', form: 'touch', tier: 1, cd: 12, stance: 'level', kind: 'boon', pw: 'mini', secs: 15, alt: 'shrink', other: true, reach: 240, plain: { keys: [D, R, D, L, U], rune: [1, 5, 7, 3, 0] } },
     // ⭐ STEP 13a (2026-11-23, kickoff §'STEP 13') DECAY — POISON. POISONED (a body's own game: `poison` s, `poisonDmg` health every `poisonEvery` s; cure ends it; the others told to draw it).
@@ -678,7 +687,7 @@
     vine_s: [[D, L], [4, 2, 6]],
     grow: [[L, U], [4, 1]], grow_o: [[R, U], [4, 1, 2]], shrink: [[L, D], [4, 7]], shrink_o: [[R, D], [4, 7, 2]],
     // (15a) stone closing over you, from the top down the side (on another: and across to them) · fins: the stroke side to side, a fin's curve · night eyes: up to the eyes, across them
-    stoneskin: [[D, D], [4, 0, 3]], stoneskin_o: [[D, R], [4, 0, 3, 5]], fins: [[R, L], [4, 3, 0]], nighteyes: [[U, U], [4, 0, 2]],
+    stoneskin: [[D, D], [4, 0, 3]], stoneskin_o: [[D, R], [4, 0, 3, 5]], fins: [[R, L], [4, 3, 0]], nighteyes: [[U, U], [4, 0, 2]], gaseous: [[U, L], [4, 1, 0]], rubber: [[D, U], [4, 7, 8]], petrify: [[R, D], [4, 5, 8]], jelly: [[L, R], [4, 3, 6]],
     // (13a) the venom bolt, the bolt ending · the cloud down and rolling out low · the pods down into the soil and up out of it · plague, its first mark → (towards them) and spreading out
     venombolt: [[R, R], [4, 5]], pcloud: [[D, L], [4, 3, 6]], spores: [[D, U], [4, 8, 5]], plague: [[R, L], [4, 3, 2]],
     // (13b) the curse laid over them, on to the top right · wither pulled down, then up and off to them · the bone spear, the bolt ending (a tier up: as great firebolt)
