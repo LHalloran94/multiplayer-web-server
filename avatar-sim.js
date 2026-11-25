@@ -374,8 +374,8 @@
     if (!on) { s.climbLatch = null; s.climbK = null; return; }
     const raw = { L: !!input.left, R: !!input.right, U: !!(keys && keys.up), D: !!input.down }, K = Object.assign({}, raw), La = s.climbLatch;
     if (La) { if (!raw[La.k]) s.climbLatch = null; else { K[La.k] = false; K[La.as] = true; } }
-    const sol = climbSol(s, solidAt), byWall = s.onGround && K.U && (climbCnt(climbSide(s, sol, -1, 3)) >= 2 || climbCnt(climbSide(s, sol, 1, 3)) >= 2);
-    if (s.climbW || s.climbC || s.climbWrap || s.climbLatch || byWall) input.jump = !!(keys && keys.leap);
+    // (round 3, the user: 'when you are in spider mode you cling to all surfaces … jumping with space could then be the thing that detaches you') only Space jumps
+    input.jump = !!(keys && keys.leap);
     input.left = K.L; input.right = K.R; input.down = K.D;
     s.climbK = { L: K.L, R: K.R, U: K.U, D: K.D, S: !!(keys && keys.leap) };
   }
@@ -416,34 +416,47 @@
     }
     // ── taking hold: in the air any wall or ceiling you touch (not a wall you press away from); on the ground, ↑ beside a wall
     const cool = s.climbCool > 0;
-    if (!w && !cool) { if (!G) { if (nL >= 2 && !K.R) w = -1; else if (nR >= 2 && !K.L) w = 1; } else if (K.U) { if (nL >= 2) w = -1; else if (nR >= 2) w = 1; } }
+    if (!w && !cool) { if (!G) { if (nL >= 2) w = -1; else if (nR >= 2) w = 1; } else if (K.U) { if (nL >= 2) w = -1; else if (nR >= 2) w = 1; } }
     let tookC = false; if (!c && !cool && nC >= 2 && !G) { c = true; tookC = !(was & 2); }
     // ── letting go: straight away from the surface; on the ground a wall is let go unless you climb (you stand)
-    if (w && (w < 0 ? K.R : K.L)) { w = 0; if (!c) s.climbCool = 6; }
-    if (c && K.D) { c = false; if (!w) s.climbCool = 10; }
+    // (round 3: nothing lets go but Space) in a corner the away key leaves the wall for the ceiling, ↓ the ceiling for the wall
+    if (w && c && (w < 0 ? K.R : K.L)) w = 0;
+    if (c && w && K.D) c = false;
+    // an INSIDE corner met while a held key is carrying you round: it turns onto the new surface, AWAY from the one you were on — down a face onto the floor: along
+    //   the floor away from the face; along a floor into a wall: up the wall (round 3: letting it mean itself again sent you back the way you came)
+    { const La = s.climbLatch; if (La && ((La.as === 'D' && G) || (La.as === 'U' && (c || nC >= 2)) || (La.as === 'L' && nL >= 2) || (La.as === 'R' && nR >= 2))) {
+        const vert = La.as === 'U' || La.as === 'D', ww = w || (s.climbW || 0), nx = vert ? (ww < 0 ? 'R' : ww > 0 ? 'L' : null) : (c || s.climbC ? 'D' : 'U');
+        if (!nx || nx === La.k) s.climbLatch = null; else La.as = nx;
+ } }
     if (w && !c && G && !K.U) w = 0;
     // ── outside corners
     let stopUp = false, stopDn = false, stopX = false;
     if (w && !c) { const S = w < 0 ? sL : sR, xf = s.x + w * hw, xin = xf + w * 1.5, cy = s.y - R, toward = w < 0 ? K.L : K.R;
       // its TOP: your middle past it, your feet still on it → up and over, onto it
       if (S[0] && !S[1] && !S[2] && !sol(xin, cy)) { const go = mode === 2 ? (K.U || toward) : toward;
-        if (go) { let yt = cy; while (yt < s.y && !sol(xin, yt)) yt += 1; if (tryWrap(xf, yt, xf, yt - R - 1, { w: 0, c: false, face: w, latch: { k: 'U', as: w < 0 ? 'L' : 'R' } })) return 4; }
+        if (go) { let yt = cy; while (yt < s.y && !sol(xin, yt)) yt += 1; if (tryWrap(xf, yt, xf + w * R * 0.6, yt - R - 1, { w: 0, c: false, face: w, latch: { k: 'U', as: w < 0 ? 'L' : 'R' } })) return 4; }
         else if (K.U) stopUp = true; }
       // its FOOT, over nothing: your middle below it, your head still on it → round under it, onto its underside
       if (!S[0] && !S[1] && S[2] && !G && !sol(s.x, s.y + 3) && !sol(xin, cy)) { const go = mode === 2 ? (K.D || toward) : toward;
-        if (go) { let yb = cy; while (yb > s.y - bh && !sol(xin, yb)) yb -= 1; yb += 1; if (tryWrap(xf, yb, xf, yb + R + 1, { w: 0, c: true, face: w, latch: { k: 'D', as: w < 0 ? 'L' : 'R' } })) return 4; }
+        if (go) { let yb = cy; while (yb > s.y - bh && !sol(xin, yb)) yb -= 1; yb += 1; if (tryWrap(xf, yb, xf + w * R * 0.6, yb + R + 1, { w: 0, c: true, face: w, latch: { k: 'D', as: w < 0 ? 'L' : 'R' } })) return 4; }
         else if (K.D) stopDn = true; } }
     const d = K.L && !K.R ? -1 : K.R && !K.L ? 1 : 0;
     if (c && !w) { const ya = s.y - bh - 1.5, e = sol(s.x, ya) ? 0 : sol(s.x + hw * 0.6, ya) ? -1 : sol(s.x - hw * 0.6, ya) ? 1 : 0;
       // a ceiling's END (`e`: the way past it): your middle past it → round its edge and up its outer face
       if (e) { const go = mode === 2 ? d === e : K.U;
         if (go) { let xe = s.x; while ((s.x - xe) * e < hw && !sol(xe, ya)) xe -= e; xe += e * 0.5; const yc = s.y - bh;
-          if (tryWrap(xe, yc, xe + e * (R + 1), yc, { w: -e, c: false, face: -e, latch: { k: e < 0 ? 'L' : 'R', as: 'U' } })) return 4; }
+          if (tryWrap(xe, yc, xe + e * (R + 1), yc - R * 0.6, { w: -e, c: false, face: -e, latch: { k: e < 0 ? 'L' : 'R', as: 'U' } })) return 4; }
         else if (d === e) stopX = true; } }
-    // a floor's EDGE, with ↓: your middle over nothing → round its edge and down its outer face
-    if (!w && !c && G && K.D && !cool) { const yf = s.y + 2, l = sol(s.x - hw * 0.6, yf), r = sol(s.x + hw * 0.6, yf);
-      if (!sol(s.x, yf) && l !== r) { const dir = l ? 1 : -1; let xe = s.x; while ((s.x - xe) * dir < hw && !sol(xe, yf)) xe -= dir; xe += dir * 0.5;
-        if (tryWrap(xe, s.y - 1, xe + dir * (R + 1), s.y - 1, { w: -dir, c: false, face: -dir, latch: null })) return 4; } }
+    // a floor's EDGE (a real drop, not a step in the ground): your middle over nothing → round its edge and down its outer face. (round 3, the user: 'no walking off
+    //   edges … walk off an edge straight onto the wall'.) CARRY: as you walk off it, the key you walk with now meaning ↓ · STOP: held at the edge, ↓ takes you over
+    if (!w && !c && G && !cool) { const yf = s.y + 2, l = sol(s.x - hw * 0.6, yf), r = sol(s.x + hw * 0.6, yf);
+      if (!sol(s.x, yf) && l !== r) { const dir = l ? 1 : -1; let step = false; for (let k = 2; k <= 18 && !step; k += 4) if (sol(s.x + dir * hw * 0.5, s.y + k)) step = true;
+        if (!step) { const walk = dir < 0 ? K.L : K.R, go = mode === 2 ? !K.U : K.D; let xs = s.x; while ((s.x - xs) * dir < hw && !sol(xs, yf)) xs -= dir; const edge = xs + dir, px = xs + dir * 0.5;
+          if (go && tryWrap(px, s.y - 1, px + dir * (R + 1), s.y - 1 + R * 0.6, { w: -dir, c: false, face: -dir, latch: walk ? { k: dir < 0 ? 'L' : 'R', as: 'D' } : null })) return 4;
+          // (STOP: held with your middle just over the edge — where the next step still sees it)
+          const over = (s.x - edge) * dir; if (over > 0) { s.x -= dir * over; if (s.vx * dir > 0) s.vx = 0; } } } }
+    // (round 3) lost every hold in mid-move (a notch, a slant of steps): rock within a few px is taken again before the body falls
+    if (!w && !c && !G && was && !cool) { for (let mg = 4; mg <= 9 && !w && !c; mg++) { if (climbCnt(climbSide(s, sol, -1, mg)) >= 1) { s.x -= mg - 3; w = -1; } else if (climbCnt(climbSide(s, sol, 1, mg)) >= 1) { s.x += mg - 3; w = 1; } else if (climbCeil(s, sol, mg) >= 1) { s.y -= mg - 3; c = true; } } }
     s.climbW = w; s.climbC = c;
     if (!w && !c) return 0;
     // ── moving along what you hold
