@@ -163,7 +163,7 @@
       plain: { keys: [L, U, L, D, R], rune: [2, 1, 4, 7, 6] } },
     veil: { name: 'Veil a thing', school: 'illusion', form: 'thing', tier: 1, cd: 15, stance: 'level', kind: 'veil', secs: 60, reach: 320, learn: 5,
       plain: { keys: [U, L, D, L, U], rune: [0, 3, 4, 5, 8] } },
-    hiding: { name: 'Veil of hiding', school: 'illusion', form: 'field', tier: 1, cd: 40, stance: 'raise', kind: 'hidefield', secs: 10, R: 56, reach: 420, learn: 5,
+    hiding: { name: 'Veil of hiding', school: 'illusion', form: 'field', tier: 1, cd: 40, stance: 'raise', kind: 'hidefield', secs: 10, R: 150, reach: 420, learn: 5,
       plain: { keys: [L, U, R, U, L, D], rune: [3, 0, 1, 5, 8, 7] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
