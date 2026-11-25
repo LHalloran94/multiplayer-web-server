@@ -354,6 +354,113 @@
     return w ? (c ? 3 : 1) : 2;
   }
 
+  // ---- ⭐ CLIMBING, ROUND 2 (magic 15c round 2, 2026-11-25 — the user: the controls "don't really work in a nice way", holding → into a right-hand wall walked
+  // you up it, a jump could not stick to a ceiling, corners threw you off) ----
+  // THE KEYS ARE SCREEN DIRECTIONS (as wall-walking games re-map the controls onto the surface): on a wall ↑ (W) climbs, ↓ goes down; on a ceiling ← → crawl;
+  // on the floor you walk as ever. Straight INTO the surface does nothing; straight AWAY lets go (← on a right-hand wall, ↓ on a ceiling). While you cling
+  // only SPACE jumps — off a wall away from it, off a ceiling downwards — so ↑ / W climb instead (on open ground they jump as ever). INSIDE corners: you hold
+  // both surfaces. OUTSIDE corners (a wall's top or foot, a ceiling's end, a floor's edge with ↓): you swing round the edge on an arc about it.
+  // `mode` 1 = STOP at an outside edge until you press the new way round · 2 = CARRY: the key you hold takes you round, and goes on meaning the same way
+  // round on the new surface (`climbLatch`) until you let go of it.
+  // `climbKeys` runs BEFORE `stepMovement` (what the keys mean this step — so the sim's walking and jumping see the same), `climbStep2` AFTER it, before the
+  // terrain pass (as `climbStep`). keys: { up: ↑ / W held (not Space), leap: Space held }.
+  const climbCnt = (A) => (A[0] ? 1 : 0) + (A[1] ? 1 : 0) + (A[2] ? 1 : 0);
+  function climbSol(s, solidAt) { const WW = boundsW(s); return (x, y) => x < 0 || x > WW || !!solidAt(x, y); }
+  // [by the feet, the middle, the head] on side `d`, `mg` px out from the body
+  function climbSide(s, sol, d, mg) { const hw = bodyW(s) / 2, bh = bodyH(s), x = s.x + d * (hw + mg); return [sol(x, s.y - bh * 0.22), sol(x, s.y - bh * 0.52), sol(x, s.y - bh * 0.82)]; }
+  function climbCeil(s, sol, mg) { const hw = bodyW(s) / 2, y = s.y - bodyH(s) - mg; let n = 0; for (const f of [-0.6, 0, 0.6]) if (sol(s.x + hw * f, y)) n++; return n; }
+  function climbKeys(s, input, keys, solidAt, on) {
+    s.climbG = !!s.onGround;   // the ground as the last step left it (the sim's own step clears it before the terrain pass sets it again)
+    if (!on) { s.climbLatch = null; s.climbK = null; return; }
+    const raw = { L: !!input.left, R: !!input.right, U: !!(keys && keys.up), D: !!input.down }, K = Object.assign({}, raw), La = s.climbLatch;
+    if (La) { if (!raw[La.k]) s.climbLatch = null; else { K[La.k] = false; K[La.as] = true; } }
+    const sol = climbSol(s, solidAt), byWall = s.onGround && K.U && (climbCnt(climbSide(s, sol, -1, 3)) >= 2 || climbCnt(climbSide(s, sol, 1, 3)) >= 2);
+    if (s.climbW || s.climbC || s.climbWrap || s.climbLatch || byWall) input.jump = !!(keys && keys.leap);
+    input.left = K.L; input.right = K.R; input.down = K.D;
+    s.climbK = { L: K.L, R: K.R, U: K.U, D: K.D, S: !!(keys && keys.leap) };
+  }
+  // start a swing round an outside corner at P: the body's middle from where it is now to `C1`, on an arc about P (bulged so the box's corner clears the rock)
+  function climbWrapStart(s, sol, px, py, c1x, c1y, then) {
+    const R = bodyR(s), cx = s.x, cy = s.y - R, q = R * 0.8;
+    for (const [dx, dy] of [[0, 0], [q, 0], [-q, 0], [0, q], [0, -q]]) if (sol(c1x + dx, c1y + dy)) return false;
+    const a0 = Math.atan2(cy - py, cx - px), a1r = Math.atan2(c1y - py, c1x - px); let da = a1r - a0; while (da > Math.PI) da -= 2 * Math.PI; while (da <= -Math.PI) da += 2 * Math.PI;
+    const r0 = Math.hypot(cx - px, cy - py), r1 = Math.hypot(c1x - px, c1y - py), am = a0 + da / 2, rm = (r0 + r1) / 2 + R * 0.45;
+    if (sol(px + Math.cos(am) * rm, py + Math.sin(am) * rm)) return false;
+    const k = s.speedMul || 1; s.climbWrap = Object.assign({ px, py, a0, da, r0, r1, R, t: 0, n: Math.max(6, Math.round(Math.PI / 2 * R / (C.CLIMB_VY * k))) }, then);
+    return true;
+  }
+  function climbStep2(s, solidAt, on, mode) {
+    const K = s.climbK || { L: false, R: false, U: false, D: false, S: false }, fresh = K.S && !s.climbPJ; s.climbPJ = K.S;
+    if (s.climbCool > 0) s.climbCool--;
+    if (!on || s.grabbedBy) { s.climbW = 0; s.climbC = false; s.climbWrap = null; s.climbLatch = null; return 0; }
+    const G = !!s.climbG, sol = climbSol(s, solidAt), R = bodyR(s), hw = bodyW(s) / 2, bh = bodyH(s), sk = s.speedMul || 1, upV = C.CLIMB_VY * sk, dnV = C.CLIMB_DOWN_VY * sk, xV = C.CLIMB_VX * sk;
+    const put = (vx, vy) => { s.x += vx - s.vx; s.y += vy - s.vy; s.vx = vx; s.vy = vy; };
+    const hold = () => { s.onGround = false; s.coyote = 0; s.jumpBuffer = 0; s.hasDoubleJump = true; s.wallSlideDir = 0; };
+    // a swing begins where the body was before this step's own move (that move undone first); refused → as it was
+    const tryWrap = (px, py, c1x, c1y, then) => { const ox = s.x, oy = s.y, ovx = s.vx, ovy = s.vy; put(0, 0);
+      if (climbWrapStart(s, sol, px, py, c1x, c1y, then)) { s.climbW = 0; s.climbC = false; hold(); return true; } s.x = ox; s.y = oy; s.vx = ovx; s.vy = ovy; return false; };
+    // ── swinging round an outside corner (the step it set the swing up, the body held still; then the arc; then the surface it comes to)
+    const Wr = s.climbWrap;
+    if (Wr) { Wr.t++; const u = Math.min(1, Wr.t / Wr.n), a = Wr.a0 + Wr.da * u, r = Wr.r0 + (Wr.r1 - Wr.r0) * u + Wr.R * 0.45 * Math.sin(Math.PI * u), cx = Wr.px + Math.cos(a) * r, cy = Wr.py + Math.sin(a) * r;
+      s.vx = cx - s.x; s.vy = cy + Wr.R - s.y; s.x = cx; s.y = cy + Wr.R; hold(); if (Wr.face) s.facingLeft = Wr.face < 0;
+      if (u >= 1) { s.climbWrap = null; s.climbW = Wr.w || 0; s.climbC = !!Wr.c; s.vx = 0; s.vy = 0; if (Wr.latch && mode === 2) { const L0 = s.climbLatch; s.climbLatch = { k: L0 && L0.as === Wr.latch.k ? L0.k : Wr.latch.k, as: Wr.latch.as }; } }   /* (a chain of corners: the key you are really holding goes on meaning the next way round) */
+      return 4; }
+    const sL = climbSide(s, sol, -1, 3), sR = climbSide(s, sol, 1, 3), nL = climbCnt(sL), nR = climbCnt(sR), nC = climbCeil(s, sol, 3);
+    let w = s.climbW || 0, c = !!s.climbC; const was = (w ? 1 : 0) | (c ? 2 : 0);
+    if (w && (w < 0 ? nL : nR) === 0) w = 0;
+    if (c && nC === 0) c = false;
+    // ── Space: off a wall away from it (a corner too), off a ceiling downwards
+    if (fresh && (w || c)) {
+      if (w) { put(-w * maxVxOf(s) * 1.4, jumpVyOf(s)); s.facingLeft = w > 0; } else put(0, 2);
+      s.hasDoubleJump = true; s.climbW = 0; s.climbC = false; s.climbCool = 12; s.climbLatch = null; s.jumpBuffer = 0; return 0;
+    }
+    // ── taking hold: in the air any wall or ceiling you touch (not a wall you press away from); on the ground, ↑ beside a wall
+    const cool = s.climbCool > 0;
+    if (!w && !cool) { if (!G) { if (nL >= 2 && !K.R) w = -1; else if (nR >= 2 && !K.L) w = 1; } else if (K.U) { if (nL >= 2) w = -1; else if (nR >= 2) w = 1; } }
+    let tookC = false; if (!c && !cool && nC >= 2 && !G) { c = true; tookC = !(was & 2); }
+    // ── letting go: straight away from the surface; on the ground a wall is let go unless you climb (you stand)
+    if (w && (w < 0 ? K.R : K.L)) { w = 0; if (!c) s.climbCool = 6; }
+    if (c && K.D) { c = false; if (!w) s.climbCool = 10; }
+    if (w && !c && G && !K.U) w = 0;
+    // ── outside corners
+    let stopUp = false, stopDn = false, stopX = false;
+    if (w && !c) { const S = w < 0 ? sL : sR, xf = s.x + w * hw, xin = xf + w * 1.5, cy = s.y - R, toward = w < 0 ? K.L : K.R;
+      // its TOP: your middle past it, your feet still on it → up and over, onto it
+      if (S[0] && !S[1] && !S[2] && !sol(xin, cy)) { const go = mode === 2 ? (K.U || toward) : toward;
+        if (go) { let yt = cy; while (yt < s.y && !sol(xin, yt)) yt += 1; if (tryWrap(xf, yt, xf, yt - R - 1, { w: 0, c: false, face: w, latch: { k: 'U', as: w < 0 ? 'L' : 'R' } })) return 4; }
+        else if (K.U) stopUp = true; }
+      // its FOOT, over nothing: your middle below it, your head still on it → round under it, onto its underside
+      if (!S[0] && !S[1] && S[2] && !G && !sol(s.x, s.y + 3) && !sol(xin, cy)) { const go = mode === 2 ? (K.D || toward) : toward;
+        if (go) { let yb = cy; while (yb > s.y - bh && !sol(xin, yb)) yb -= 1; yb += 1; if (tryWrap(xf, yb, xf, yb + R + 1, { w: 0, c: true, face: w, latch: { k: 'D', as: w < 0 ? 'L' : 'R' } })) return 4; }
+        else if (K.D) stopDn = true; } }
+    const d = K.L && !K.R ? -1 : K.R && !K.L ? 1 : 0;
+    if (c && !w) { const ya = s.y - bh - 1.5, e = sol(s.x, ya) ? 0 : sol(s.x + hw * 0.6, ya) ? -1 : sol(s.x - hw * 0.6, ya) ? 1 : 0;
+      // a ceiling's END (`e`: the way past it): your middle past it → round its edge and up its outer face
+      if (e) { const go = mode === 2 ? d === e : K.U;
+        if (go) { let xe = s.x; while ((s.x - xe) * e < hw && !sol(xe, ya)) xe -= e; xe += e * 0.5; const yc = s.y - bh;
+          if (tryWrap(xe, yc, xe + e * (R + 1), yc, { w: -e, c: false, face: -e, latch: { k: e < 0 ? 'L' : 'R', as: 'U' } })) return 4; }
+        else if (d === e) stopX = true; } }
+    // a floor's EDGE, with ↓: your middle over nothing → round its edge and down its outer face
+    if (!w && !c && G && K.D && !cool) { const yf = s.y + 2, l = sol(s.x - hw * 0.6, yf), r = sol(s.x + hw * 0.6, yf);
+      if (!sol(s.x, yf) && l !== r) { const dir = l ? 1 : -1; let xe = s.x; while ((s.x - xe) * dir < hw && !sol(xe, yf)) xe -= dir; xe += dir * 0.5;
+        if (tryWrap(xe, s.y - 1, xe + dir * (R + 1), s.y - 1, { w: -dir, c: false, face: -dir, latch: null })) return 4; } }
+    s.climbW = w; s.climbC = c;
+    if (!w && !c) return 0;
+    // ── moving along what you hold
+    let vx, vy;
+    if (w && c) { vx = 0; vy = 0; }
+    else if (w) { vx = 0; vy = K.U ? -upV : K.D ? dnV : 0; if (stopUp && vy < 0) vy = 0; if (stopDn && vy > 0) vy = 0; }
+    else { vy = 0; vx = d * xV; if (stopX) vx = 0; }
+    if (w) s.facingLeft = w < 0; else if (vx) s.facingLeft = vx < 0;
+    // a ceiling taken while rising: the step's rise is KEPT (the terrain pass stops the head at the rock) — undoing it left you below the reach of the next step
+    if (tookC && s.vy < 0) { s.x += vx - s.vx; s.vx = vx; s.vy = 0; } else put(vx, vy);
+    // flush with the rock, up to 6 px (never pressed into it — that read as a low ceiling, and the body squashed)
+    if (c && !tookC) for (let i = 0; i < 6 && climbCeil(s, sol, 1) === 0; i++) s.y -= 1;
+    if (w) for (let i = 0; i < 6 && climbCnt(climbSide(s, sol, w, 1)) === 0; i++) s.x += w;
+    hold();
+    return w ? (c ? 3 : 1) : 2;
+  }
+
   // ---- Grab / throw resolution + carried pinning (server-authoritative) ----
   function resolveGrabThrow(list, byId) {
     for (const s of list) {
@@ -511,7 +618,7 @@
 
   return {
     C, STAGE_LAYOUTS, layoutIndex, platformsFor, floorY, setBounds, boundsW, boundsH,
-    createState, stepMovement, climbStep, resolveGrabThrow, resolveCollisions, resolveOwnCollision, snapshot, applySnapshot,
+    createState, stepMovement, climbStep, climbKeys, climbStep2, resolveGrabThrow, resolveCollisions, resolveOwnCollision, snapshot, applySnapshot,
     // ⭐ EXPORTED so the client asks THIS FILE what a body's dimensions are, rather than keeping a second
     // opinion. The clamp, the exponents and the mass law are physics and belong to the sim; a client that
     // computed its own would be the two-lists-of-materials bug in another costume.
