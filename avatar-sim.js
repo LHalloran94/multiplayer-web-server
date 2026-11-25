@@ -417,6 +417,9 @@
     const up = top + 2; for (let h = H - 1; h <= H + up; h += 2) if (sol(cx + nx * (h - en), cy + ny * (h - en))) return 'blocked';
     s.x += nx * up; s.y += ny * up; return 'stepped';
   }
+  // (round 7) an inside corner turns the key you are moving with onto the new surface: the key you are really holding (through any corner meaning it already has) now
+  //   means `as`
+  function climbTurn(s, kMapped, as) { const L0 = s.climbLatch, k = L0 && L0.as === kMapped ? L0.k : kMapped; if (k === as) { s.climbLatch = null; return; } s.climbLatch = { k, as }; }
   function climbStep2(s, solidAt, on, mode) {
     const K = s.climbK || { L: false, R: false, U: false, D: false, S: false }, fresh = K.S && !s.climbPJ; s.climbPJ = K.S;
     if (s.climbCool > 0) s.climbCool--;
@@ -439,7 +442,7 @@
     //   ceiling, and dropping the hold there pulled it back up into the bump
     const nearF = (nx, ny, maxd) => { const ex = Math.abs(ny) * hw, ey = Math.abs(nx) * bh / 2, H = 2 * (Math.abs(nx) * hw + Math.abs(ny) * bh / 2);
       for (let dd = 1; dd <= maxd; dd += 3) { const ox = s.x - nx * (hw * Math.abs(nx) + dd), oy = s.y - bh / 2 - ny * (bh / 2 * Math.abs(ny) + dd);
-        for (let q = -1; q <= 1.0001; q += 4 / Math.max(4, 2 * Math.max(ex, ey))) if (sol(ox + q * ex, oy + q * ey)) return true; } return false; }, keepD = bh * C.CLIMB_LIP + 3;
+        for (let q = -1; q <= 1.0001; q += 4 / Math.max(4, 2 * Math.max(ex, ey))) if (sol(ox + q * ex, oy + q * ey)) return true; } return false; }, keepD = bh * 0.9;   /* (round 7: a slope leaning away outran 0.65 of the body — the cave hunt's falls) */
     if (w && (w < 0 ? nL : nR) === 0 && !nearF(-w, 0, keepD)) w = 0;
     if (c && nC === 0 && !nearF(0, 1, keepD)) c = false;
     // ── Space: off a wall away from it (a corner too), off a ceiling downwards
@@ -449,34 +452,44 @@
     }
     // ── taking hold: in the air any wall or ceiling you touch (not a wall you press away from); on the ground, ↑ beside a wall
     const cool = s.climbCool > 0;
-    if (!w && !cool) { if (!G) { if (nL >= 2) w = -1; else if (nR >= 2) w = 1; } else if (K.U) { if (nL >= 2) w = -1; else if (nR >= 2) w = 1; } }
-    let tookC = false; if (!c && !cool && nC >= 2 && !G) { c = true; tookC = !(was & 2); }
+    // (round 7) …or rock ANYWHERE along the face you are pushing towards (a notch over a corner left only one of three probes on rock: the ceiling was never taken, and ↑
+    //   pushed into it for ever — found by the offline cave hunt, `climb_bot.js`)
+    //   — but already on another surface a face is taken only with rock along 40% of it (an outcrop touching a corner was taken as a ceiling / wall: a false corner)
+    const fracF = (nx, ny) => { const ex = Math.abs(ny) * hw, ey = Math.abs(nx) * bh / 2, ox = s.x - nx * (hw * Math.abs(nx) + 2), oy = s.y - bh / 2 - ny * (bh / 2 * Math.abs(ny) + 2); let n = 0, k = 0;
+      for (let q = -1; q <= 1.0001; q += 0.2) { k++; if (sol(ox + q * ex, oy + q * ey)) n++; } return n / k; };
+    const pushL = K.L || (s.vx < -0.5), pushR = K.R || (s.vx > 0.5), pushU = K.U || s.vy < -0.5 || !!w, onC = c, onW = !!w;
+    if (!w && !cool) { if (!G) { if (nL >= 2 || (pushL && fracF(1, 0) >= (onC ? 0.4 : 0.01))) w = -1; else if (nR >= 2 || (pushR && fracF(-1, 0) >= (onC ? 0.4 : 0.01))) w = 1; } else if (K.U) { if (nL >= 2) w = -1; else if (nR >= 2) w = 1; } }
+    let tookC = false; if (!c && !cool && !G && (nC >= 2 || (pushU && fracF(0, 1) >= (onW ? 0.4 : 0.01)))) { c = true; tookC = !(was & 2); }
     // ── letting go: straight away from the surface; on the ground a wall is let go unless you climb (you stand)
     // (round 3: nothing lets go but Space) in a corner the away key leaves the wall for the ceiling, ↓ the ceiling for the wall
     if (w && c && (w < 0 ? K.R : K.L)) w = 0;
     if (c && w && K.D) c = false;
-    // an INSIDE corner met while a held key is carrying you round: it turns onto the new surface, AWAY from the one you were on — down a face onto the floor: along
-    //   the floor away from the face; along a floor into a wall: up the wall (round 3: letting it mean itself again sent you back the way you came)
-    { const La = s.climbLatch; if (La && ((La.as === 'D' && G) || (La.as === 'U' && (c || nC >= 2)) || (La.as === 'L' && nL >= 2) || (La.as === 'R' && nR >= 2))) {
-        const vert = La.as === 'U' || La.as === 'D', ww = w || (s.climbW || 0), nx = vert ? (ww < 0 ? 'R' : ww > 0 ? 'L' : null) : (c || s.climbC ? 'D' : 'U');
-        if (!nx || nx === La.k) s.climbLatch = null; else La.as = nx;
- } }
+    // ⭐ (round 7) A KEY CARRYING YOU ALWAYS MEANS A WAY ALONG WHAT YOU HOLD. The ways open from here: along the floor, along a wall, along a ceiling (never into one).
+    //   A carried key whose meaning is not one of them — met an inside corner, or left pointing at or away from rock after a corner the probes saw late (found by the
+    //   offline cave hunt) — turns to the open way nearest the way you were going (`climbMv`), never straight back: along a floor into a wall → up it, up a wall into a
+    //   ceiling → along it, along a ceiling into a wall → down it, down a wall onto the floor → along the floor away from it.
+    { const La = s.climbLatch; if (La) { const V = { L: [-1, 0], R: [1, 0], U: [0, -1], D: [0, 1] }, open = [];
+        if (G || c) open.push('L', 'R'); if (w) open.push('U', 'D');
+        const ok = (k) => open.includes(k) && !(k === 'D' && G) && !(k === 'U' && c) && !(k === 'L' && w < 0) && !(k === 'R' && w > 0);
+        if (open.length && !ok(La.as)) { const mv = s.climbMv || V[La.as]; let best = null, bd = -1.5;
+          for (const k of ['L', 'R', 'U', 'D']) { if (!ok(k)) continue; const d = V[k][0] * mv[0] + V[k][1] * mv[1]; if (d > -0.5 && d > bd) { bd = d; best = k; } }
+          if (best) { if (best === La.k) s.climbLatch = null; else La.as = best; } } } }
     if (w && !c && G && !K.U) w = 0;
     // ── outside corners
     let stopUp = false, stopDn = false, stopX = false;
     if (w && !c) { const S = w < 0 ? sL : sR, xf = s.x + w * hw, xin = xf + w * 1.5, cy = s.y - R, toward = w < 0 ? K.L : K.R;
       // its TOP: your middle past it, your feet still on it → up and over, onto it
-      if (S[0] && !S[1] && !S[2] && !sol(xin, cy) && climbOpenBox(sol, xin, s.y - bh - 4, xin + w * bh * C.CLIMB_LIP, s.y - bh - 4 - bh * C.CLIMB_LIP)) { const go = mode === 2 ? (K.U || toward) : toward;   /* (round 5: not a notch — the face does not come back above you) */
+      if (S[0] && !S[1] && !S[2] && !sol(xin, cy) && climbOpenBox(sol, xin, cy, xin + w * bh * C.CLIMB_LIP, s.y - bh - 4 - bh * C.CLIMB_LIP)) { const go = mode === 2 ? (K.U || toward) : toward;   /* (round 5: not a notch — the face does not come back above you) */
         if (go) { let yt = cy; while (yt < s.y && !sol(xin, yt)) yt += 1; if (tryWrap(xf, yt, xf + w * R * 0.6, yt - R - 1, { w: 0, c: false, face: w, latch: { k: 'U', as: w < 0 ? 'L' : 'R' } })) return 4; }
         if (K.U) stopUp = true; }   /* (round 4: a swing that will not fit holds you at the edge — it let you fall) */
       // its FOOT, over nothing: your middle below it, your head still on it → round under it, onto its underside
-      if (!S[0] && !S[1] && S[2] && !G && !sol(s.x, s.y + 3) && !sol(xin, cy) && climbOpenBox(sol, xin, s.y + 4, xin + w * bh * C.CLIMB_LIP, s.y + 4 + bh * C.CLIMB_LIP)) { const go = mode === 2 ? (K.D || toward) : toward;   /* (round 5: not a notch) */
+      if (!S[0] && !S[1] && S[2] && !G && !sol(s.x, s.y + 3) && !sol(xin, cy) && climbOpenBox(sol, xin, cy, xin + w * bh * C.CLIMB_LIP, s.y + 4 + bh * C.CLIMB_LIP)) { const go = mode === 2 ? (K.D || toward) : toward;   /* (round 5: not a notch) */
         if (go) { let yb = cy; while (yb > s.y - bh && !sol(xin, yb)) yb -= 1; yb += 1; if (tryWrap(xf, yb, xf + w * R * 0.6, yb + R + 1, { w: 0, c: true, face: w, latch: { k: 'D', as: w < 0 ? 'L' : 'R' } })) return 4; }
         if (K.D) stopDn = true; } }
     const d = K.L && !K.R ? -1 : K.R && !K.L ? 1 : 0;
     // (round 5, the user: a single missing cell in a flat ceiling stopped them dead) an END has rock on ONE side of your middle only and air on past it — a notch has rock
     //   both sides, and is crawled over
-    if (c && !w) { const ya = s.y - bh - 1.5, rR = sol(s.x + hw * 0.6, ya), rL = sol(s.x - hw * 0.6, ya), e0 = sol(s.x, ya) || rR === rL ? 0 : rR ? -1 : 1, e = e0 && climbOpenBox(sol, s.x + e0 * hw * 1.2, ya, s.x + e0 * (hw * 1.2 + bh * C.CLIMB_LIP), ya - bh) ? e0 : 0;   /* (a body's height of air past it, else it is a bump or a step: crawled past) */
+    if (c && !w) { const ya = s.y - bh - 1.5, rR = sol(s.x + hw * 0.6, ya), rL = sol(s.x - hw * 0.6, ya), e0 = sol(s.x, ya) || rR === rL ? 0 : rR ? -1 : 1, xe0 = (() => { let q = s.x; if (e0) while ((s.x - q) * e0 < hw && !sol(q, ya)) q -= e0; return q; })(), e = e0 && climbOpenBox(sol, xe0 + e0, ya, xe0 + e0 * (1 + hw * 1.2 + bh * C.CLIMB_LIP), ya - bh) ? e0 : 0;   /* (round 7: looked for from the rock's very edge — a ceiling stepping up just past it was read as its end) */   /* (a body's height of air past it, else it is a bump or a step: crawled past) */
       // a ceiling's END (`e`: the way past it): your middle past it → round its edge and up its outer face
       if (e) { const go = mode === 2 ? d === e : K.U;
         if (go) { let xe = s.x; while ((s.x - xe) * e < hw && !sol(xe, ya)) xe -= e; xe += e * 0.5; const yc = s.y - bh;
@@ -485,16 +498,22 @@
     // a floor's EDGE (a real drop, not a step in the ground): your middle over nothing → round its edge and down its outer face. (round 3, the user: 'no walking off
     //   edges … walk off an edge straight onto the wall'.) CARRY: as you walk off it, the key you walk with now meaning ↓ · STOP: held at the edge, ↓ takes you over
     if (!w && !c && G && !cool) { const yf = s.y + 2, l = sol(s.x - hw * 0.6, yf), r = sol(s.x + hw * 0.6, yf);
-      if (!sol(s.x, yf) && l !== r) { const dir = l ? 1 : -1; const step = !climbOpenBox(sol, s.x + dir * hw * 0.5, s.y + 2, s.x + dir * (hw * 0.5 + bh * C.CLIMB_LIP), s.y + 2 + bh * C.CLIMB_LIP);   /* (round 5: a step down no deeper than a step-over is walked down) */
-        if (!step) { const walk = dir < 0 ? K.L : K.R, go = mode === 2 ? !K.U : K.D; let xs = s.x; while ((s.x - xs) * dir < hw && !sol(xs, yf)) xs -= dir; const edge = xs + dir, px = xs + dir * 0.5;
+      if (!sol(s.x, yf) && l !== r) { const dir = l ? 1 : -1; let xs = s.x; while ((s.x - xs) * dir < hw && !sol(xs, yf)) xs -= dir;
+        // (round 7) a step down no deeper than a step-over, from the very EDGE of what you stand on out past your front, is walked down (from your middle it missed a
+        //   step just behind it, and the swing down past it would not fit — the offline cave hunt)
+        const step = !climbOpenBox(sol, xs + dir * 2, s.y + 2, xs + dir * (2 + hw * 1.5 + bh * C.CLIMB_LIP), s.y + 2 + bh * C.CLIMB_LIP);
+        if (!step) { const walk = dir < 0 ? K.L : K.R, go = mode === 2 ? !K.U : K.D; const edge = xs + dir, px = xs + dir * 0.5;
           if (go && tryWrap(px, s.y - 1, px + dir * (R + 1), s.y - 1 + R * 0.6, { w: -dir, c: false, face: -dir, latch: walk ? { k: dir < 0 ? 'L' : 'R', as: 'D' } : null })) return 4;
           // (STOP: held with your middle just over the edge — where the next step still sees it)
           const over = (s.x - edge) * dir; if (over > 0) { s.x -= dir * over; if (s.vx * dir > 0) s.vx = 0; } } } }
     // (round 3) lost every hold in mid-move (a notch, a slant of steps): rock within a few px is taken again before the body falls
-    if (!w && !c && !G && was && !cool) { for (let mg = 4; mg <= 14 && !w && !c; mg++) { const fr = (dx, dy) => { const q = R * 0.8; for (const [ex, ey] of [[0, 0], [q, 0], [-q, 0], [0, q], [0, -q]]) if (sol(s.x + dx + ex, s.y - R + dy + ey)) return false; return true; };   /* (round 5: never into rock) */
+    if (!w && !c && !G && was && !cool) { for (let mg = 4; mg <= 20 && !w && !c; mg++) { const fr = (dx, dy) => { const q = R * 0.8; for (const [ex, ey] of [[0, 0], [q, 0], [-q, 0], [0, q], [0, -q]]) if (sol(s.x + dx + ex, s.y - R + dy + ey)) return false; return true; };   /* (round 5: never into rock) */
       if (climbCnt(climbSide(s, sol, -1, mg)) >= 1 && fr(-(mg - 3), 0)) { s.x -= mg - 3; w = -1; } else if (climbCnt(climbSide(s, sol, 1, mg)) >= 1 && fr(mg - 3, 0)) { s.x += mg - 3; w = 1; } else if (climbCeil(s, sol, mg) >= 1 && fr(0, -(mg - 3))) { s.y -= mg - 3; c = true; } } }
     // (round 5) on the floor, walking into a bump: stepped up over it (the terrain pass only steps one cell)
-    if (!w && !c && G && (K.L || K.R) && !(K.L && K.R)) { const dd = K.L ? -1 : 1; climbLip(s, sol, 0, -1, dd, 0, Math.abs(s.vx) + 1); }
+    if (!w && !c && G && (K.L || K.R) && !(K.L && K.R)) s.climbMv = [K.L ? -1 : 1, 0];
+    if (!w && !c && G && (K.L || K.R) && !(K.L && K.R)) { const dd = K.L ? -1 : 1; if (climbLip(s, sol, 0, -1, dd, 0, Math.abs(s.vx) + 1) === 'blocked' && mode === 2 && !cool) {
+        // (mode 2) a wall met walking: up it, the key you walk with now meaning ↑
+        w = dd; climbTurn(s, dd < 0 ? 'L' : 'R', 'U'); } }
     s.climbW = w; s.climbC = c;
     if (!w && !c) return 0;
     // ── moving along what you hold
@@ -503,19 +522,20 @@
     else if (w) { vx = 0; vy = K.U ? -upV : K.D ? dnV : 0; if (stopUp && vy < 0) vy = 0; if (stopDn && vy > 0) vy = 0; }
     else { vy = 0; vx = d * xV; if (stopX) vx = 0; }
     // (round 5) a bump ahead on the wall or the ceiling: stepped over, away from the surface (a wall: across, a ceiling: down)
-    if (w && !c && vy) { if (climbLip(s, sol, -w, 0, 0, Math.sign(vy), vy) === 'blocked' && mode !== 2) vy = 0; }
-    else if (c && !w && vx) { if (climbLip(s, sol, 0, 1, Math.sign(vx), 0, vx) === 'blocked' && mode !== 2) vx = 0; }
+    if (w && !c && vy) { if (climbLip(s, sol, -w, 0, 0, Math.sign(vy), vy) === 'blocked') { if (mode !== 2) vy = 0; else if (vy < 0) { c = true; s.climbC = true; climbTurn(s, 'U', w < 0 ? 'R' : 'L'); vy = 0; } else climbTurn(s, 'D', w < 0 ? 'R' : 'L'); } }
+    else if (c && !w && vx) { if (climbLip(s, sol, 0, 1, Math.sign(vx), 0, vx) === 'blocked') { if (mode !== 2) vx = 0; else { w = Math.sign(vx); s.climbW = w; climbTurn(s, vx < 0 ? 'L' : 'R', 'D'); vx = 0; } } }
     // (round 4) facing the way you go, in the body's OWN frame — it is drawn turned to its surface: on a wall on your left your left is up, on a ceiling your left is
     //   screen right
     if (w && !c) { if (vy) s.facingLeft = (vy < 0) === (w < 0); } else if (c && !w) { if (vx) s.facingLeft = vx > 0; } else if (vx) s.facingLeft = vx < 0;
     // a ceiling taken while rising: the step's rise is KEPT (the terrain pass stops the head at the rock) — undoing it left you below the reach of the next step
     if (tookC && s.vy < 0) { s.x += vx - s.vx; s.vx = vx; s.vy = 0; } else put(vx, vy);
+    if (vx || vy) s.climbMv = [Math.sign(vx), Math.sign(vy)];
     // flush with the rock, up to 6 px (never pressed into it — that read as a low ceiling, and the body squashed)
     //   (round 5: tested along the WHOLE face, every 4 px — three points let it pull the body up into a bump it was passing under, which undid the step over it)
     const touch = (nx, ny) => { const ex = Math.abs(ny) * hw, ey = Math.abs(nx) * bh / 2, ox = s.x - nx * (hw + 1), oy = s.y - bh / 2 - ny * (bh / 2 + 1);
       for (let q = -1; q <= 1.0001; q += 4 / Math.max(4, 2 * Math.max(ex, ey))) if (sol(ox + q * ex, oy + q * ey)) return true; return false; };
-    if (c && !tookC) for (let i = 0; i < 6 && !touch(0, 1); i++) s.y -= 1;
-    if (w) for (let i = 0; i < 6 && !touch(-w, 0); i++) s.x += w;
+    if (c && !tookC) for (let i = 0; i < 10 && !touch(0, 1); i++) s.y -= 1;
+    if (w) for (let i = 0; i < 10 && !touch(-w, 0); i++) s.x += w;   /* (round 7: up to 10 px a step — a face leaning away is followed) */
     hold();
     return w ? (c ? 3 : 1) : 2;
   }
