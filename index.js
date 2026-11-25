@@ -3851,15 +3851,23 @@ const _magicMirrors = new Map();
 //   dome: in the point's column, below its middle the first run of rock 3 cells deep (or running past its bottom) is the ground — nothing under it is inside; above, the same
 //   for a ceiling; where its middle is rock it sits on top of that
 const _magicNulls = new Map();
+// (magic 16a round 6) the sphere's shape is a FILL from its middle through open cells inside the circle — any rock stops it (the client's 16zj `magicDomeCut`); kept a quarter second
+function magicSphereFill(room, x, cy, R) {
+  const st = cellsOf(room), grid = st.terrain, T = TERRAIN_CELL, ROWS = st.rows, floorRow = Math.floor(roomFloorTop(room) / T);
+  const c0 = Math.floor((x - R) / T), c1 = Math.floor((x + R) / T), r0 = Math.floor((cy - R) / T), r1 = Math.floor((cy + R - 0.01) / T), W = c1 - c0 + 1, H = r1 - r0 + 1, m = new Uint8Array(Math.max(1, W * H));
+  const rock = (c, r) => { const C = c + c0, Rr = r + r0; if (Rr >= floorRow) return true; if (Rr < 0) return false; if (C < 0 || C >= st.cols) return true; const v = peekCellAt(grid, C * ROWS + Rr); return v > 0 && isSolidCell(v); };
+  const inC = (c, r) => { const xa = (c + c0) * T, ya = (r + r0) * T, nx = Math.max(xa, Math.min(x, xa + T)), ny = Math.max(ya, Math.min(cy, ya + T)); return Math.hypot(nx - x, ny - cy) < R; };
+  const cs = Math.floor(x / T) - c0; let rs = Math.min(H - 1, Math.floor(cy / T) - r0); while (rs >= 0 && rock(cs, rs)) rs--;
+  if (rs >= 0 && inC(cs, rs)) { const stk = [rs * W + cs]; m[rs * W + cs] = 1;
+    while (stk.length) { const i = stk.pop(), c = i % W, r = (i - c) / W;
+      for (let d = 0; d < 4; d++) { const cc = d === 0 ? c + 1 : d === 1 ? c - 1 : c, rr = d === 2 ? r + 1 : d === 3 ? r - 1 : r; if (cc < 0 || rr < 0 || cc >= W || rr >= H) continue; const j = rr * W + cc; if (m[j]) continue;
+        if (!inC(cc, rr) || rock(cc, rr)) { m[j] = 2; continue; } m[j] = 1; stk.push(j); } } }
+  return { at: Date.now(), c0, r0, W, H, m };
+}
 function magicNullIn(room, q, x, y) {
-  if (Math.hypot(x - q.x, y - q.cy) > q.R) return false; const st = cellsOf(room), grid = st.terrain; if (!grid || !st.rows) return true;
-  const T = TERRAIN_CELL, ROWS = st.rows, c = Math.floor(x / T), r = Math.floor(y / T), sr = Math.floor(q.cy / T), rT = Math.floor((q.cy - q.R) / T), rB = Math.floor((q.cy + q.R) / T), floorRow = Math.floor(roomFloorTop(room) / T);
-  if (c < 0 || c >= st.cols) return false; const solid = (rr) => { if (rr >= floorRow) return true; if (rr < 0) return false; const v = peekCellAt(grid, c * ROWS + rr); return v > 0 && isSolidCell(v); };
-  let up0 = sr;
-  if (solid(sr)) { let k = sr; while (k >= rT && solid(k)) k--; if (r > k) return false; up0 = k; }
-  else if (r > sr) { for (let k = sr; k <= rB; k++) if (solid(k)) { let e = k; while (e <= rB + 3 && solid(e)) e++; if (e - k >= 3 || e > rB) { if (r >= k) return false; break; } k = e; } }
-  if (r < up0) { for (let k = up0; k >= rT; k--) if (solid(k)) { let e = k; while (e >= rT - 3 && solid(e)) e--; if (k - e >= 3 || e < rT) { if (r <= k) return false; break; } k = e; } }
-  return true;
+  if (Math.hypot(x - q.x, y - q.cy) > q.R) return false; const st = cellsOf(room); if (!st.terrain || !st.rows) return true;
+  if (!q._fill || Date.now() - q._fill.at > 250 || q._fill.R !== q.R) { q._fill = magicSphereFill(room, q.x, q.cy, q.R); q._fill.R = q.R; }
+  const F = q._fill, c = Math.floor(x / TERRAIN_CELL) - F.c0, r = Math.floor(y / TERRAIN_CELL) - F.r0; return c >= 0 && r >= 0 && c < F.W && r < F.H && F.m[r * F.W + c] === 1;
 }
 // ⭐ (magic 11d) ALARMS: room → [{ id, by, x, y (the ground), at (awake from), until, trip (last, ms) }] · SEALS: object id → { id (cast), obj, by, room, until }
 const _magicAlarms = new Map(), _magicSeals = new Map();
