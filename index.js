@@ -3863,6 +3863,9 @@ function magicNullIn(room, q, x, y) {
 }
 // ⭐ (magic 11d) ALARMS: room → [{ id, by, x, y (the ground), at (awake from), until, trip (last, ms) }] · SEALS: object id → { id (cast), obj, by, room, until }
 const _magicAlarms = new Map(), _magicSeals = new Map();
+// ⭐ (magic 16a) ILLUSION: a veiled thing (object id → { id, obj, by, room, until }) · a dome of hiding (cast id → { id, by, room, x, y, R, until }). Illusions on BODIES are kept on
+//   their socket (`socket._ill`, from 'magic-ill' — what that body's own game says).
+const _magicVeils = new Map(), _magicHides = new Map();
 // ⭐ (magic 12a) HEALING GROVES: cast id → { id, by, room, x, y (the ground under the point), w (px across), until } — kept so an arriving page is told and a dispel ends them
 const _magicGroves = new Map();
 // ⭐ (magic 13a) POISON CLOUDS: cast id → { id, by, room, x, y (the ground under the point), w, h (px), until } · SPORE PODS: cast id → { id, by, room, x, y (the ground), until, armAt }
@@ -4031,6 +4034,12 @@ function magicDispel(room, cx, cy, R, ms, by) {
   // (11d) alarms, seals (by where this server last had the thing)
   { const as = _magicAlarms.get(room); if (as) for (const q of as.slice()) { const t = at(q.x, q.y); if (t >= 0) { n++; later(t, () => { const a2 = _magicAlarms.get(room), i = a2 ? a2.indexOf(q) : -1; if (i >= 0) { a2.splice(i, 1); io.to(room).emit('magic-alarm-gone', { id: q.id }); } }); } } }
   for (const [oid, q] of _magicSeals) { if (q.room !== room) continue; const ob = roomObjects[room] && roomObjects[room].get(oid); if (!ob) continue; const P = ob.loose ? magicBoulderPose(room, ob) : ob, t = at(P.x, P.y, 12); if (t >= 0) { n++; later(t, () => { if (_magicSeals.get(oid) === q) { _magicSeals.delete(oid); io.to(room).emit('magic-seal-gone', { obj: oid }); } }); } }
+  // (16a) illusions: on a body (by where its keeper stands), a veiled thing, a dome of hiding
+  for (const sid in socketToAvatarRoom) { if (socketToAvatarRoom[sid] !== room) continue; const sk = io.sockets.sockets.get(sid), I = sk && sk._ill; if (!I || !Object.keys(I).length) continue;
+    const p = sockAt(sid), t = p ? at(p.x, p.y - 12) : -1; if (t < 0) continue; n++; later(t, () => { for (const k of Object.keys(I)) { delete I[k]; io.to(room).emit('magic-ill', { from: sid, k, ms: 0, why: 'dispel' }); } }); }
+  for (const [oid, q] of _magicVeils) { if (q.room !== room) continue; const ob = roomObjects[room] && roomObjects[room].get(oid); if (!ob) continue; const P = ob.loose ? magicBoulderPose(room, ob) : ob, t = at(P.x, P.y, 12);
+    if (t >= 0) { n++; later(t, () => { if (_magicVeils.get(oid) === q) { _magicVeils.delete(oid); io.to(room).emit('magic-veil-gone', { obj: oid, why: 'dispel' }); } }); } }
+  for (const [k, q] of _magicHides) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y, q.R); if (t >= 0) { n++; later(t, () => { if (_magicHides.delete(k)) io.to(room).emit('magic-hide-gone', { id: k, why: 'dispel' }); }); } }
   // (12c) vines
   for (const [k, q] of _magicVines) { if (q.room !== room) continue; const t = at(q.x, q.y + q.L / 2, q.L / 2); if (t >= 0) { n++; later(t, () => { if (_magicVines.delete(k)) magicObjDrop(room, q.oid); }); } }
   // (12b) entangle's snares, thorn hedges
@@ -29513,6 +29522,16 @@ io.on('connection', (socket) => {
       as.push({ id, by: socket.id, x: out.tx, y: out.ty, R: out.R, at: now + (S.armS || 1) * 1000, until: now + secs * 1000, trip: 0 }); out.secs = secs; out.arm = S.armS || 1; }
     if (S.kind === 'seal') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || ob.type !== 'stamp') return no('nothing');
       if (hm && hm.has(m.obj) && hm.get(m.obj) !== socket.id) return no('nothing'); const secs = +(SK.secs || 120).toFixed(2); _magicSeals.set(m.obj, { id, obj: m.obj, by: socket.id, room, until: now + secs * 1000 }); out.obj = m.obj; out.secs = secs; }
+    // ⭐ (magic 16a) ILLUSION — on a body: its time (another's guise its own, shorter) and a guise's look (the caster's game picked it) · a veiled thing · the dome of hiding (two a caster)
+    if (S.kind === 'ill') { const oth = typeof m.tgt === 'string' && m.tgt !== socket.id; out.secs = +((oth && S.secsOther) || SK.secs || 20).toFixed(2); out.ill = S.ill;
+      if (S.ill === 'guise' && typeof m.look === 'string' && /^[a-z0-9_]{1,32}$/.test(m.look)) { out.look = m.look; out.lw = Math.max(10, Math.min(120, Math.round(+m.lw || 40))); out.lh = Math.max(10, Math.min(120, Math.round(+m.lh || 40)));
+        if (typeof m.shape === 'string' && /^[a-z]{1,12}$/.test(m.shape)) out.shape = m.shape; } }
+    if (S.kind === 'veil') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || ob.type !== 'stamp') return no('nothing');
+      const secs = +(SK.secs || 60).toFixed(2); _magicVeils.set(m.obj, { id, obj: m.obj, by: socket.id, room, until: now + secs * 1000 }); out.obj = m.obj; out.secs = secs; }
+    if (S.kind === 'hidefield') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const secs = +(SK.secs || 10).toFixed(2);
+      for (const [k, q] of _magicHides) if (now > q.until) _magicHides.delete(k);
+      { const mine = [..._magicHides.values()].filter(q => q.by === socket.id).sort((a, b) => a.until - b.until); while (mine.length >= 2) _magicHides.delete(mine.shift().id); }
+      out.R = S.R || 56; out.secs = secs; _magicHides.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, R: out.R, until: now + secs * 1000 }); }
     // ⭐ (magic 12b) THE THORN HEDGE: on the ground under the point (none there: refused), `most` a caster (the oldest goes) · BARKSKIN: its time
     if (S.kind === 'bark') out.secs = +(SK.secs || 30).toFixed(2);
     // ⭐ (magic 12c) A VINE from the rock over the point (none in reach: refused), `most` a caster · A TREE on the ground under the point · REGROW (a generated world only)
@@ -29579,6 +29598,15 @@ io.on('connection', (socket) => {
   // ⭐ (magic 11a) A WARD SKIN STRUCK (or ended — `hp` 0, `q` quietly: its keeper died): its keeper's own game says what is left and where the blow came from; to everybody else
   // ⭐ (magic 12b) MY BODY HELD BY ROOTS (on, how long) or let go — the others draw the roots on me · a hedge I stand in while burning catches
   // ⭐ (magic 13a) WHAT AILS A BODY (its own game says): poisoned, sick with plague — to the others, to draw it (`k` which, `ms` how long — 0 ended)
+  // ⭐ (magic 16a) AN ILLUSION ON A BODY, said by that body's own game ('unseen', 'cham', 'guise'): kept on its socket (for whoever arrives later — 'magic-runes-ask') and passed on
+  socket.on('magic-ill', (m) => { const room = currentAvatarRoom; if (!room || !m || ['unseen', 'cham', 'guise'].indexOf(m.k) < 0) return; const now = Date.now(); if (now - (socket._illT || 0) < 40) return; socket._illT = now;
+    const ms = Math.max(0, Math.min(90000, +m.ms || 0)), I = socket._ill || (socket._ill = {}), out = { from: socket.id, k: m.k, ms };
+    if (m.k === 'guise' && ms > 0 && typeof m.look === 'string' && /^[a-z0-9_]{1,32}$/.test(m.look)) { out.look = m.look; out.lw = Math.max(10, Math.min(120, Math.round(+m.lw || 40))); out.lh = Math.max(10, Math.min(120, Math.round(+m.lh || 40)));
+      if (typeof m.shape === 'string' && /^[a-z]{1,12}$/.test(m.shape)) out.shape = m.shape; }
+    if (ms > 0) I[m.k] = Object.assign({ until: now + ms, room }, out); else delete I[m.k];
+    socket.to(room).emit('magic-ill', out); });
+  // (16a) a veiled thing shown again early (its holder's game: it struck)
+  socket.on('magic-veil-end', (m) => { const q = m && typeof m.obj === 'string' ? _magicVeils.get(m.obj) : null; if (!q || q.room !== currentAvatarRoom) return; _magicVeils.delete(m.obj); io.to(q.room).emit('magic-veil-gone', { obj: m.obj, why: 'strike' }); });
   socket.on('magic-ail', (m) => { const room = currentAvatarRoom; if (!room || !m || ['poison', 'plague', 'curse', 'wither'].indexOf(m.k) < 0) return; const now = Date.now(); if (now - (socket._ailT || 0) < 40) return; socket._ailT = now;
     socket.to(room).emit('magic-ail', { from: socket.id, k: m.k, ms: Math.max(0, Math.min(30000, +m.ms || 0)) }); });
   // (13a) PLAGUE PASSED ON: my game found a body near me while I am sick — that player's game is told (same room, near where they last said they were)
@@ -29738,6 +29766,12 @@ io.on('connection', (socket) => {
     { const as = (_magicAlarms.get(room) || []).filter(q => now < q.until); socket.emit('magic-alarms', { list: as.map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, R: q.R, arm: Math.max(0, q.at - now), left: q.until - now })) });
       socket.emit('magic-nulls', { list: [..._magicNulls.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, cy: q.cy, R: q.R, left: q.until - now })) });
       socket.emit('magic-seals', { list: [..._magicSeals.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, obj: q.obj, by: q.by, left: q.until - now })) });
+      // (magic 16a) illusions on bodies, veiled things, domes of hiding
+      { const L = []; for (const sid in socketToAvatarRoom) { if (socketToAvatarRoom[sid] !== room || sid === socket.id) continue; const sk = io.sockets.sockets.get(sid), I = sk && sk._ill; if (!I) continue;
+          for (const k in I) { const q = I[k]; if (q.room === room && now < q.until) { const o2 = Object.assign({}, q, { ms: q.until - now }); delete o2.until; delete o2.room; L.push(o2); } } }
+        socket.emit('magic-ills', { list: L }); }
+      socket.emit('magic-veils', { list: [..._magicVeils.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, obj: q.obj, by: q.by, left: q.until - now })) });
+      socket.emit('magic-hides', { list: [..._magicHides.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, R: q.R, left: q.until - now })) });
       // (magic 13a) poison clouds, spore pods
       socket.emit('magic-pclouds', { list: [..._magicPClouds.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, h: q.h, left: q.until - now })) });
       socket.emit('magic-spores', { list: [..._magicSpores.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, left: q.until - now, arm: Math.max(0, q.armAt - now) })) });

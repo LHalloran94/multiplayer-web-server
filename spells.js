@@ -148,6 +148,23 @@
     //   mirror  moves as your mirror image (client 16zj `magicDoubleSimStep`)
     double_m: { name: 'A mirror double', school: 'illusion', form: 'placed', tier: 1, cd: 12, stance: 'raise', kind: 'double', alt: 'double', mirror: true, secs: 60,
       plain: { keys: [L, U, R, D, U], rune: [2, 0, 6, 7, 4] } },
+    // ⭐ 16a (2026-11-25, kickoff §'STEP 16 — ILLUSION') HIDING. Kind 'ill' = a state on a BODY that only changes how it is DRAWN (the server keeps who has which, for those who
+    //   arrive later — 'magic-ill'); `ill` names it. The pointer rule: on whoever the pointer is on, yourself by default.
+    //   unseen   not drawn at all on anybody else's screen (a faint bend of the light where it moves); ends when its keeper strikes, casts, uses a thing or is hurt
+    //   cham     the body fades into what is behind it while still (`stillK`), patchy when it moves (`moveK`); a blow does not end it
+    //   guise    drawn as a THING: the thing under the pointer when cast (you take its look), else one that suits the spot; on another body `secsOther` s; ends as unseen
+    //   veil     (kind) a THING unseen — loose or held — `secs` s; a weapon shows itself at its first blow
+    //   hidefield (kind) a dome `R` px about the point: every body inside it is unseen from outside it (tier 1, not 2: a tier-2 rune's two underlines fold back over each other)
+    unseen: { name: 'Unseen', school: 'illusion', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 25, stance: 'raise', kind: 'ill', ill: 'unseen', secs: 20, learn: 5, fx: '#ff9be0',
+      plain: { keys: [L, U, D, U, L], rune: [2, 4, 7, 3, 0] } },
+    chameleon: { name: 'Chameleon', school: 'illusion', form: 'self', aim: 'self', reach: 240, tier: 0, cd: 15, stance: 'raise', kind: 'ill', ill: 'cham', secs: 40, learn: 3, stillK: 0.12, moveK: 0.55, fx: '#b0e090',
+      plain: { keys: [L, L, U, D, R], rune: [0, 4, 7, 5, 2] } },
+    guise: { name: 'Guise of a thing', school: 'illusion', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'ill', ill: 'guise', secs: 60, secsOther: 5, learn: 5, fx: '#e0b080',
+      plain: { keys: [L, U, L, D, R], rune: [2, 1, 4, 7, 6] } },
+    veil: { name: 'Veil a thing', school: 'illusion', form: 'thing', tier: 1, cd: 15, stance: 'level', kind: 'veil', secs: 60, reach: 320, learn: 5,
+      plain: { keys: [U, L, D, L, U], rune: [0, 3, 4, 5, 8] } },
+    hiding: { name: 'Veil of hiding', school: 'illusion', form: 'field', tier: 1, cd: 40, stance: 'raise', kind: 'hidefield', secs: 10, R: 56, reach: 420, learn: 5,
+      plain: { keys: [L, U, R, U, L, D], rune: [3, 0, 1, 5, 8, 7] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
     //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
@@ -694,6 +711,8 @@
     // (14c) the shield laid down round you · spikes down into the ground and up · the grip reached out and drawn back · the whip cracked out and up
     bloodshield: [[D, D], [4, 6]], bloodspikes: [[D, U], [4, 0, 5]], bloodgrip: [[L, L], [4, 0, 2]], bloodwhip: [[R, L], [4, 8, 2]],
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
+    // (16a) unseen: up over you and away · chameleon: out to the side and back down into it · the guise: down into a box · the veil drawn over the thing and down · the dome up round its side and over
+    unseen: [[U, D], [4, 0, 1]], chameleon: [[L, L], [4, 3, 6]], guise: [[D, R], [4, 8, 5]], veil: [[R, U], [4, 2, 1]], hiding: [[L, D], [4, 3, 0, 1]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
