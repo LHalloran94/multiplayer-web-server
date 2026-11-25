@@ -375,7 +375,8 @@
     const raw = { L: !!input.left, R: !!input.right, U: !!(keys && keys.up), D: !!input.down }, K = Object.assign({}, raw), La = s.climbLatch;
     if (La) { if (!raw[La.k]) s.climbLatch = null; else { K[La.k] = false; K[La.as] = true; } }
     // (round 3, the user: 'when you are in spider mode you cling to all surfaces … jumping with space could then be the thing that detaches you') only Space jumps
-    input.jump = !!(keys && keys.leap);
+    // (round 4, the user: no double jump after leaving a surface — ↑ / W were taken from the jump everywhere) in the AIR every jump key jumps; on a surface only Space
+    if (s.climbW || s.climbC || s.climbWrap || s.climbLatch || s.onGround) input.jump = !!(keys && keys.leap);
     input.left = K.L; input.right = K.R; input.down = K.D;
     s.climbK = { L: K.L, R: K.R, U: K.U, D: K.D, S: !!(keys && keys.leap) };
   }
@@ -402,7 +403,7 @@
     // ── swinging round an outside corner (the step it set the swing up, the body held still; then the arc; then the surface it comes to)
     const Wr = s.climbWrap;
     if (Wr) { Wr.t++; const u = Math.min(1, Wr.t / Wr.n), a = Wr.a0 + Wr.da * u, r = Wr.r0 + (Wr.r1 - Wr.r0) * u + Wr.R * 0.45 * Math.sin(Math.PI * u), cx = Wr.px + Math.cos(a) * r, cy = Wr.py + Math.sin(a) * r;
-      s.vx = cx - s.x; s.vy = cy + Wr.R - s.y; s.x = cx; s.y = cy + Wr.R; hold(); if (Wr.face) s.facingLeft = Wr.face < 0;
+      s.vx = cx - s.x; s.vy = cy + Wr.R - s.y; s.x = cx; s.y = cy + Wr.R; hold();
       if (u >= 1) { s.climbWrap = null; s.climbW = Wr.w || 0; s.climbC = !!Wr.c; s.vx = 0; s.vy = 0; if (Wr.latch && mode === 2) { const L0 = s.climbLatch; s.climbLatch = { k: L0 && L0.as === Wr.latch.k ? L0.k : Wr.latch.k, as: Wr.latch.as }; } }   /* (a chain of corners: the key you are really holding goes on meaning the next way round) */
       return 4; }
     const sL = climbSide(s, sol, -1, 3), sR = climbSide(s, sol, 1, 3), nL = climbCnt(sL), nR = climbCnt(sR), nC = climbCeil(s, sol, 3);
@@ -435,18 +436,18 @@
       // its TOP: your middle past it, your feet still on it → up and over, onto it
       if (S[0] && !S[1] && !S[2] && !sol(xin, cy)) { const go = mode === 2 ? (K.U || toward) : toward;
         if (go) { let yt = cy; while (yt < s.y && !sol(xin, yt)) yt += 1; if (tryWrap(xf, yt, xf + w * R * 0.6, yt - R - 1, { w: 0, c: false, face: w, latch: { k: 'U', as: w < 0 ? 'L' : 'R' } })) return 4; }
-        else if (K.U) stopUp = true; }
+        if (K.U) stopUp = true; }   /* (round 4: a swing that will not fit holds you at the edge — it let you fall) */
       // its FOOT, over nothing: your middle below it, your head still on it → round under it, onto its underside
       if (!S[0] && !S[1] && S[2] && !G && !sol(s.x, s.y + 3) && !sol(xin, cy)) { const go = mode === 2 ? (K.D || toward) : toward;
         if (go) { let yb = cy; while (yb > s.y - bh && !sol(xin, yb)) yb -= 1; yb += 1; if (tryWrap(xf, yb, xf + w * R * 0.6, yb + R + 1, { w: 0, c: true, face: w, latch: { k: 'D', as: w < 0 ? 'L' : 'R' } })) return 4; }
-        else if (K.D) stopDn = true; } }
+        if (K.D) stopDn = true; } }
     const d = K.L && !K.R ? -1 : K.R && !K.L ? 1 : 0;
     if (c && !w) { const ya = s.y - bh - 1.5, e = sol(s.x, ya) ? 0 : sol(s.x + hw * 0.6, ya) ? -1 : sol(s.x - hw * 0.6, ya) ? 1 : 0;
       // a ceiling's END (`e`: the way past it): your middle past it → round its edge and up its outer face
       if (e) { const go = mode === 2 ? d === e : K.U;
         if (go) { let xe = s.x; while ((s.x - xe) * e < hw && !sol(xe, ya)) xe -= e; xe += e * 0.5; const yc = s.y - bh;
           if (tryWrap(xe, yc, xe + e * (R + 1), yc - R * 0.6, { w: -e, c: false, face: -e, latch: { k: e < 0 ? 'L' : 'R', as: 'U' } })) return 4; }
-        else if (d === e) stopX = true; } }
+        if (d === e) stopX = true; } }
     // a floor's EDGE (a real drop, not a step in the ground): your middle over nothing → round its edge and down its outer face. (round 3, the user: 'no walking off
     //   edges … walk off an edge straight onto the wall'.) CARRY: as you walk off it, the key you walk with now meaning ↓ · STOP: held at the edge, ↓ takes you over
     if (!w && !c && G && !cool) { const yf = s.y + 2, l = sol(s.x - hw * 0.6, yf), r = sol(s.x + hw * 0.6, yf);
@@ -456,7 +457,7 @@
           // (STOP: held with your middle just over the edge — where the next step still sees it)
           const over = (s.x - edge) * dir; if (over > 0) { s.x -= dir * over; if (s.vx * dir > 0) s.vx = 0; } } } }
     // (round 3) lost every hold in mid-move (a notch, a slant of steps): rock within a few px is taken again before the body falls
-    if (!w && !c && !G && was && !cool) { for (let mg = 4; mg <= 9 && !w && !c; mg++) { if (climbCnt(climbSide(s, sol, -1, mg)) >= 1) { s.x -= mg - 3; w = -1; } else if (climbCnt(climbSide(s, sol, 1, mg)) >= 1) { s.x += mg - 3; w = 1; } else if (climbCeil(s, sol, mg) >= 1) { s.y -= mg - 3; c = true; } } }
+    if (!w && !c && !G && was && !cool) { for (let mg = 4; mg <= 14 && !w && !c; mg++) { if (climbCnt(climbSide(s, sol, -1, mg)) >= 1) { s.x -= mg - 3; w = -1; } else if (climbCnt(climbSide(s, sol, 1, mg)) >= 1) { s.x += mg - 3; w = 1; } else if (climbCeil(s, sol, mg) >= 1) { s.y -= mg - 3; c = true; } } }
     s.climbW = w; s.climbC = c;
     if (!w && !c) return 0;
     // ── moving along what you hold
@@ -464,7 +465,9 @@
     if (w && c) { vx = 0; vy = 0; }
     else if (w) { vx = 0; vy = K.U ? -upV : K.D ? dnV : 0; if (stopUp && vy < 0) vy = 0; if (stopDn && vy > 0) vy = 0; }
     else { vy = 0; vx = d * xV; if (stopX) vx = 0; }
-    if (w) s.facingLeft = w < 0; else if (vx) s.facingLeft = vx < 0;
+    // (round 4) facing the way you go, in the body's OWN frame — it is drawn turned to its surface: on a wall on your left your left is up, on a ceiling your left is
+    //   screen right
+    if (w && !c) { if (vy) s.facingLeft = (vy < 0) === (w < 0); } else if (c && !w) { if (vx) s.facingLeft = vx > 0; } else if (vx) s.facingLeft = vx < 0;
     // a ceiling taken while rising: the step's rise is KEPT (the terrain pass stops the head at the rock) — undoing it left you below the reach of the next step
     if (tookC && s.vy < 0) { s.x += vx - s.vx; s.vx = vx; s.vy = 0; } else put(vx, vy);
     // flush with the rock, up to 6 px (never pressed into it — that read as a low ceiling, and the body squashed)
