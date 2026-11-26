@@ -29651,7 +29651,7 @@ io.on('connection', (socket) => {
   // ⭐ (magic 13a) WHAT AILS A BODY (its own game says): poisoned, sick with plague — to the others, to draw it (`k` which, `ms` how long — 0 ended)
   // ⭐ (magic 16a) AN ILLUSION ON A BODY, said by that body's own game ('unseen', 'cham', 'guise'): kept on its socket (for whoever arrives later — 'magic-runes-ask') and passed on
   // (magic 16b) …and the false selves: a disguise ('disg': whose look `src`, or a made-up stranger's `seed`), mirror images ('imgs': which are left `mask`, `seed`), displacement ('disp': `side`)
-  socket.on('magic-ill', (m) => { const room = currentAvatarRoom; if (!room || !m || ['unseen', 'cham', 'guise', 'disg', 'imgs', 'disp', 'fear', 'calm', 'charm'].indexOf(m.k) < 0) return;   // (16e: the minds too)
+  socket.on('magic-ill', (m) => { const room = currentAvatarRoom; if (!room || !m || ['unseen', 'cham', 'guise', 'disg', 'imgs', 'disp', 'fear', 'calm', 'charm', 'truesight'].indexOf(m.k) < 0) return;   // (16e: the minds too · 17a: true sight)
  const now = Date.now(); if (now - (socket._illT || 0) < 40) return; socket._illT = now;
     const ms = Math.max(0, Math.min(90000, +m.ms || 0)), I = socket._ill || (socket._ill = {}), out = { from: socket.id, k: m.k, ms };
     if (ms > 0 && typeof m.src === 'string' && /^[\w:-]{1,48}$/.test(m.src)) out.src = m.src;

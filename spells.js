@@ -225,6 +225,12 @@
       plain: { keys: [R, L, R, D, U], rune: [2, 1, 0, 3, 7] } },
     charm: { name: 'Charm', school: 'illusion', form: 'touch', tier: 1, cd: 30, stance: 'level', kind: 'mind', mind: 'charm', other: true, reach: 260, secs: 8, secsEnemy: 20, towardK: 1.3, awayK: 0.35, learn: 5, fx: '#ff7aa8',
       plain: { keys: [U, R, U, L, D], rune: [3, 0, 4, 2, 5] } },
+    // ⭐ STEP 17a (2026-11-26, kickoff §'STEP 17 — KNOWING') TRUE SIGHT — kind 'know', `know` which. On yourself, or (aimed, as cure) the body under the pointer: for `secs` s
+    //   that body's own screen draws the TRUTH — every illusion (bodies, things, false ground, copies, doubles, piles) as if none were cast, each marked with teal glints;
+    //   runes and alarms shown whole; colour spray and shroud lifted off it, phantasms faint; a thread from anyone under a mind spell to its caster. Every screen sees the
+    //   body's eyes glow teal (the state rides 'magic-ill', k 'truesight', so arrivals see it and a dispel ends it). Client 16zj §'STEP 17a'.
+    truesight: { name: 'True sight', school: 'knowing', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 30, stance: 'raise', kind: 'know', know: 'truesight', secs: 20, learn: 5, fx: '#8fe8e0',
+      plain: { keys: [U, L, U, U, R], rune: [6, 1, 3, 4, 5] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
     //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
@@ -782,6 +788,8 @@
     // (16e) fear: shrinking back up and away · calm: smoothed across the top and laid down · charm: drawn in to you, a heart
     fear: [[L, D, R], [4, 5, 2, 1, 3]], calm: [[R, L, R], [4, 0, 2, 5, 3]], charm: [[U, R, D], [4, 1, 0, 3, 7, 5, 2]],
     colourspray: [[L, U], [4, 5, 2, 1, 0]], shroud: [[D, R, L], [4, 5, 8, 7, 3]], phantasms: [[D, L, D], [4, 7, 6, 3, 5]], bewilder: [[U, L, R], [4, 1, 5, 7, 3]],
+    // (17a) true sight: up to the eyes
+    truesight: [[U, U], [4, 1]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
