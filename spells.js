@@ -257,15 +257,15 @@
     //   caster where a marked player is when their game is not sent them ('magic-where'). Dispel takes it off.
     seekmark: { name: "Seeker's mark", school: 'knowing', form: 'touch', tier: 0, cd: 20, stance: 'level', kind: 'seekmark', other: true, reach: 260, secs: 60, learn: 3, fx: '#8fe8e0',
       plain: { keys: [U, R, R, D, L], rune: [7, 3, 0, 1, 5] } },
-    // ⭐ STEP 17d (2026-11-26) READ — kind 'know', `know` 'reading' (17a's state, on 'magic-ill'): for `secs` s whatever your pointer is on gets a small card of the tome's
+    // ⭐ STEP 17d (2026-11-26) READ — kind 'know', `know` 'reading' (17a's state, on 'magic-ill'): for `secs` s (round 2, the user: 30) whatever your pointer is on gets a small card of the tome's
     //   runes that resolve into words — a body's real name (through a disguise), health, the spells on it, what it wears and its condition; a thing's numbers (weight, reach,
     //   a blow, what it digs, protection, a scroll's spell, a tome's pages, the spells a reagent feeds); a mimic named; a cell's material, hardness and worth. The inventory's
     //   details pane shows the same lines. Your own screen only (others see your eyes glow). Client 16zj §'STEP 17d'.
-    read: { name: 'Read', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'know', know: 'reading', secs: 20, learn: 3, fx: '#8fe8e0',
+    read: { name: 'Read', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'know', know: 'reading', secs: 30, learn: 3, fx: '#8fe8e0',
       plain: { keys: [R, D, L, D, R], rune: [0, 2, 3, 5, 8] } },
-    // ⭐ STEP 17d FORESIGHT — kind 'know', `know` 'foresight': for `secs` s every flying thing (spell bolts, thrown rock, arrows, thrown things, boulders, the creator's
+    // ⭐ STEP 17d FORESIGHT — kind 'know', `know` 'foresight': for `secs` s (round 2, the user: 30) every flying thing (spell bolts, thrown rock, arrows, thrown things, boulders, the creator's
     //   enemies' shots) shows its path ahead as teal motes, to where it lands (≤ `ahead` s of its flight).
-    foresight: { name: 'Foresight', school: 'knowing', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'know', know: 'foresight', secs: 15, ahead: 3, learn: 5, fx: '#8fe8e0',
+    foresight: { name: 'Foresight', school: 'knowing', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'know', know: 'foresight', secs: 30, ahead: 3, learn: 5, fx: '#8fe8e0',
       plain: { keys: [U, R, R, D, D], rune: [3, 1, 5, 8, 7] } },
     // ⭐ STEP 17d THE WAY OUT — kind 'know', `know` 'wayout': for `secs` s teal motes drift along the open path from you to the nearest open sky — or to your Space mark if
     //   you have one — searched round you (`R` × `Rv` cells) and redone each second as you move.
