@@ -257,6 +257,20 @@
     //   caster where a marked player is when their game is not sent them ('magic-where'). Dispel takes it off.
     seekmark: { name: "Seeker's mark", school: 'knowing', form: 'touch', tier: 0, cd: 20, stance: 'level', kind: 'seekmark', other: true, reach: 260, secs: 60, learn: 3, fx: '#8fe8e0',
       plain: { keys: [U, R, R, D, L], rune: [7, 3, 0, 1, 5] } },
+    // ⭐ STEP 17d (2026-11-26) READ — kind 'know', `know` 'reading' (17a's state, on 'magic-ill'): for `secs` s whatever your pointer is on gets a small card of the tome's
+    //   runes that resolve into words — a body's real name (through a disguise), health, the spells on it, what it wears and its condition; a thing's numbers (weight, reach,
+    //   a blow, what it digs, protection, a scroll's spell, a tome's pages, the spells a reagent feeds); a mimic named; a cell's material, hardness and worth. The inventory's
+    //   details pane shows the same lines. Your own screen only (others see your eyes glow). Client 16zj §'STEP 17d'.
+    read: { name: 'Read', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'know', know: 'reading', secs: 20, learn: 3, fx: '#8fe8e0',
+      plain: { keys: [R, D, L, D, R], rune: [0, 2, 3, 5, 8] } },
+    // ⭐ STEP 17d FORESIGHT — kind 'know', `know` 'foresight': for `secs` s every flying thing (spell bolts, thrown rock, arrows, thrown things, boulders, the creator's
+    //   enemies' shots) shows its path ahead as teal motes, to where it lands (≤ `ahead` s of its flight).
+    foresight: { name: 'Foresight', school: 'knowing', form: 'self', tier: 1, cd: 20, stance: 'raise', kind: 'know', know: 'foresight', secs: 15, ahead: 3, learn: 5, fx: '#8fe8e0',
+      plain: { keys: [U, R, R, D, D], rune: [3, 1, 5, 8, 7] } },
+    // ⭐ STEP 17d THE WAY OUT — kind 'know', `know` 'wayout': for `secs` s teal motes drift along the open path from you to the nearest open sky — or to your Space mark if
+    //   you have one — searched round you (`R` × `Rv` cells) and redone each second as you move.
+    wayout: { name: 'The way out', school: 'knowing', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'know', know: 'wayout', secs: 20, R: 160, Rv: 120, learn: 3, fx: '#8fe8e0',
+      plain: { keys: [D, L, U, U, R], rune: [8, 7, 3, 0, 1] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
     //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
@@ -820,6 +834,8 @@
     throughstone: [[D, U], [4, 7, 2]], seek: [[L, R], [4, 0, 2]], seek_w: [[L, D], [4, 6, 8]], seek_l: [[L, U], [4, 2, 0]],
     // (17c) the far eye: sent up and away over the top · the mark: laid on them, its first mark turned → and on to the top right
     fareye: [[U, R], [4, 1, 2]], seekmark: [[R, U], [4, 5, 2]],
+    // (17d) read: along a line and down the page · foresight: back, up over the top and down ahead to where it lands · the way out: down into the dark, then up and out
+    read: [[R, D], [4, 5, 8]], foresight: [[R, R], [4, 3, 1, 5]], wayout: [[U, L], [4, 7, 3, 0]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
