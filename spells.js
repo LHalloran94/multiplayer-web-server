@@ -213,6 +213,18 @@
       plain: { keys: [U, L, R, D, D], rune: [3, 4, 2, 8, 6] } },
     bewilder: { name: 'Bewilder', school: 'illusion', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'sense', sense: 'bew', other: true, reach: 260, secs: 3, learn: 3, fx: '#c8a8ff',
       plain: { keys: [U, R, R, L, U], rune: [5, 1, 3, 7, 5] } },
+    // ⭐ 16e (2026-11-26) MINDS — kind 'mind', `mind` which; on another player (their own game feels it; the state rides 'magic-ill', so arrivals and dispel know it), the dummy
+    //   (signs only), or one of the creator's ENEMIES (the server's `enemyTarget` reads `E.mind`; `secsEnemy`). All tier 1.
+    //   fear   moving towards the caster `towardK`, away `awayK`; the caster looms on their screen; violet wisps · an enemy runs from the caster
+    //   calm   no punch, swing, throw or harmful spell at others (block, move, spells on yourself are fine) · an enemy sees nobody
+    //   charm  fear reversed (towards quick, away slow) — their blows on the caster do nothing, a blow FROM the caster ends it — a rose thread chest → caster ·
+    //          an enemy follows the caster and goes for others, never the caster
+    fear: { name: 'Fear', school: 'illusion', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'mind', mind: 'fear', other: true, reach: 260, secs: 6, secsEnemy: 10, towardK: 0.35, awayK: 1.3, learn: 5, fx: '#a070e0',
+      plain: { keys: [L, D, R, U, L], rune: [1, 4, 3, 6, 7] } },
+    calm: { name: 'Calm', school: 'illusion', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'mind', mind: 'calm', other: true, reach: 260, secs: 6, secsEnemy: 12, learn: 5, fx: '#9fd8ff',
+      plain: { keys: [R, L, R, D, U], rune: [2, 1, 0, 3, 7] } },
+    charm: { name: 'Charm', school: 'illusion', form: 'touch', tier: 1, cd: 30, stance: 'level', kind: 'mind', mind: 'charm', other: true, reach: 260, secs: 8, secsEnemy: 20, towardK: 1.3, awayK: 0.35, learn: 5, fx: '#ff7aa8',
+      plain: { keys: [U, R, U, L, D], rune: [3, 0, 4, 2, 5] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
     //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
@@ -767,6 +779,8 @@
     // (16c) the false wall: down to the ground and up its face · unseen rock: pushed in and up through it · the phantom thing: out to the thing and drawn back along the top
     falsewall: [[R, D], [4, 8, 2]], hiderock: [[R, R], [4, 5, 1]], phantom: [[R, U, L], [4, 2, 0]],
     // (16d) colour spray: fanned out across the top · shroud: drawn down and round them · phantasms: figures stood round you, down, along, up and across · bewilder: round the head
+    // (16e) fear: shrinking back up and away · calm: smoothed across the top and laid down · charm: drawn in to you, a heart
+    fear: [[L, D, R], [4, 5, 2, 1, 3]], calm: [[R, L, R], [4, 0, 2, 5, 3]], charm: [[U, R, D], [4, 1, 0, 3, 7, 5, 2]],
     colourspray: [[L, U], [4, 5, 2, 1, 0]], shroud: [[D, R, L], [4, 5, 8, 7, 3]], phantasms: [[D, L, D], [4, 7, 6, 3, 5]], bewilder: [[U, L, R], [4, 1, 5, 7, 3]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };

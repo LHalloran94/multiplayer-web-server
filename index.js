@@ -4055,6 +4055,8 @@ function magicDispel(room, cx, cy, R, ms, by) {
   // (11d) alarms, seals (by where this server last had the thing)
   { const as = _magicAlarms.get(room); if (as) for (const q of as.slice()) { const t = at(q.x, q.y); if (t >= 0) { n++; later(t, () => { const a2 = _magicAlarms.get(room), i = a2 ? a2.indexOf(q) : -1; if (i >= 0) { a2.splice(i, 1); io.to(room).emit('magic-alarm-gone', { id: q.id }); } }); } } }
   for (const [oid, q] of _magicSeals) { if (q.room !== room) continue; const ob = roomObjects[room] && roomObjects[room].get(oid); if (!ob) continue; const P = ob.loose ? magicBoulderPose(room, ob) : ob, t = at(P.x, P.y, 12); if (t >= 0) { n++; later(t, () => { if (_magicSeals.get(oid) === q) { _magicSeals.delete(oid); io.to(room).emit('magic-seal-gone', { obj: oid }); } }); } }
+  // (16e) a mind on one of the creator's enemies
+  { const RE = roomEnemies.get(room); if (RE && RE.E) for (const E of RE.E.values()) { if (!E.mind || now >= E.mind.until) continue; const t = at(E.x, E.y - 12); if (t >= 0) { n++; later(t, () => { E.mind = null; io.to(room).emit('magic-mind-end', { enemy: E.id, why: 'dispel' }); }); } } }
   // (16a) illusions: on a body (by where its keeper stands), a veiled thing, a dome of hiding
   for (const sid in socketToAvatarRoom) { if (socketToAvatarRoom[sid] !== room) continue; const sk = io.sockets.sockets.get(sid), I = sk && sk._ill; if (!I || !Object.keys(I).length) continue;
     const p = sockAt(sid), t = p ? at(p.x, p.y - 12) : -1; if (t < 0) continue; n++; later(t, () => { for (const k of Object.keys(I)) { delete I[k]; io.to(room).emit('magic-ill', { from: sid, k, ms: 0, why: 'dispel' }); } }); }
@@ -23701,13 +23703,27 @@ function enemyNoDamage(K, how) { return (K.shell && (how === 'stomp' || how === 
 // fine for "is anybody near" and too stale to dive at; so a player near an enemy reports its body centre ~10×/s
 // (`enemy-me`), and only then. Entries go stale on their own, which is also what forgets a player who left.
 const enemyTargets = new Map();                       // room → Map<sid, { x, y, t }>
+// ⭐ (magic 16e) AN ENEMY UNDER A MIND (`E.mind` { k, by, until }, set by the cast; `enemyMindE` = the one stepping now, 16e's `enemyTick`). Every kind asks this one
+//   function who to go for, so: CALM — nobody. FEAR — near its caster, a point on the far side of itself from them (it runs away) — far, anybody but them. CHARM —
+//   anybody but its caster (it goes for them) — nobody else in view: a point just short of its caster (it follows them).
+let enemyMindE = null;
 function enemyTarget(room, x, y, maxDx, dyMin, dyMax, now) {
+  const ME = enemyMindE, q = ME && ME.mind; if (!q || now >= q.until) return enemyTarget0(room, x, y, maxDx, dyMin, dyMax, now, null);
+  if (q.k === 'calm') return null;
+  const m = enemyTargets.get(room), by = m && m.get(q.by), byOk = !!by && now - by.t < 1500;
+  if (q.k === 'fear') { if (byOk && Math.abs(by.x - x) < 360 && Math.abs(by.y - y) < 260) return { x: x + (by.x >= x ? -1 : 1) * 160, y, t: now, sid: null, fake: 1 }; return enemyTarget0(room, x, y, maxDx, dyMin, dyMax, now, q.by); }
+  const o = enemyTarget0(room, x, y, maxDx, dyMin, dyMax, now, q.by); if (o) return o;
+  if (byOk && Math.abs(by.x - x) > 46) return { x: by.x - Math.sign(by.x - x) * 40, y: by.y, t: now, sid: null, fake: 1 };
+  return null;
+}
+function enemyTarget0(room, x, y, maxDx, dyMin, dyMax, now, skip) {
   const m = enemyTargets.get(room); if (!m) return null;
   // (round 33) an enemy with a VIEW AREA: its shape replaces the kind's rectangle, and rock blocks it unless it sees through
   const W = enemyView, shape = W && W.V.k ? W.V : null, sight = W && !W.V.t && (shape || !W.zone) ? W.solid : null;
   let best = null, bd = Infinity;
   for (const [sid, p] of m) {
     if (now - p.t > 1500) { if (now - p.t > 10000) m.delete(sid); continue; }
+    if (sid === skip) continue;
     const dx = p.x - x, dy = p.y - y;
     if (shape) { if (!enemyViewHas(shape, x, y, W.E.dir || 1, p.x, p.y)) continue; }
     else if (Math.abs(dx) > maxDx || dy < dyMin || dy > dyMax) continue;
@@ -25480,7 +25496,8 @@ function enemyTick() {
       }
       { const V = o.eview || o.esee;                   // (round 33: its view area, the placed one's own first)
         enemyView = V && (ENEMY_VIEW_KINDS.has(E.k) || ENEMY_VIEW_ZONE.has(E.k)) ? { V, E, zone: ENEMY_VIEW_ZONE.has(E.k), solid: null } : null; }
-      try { enemyStep(room, R, E, o, now, dt); } finally { enemyView = null; }
+      enemyMindE = E.mind && now < E.mind.until ? E : null; if (E.mind && !enemyMindE) E.mind = null;   // (magic 16e)
+      try { enemyStep(room, R, E, o, now, dt); } finally { enemyView = null; enemyMindE = null; }
       if (o.path && !E.dead) enemyPathStep(room, R, E, o, now, dt);    // (round 32: a path in the world, while it is only wandering — it wins over a movement)
       else if (o.emov && !E.dead) enemyMovement(room, R, E, o, now, dt);   // (round 31: its own movement, while it is only wandering)
       if (E.dead) { dead.push(o.id); continue; }
@@ -29360,7 +29377,9 @@ io.on('connection', (socket) => {
       else if (m.tgt !== socket.id && m.tgt !== 'mw-test-dummy') { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;
         if (!ts || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 260) + 120)) return no('nobody'); } }
     // (4e) ON ANOTHER: a player in this room, near enough (by where their own game last said they were)
-    if (S.other && m.tgt !== 'mw-test-dummy') { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;   // (4e round 2: the practice dummy lives on its caster's machine alone)
+    // (magic 16e) a MIND on one of the creator's enemies: in this room, near enough to the caster's point
+    let MINDE = null; if (S.kind === 'mind' && typeof m.enemy === 'string') { const RE = roomEnemies.get(room), E = RE && RE.E && RE.E.get(m.enemy); if (!E || E.dead || Math.hypot(E.x - m.x, E.y - m.y) > (S.reach || 260) + 160) return no('nobody'); MINDE = E; }
+    if (S.other && m.tgt !== 'mw-test-dummy' && !MINDE) { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;   // (4e round 2: the practice dummy lives on its caster's machine alone)
       if (!ts || ts.id === socket.id || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 240) + 120)) return no('nobody'); }
     // (magic 15b round 2) AIMED (`aim`): the body under the caster's pointer — yourself, the dummy (its caster's machine), or a player in this room near enough; none named: on yourself
     if (S.aim && typeof m.tgt === 'string' && m.tgt !== socket.id && m.tgt !== 'mw-test-dummy') { const ts = io.sockets.sockets.get(m.tgt), tp = ts && ts._avPos;
@@ -29412,7 +29431,8 @@ io.on('connection', (socket) => {
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
     const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: powK };
     if (SC) { out.charge = 1; out.cat = ''; }
-    if (S.other || (S.aim && typeof m.tgt === 'string')) out.tgt = m.tgt;   // (4e) (magic 15b round 2: an aimed spell's body)
+    if ((S.other && !MINDE) || (S.aim && typeof m.tgt === 'string')) out.tgt = m.tgt;   // (4e) (magic 15b round 2: an aimed spell's body)
+    if (MINDE) { const secs = +((S.secsEnemy || S.secs || 10) * (socket._magicSecsK || 1)).toFixed(2); MINDE.mind = { k: S.mind, by: socket.id, until: now + secs * 1000 }; out.enemy = m.enemy; out.secs = secs; }   // (magic 16e)
     // (step 3a) where a placed spell goes (the light orb): the caster's point, no further than its reach
     if (isFinite(m.tx) && isFinite(m.ty)) { const dx = m.tx - out.x, dy = m.ty - out.y, d = Math.hypot(dx, dy), lim = ((MD && MD.reach) || S.reach || 400) + 8, k = d > lim ? lim / d : 1; out.tx = Math.round(out.x + dx * k); out.ty = Math.round(out.y + dy * k); }   // (4c: the lob's reach)
     if (MD) { out.mod = m.mod; if (m.mod === 'mod_arc' && !isFinite(out.tx)) return no('bad'); }
@@ -29631,7 +29651,8 @@ io.on('connection', (socket) => {
   // ⭐ (magic 13a) WHAT AILS A BODY (its own game says): poisoned, sick with plague — to the others, to draw it (`k` which, `ms` how long — 0 ended)
   // ⭐ (magic 16a) AN ILLUSION ON A BODY, said by that body's own game ('unseen', 'cham', 'guise'): kept on its socket (for whoever arrives later — 'magic-runes-ask') and passed on
   // (magic 16b) …and the false selves: a disguise ('disg': whose look `src`, or a made-up stranger's `seed`), mirror images ('imgs': which are left `mask`, `seed`), displacement ('disp': `side`)
-  socket.on('magic-ill', (m) => { const room = currentAvatarRoom; if (!room || !m || ['unseen', 'cham', 'guise', 'disg', 'imgs', 'disp'].indexOf(m.k) < 0) return; const now = Date.now(); if (now - (socket._illT || 0) < 40) return; socket._illT = now;
+  socket.on('magic-ill', (m) => { const room = currentAvatarRoom; if (!room || !m || ['unseen', 'cham', 'guise', 'disg', 'imgs', 'disp', 'fear', 'calm', 'charm'].indexOf(m.k) < 0) return;   // (16e: the minds too)
+ const now = Date.now(); if (now - (socket._illT || 0) < 40) return; socket._illT = now;
     const ms = Math.max(0, Math.min(90000, +m.ms || 0)), I = socket._ill || (socket._ill = {}), out = { from: socket.id, k: m.k, ms };
     if (ms > 0 && typeof m.src === 'string' && /^[\w:-]{1,48}$/.test(m.src)) out.src = m.src;
     if (ms > 0 && isFinite(m.seed)) out.seed = Math.abs(Math.floor(+m.seed)) % 1000000;
