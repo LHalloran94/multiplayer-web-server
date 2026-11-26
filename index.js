@@ -29532,8 +29532,11 @@ io.on('connection', (socket) => {
       if (hm && hm.has(m.obj) && hm.get(m.obj) !== socket.id) return no('nothing'); const secs = +(SK.secs || 120).toFixed(2); _magicSeals.set(m.obj, { id, obj: m.obj, by: socket.id, room, until: now + secs * 1000 }); out.obj = m.obj; out.secs = secs; }
     // ⭐ (magic 16a) ILLUSION — on a body: its time (another's guise its own, shorter) and a guise's look (the caster's game picked it) · a veiled thing · the dome of hiding (two a caster)
     if (S.kind === 'ill') { const oth = typeof m.tgt === 'string' && m.tgt !== socket.id; out.secs = +((oth && S.secsOther) || SK.secs || 20).toFixed(2); out.ill = S.ill;
+      if (S.swap && !oth) return no('nobody');   // (magic 16b) two faces: somebody to swap with
       if (S.ill === 'guise' && typeof m.look === 'string' && /^[a-z0-9_]{1,32}$/.test(m.look)) { out.look = m.look; out.lw = Math.max(10, Math.min(120, Math.round(+m.lw || 40))); out.lh = Math.max(10, Math.min(120, Math.round(+m.lh || 40)));
         if (typeof m.shape === 'string' && /^[a-z]{1,12}$/.test(m.shape)) out.shape = m.shape; } }
+    // ⭐ (magic 16b) FAKE YOUR DEATH: how long its caster is unseen after, how long the false pile lies (every screen plays the death from the cast)
+    if (S.kind === 'fakedeath') { out.secs = +(SK.secs || 8).toFixed(2); out.pile = S.pileS || 60; }
     if (S.kind === 'veil') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || ob.type !== 'stamp') return no('nothing');
       const secs = +(SK.secs || 60).toFixed(2); _magicVeils.set(m.obj, { id, obj: m.obj, by: socket.id, room, until: now + secs * 1000 }); out.obj = m.obj; out.secs = secs; }
     if (S.kind === 'hidefield') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const secs = +(SK.secs || 10).toFixed(2);
@@ -29607,13 +29610,24 @@ io.on('connection', (socket) => {
   // ⭐ (magic 12b) MY BODY HELD BY ROOTS (on, how long) or let go — the others draw the roots on me · a hedge I stand in while burning catches
   // ⭐ (magic 13a) WHAT AILS A BODY (its own game says): poisoned, sick with plague — to the others, to draw it (`k` which, `ms` how long — 0 ended)
   // ⭐ (magic 16a) AN ILLUSION ON A BODY, said by that body's own game ('unseen', 'cham', 'guise'): kept on its socket (for whoever arrives later — 'magic-runes-ask') and passed on
-  socket.on('magic-ill', (m) => { const room = currentAvatarRoom; if (!room || !m || ['unseen', 'cham', 'guise'].indexOf(m.k) < 0) return; const now = Date.now(); if (now - (socket._illT || 0) < 40) return; socket._illT = now;
+  // (magic 16b) …and the false selves: a disguise ('disg': whose look `src`, or a made-up stranger's `seed`), mirror images ('imgs': which are left `mask`, `seed`), displacement ('disp': `side`)
+  socket.on('magic-ill', (m) => { const room = currentAvatarRoom; if (!room || !m || ['unseen', 'cham', 'guise', 'disg', 'imgs', 'disp'].indexOf(m.k) < 0) return; const now = Date.now(); if (now - (socket._illT || 0) < 40) return; socket._illT = now;
     const ms = Math.max(0, Math.min(90000, +m.ms || 0)), I = socket._ill || (socket._ill = {}), out = { from: socket.id, k: m.k, ms };
+    if (ms > 0 && typeof m.src === 'string' && /^[\w:-]{1,48}$/.test(m.src)) out.src = m.src;
+    if (ms > 0 && isFinite(m.seed)) out.seed = Math.abs(Math.floor(+m.seed)) % 1000000;
+    if (ms > 0 && isFinite(m.mask)) out.mask = (+m.mask | 0) & 7;
+    if (ms > 0 && isFinite(m.side)) out.side = +m.side < 0 ? -1 : 1;
+    if (ms > 0 && typeof m.sn === 'string') out.sn = m.sn.replace(/[<>]/g, '').slice(0, 40);   // (the look's name and hue, for a screen that has no such body — somebody's own test dummy)
+    if (ms > 0 && isFinite(m.sh)) out.sh = Math.round(+m.sh) % 360;
+    if (ms > 0 && m.nh) out.nh = 1;   // (16b: unseen by fake death / mislead — what it holds unseen too)
     if (m.k === 'guise' && ms > 0 && typeof m.look === 'string' && /^[a-z0-9_]{1,32}$/.test(m.look)) { out.look = m.look; out.lw = Math.max(10, Math.min(120, Math.round(+m.lw || 40))); out.lh = Math.max(10, Math.min(120, Math.round(+m.lh || 40)));
       if (typeof m.shape === 'string' && /^[a-z]{1,12}$/.test(m.shape)) out.shape = m.shape; }
     if (ms > 0) I[m.k] = Object.assign({ until: now + ms, room }, out); else delete I[m.k];
     socket.to(room).emit('magic-ill', out); });
   // (16a) a veiled thing shown again early (its holder's game: it struck)
+  // (magic 16b) A MIRROR IMAGE POPPED by a blow (the striker's game saw it go through): every screen takes it away · its body's game says what is left ('magic-ill')
+  socket.on('magic-img-pop', (m) => { const room = currentAvatarRoom; if (!room || !m || typeof m.who !== 'string' || !/^[\w:-]{1,48}$/.test(m.who)) return; const now = Date.now(); if (now - (socket._imgPopT || 0) < 60) return; socket._imgPopT = now;
+    io.to(room).emit('magic-img-pop', { who: m.who, n: (+m.n | 0) & 3, by: socket.id }); });
   socket.on('magic-veil-end', (m) => { const q = m && typeof m.obj === 'string' ? _magicVeils.get(m.obj) : null; if (!q || q.room !== currentAvatarRoom) return; _magicVeils.delete(m.obj); io.to(q.room).emit('magic-veil-gone', { obj: m.obj, why: 'strike' }); });
   socket.on('magic-ail', (m) => { const room = currentAvatarRoom; if (!room || !m || ['poison', 'plague', 'curse', 'wither'].indexOf(m.k) < 0) return; const now = Date.now(); if (now - (socket._ailT || 0) < 40) return; socket._ailT = now;
     socket.to(room).emit('magic-ail', { from: socket.id, k: m.k, ms: Math.max(0, Math.min(30000, +m.ms || 0)) }); });

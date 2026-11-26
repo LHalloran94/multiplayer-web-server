@@ -165,6 +165,26 @@
       plain: { keys: [U, L, D, L, U], rune: [0, 3, 4, 5, 8] } },
     hiding: { name: 'Veil of hiding', school: 'illusion', form: 'field', tier: 1, cd: 40, stance: 'raise', kind: 'hidefield', secs: 10, R: 150, reach: 420, learn: 5,
       plain: { keys: [L, U, R, U, L, D], rune: [3, 0, 1, 5, 8, 7] } },
+    // ⭐ 16b (2026-11-26, kickoff §'16b — READING FOR THE BUILD') FALSE SELVES. All tier 1: a tier-2 rune in the language ends with the underline drawn twice (6 8 6 8) and folds
+    //   back over itself whatever the word is — no spell is tier 2 yet (mirror images, fake death and mislead were proposed at 2).
+    //   disg     drawn with another's look (colour, face, gear) and their name on the in-world nameplate only — your own EYES kept; the pointer on a body = theirs, on
+    //            nobody = a made-up stranger · `swap` (two faces): you and the one nearest the pointer swap looks
+    //   imgs     `n` copies of you drawn by every screen, trailing you and swapping places; a blow through one pops it; your bolts are fired again from each, harmless
+    //   disp     drawn a body `off` widths to one side (your things and name with it); every hit still tests your real body
+    //   fakedeath (kind) a real-looking death on every screen, then unseen `secs` s; a false pile of your gear, gone when touched (`pileS` s at most)
+    //   mislead  (the double's kind) your double walks on in your place (`secsWalk` s) while you are unseen `secs` s
+    disguise: { name: 'Disguise', school: 'illusion', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'ill', ill: 'disg', secs: 60, learn: 5, fx: '#ff9be0', alts: ['twofaces'],
+      plain: { keys: [L, U, U, D, R], rune: [2, 4, 0, 3, 7] } },
+    twofaces: { name: 'Two faces', school: 'illusion', form: 'touch', aim: 'pick', reach: 240, tier: 1, cd: 25, stance: 'level', kind: 'ill', ill: 'disg', swap: true, alt: 'disguise', secs: 30, learn: 5, fx: '#ff9be0',
+      plain: { keys: [L, U, U, R, U], rune: [2, 4, 0, 3, 5] } },
+    images: { name: 'Mirror images', school: 'illusion', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 30, stance: 'raise', kind: 'ill', ill: 'imgs', n: 3, secs: 20, swapS: 2.4, learn: 5, fx: '#ff9be0',
+      plain: { keys: [L, R, L, R, U], rune: [1, 3, 5, 7, 4] } },
+    displace: { name: 'Displacement', school: 'illusion', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'ill', ill: 'disp', off: 1.15, secs: 15, learn: 5, fx: '#ff9be0',
+      plain: { keys: [L, U, R, R, D], rune: [2, 0, 8, 5] } },
+    fakedeath: { name: 'Fake your death', school: 'illusion', form: 'self', tier: 1, cd: 45, stance: 'raise', kind: 'fakedeath', secs: 8, pileS: 60, learn: 5,
+      plain: { keys: [L, D, D, R, D], rune: [1, 6, 8, 2] } },
+    mislead: { name: 'Mislead', school: 'illusion', form: 'self', tier: 1, cd: 35, stance: 'raise', kind: 'double', mislead: true, secs: 10, secsWalk: 8, walk: 150, jump: 420, learn: 5,
+      plain: { keys: [L, U, R, R, U], rune: [0, 4, 6, 8, 5] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
     //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
@@ -713,6 +733,9 @@
     double: [[D, D], [4, 6]], double_m: [[D, L], [4, 7]],
     // (16a) unseen: up over you and away · chameleon: out to the side and back down into it · the guise: down into a box · the veil drawn over the thing and down · the dome up round its side and over
     unseen: [[U, D], [4, 0, 1]], chameleon: [[L, L], [4, 3, 6]], guise: [[D, R], [4, 8, 5]], veil: [[R, U], [4, 2, 1]], hiding: [[L, D], [4, 3, 0, 1]],
+    // (16b) disguise: a mask pulled up and over · two faces: the same turned → to them, on to the top right · mirror images: out, up over you and down the other side ·
+    //   displacement: stepped aside and up · fake death: falling to the ground and toppled back · mislead: off and on, away from where you were
+    disguise: [[U, L], [4, 1, 0]], twofaces: [[R, L], [4, 1, 2]], images: [[L, R], [4, 3, 1, 5]], displace: [[U, R], [4, 5, 2]], fakedeath: [[D, U], [4, 7, 3]], mislead: [[U, U], [4, 2, 5]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
