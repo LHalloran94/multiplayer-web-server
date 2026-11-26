@@ -203,13 +203,13 @@
     //   every screen shows a small sign on that body. Ended by time or a dispel.
     //   spray    a fan `reach` px, `cone` degrees each side, from the hand: every body it crosses (clear of rock) has its screen flooded with colour `secs` s
     //   shroud   on another: their sight closes in to `R` cells past their body (dark by `soft` cells more), for `secs` s
-    //   phant    on another: `n` copies of the caster about them that only they see, firing false bolts every `every` s; a blow through one pops it
+    //   phant    on another: two copies of the caster (round 2: one each side) about them that only they see, firing false bolts every `every` s; a blow through one pops it
     //   bew      on another: left and right swapped for `secs` s
     colourspray: { name: 'Colour spray', school: 'illusion', form: 'burst', tier: 0, cd: 8, stance: 'level', kind: 'sense', sense: 'spray', reach: 150, cone: 28, ms: 420, secs: 3, learn: 3, fx: '#ff9be0',
       plain: { keys: [U, R, L, U, R], rune: [7, 4, 2, 1, 0] } },
     shroud: { name: 'Shroud', school: 'illusion', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'sense', sense: 'shroud', other: true, reach: 260, secs: 8, R: 4, soft: 4, learn: 5, fx: '#9a7ab8',
       plain: { keys: [U, D, L, D, R], rune: [0, 4, 8, 7, 3] } },
-    phantasms: { name: 'Phantasms', school: 'illusion', form: 'touch', tier: 1, cd: 25, stance: 'level', kind: 'sense', sense: 'phant', other: true, reach: 260, secs: 8, n: 3, every: 1.4, learn: 5, fx: '#ff9be0',
+    phantasms: { name: 'Phantasms', school: 'illusion', form: 'touch', tier: 1, cd: 25, stance: 'level', kind: 'sense', sense: 'phant', other: true, reach: 260, secs: 8, n: 2, every: 1.4, learn: 5, fx: '#ff9be0',
       plain: { keys: [U, L, R, D, D], rune: [3, 4, 2, 8, 6] } },
     bewilder: { name: 'Bewilder', school: 'illusion', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'sense', sense: 'bew', other: true, reach: 260, secs: 3, learn: 3, fx: '#c8a8ff',
       plain: { keys: [U, R, R, L, U], rune: [5, 1, 3, 7, 5] } },
