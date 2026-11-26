@@ -199,6 +199,20 @@
       plain: { keys: [L, U, R, R, L], rune: [2, 0, 4, 5, 8] } },
     phantom: { name: 'Phantom thing', school: 'illusion', form: 'shaping', tier: 1, cd: 15, stance: 'level', kind: 'phantom', chan: true, chanS: 10, secs: 60, reach: 320, learn: 5, fx: '#ff9be0',
       plain: { keys: [L, U, L, D, U], rune: [2, 0, 3, 4, 1] } },
+    // ⭐ 16d (2026-11-26) OTHERS' SENSES — kind 'sense', `sense` which. Drawn and felt only on the screen of the one it is on (the server keeps no state: each is short);
+    //   every screen shows a small sign on that body. Ended by time or a dispel.
+    //   spray    a fan `reach` px, `cone` degrees each side, from the hand: every body it crosses (clear of rock) has its screen flooded with colour `secs` s
+    //   shroud   on another: their sight closes in to `R` cells past their body (dark by `soft` cells more), for `secs` s
+    //   phant    on another: `n` copies of the caster about them that only they see, firing false bolts every `every` s; a blow through one pops it
+    //   bew      on another: left and right swapped for `secs` s
+    colourspray: { name: 'Colour spray', school: 'illusion', form: 'burst', tier: 0, cd: 8, stance: 'level', kind: 'sense', sense: 'spray', reach: 150, cone: 28, ms: 420, secs: 3, learn: 3, fx: '#ff9be0',
+      plain: { keys: [U, R, L, U, R], rune: [7, 4, 2, 1, 0] } },
+    shroud: { name: 'Shroud', school: 'illusion', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'sense', sense: 'shroud', other: true, reach: 260, secs: 8, R: 4, soft: 4, learn: 5, fx: '#9a7ab8',
+      plain: { keys: [U, D, L, D, R], rune: [0, 4, 8, 7, 3] } },
+    phantasms: { name: 'Phantasms', school: 'illusion', form: 'touch', tier: 1, cd: 25, stance: 'level', kind: 'sense', sense: 'phant', other: true, reach: 260, secs: 8, n: 3, every: 1.4, learn: 5, fx: '#ff9be0',
+      plain: { keys: [U, L, R, D, D], rune: [3, 4, 2, 8, 6] } },
+    bewilder: { name: 'Bewilder', school: 'illusion', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'sense', sense: 'bew', other: true, reach: 260, secs: 3, learn: 3, fx: '#c8a8ff',
+      plain: { keys: [U, R, R, L, U], rune: [5, 1, 3, 7, 5] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
     //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
@@ -752,6 +766,8 @@
     disguise: [[U, L], [4, 1, 0]], twofaces: [[R, L], [4, 1, 2]], images: [[L, R], [4, 3, 1, 5]], displace: [[U, R], [4, 5, 2]], fakedeath: [[D, U], [4, 7, 3]], mislead: [[U, U], [4, 2, 5]],
     // (16c) the false wall: down to the ground and up its face · unseen rock: pushed in and up through it · the phantom thing: out to the thing and drawn back along the top
     falsewall: [[R, D], [4, 8, 2]], hiderock: [[R, R], [4, 5, 1]], phantom: [[R, U, L], [4, 2, 0]],
+    // (16d) colour spray: fanned out across the top · shroud: drawn down and round them · phantasms: figures stood round you, down, along, up and across · bewilder: round the head
+    colourspray: [[L, U], [4, 5, 2, 1, 0]], shroud: [[D, R, L], [4, 5, 8, 7, 3]], phantasms: [[D, L, D], [4, 7, 6, 3, 5]], bewilder: [[U, L, R], [4, 1, 5, 7, 3]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
