@@ -3874,6 +3874,19 @@ const _magicAlarms = new Map(), _magicSeals = new Map();
 // ⭐ (magic 16a) ILLUSION: a veiled thing (object id → { id, obj, by, room, until }) · a dome of hiding (cast id → { id, by, room, x, y, R, until }). Illusions on BODIES are kept on
 //   their socket (`socket._ill`, from 'magic-ill' — what that body's own game says).
 const _magicVeils = new Map(), _magicHides = new Map();
+// ⭐ (magic 16c) FALSE THINGS placed in a room: a false wall / opening and a mirage (the box and its cells as the caster's game found them, a row of bits each — `fb`), a
+//   phantom thing (`ph`: a thing's look, where it was set). Kept for whoever arrives ('magic-falses') and for dispel; `MAGIC_FALSE_MOST` a caster (the oldest goes)
+const _magicFalse = new Map(), MAGIC_FALSE_MOST = 4;
+function magicFalseBox(fb, liq) { if (!fb || typeof fb !== 'object') return null; const i = (v) => Math.round(+v);
+  const c0 = i(fb.c0), r0 = i(fb.r0), w = i(fb.w), h = i(fb.h); if (![c0, r0, w, h].every(Number.isFinite) || c0 < 0 || r0 < 0 || w < 1 || w > 24 || h < 1 || h > 16) return null;
+  if (!Array.isArray(fb.rows) || fb.rows.length !== h) return null; const rows = fb.rows.map(v => i(v)); if (!rows.every(v => Number.isFinite(v) && v >= 0 && v < (1 << w))) return null; if (!rows.some(v => v)) return null;
+  const out = { c0, r0, w, h, rows }; if (!liq) { const mat = i(fb.mat); if (!(mat >= 1 && mat <= 255)) return null; out.mat = mat; } else out.liq = fb.liq ? 1 : 0; return out; }
+function magicFalseKeep(q) { const now = Date.now(); for (const [k, o] of _magicFalse) if (now > o.until) _magicFalse.delete(k);
+  const mine = [..._magicFalse.values()].filter(o => o.by === q.by).sort((a, b) => a.until - b.until);
+  while (mine.length >= MAGIC_FALSE_MOST) { const o = mine.shift(); _magicFalse.delete(o.id); io.to(o.room).emit('magic-false-gone', { id: o.id, why: 'most' }); }
+  _magicFalse.set(q.id, q); }
+function magicFalseWire(q, now) { return { id: q.id, by: q.by, kind: q.kind, spell: q.spell, fb: q.fb || undefined, ph: q.ph || undefined, left: Math.max(0, q.until - now) }; }
+function magicFalseAt(q) { const T = TERRAIN_CELL; if (q.fb) return [(q.fb.c0 + q.fb.w / 2) * T, (q.fb.r0 + q.fb.h / 2) * T, Math.max(q.fb.w, q.fb.h) * T / 2]; if (q.ph) return [q.ph.x, q.ph.y, 20]; return null; }
 // ⭐ (magic 12a) HEALING GROVES: cast id → { id, by, room, x, y (the ground under the point), w (px across), until } — kept so an arriving page is told and a dispel ends them
 const _magicGroves = new Map();
 // ⭐ (magic 13a) POISON CLOUDS: cast id → { id, by, room, x, y (the ground under the point), w, h (px), until } · SPORE PODS: cast id → { id, by, room, x, y (the ground), until, armAt }
@@ -4047,6 +4060,7 @@ function magicDispel(room, cx, cy, R, ms, by) {
     const p = sockAt(sid), t = p ? at(p.x, p.y - 12) : -1; if (t < 0) continue; n++; later(t, () => { for (const k of Object.keys(I)) { delete I[k]; io.to(room).emit('magic-ill', { from: sid, k, ms: 0, why: 'dispel' }); } }); }
   for (const [oid, q] of _magicVeils) { if (q.room !== room) continue; const ob = roomObjects[room] && roomObjects[room].get(oid); if (!ob) continue; const P = ob.loose ? magicBoulderPose(room, ob) : ob, t = at(P.x, P.y, 12);
     if (t >= 0) { n++; later(t, () => { if (_magicVeils.get(oid) === q) { _magicVeils.delete(oid); io.to(room).emit('magic-veil-gone', { obj: oid, why: 'dispel' }); } }); } }
+  for (const [k, q] of _magicFalse) { if (q.room !== room || now > q.until) continue; const P = magicFalseAt(q), t = P ? at(P[0], P[1], P[2]) : -1; if (t >= 0) { n++; later(t, () => { if (_magicFalse.delete(k)) io.to(room).emit('magic-false-gone', { id: k, why: 'dispel' }); }); } }   // (16c) false things
   for (const [k, q] of _magicHides) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y, q.R); if (t >= 0) { n++; later(t, () => { if (_magicHides.delete(k)) io.to(room).emit('magic-hide-gone', { id: k, why: 'dispel' }); }); } }
   // (12c) vines
   for (const [k, q] of _magicVines) { if (q.room !== room) continue; const t = at(q.x, q.y + q.L / 2, q.L / 2); if (t >= 0) { n++; later(t, () => { if (_magicVines.delete(k)) magicObjDrop(room, q.oid); }); } }
@@ -29543,6 +29557,12 @@ io.on('connection', (socket) => {
       for (const [k, q] of _magicHides) if (now > q.until) _magicHides.delete(k);
       { const mine = [..._magicHides.values()].filter(q => q.by === socket.id).sort((a, b) => a.until - b.until); while (mine.length >= 2) _magicHides.delete(mine.shift().id); }
       out.R = S.R || 56; out.secs = secs; _magicHides.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, R: out.R, until: now + secs * 1000 }); }
+    // ⭐ (magic 16c) A FALSE WALL / OPENING, A MIRAGE: the box and its cells as the caster's game found them (only drawn — nothing here changes a cell), within reach
+    if (S.kind === 'falseterr' || S.kind === 'mirage') { const F = magicFalseBox(m.fb, S.kind === 'mirage'); if (!F) return no('nothing'); const P = magicFalseAt({ fb: F });
+      if (Math.hypot(P[0] - out.x, P[1] - out.y) > (S.reach || 320) + 120) return no('far'); if (S.kind === 'mirage') F.liq = S.liq ? 1 : 0;
+      const secs = +(SK.secs || 60).toFixed(2); out.fb = F; out.secs = secs; magicFalseKeep({ id, by: socket.id, room, kind: S.kind, spell: m.spell, fb: F, until: now + secs * 1000 }); }
+    // (16c) THE PHANTOM THING: a thing to copy (it is set where its caster lets go — 'magic-chan-stop')
+    if (S.kind === 'phantom') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || ob.type !== 'stamp') return no('nothing'); out.obj = m.obj; }
     // ⭐ (magic 12b) THE THORN HEDGE: on the ground under the point (none there: refused), `most` a caster (the oldest goes) · BARKSKIN: its time
     if (S.kind === 'bark') out.secs = +(SK.secs || 30).toFixed(2);
     // ⭐ (magic 12c) A VINE from the rock over the point (none in reach: refused), `most` a caster · A TREE on the ground under the point · REGROW (a generated world only)
@@ -29685,6 +29705,13 @@ io.on('connection', (socket) => {
     const K = q.chunk || q.water; if (K && isFinite(m.cx) && isFinite(m.cy) && Math.hypot(+m.cx - q.x, +m.cy - q.y) < (SPELLS.of(q.spell) || {}).reach + 120) { K.cx = Math.round(+m.cx); K.cy = Math.round(+m.cy); }   // (5b) where the held chunk is (7b: or the ball of water)
     socket.to(room).emit('magic-aim', Object.assign({ id: m.id | 0, x: q.x, y: q.y, ax: +q.ax.toFixed(3), ay: +q.ay.toFixed(3) }, K ? { cx: K.cx, cy: K.cy } : {})); });
   socket.on('magic-chan-stop', (m) => { const q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id) return;
+    // ⭐ (magic 16c) A PHANTOM THING let go: set where its caster's game has the copy (within reach of where it was cast), with the look it copied, `secs` s on every screen
+    { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'phantom') { const P = m.ph, now = Date.now();
+      const ok = !!P && typeof P === 'object' && typeof P.look === 'string' && /^[a-z0-9_]{1,32}$/.test(P.look) && isFinite(P.x) && isFinite(P.y) && Math.hypot(P.x - q.x, P.y - q.y) <= (S0.reach || 320) + 160;
+      if (ok) { const sk = io.sockets.sockets.get(socket.id), secs = +((S0.secs || 60) * ((sk && sk._magicSecsK) || 1)).toFixed(2), ph = { look: P.look, w: Math.max(4, Math.min(160, Math.round(+P.w || 30))), h: Math.max(4, Math.min(160, Math.round(+P.h || 30))),
+          shape: typeof P.shape === 'string' && /^[a-z]{1,12}$/.test(P.shape) ? P.shape : 'rect', x: Math.round(+P.x), y: Math.round(+P.y), a: isFinite(P.a) ? +(+P.a).toFixed(3) : 0, fl: P.fl ? 1 : 0 };
+        const fq = { id: m.id | 0, by: socket.id, room: q.room, kind: 'phantom', spell: q.spell, ph, until: now + secs * 1000 }; magicFalseKeep(fq); io.to(q.room).emit('magic-false-set', magicFalseWire(fq, now)); }
+      magicChanEnd(m.id | 0, 'let'); return; } }
     // (magic 10b round 2) A REWIND let go: the path back (newest first, each step no longer than a body could go) to every screen with its end — none / bad: it just ends
     { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'rewind') { const a = Array.isArray(m.pts) ? m.pts : null; let ok = !!a && a.length >= 4 && a.length <= 320 && a.length % 2 === 0 && a.every(v => isFinite(v) && Math.abs(v) < 1e7);
       if (ok) for (let i = 2; i < a.length; i += 2) if (Math.hypot(a[i] - a[i - 2], a[i + 1] - a[i - 1]) > 900) { ok = false; break; }
@@ -29793,6 +29820,7 @@ io.on('connection', (socket) => {
           for (const k in I) { const q = I[k]; if (q.room === room && now < q.until) { const o2 = Object.assign({}, q, { ms: q.until - now }); delete o2.until; delete o2.room; L.push(o2); } } }
         socket.emit('magic-ills', { list: L }); }
       socket.emit('magic-veils', { list: [..._magicVeils.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, obj: q.obj, by: q.by, left: q.until - now })) });
+      socket.emit('magic-falses', { list: [..._magicFalse.values()].filter(q => q.room === room && now < q.until).map(q => magicFalseWire(q, now)) });   // (magic 16c) false things
       socket.emit('magic-hides', { list: [..._magicHides.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, R: q.R, left: q.until - now })) });
       // (magic 13a) poison clouds, spore pods
       socket.emit('magic-pclouds', { list: [..._magicPClouds.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, h: q.h, left: q.until - now })) });

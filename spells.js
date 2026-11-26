@@ -185,6 +185,22 @@
       plain: { keys: [L, D, D, R, D], rune: [1, 6, 8, 2] } },
     mislead: { name: 'Mislead', school: 'illusion', form: 'self', tier: 1, cd: 35, stance: 'raise', kind: 'double', mislead: true, secs: 10, secsWalk: 8, walk: 150, jump: 420, learn: 5,
       plain: { keys: [L, U, R, R, U], rune: [0, 4, 6, 8, 5] } },
+    // ⭐ 16c (2026-11-26) FALSE THINGS — all tier 1 (a tier-2 rune folds). Placed illusions: only what is DRAWN changes; the light, the physics and the server keep the truth;
+    //   touched, one turns faint for that viewer only; its caster sees it faint with a pink edge.
+    //   falseterr  a box of cells drawn by the terrain's own drawing: `fake` 'wall' — the box's open cells drawn as the rock beside it, `bw` × `bh` cells standing on the
+    //              ground under the point (the light leaks through it) · 'open' (variant) — the rock in the box drawn open (the light still stops at it)
+    //   mirage     a false pool in the dip under the point (at most `maxW` × `maxD` cells), its own look on the graphics card; `liq` 1 = lava (variant); no splash, ripple, wet
+    //   phantom    (shaping, held) the thing under the pointer: a copy of it on your pointer while held, set where you let go for `secs` s; not solid, not usable
+    falsewall: { name: 'False wall', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'falseterr', fake: 'wall', bw: 3, bh: 8, secs: 60, reach: 320, learn: 5, fx: '#ff9be0', alts: ['falseopen'],
+      plain: { keys: [L, U, D, D, L], rune: [2, 0, 4, 6, 3] } },
+    falseopen: { name: 'False opening', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'falseterr', fake: 'open', alt: 'falsewall', bw: 3, bh: 8, secs: 60, reach: 320, learn: 5, fx: '#ff9be0',
+      plain: { keys: [L, U, R, R, L], rune: [2, 0, 4, 5, 8] } },
+    mirage: { name: 'Mirage', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'mirage', liq: 0, maxW: 16, maxD: 5, secs: 60, reach: 360, learn: 5, fx: '#7fd0ff', alts: ['mirage_l'],
+      plain: { keys: [L, U, R, D, L], rune: [2, 0, 4, 8, 7] } },
+    mirage_l: { name: 'Mirage of lava', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'mirage', liq: 1, alt: 'mirage', maxW: 16, maxD: 5, secs: 60, reach: 360, learn: 5, fx: '#ff9050',
+      plain: { keys: [L, U, D, L, R], rune: [2, 0, 4, 6, 7] } },
+    phantom: { name: 'Phantom thing', school: 'illusion', form: 'shaping', tier: 1, cd: 15, stance: 'level', kind: 'phantom', chan: true, chanS: 10, secs: 60, reach: 320, learn: 5, fx: '#ff9be0',
+      plain: { keys: [L, U, L, D, U], rune: [2, 0, 3, 4, 1] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
     //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
@@ -736,6 +752,9 @@
     // (16b) disguise: a mask pulled up and over · two faces: the same turned → to them, on to the top right · mirror images: out, up over you and down the other side ·
     //   displacement: stepped aside and up · fake death: falling to the ground and toppled back · mislead: off and on, away from where you were
     disguise: [[U, L], [4, 1, 0]], twofaces: [[R, L], [4, 1, 2]], images: [[L, R], [4, 3, 1, 5]], displace: [[U, R], [4, 5, 2]], fakedeath: [[D, U], [4, 7, 3]], mislead: [[U, U], [4, 2, 5]],
+    // (16c) the false wall: down to the ground and up its face · the false opening: pushed in and up through it · the mirage: down into the dip and up its far bank · its
+    //   lava: the same, a step further · the phantom thing: out to the thing and drawn back along the top
+    falsewall: [[R, D], [4, 8, 2]], falseopen: [[R, R], [4, 5, 1]], mirage: [[L, U], [4, 3, 1]], mirage_l: [[L, U, R], [4, 3, 1, 2]], phantom: [[R, U, L], [4, 2, 0]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
