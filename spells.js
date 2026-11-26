@@ -246,6 +246,17 @@
       plain: { keys: [L, L, D, D, R], rune: [5, 1, 3, 7, 8] } },
     seek_l: { name: 'Seek life', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'life', alt: 'seek', secs: 5, linger: 4, R: 80, sweepMs: 900, fx: '#ff8a8a',
       plain: { keys: [L, L, D, U, U], rune: [5, 1, 3, 6, 7] } },
+    // ⭐ STEP 17c (2026-11-26) FAR EYE — kind 'fareye', HELD (`chan`, ≤ `chanS` s): a glass eye opens at the catalyst's tip; while the fire button is held you fly it with the
+    //   movement keys (`speed` px/s, ↑ / Space up), your body standing still; the camera, your sight and your own light go with it; open space only (it slips through a one-cell
+    //   gap); no further than `reach` px from you. Let go (or a blow on you, or its time) and it closes. Every screen sees it, and a faint thread back to its caster (the
+    //   held spell's 'magic-aim' carries where it is). PROCESSOR: one point moved a step.
+    fareye: { name: 'Far eye', school: 'knowing', form: 'placed', tier: 1, cd: 20, stance: 'raise', kind: 'fareye', chan: true, chanS: 30, reach: 960, speed: 320, r: 3.5, learn: 5, fx: '#8fe8e0',
+      plain: { keys: [R, U, L, U, R], rune: [8, 3, 1, 5, 0] } },
+    // ⭐ STEP 17c SEEKER'S MARK — kind 'seekmark', on another (a player, your dummy, one of the creator's enemies): for `secs` s a teal eye sigil over them on every screen;
+    //   to its caster it shows through rock, the dark and illusions, with an arrow and the distance at the screen's edge and a ring on the minimap; the server tells the
+    //   caster where a marked player is when their game is not sent them ('magic-where'). Dispel takes it off.
+    seekmark: { name: "Seeker's mark", school: 'knowing', form: 'touch', tier: 0, cd: 20, stance: 'level', kind: 'seekmark', other: true, reach: 260, secs: 120, learn: 3, fx: '#8fe8e0',
+      plain: { keys: [U, R, R, D, L], rune: [7, 3, 0, 1, 5] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
     //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
@@ -807,6 +818,8 @@
     truesight: [[U, U], [4, 1]],
     // (17b) through the stone: down into it and out the far side · seek: spread out over the top; water: along the bottom; life: back across the top
     throughstone: [[D, U], [4, 7, 2]], seek: [[L, R], [4, 0, 2]], seek_w: [[L, D], [4, 6, 8]], seek_l: [[L, U], [4, 2, 0]],
+    // (17c) the far eye: sent up and away over the top · the mark: laid on them, its first mark turned → and on to the top right
+    fareye: [[U, R], [4, 1, 2]], seekmark: [[R, U], [4, 5, 2]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };

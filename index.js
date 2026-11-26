@@ -3836,6 +3836,7 @@ function magicMindKey(socket) { const k = playerKeyFor(socket.id); if (socket._m
 // ⭐ MAGIC 4d (2026-11-18) — CHANNELLED SPELLS (spells.js `chan`): a cast id → { by, room, spell, cat, until, x, y, ax, ay, reach } while its caster holds it. Ended by its caster
 //   letting go (`magic-chan-stop`), its time (`chanS`; a minute at most), or its caster gone — everybody is told (`magic-chan-end`, with the cooldown, which counts from here).
 //   Where it points while held comes from its caster (`magic-aim`) and goes on to the others; the ground at its end is lit here (`magic-chan-burn`). PROCESSOR: a few a second.
+const _magicSeekMarks = new Map();   // (magic 17c) 'caster>target' → until (ms): live seeker's marks, for 'magic-where'
 const _magicChans = new Map();
 // (magic 10b) SPACE's MARKS: one a player (socket id → { id, room, x, y, at, until }) — a new one, their death ('magic-mark-drop') or `secs` ends it
 const _magicMarks = new Map();
@@ -29378,7 +29379,7 @@ io.on('connection', (socket) => {
         if (!ts || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 260) + 120)) return no('nobody'); } }
     // (4e) ON ANOTHER: a player in this room, near enough (by where their own game last said they were)
     // (magic 16e) a MIND on one of the creator's enemies: in this room, near enough to the caster's point
-    let MINDE = null; if (S.kind === 'mind' && typeof m.enemy === 'string') { const RE = roomEnemies.get(room), E = RE && RE.E && RE.E.get(m.enemy); if (!E || E.dead || Math.hypot(E.x - m.x, E.y - m.y) > (S.reach || 260) + 160) return no('nobody'); MINDE = E; }
+    let MINDE = null; if ((S.kind === 'mind' || S.kind === 'seekmark') && typeof m.enemy === 'string') { const RE = roomEnemies.get(room), E = RE && RE.E && RE.E.get(m.enemy); if (!E || E.dead || Math.hypot(E.x - m.x, E.y - m.y) > (S.reach || 260) + 160) return no('nobody'); MINDE = E; }
     if (S.other && m.tgt !== 'mw-test-dummy' && !MINDE) { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;   // (4e round 2: the practice dummy lives on its caster's machine alone)
       if (!ts || ts.id === socket.id || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 240) + 120)) return no('nobody'); }
     // (magic 15b round 2) AIMED (`aim`): the body under the caster's pointer — yourself, the dummy (its caster's machine), or a player in this room near enough; none named: on yourself
@@ -29432,7 +29433,9 @@ io.on('connection', (socket) => {
     const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: powK };
     if (SC) { out.charge = 1; out.cat = ''; }
     if ((S.other && !MINDE) || (S.aim && typeof m.tgt === 'string')) out.tgt = m.tgt;   // (4e) (magic 15b round 2: an aimed spell's body)
-    if (MINDE) { const secs = +((S.secsEnemy || S.secs || 10) * (socket._magicSecsK || 1)).toFixed(2); MINDE.mind = { k: S.mind, by: socket.id, until: now + secs * 1000 }; out.enemy = m.enemy; out.secs = secs; }   // (magic 16e)
+    if (MINDE) { const secs = +((S.secsEnemy || S.secs || 10) * (socket._magicSecsK || 1)).toFixed(2); if (S.kind === 'mind') MINDE.mind = { k: S.mind, by: socket.id, until: now + secs * 1000 }; out.enemy = m.enemy; out.secs = secs; }   // (magic 16e; 17c: a seeker's mark on an enemy is checked the same way)
+    // ⭐ (magic 17c) SEEKER'S MARK on a player: who marked whom, till when — so 'magic-where' answers its caster with their place wherever they are in the room
+    if (S.kind === 'seekmark' && typeof out.tgt === 'string' && out.tgt !== 'mw-test-dummy') { const secs = +((S.secs || 120) * (socket._magicSecsK || 1)).toFixed(2); _magicSeekMarks.set(socket.id + '>' + out.tgt, now + secs * 1000); out.secs = secs; if (_magicSeekMarks.size > 2000) for (const [k, t] of _magicSeekMarks) if (t < now) _magicSeekMarks.delete(k); }
     // (step 3a) where a placed spell goes (the light orb): the caster's point, no further than its reach
     if (isFinite(m.tx) && isFinite(m.ty)) { const dx = m.tx - out.x, dy = m.ty - out.y, d = Math.hypot(dx, dy), lim = ((MD && MD.reach) || S.reach || 400) + 8, k = d > lim ? lim / d : 1; out.tx = Math.round(out.x + dx * k); out.ty = Math.round(out.y + dy * k); }   // (4c: the lob's reach)
     if (MD) { out.mod = m.mod; if (m.mod === 'mod_arc' && !isFinite(out.tx)) return no('bad'); }
@@ -29445,7 +29448,7 @@ io.on('connection', (socket) => {
       setTimeout(() => magicQuake(room, g.x, g.y, SQ, sp, by), S.slamMs || 0); }
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id) magicChanEnd(k, 'new');
-      _magicChans.set(id, { by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK || WB ? 3000 : 300), water: WB ? { u: WB.u, cx: WB.cx, cy: WB.cy } : null, x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, co: CHK.co || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });
+      _magicChans.set(id, { eye: S.kind === 'fareye' ? { cx: out.x, cy: out.y } : null, by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK || WB ? 3000 : 300), water: WB ? { u: WB.u, cx: WB.cx, cy: WB.cy } : null, x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, co: CHK.co || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });
       if (CHK) out.ch = { m: CHK.m, o: CHK.o, cx: Math.round(CHK.cx), cy: Math.round(CHK.cy), a: +(CHK.a || 0).toFixed(4), from: CHK.from || undefined, w: CHK.w || undefined, cs: CHK.cs, co: CHK.co || undefined };   // (round 7: `cs` its crack pattern's seed — the same chunk and boulder)   // (round 6: `w` its cells' damage — drawn cracked while held)   // (5b round 5: `a` its turn, `from` the boulder it was)   // (5b: its caster's game ends it — the server's own end only if they are gone)
       if (WB) out.wb = { u: WB.u, n: WB.n, cx: WB.cx, cy: WB.cy, from: WB.from };   // (7b)
       if (S.kind === 'jet') out.jg = liqDropCfg.g;   // (7b round 2) the drops' fall, so every screen draws the stream along the arc the real water flies
@@ -29723,8 +29726,12 @@ io.on('connection', (socket) => {
   socket.on('magic-aim', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const q = _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return;
     const now = Date.now(); if (now - (socket._aimT || 0) < 35) return; socket._aimT = now; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 520) return;
     const al = Math.hypot(m.ax, m.ay) || 1; q.x = Math.round(+m.x); q.y = Math.round(+m.y); q.ax = m.ax / al; q.ay = m.ay / al;
-    const K = q.chunk || q.water; if (K && isFinite(m.cx) && isFinite(m.cy) && Math.hypot(+m.cx - q.x, +m.cy - q.y) < (SPELLS.of(q.spell) || {}).reach + 120) { K.cx = Math.round(+m.cx); K.cy = Math.round(+m.cy); }   // (5b) where the held chunk is (7b: or the ball of water)
+    const K = q.chunk || q.water || q.eye; if (K && isFinite(m.cx) && isFinite(m.cy) && Math.hypot(+m.cx - q.x, +m.cy - q.y) < (SPELLS.of(q.spell) || {}).reach + 120) { K.cx = Math.round(+m.cx); K.cy = Math.round(+m.cy); }   // (5b) where the held chunk is (7b: or the ball of water)
     socket.to(room).emit('magic-aim', Object.assign({ id: m.id | 0, x: q.x, y: q.y, ax: +q.ax.toFixed(3), ay: +q.ay.toFixed(3) }, K ? { cx: K.cx, cy: K.cy } : {})); });
+  // ⭐ (magic 17c) SEEKER'S MARK: its caster asks where those it marked are (≤ 8, twice a second at most) — answered only for a live mark, in the same room
+  socket.on('magic-where', (m) => { const room = currentAvatarRoom; if (!room || !m || !Array.isArray(m.ids)) return; const now = Date.now(); if (now - (socket._whereT || 0) < 400) return; socket._whereT = now; const L = [];
+    for (const id of m.ids.slice(0, 8)) { if (typeof id !== 'string' || !((_magicSeekMarks.get(socket.id + '>' + id) || 0) > now)) continue; const sk = io.sockets.sockets.get(id), p = sk && sk._avPos; if (!sk || socketToAvatarRoom[id] !== room || !p) continue; L.push({ id, x: Math.round(p.x), y: Math.round(p.y), age: now - p.t }); }
+    socket.emit('magic-where', { list: L }); });
   socket.on('magic-chan-stop', (m) => { const q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id) return;
     // ⭐ (magic 16c) A PHANTOM THING let go: set where its caster's game has the copy (within reach of where it was cast), with the look it copied, `secs` s on every screen
     { const S0 = SPELLS.of(q.spell); if (S0 && S0.kind === 'phantom') { const P = m.ph, now = Date.now();
