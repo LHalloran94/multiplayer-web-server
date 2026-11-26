@@ -167,7 +167,7 @@
       plain: { keys: [L, U, R, U, L, D], rune: [3, 0, 1, 5, 8, 7] } },
     // ⭐ 16b (2026-11-26, kickoff §'16b — READING FOR THE BUILD') FALSE SELVES. All tier 1: a tier-2 rune in the language ends with the underline drawn twice (6 8 6 8) and folds
     //   back over itself whatever the word is — no spell is tier 2 yet (mirror images, fake death and mislead were proposed at 2).
-    //   disg     drawn with another's look (colour, face, gear) and their name on the in-world nameplate only — your own EYES kept; the pointer on a body = theirs, on
+    //   disg     drawn with another's look (colour, face and eyes, gear) and their name on the in-world nameplate only (2026-11-26 round 2: their eyes too); the pointer on a body = theirs, on
     //            nobody = a made-up stranger · `swap` (two faces): you and the one nearest the pointer swap looks
     //   imgs     `n` copies of you drawn by every screen, trailing you and swapping places; a blow through one pops it; your bolts are fired again from each, harmless
     //   disp     drawn a body `off` widths to one side (your things and name with it); every hit still tests your real body
