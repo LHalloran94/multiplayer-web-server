@@ -185,20 +185,18 @@
       plain: { keys: [L, D, D, R, D], rune: [1, 6, 8, 2] } },
     mislead: { name: 'Mislead', school: 'illusion', form: 'self', tier: 1, cd: 35, stance: 'raise', kind: 'double', mislead: true, secs: 10, secsWalk: 8, walk: 150, jump: 420, learn: 5,
       plain: { keys: [L, U, R, R, U], rune: [0, 4, 6, 8, 5] } },
-    // ⭐ 16c (2026-11-26) FALSE THINGS — all tier 1 (a tier-2 rune folds). Placed illusions: only what is DRAWN changes; the light, the physics and the server keep the truth;
-    //   touched, one turns faint for that viewer only; its caster sees it faint with a pink edge.
-    //   falseterr  a box of cells drawn by the terrain's own drawing: `fake` 'wall' — the box's open cells drawn as the rock beside it, `bw` × `bh` cells standing on the
-    //              ground under the point (the light leaks through it) · 'open' (variant) — the rock in the box drawn open (the light still stops at it)
-    //   mirage     a false pool in the dip under the point (at most `maxW` × `maxD` cells), its own look on the graphics card; `liq` 1 = lava (variant); no splash, ripple, wet
-    //   phantom    (shaping, held) the thing under the pointer: a copy of it on your pointer while held, set where you let go for `secs` s; not solid, not usable
-    falsewall: { name: 'False wall', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'falseterr', fake: 'wall', bw: 3, bh: 8, secs: 60, reach: 320, learn: 5, fx: '#ff9be0', alts: ['falseopen'],
+    // ⭐ 16c (2026-11-26) FALSE THINGS — all tier 1 (a tier-2 rune folds). Placed illusions: only what is DRAWN changes; the physics and the server keep the truth;
+    //   touched, one shows itself to that viewer only.
+    //   falseterr  a box of cells drawn per viewer · `fake` 'wall' — RISES TO FILL THE GAP under the point (round 2, the user): floor to ceiling, at most `maxH` cells, or across
+    //              a shaft (a false floor), at most `maxW`; no gap: `bh` cells tall; `bw` cells thick; drawn as the rock beside it by the terrain's own drawing, and solid to
+    //              the light of every screen · 'hide' (round 2, the user — in place of the false opening) UNSEEN ROCK: the rock within `R` cells of the point unseen
+    //              (what is behind it shows, the light passes) until a body touches it — then it comes back, with a sweep of light
+    //   phantom    (shaping, held) the thing under the pointer: a copy of it on your pointer while held (the wheel turns it), set where you let go for `secs` s; not solid
+    //   (round 2, the user: the mirages do not look or work well — LEFT OUT for now; their drawing is parked in 16zj §'STEP 16c', kind 'mirage')
+    falsewall: { name: 'False wall', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'falseterr', fake: 'wall', bw: 3, bh: 8, maxH: 16, maxW: 24, secs: 60, reach: 320, learn: 5, fx: '#ff9be0',
       plain: { keys: [L, U, D, D, L], rune: [2, 0, 4, 6, 3] } },
-    falseopen: { name: 'False opening', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'falseterr', fake: 'open', alt: 'falsewall', bw: 3, bh: 8, secs: 60, reach: 320, learn: 5, fx: '#ff9be0',
+    hiderock: { name: 'Unseen rock', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'falseterr', fake: 'hide', R: 4, secs: 60, reach: 320, learn: 5, fx: '#ff9be0',
       plain: { keys: [L, U, R, R, L], rune: [2, 0, 4, 5, 8] } },
-    mirage: { name: 'Mirage', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'mirage', liq: 0, maxW: 16, maxD: 5, secs: 60, reach: 360, learn: 5, fx: '#7fd0ff', alts: ['mirage_l'],
-      plain: { keys: [L, U, R, D, L], rune: [2, 0, 4, 8, 7] } },
-    mirage_l: { name: 'Mirage of lava', school: 'illusion', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'mirage', liq: 1, alt: 'mirage', maxW: 16, maxD: 5, secs: 60, reach: 360, learn: 5, fx: '#ff9050',
-      plain: { keys: [L, U, D, L, R], rune: [2, 0, 4, 6, 7] } },
     phantom: { name: 'Phantom thing', school: 'illusion', form: 'shaping', tier: 1, cd: 15, stance: 'level', kind: 'phantom', chan: true, chanS: 10, secs: 60, reach: 320, learn: 5, fx: '#ff9be0',
       plain: { keys: [L, U, L, D, U], rune: [2, 0, 3, 4, 1] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
@@ -752,9 +750,8 @@
     // (16b) disguise: a mask pulled up and over · two faces: the same turned → to them, on to the top right · mirror images: out, up over you and down the other side ·
     //   displacement: stepped aside and up · fake death: falling to the ground and toppled back · mislead: off and on, away from where you were
     disguise: [[U, L], [4, 1, 0]], twofaces: [[R, L], [4, 1, 2]], images: [[L, R], [4, 3, 1, 5]], displace: [[U, R], [4, 5, 2]], fakedeath: [[D, U], [4, 7, 3]], mislead: [[U, U], [4, 2, 5]],
-    // (16c) the false wall: down to the ground and up its face · the false opening: pushed in and up through it · the mirage: down into the dip and up its far bank · its
-    //   lava: the same, a step further · the phantom thing: out to the thing and drawn back along the top
-    falsewall: [[R, D], [4, 8, 2]], falseopen: [[R, R], [4, 5, 1]], mirage: [[L, U], [4, 3, 1]], mirage_l: [[L, U, R], [4, 3, 1, 2]], phantom: [[R, U, L], [4, 2, 0]],
+    // (16c) the false wall: down to the ground and up its face · unseen rock: pushed in and up through it · the phantom thing: out to the thing and drawn back along the top
+    falsewall: [[R, D], [4, 8, 2]], hiderock: [[R, R], [4, 5, 1]], phantom: [[R, U, L], [4, 2, 0]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
