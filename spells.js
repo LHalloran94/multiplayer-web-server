@@ -238,13 +238,13 @@
       plain: { keys: [D, D, R, U, L], rune: [0, 4, 8, 5, 3] } },
     // ⭐ STEP 17b SEEK — kind 'seek', `seek` what: a pulse goes out `R` cells over `sweepMs`; what it passes lights up over the dark for `secs` s (ore in its colour, liquid
     //   in its colour, a living body's heartbeat — through rock and through an illusion), small arrows at the screen's edge for those off it, dots on the minimap. The
-    //   caster's game alone, a scan of the cells it holds (PROCESSOR, sparse) — every find within reach, nearest first up to `most`, again each second round where you are.
+    //   caster's game alone, a scan of the cells it holds (PROCESSOR, sparse) — every find within reach, nearest first up to `most`. ONE pulse (round 5, the user): what it catches lingers `linger` s from the moment it is reached, then fades.
     //   Every screen: the pulse. Water and life are variants on ore's page.
-    seek: { name: 'Seek ore', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'ore', secs: 12, R: 80, sweepMs: 900, most: 600, learn: 3, fx: '#e8c878', alts: ['seek_w', 'seek_l'],
+    seek: { name: 'Seek ore', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'ore', secs: 5, linger: 4, R: 80, sweepMs: 900, most: 600, learn: 3, fx: '#e8c878', alts: ['seek_w', 'seek_l'],
       plain: { keys: [L, L, D, U, R], rune: [5, 1, 3, 7, 6] } },
-    seek_w: { name: 'Seek water', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'liq', alt: 'seek', secs: 12, R: 80, sweepMs: 900, most: 400, fx: '#7fc8ff',
+    seek_w: { name: 'Seek water', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'liq', alt: 'seek', secs: 5, linger: 4, R: 80, sweepMs: 900, most: 400, fx: '#7fc8ff',
       plain: { keys: [L, L, D, D, R], rune: [5, 1, 3, 7, 8] } },
-    seek_l: { name: 'Seek life', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'life', alt: 'seek', secs: 12, R: 80, sweepMs: 900, fx: '#ff8a8a',
+    seek_l: { name: 'Seek life', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'life', alt: 'seek', secs: 5, linger: 4, R: 80, sweepMs: 900, fx: '#ff8a8a',
       plain: { keys: [L, L, D, U, U], rune: [5, 1, 3, 6, 7] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
