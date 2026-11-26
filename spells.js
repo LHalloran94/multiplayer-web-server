@@ -231,6 +231,20 @@
     //   body's eyes glow teal (the state rides 'magic-ill', k 'truesight', so arrivals see it and a dispel ends it). Client 16zj §'STEP 17a'.
     truesight: { name: 'True sight', school: 'knowing', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 30, stance: 'raise', kind: 'know', know: 'truesight', secs: 20, learn: 5, fx: '#8fe8e0',
       plain: { keys: [U, L, U, U, R], rune: [6, 1, 3, 4, 5] } },
+    // ⭐ STEP 17b (2026-11-26) THROUGH THE STONE — kind 'stone': for `secs` s, round you to `R` cells (a ring sweeps out over `sweepMs`, and closes in over the last `closeMs`),
+    //   rock does not stop your sight and the dark is lifted: the world as it is under the light, laid back over the darkness faint and teal (the caster's screen only —
+    //   16zj `magicStone*`, on the GRAPHICS CARD by the canvas's own copies; the sight test round you says 'seen' so the bodies there are drawn). Every screen: the ring.
+    throughstone: { name: 'Through the stone', school: 'knowing', form: 'self', tier: 1, cd: 15, stance: 'raise', kind: 'stone', secs: 6, R: 40, sweepMs: 650, closeMs: 900, learn: 5, fx: '#8fe8e0',
+      plain: { keys: [D, D, R, U, L], rune: [0, 4, 8, 5, 3] } },
+    // ⭐ STEP 17b SEEK — kind 'seek', `seek` what: a pulse goes out `R` cells over `sweepMs`; what it passes lights up over the dark for `secs` s (ore in its colour, liquid
+    //   in its colour, a living body's heartbeat — through rock and through an illusion), small arrows at the screen's edge for those off it, dots on the minimap. The
+    //   caster's game alone, one scan of the cells it holds (PROCESSOR, sparse). Every screen: the pulse. Water and life are variants on ore's page.
+    seek: { name: 'Seek ore', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'ore', secs: 12, R: 80, sweepMs: 900, most: 40, learn: 3, fx: '#e8c878', alts: ['seek_w', 'seek_l'],
+      plain: { keys: [L, L, D, U, R], rune: [5, 1, 3, 7, 6] } },
+    seek_w: { name: 'Seek water', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'liq', alt: 'seek', secs: 12, R: 80, sweepMs: 900, most: 30, fx: '#7fc8ff',
+      plain: { keys: [L, L, D, D, R], rune: [5, 1, 3, 7, 8] } },
+    seek_l: { name: 'Seek life', school: 'knowing', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'seek', seek: 'life', alt: 'seek', secs: 12, R: 80, sweepMs: 900, fx: '#ff8a8a',
+      plain: { keys: [L, L, D, U, U], rune: [5, 1, 3, 6, 7] } },
     // ⭐ 4d (2026-11-18, kickoff §ROUND 4 — CHANNELLING, the user agreed the proposal): A HELD SPELL. `chan` = it goes on while the fire button is held (you stand still, aiming with
     //   the pointer), letting go ends it at once; `chanS` = the most it can be held, seconds (0 = for as long as you hold it — the server still ends it after a minute); its cooldown
     //   counts from when it ends; a blow of 1 health breaks it. FLAME STREAM: the flamethrower's jet (16b `drawFlameJetPts`) from the catalyst towards the pointer — `reach` px,
@@ -790,6 +804,8 @@
     colourspray: [[L, U], [4, 5, 2, 1, 0]], shroud: [[D, R, L], [4, 5, 8, 7, 3]], phantasms: [[D, L, D], [4, 7, 6, 3, 5]], bewilder: [[U, L, R], [4, 1, 5, 7, 3]],
     // (17a) true sight: up to the eyes
     truesight: [[U, U], [4, 1]],
+    // (17b) through the stone: down into it and out the far side · seek: spread out over the top; water: along the bottom; life: back across the top
+    throughstone: [[D, U], [4, 7, 2]], seek: [[L, R], [4, 0, 2]], seek_w: [[L, D], [4, 6, 8]], seek_l: [[L, U], [4, 2, 0]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
