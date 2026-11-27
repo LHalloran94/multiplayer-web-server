@@ -29536,11 +29536,16 @@ io.on('connection', (socket) => {
       // (12b) a LOBBED spell (entangle's seed) comes down on the pointer without the modifier: every screen works out the same arc
       else if (S.lob && isFinite(out.tx)) { const A = SPELLS.arcAim(S, { g: S.lobG || 1100 }, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
       { const BN = MDo('mod_bounce'); if (BN) lf *= BN.lifeK || 1; }   // (21 M2) a bouncing one flies longer (after the lob, which sets its own time)
+      { const HO = MDo('mod_homing') || MDo('mod_boomerang'); if (HO) lf *= HO.lifeK || 1; }   // (21 M3) homing / coming back fly longer
+      // (21 M3) BIGGER / SMALLER: this generation's size (each one put in again: more), and its speed unless it is lobbed
+      const sizeOf = (G) => { let k = 1, sp = 1; for (const q of G) { const Z = (q === 'mod_bigger' || q === 'mod_smaller') && SPELLS.modOf(q); if (Z) { k *= Z.k || 1; sp *= Z.speedK || 1; } } return { k, sp }; };
+      const SZ0 = sizeOf(GENS[0]); if (!MS.has('mod_arc') && !(S.lob && isFinite(out.tx))) v *= SZ0.sp;
       const SPL = MDo('mod_split'), ids = [id]; if (SPL) { for (let i = 1; i < (SPL.n || 3); i++) ids.push(++_magicSeq); out.ids = ids; }
       const DLm = GENS[0].filter(q => q === 'mod_delay').length * (((SPELLS.modOf('mod_delay') || {}).secs) || 1.5) * 1000;   // (21 M2) DELAYED: it waits where it was cast, each piece put in longer
       const SKf0 = S.freezeN ? Object.assign({}, SK, { cells: S.freezeN, secs: (S.freezeS || 20) * (socket._magicSecsK || 1), ringMs: 60 }) : SK;   // (4e round 2: the chill bolt's freeze — a cell or two)
       const SKf = shot && SPL ? magicModSplitSK(SKf0, SPL.shotK || 0.6) : SKf0;   // (21 M1) a split shot's pieces land smaller
-      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800 + DLm, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (SPL ? 0.6 : 1)).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.seed ? 'seed' : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MS.has('mod_follow') || MS.has('mod_bounce') ? 1 : 0, modded: ML.length ? 1 : 0, lux: S.lux || null, luxR: S.lux === 'dark' ? S.R || 8 : S.lux === 'snuff' ? S.R || 24 : 0 });
+      const SKz = SZ0.k !== 1 && shot ? magicModSplitSK(SKf, SZ0.k) : SKf;   // (21 M3) its size
+      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800 + DLm, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (SPL ? 0.6 : 1) * SZ0.k).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.seed ? 'seed' : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKz, spell: m.spell, steer: MS.has('mod_follow') || MS.has('mod_bounce') || MS.has('mod_homing') || MS.has('mod_boomerang') ? 1 : 0, modded: ML.length ? 1 : 0, lux: S.lux || null, luxR: +((S.lux === 'dark' ? S.R || 8 : S.lux === 'snuff' ? S.R || 24 : 0) * SZ0.k).toFixed(1) });
       // ⭐ (21 M2; M3 generations; M3 round 2 — the user: as much freedom as is practical; split and cluster stack either way, each smaller and weaker) CLUSTER: for each one
       //   that flies (the spell and its split copies), an id for each of its pieces — where it ends they burst out (every screen from its 'magic-end'), each kept here as a smaller
       //   one of it: a burst × 0.4, a shot's size × `shotK`; their time is THEIR generation's (its bounce, follower, delay). A generation that SPLITS gives each piece its copies
@@ -29549,11 +29554,12 @@ io.on('connection', (socket) => {
       { const CLm = SPELLS.modOf('mod_cluster'), SPm = SPELLS.modOf('mod_split'), BNm = SPELLS.modOf('mod_bounce'), FOm = SPELLS.modOf('mod_follow'), DLs = ((SPELLS.modOf('mod_delay') || {}).secs || 1.5) * 1000, map = {}, spm = {};
         let layer = ids.map(q => [q, _magicLive.get(q)]), budget = 400;
         for (let gi = 0; gi + 1 < GENS.length && layer.length && CLm; gi++) { const Gn = GENS[gi + 1], has = (q) => Gn.indexOf(q) >= 0, next = [];
-          const lfP = Math.max(has('mod_arc') ? 2.4 : 0, (CLm.life || 0.45) * (has('mod_bounce') ? BNm.lifeK || 1 : 1) * (has('mod_follow') ? FOm.lifeK || 1 : 1)), dl = Gn.filter(q => q === 'mod_delay').length * DLs;   // (round 2: pieces that arc lob onto the cast's point — up to 1.8 s + 0.6)
+          const HOm = has('mod_homing') ? SPELLS.modOf('mod_homing') : has('mod_boomerang') ? SPELLS.modOf('mod_boomerang') : null, SZn = sizeOf(Gn);
+          const lfP = Math.max(has('mod_arc') ? 2.4 : 0, (CLm.life || 0.45) * (has('mod_bounce') ? BNm.lifeK || 1 : 1) * (has('mod_follow') ? FOm.lifeK || 1 : 1) * (HOm ? HOm.lifeK || 1 : 1)), dl = Gn.filter(q => q === 'mod_delay').length * DLs;   // (round 2: pieces that arc lob onto the cast's point — up to 1.8 s + 0.6)
           for (const [q, L0] of layer) { if (!L0) continue; const a = [];
             for (let i = 0; i < (CLm.n || 5) && budget > 0; i++, budget--) { const c = ++_magicSeq; a.push(c);
-              const L1 = Object.assign({}, L0, { until: L0.until + (lfP + 0.8) * 1000 + dl + 1500, reach: L0.reach + Math.max(v * (CLm.speedK || 0.55) * lfP * 1.5, has('mod_arc') ? 1200 : 0) + 64, burst: L0.burst ? +(L0.burst * 0.4).toFixed(1) : 0,
-                SK: shot ? magicModSplitSK(L0.SK, CLm.shotK || 0.4) : L0.SK, steer: has('mod_follow') || has('mod_bounce') ? 1 : 0, modded: 1, piece: 1 });
+              const L1 = Object.assign({}, L0, { until: L0.until + (lfP + 0.8) * 1000 + dl + 1500, reach: L0.reach + Math.max(v * (CLm.speedK || 0.55) * lfP * 1.5, has('mod_arc') ? 1200 : 0) + 64, burst: L0.burst ? +(L0.burst * 0.4 * SZn.k).toFixed(1) : 0, luxR: +((L0.luxR || 0) * SZn.k).toFixed(1),
+                SK: shot ? magicModSplitSK(L0.SK, (CLm.shotK || 0.4) * SZn.k) : L0.SK, steer: has('mod_follow') || has('mod_bounce') || has('mod_homing') || has('mod_boomerang') ? 1 : 0, modded: 1, piece: 1 });
               if (has('mod_split') && SPm) { const L2 = Object.assign({}, L1, { burst: L1.burst ? +(L1.burst * 0.6).toFixed(1) : 0, SK: shot ? magicModSplitSK(L1.SK, SPm.shotK || 0.6) : L1.SK }), cp = [];
                 Object.assign(L1, { burst: L2.burst, SK: L2.SK }); for (let j = 1; j < (SPm.n || 3) && budget > 0; j++, budget--) { const d = ++_magicSeq; cp.push(d); _magicLive.set(d, Object.assign({}, L2)); next.push([d, _magicLive.get(d)]); } spm[c] = cp; }
               _magicLive.set(c, L1); next.push([c, L1]); }

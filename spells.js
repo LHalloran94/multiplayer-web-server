@@ -857,16 +857,22 @@
     mod_thru:    { name: 'Through walls', keys: [R, R], rune: [2, 4], fits: ['fly'], group: ['wall'], noLob: 1, cdK: 2, learn: 3, cells: 10 },
     mod_delay:   { name: 'Delayed', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['placed', 'round'], group: ['wait'], rep: 3, cdK: 1.25, learn: 3, secs: 2.5 },   // (M2 round 3, the user: a bit longer — 1.5 → 2.5 s a piece)
     mod_cluster: { name: 'Cluster', keys: [U, D], rune: [7, 5], fits: ['fly'], maker: 1, cdK: 1.5, learn: 3, n: 5, fan: 150, speedK: 0.55, life: 0.45, dmgK: 0.5, powK: 0.6, shotK: 0.4, szK: 0.6 },
+    // ⭐ M3 (2026-11-28; each in ITS generation):
+    //   bigger / smaller  drawn and striking × `k` (its burst, a shot's size, a ball of darkness × `k` too), its blow × `dmgK`, its speed × `speedK` (not a lob's); put in again: more
+    //   pierce   goes on through up to `n` bodies, each once, each blow × `dmgK` (a burst / seed / carrier of light passes them by)
+    //   homing   its caster's game turns it towards the nearest body AHEAD (within `cone` degrees, `range` px) at `turn` rad/s; flies × `lifeK`, less pulled down (`gravK`)
+    //   boomerang  out for `out` of its time, then its caster's game turns it back to its caster at `turn` rad/s — it ends harmlessly back in their hand; × `lifeK` its time;
+    //            not on a stone or ember that must come down (`noLob`)
+    mod_bigger:    { name: 'Bigger', keys: [U, U], rune: [0, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.5, learn: 3, k: 1.5, dmgK: 1.4, speedK: 0.85 },
+    mod_smaller:   { name: 'Smaller', keys: [D, D], rune: [2, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.2, learn: 3, k: 0.65, dmgK: 0.75, speedK: 1.2 },
+    mod_pierce:    { name: 'Pierces', keys: [R, R], rune: [6, 4], fits: ['fly'], group: ['body'], hit: 1, cdK: 1.5, learn: 3, n: 3, dmgK: 0.8 },
+    mod_homing:    { name: 'Homing', keys: [D, U], rune: [8, 5], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 2, learn: 3, turn: 5, range: 320, cone: 70, lifeK: 1.5, gravK: 0.3 },
+    mod_boomerang: { name: 'Comes back', keys: [L, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], group: ['path'], noLob: 1, cdK: 1.5, learn: 3, out: 0.35, turn: 7, lifeK: 2.6, gravK: 0, catchR: 20 },   // (rig: × 2 ran out 250 px short — longer, no fall, back sooner)
   };
   // (21 M1) THE MODIFIERS TO COME — no keys, no page, not castable: only the rules (`modFits`, `modClash`, `modsOk`) know them, so what is built now already leaves room for them
   const MOD_PLAN = {
-    mod_bigger:    { name: 'Bigger', fits: ['fly', 'thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.5 },
-    mod_smaller:   { name: 'Smaller', fits: ['fly', 'thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.2 },
-    mod_pierce:    { name: 'Pierces', fits: ['fly'], group: ['body'], hit: 1, cdK: 1.5 },
     mod_chain:     { name: 'Chains', fits: ['fly'], group: ['body'], hit: 1, cdK: 2 },
     mod_explode:   { name: 'Bursts on hitting', fits: ['fly'], group: ['body'], hit: 1, cdK: 1.5 },
-    mod_homing:    { name: 'Homing', fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 2 },
-    mod_boomerang: { name: 'Comes back', fits: ['fly', 'thrown'], group: ['path'], cdK: 1.5 },
     mod_orbit:     { name: 'Circles you', fits: ['fly'], group: ['path', 'wait'], clash: ['mod_wavy'], cdK: 1.5 },
     mod_wavy:      { name: 'Wavy', fits: ['fly'], cdK: 1.25 },
     mod_faster:    { name: 'Faster', fits: ['fly', 'thrown'], group: ['pace'], rep: 2, cdK: 1.25 },
@@ -897,7 +903,7 @@
   //   either lies straight on from some spell's last line (it would merge into it) or turns one spell's rune into another's — cool lava + 5 = grease, firebolt + 7 = great firebolt) and the modifiers' own were FOUND BY A SEARCH: no piece goes back over its own line, none where one piece runs into the next, every piece
   //   its own path (`scratchpad/probe_mod_stack.js` checks; a new modifier's stroke must keep it so)
   const MOD_OPEN = { path: { keys: [R, U], rune: [3, 1] }, many: { keys: [L, R], rune: [3, 2] }, seen: { keys: [L, L], rune: [1, 6] }, wait: { keys: [D, L], rune: [3, 8] },
-    size: { keys: [R, L], rune: [1, 4] }, pace: { keys: [R, R], rune: [1, 5] }, fall: { keys: [D, D], rune: [1, 8] }, wall: { keys: [D, R], rune: [1, 3] }, body: { keys: [R, D], rune: [3, 7] },
+    size: { keys: [R, L], rune: [3, 7] }, pace: { keys: [R, R], rune: [1, 5] }, fall: { keys: [D, D], rune: [1, 8] }, wall: { keys: [D, R], rune: [1, 3] }, body: { keys: [R, D], rune: [1, 0] },   // (M3: size and body's strokes picked with their first modifiers — a search; checked by the probe)
     more: { keys: [D, U], rune: [3, 5] } };
   // (21 M1) HOW A SPELL IS DELIVERED (what `fits` means) — by its kind and form
   const SHOT_KINDS = ['freeze', 'wall', 'change', 'tunnel', 'firewall'], THROWN_KINDS = ['shard', 'waterball', 'chunk'], PAINT_KINDS = ['paint', 'rainbow'];
