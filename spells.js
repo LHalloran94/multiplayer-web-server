@@ -841,7 +841,7 @@
   //   clash  further ones it never goes with · rep  how many times it may be put in (each one more of it; 1 = once) · hit  only on a bolt that stops at bodies
   //   A spell's `noMods` = ones that would mean nothing on it (the tunnelling bolt goes through rock already).
   const MODS = {
-    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [4, 3], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 2, gravK: 0.3 },
+    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [4, 3], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3 },   // (21 M1 round 2, the user: it ran out too soon — lifeK 2 → 3.5: a firebolt follows ~3.9 s)
     // (21 M1) its stroke was 6 → 4 → 8: ending on the bottom right, the next piece's jump back to the top left ran back over it through the middle (a fold) — now an arch ∧, split's V turned over
     mod_arc:    { name: 'Arcs', keys: [U, R], rune: [3, 1, 5], fits: ['fly'], group: ['path', 'fall'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },
     mod_split:  { name: 'Splits in three', keys: [L, R], rune: [3, 7, 5], fits: ['fly'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6 },
@@ -878,6 +878,12 @@
   const modOf = (id) => isMod(id) ? MODS[id] : null;
   const modAny = (id) => isMod(id) ? MODS[id] : (typeof id === 'string' && Object.prototype.hasOwnProperty.call(MOD_PLAN, id) ? MOD_PLAN[id] : null);
   const modList = (m) => Array.isArray(m) ? m : (m ? [m] : []);
+  // (21 M1 round 2, the user: the modifiers told apart on the rings by what they do) each one's FAMILY — its colour where its marks are drawn and on its page (16zj `MAGIC_MOD_FAMS`):
+  //   path steering it · many more of it · seen how it is seen · wait holding it back · size · pace its speed · fall its weight · wall at rock · body at a body · more anything else
+  const MOD_FAM = { mod_follow: 'path', mod_arc: 'path', mod_homing: 'path', mod_boomerang: 'path', mod_orbit: 'path', mod_wavy: 'path', mod_split: 'many', mod_cluster: 'many', mod_double: 'many',
+    mod_faint: 'seen', mod_delay: 'wait', mod_hang: 'wait', mod_bigger: 'size', mod_smaller: 'size', mod_faster: 'pace', mod_slower: 'pace', mod_accel: 'pace', mod_heavy: 'fall', mod_weightless: 'fall',
+    mod_bounce: 'wall', mod_thru: 'wall', mod_pierce: 'body', mod_chain: 'body', mod_explode: 'body', mod_trail: 'more', mod_trigger: 'more', mod_lasting: 'more' };
+  for (const id in MOD_FAM) { const M = modAny(id); if (M) M.fam = MOD_FAM[id]; }
   // (21 M1) HOW A SPELL IS DELIVERED (what `fits` means) — by its kind and form
   const SHOT_KINDS = ['freeze', 'wall', 'change', 'tunnel', 'firewall'], THROWN_KINDS = ['shard', 'waterball', 'chunk'], PAINT_KINDS = ['paint', 'rainbow'];
   const isShot = (S) => !!S && SHOT_KINDS.indexOf(S.kind) >= 0 && S.speed > 0;

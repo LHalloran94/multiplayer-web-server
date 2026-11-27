@@ -29381,7 +29381,8 @@ io.on('connection', (socket) => {
     if (m.on) {
       if (typeof m.cat === 'string') out.cat = m.cat.slice(0, 64);
       if (Array.isArray(m.k)) out.k = m.k.slice(0, 40).map(v => v & 3);   // (21 M1: 12 → 40, stacked modifiers)
-      if (Number.isInteger(m.mi) && m.mi > 0 && m.mi < 40) out.mi = m.mi; if (m.ml === 3 || m.ml === 4) out.ml = m.ml;   // (21 M1: each piece's length — a ring each)   // (magic 4c round 2: where a modifier's marks begin — the others draw them on a second ring)
+      if (Number.isInteger(m.mi) && m.mi > 0 && m.mi < 40) out.mi = m.mi; if (m.ml === 3 || m.ml === 4) out.ml = m.ml;   // (21 M1: each piece's length — a ring each)
+      if (Array.isArray(m.mm)) out.mm = m.mm.slice(0, SPELLS.MOD_MAX).filter(q => SPELLS.isMod(q));   // (21 M1 round 2: the modifiers put in whole, in order — each piece in its family's colour)   // (magic 4c round 2: where a modifier's marks begin — the others draw them on a second ring)
       if (Array.isArray(m.r)) out.r = m.r.slice(0, 64).map(v => Math.max(-127, Math.min(127, Math.round(+v) || 0)));
       if (SPELLS.is(m.rdy)) out.rdy = m.rdy;
       if (m.ch) { out.ch = 1; out.h = m.h ? 1 : 0; if (isFinite(m.px) && isFinite(m.py)) { out.px = Math.max(-900, Math.min(900, Math.round(+m.px))); out.py = Math.max(-900, Math.min(900, Math.round(+m.py))); } }   // (step 2h: the spell is held in the HAND — a scroll's; step 3b: which hand, and where it points from the body)
