@@ -125,6 +125,25 @@
       grav: 0, r: 4, dmg: 0, secs: 60, screens: 3, down: 80, fx: '#bcd8ff', plain: { keys: [L, D, D, U, U], rune: [1, 4, 6, 3, 0] } },
     snuff: { name: 'Snuff', school: 'light', form: 'bolt', tier: 0, cd: 6, stance: 'level', kind: 'bolt', lux: 'snuff', fuse: true, learn: 3, reach: 420, speed: 760, life: 0.7, grav: 0, r: 3,
       dmg: 0, R: 24, fx: '#5a4a7a', plain: { keys: [L, D, R, U, D], rune: [1, 4, 5, 7, 3] } },
+    // ⭐ STEP 20d (2026-11-27) PAINTING SPELLS (the user: purely visual spells should let players express themselves — paint with the pointer). Kind 'paint', HELD (`chanS` s):
+    //   what is painted follows the pointer (within `reach` of you; every screen gets the points through 'magic-aim'), stays `secs` s after let go, then fades. While held,
+    //   the WHEEL picks the colour (the light brush, the wash) or the shape (stamps). By `brush`:
+    //   line      LIGHT BRUSH: a glowing line in your colour (a few small lights along it)
+    //   sparkler  SPARKLER: sparks fizz off the pointer and fall (nothing stays)
+    //   aurora    AURORA: a rippling curtain of green-to-violet light hung down from your stroke
+    //   stamps    STAR STAMPS: a glowing shape set every `gap` px along your stroke — the wheel picks star / heart / moon / diamond / flower; their colours run on from yours
+    //   wash      COLOUR WASH (Illusion — the Light school has no two-key word left: an illusion of colour, only drawn): a soft tint of your colour sprayed onto what is under
+    //             the pointer (lit rock takes the colour, the dark stays dark), fading over a minute
+    lightbrush: { name: 'Light brush', school: 'light', form: 'stream', tier: 0, cd: 2, stance: 'level', kind: 'paint', brush: 'line', learn: 3, chan: true, chanS: 10, reach: 480, secs: 30, pts: 300,
+      fx: '#bcd8ff', plain: { keys: [L, D, R, L, L], rune: [1, 4, 3, 7, 8] } },
+    sparkler: { name: 'Sparkler', school: 'light', form: 'stream', tier: 0, cd: 2, stance: 'level', kind: 'paint', brush: 'sparkler', learn: 3, chan: true, chanS: 10, reach: 480, secs: 0, pts: 0,
+      fx: '#ffe6a8', plain: { keys: [L, D, R, D, U], rune: [1, 4, 5, 8, 7] } },
+    aurora: { name: 'Aurora', school: 'light', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'paint', brush: 'aurora', learn: 3, chan: true, chanS: 10, reach: 480, secs: 30, pts: 240,
+      fx: '#8af0c0', plain: { keys: [L, D, L, L, U], rune: [1, 4, 6, 7, 3] } },
+    stamps: { name: 'Star stamps', school: 'light', form: 'stream', tier: 0, cd: 2, stance: 'level', kind: 'paint', brush: 'stamps', learn: 3, chan: true, chanS: 10, reach: 480, secs: 30, pts: 60, gap: 30,
+      fx: '#ffe08a', plain: { keys: [L, D, U, D, U], rune: [1, 4, 8, 7, 6] } },
+    colourwash: { name: 'Colour wash', school: 'illusion', form: 'stream', tier: 0, cd: 4, stance: 'level', kind: 'paint', brush: 'wash', learn: 3, chan: true, chanS: 8, reach: 480, secs: 60, pts: 260,
+      fx: '#ff9be0', plain: { keys: [L, U, D, R, R], rune: [2, 0, 4, 8, 7] } },
     // ⭐ STEP 3d (2026-11-17), BATCH b — the server changes the world; what it changes goes back by itself (server `magicTemp`, kept in the database so a restart does not strand it):
     //   FREEZE (4A: clear blue ice) — the WATER at the pointer turns to ice cell by cell, outward from where it struck; walkable; melts back to the same water after `secs`.
     //     cells  at most this many · ringMs  between one ring of cells and the next
@@ -918,7 +937,8 @@
     boundbow: [[D, D], [4, 3, 6]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
     flash: [[U, R], [4, 1, 2]], darkness: [[L, D], [4, 3, 6]], daylight: [[U, U], [4, 1]], sunbolt: [[R, R], [4, 5]], sunbeam: [[R, D], [4, 8]],   // (20b: the shared bolt and stream endings)
-    fireworks: [[U, L], [4, 1, 0]], display: [[L, U], [4, 3, 0]], rainbow: [[L, R], [4, 3, 1, 5]], beacon: [[D, U], [4, 0, 1]], snuff: [[D, R], [4, 0, 3]],   // (20c: up and off · its variant the other way round · an arch over · down, then up · in and out; strokes off the middle no other Light word starts with)   // (20a: up and out, a burst · down into the dark · straight up, a sun)
+    fireworks: [[U, L], [4, 1, 0]], display: [[L, U], [4, 3, 0]], rainbow: [[L, R], [4, 3, 1, 5]], beacon: [[D, U], [4, 0, 1]], snuff: [[D, R], [4, 0, 3]],
+    lightbrush: [[R, U], [4, 1, 5, 8]], sparkler: [[U, D], [4, 3, 7]], aurora: [[L, L], [4, 1, 3]], stamps: [[R, L], [4, 3, 1, 0]], colourwash: [[D, U, D], [4, 7, 8, 5]],   // (20d: the last four two-key words of Light; the wash in Illusion)   // (20c: up and off · its variant the other way round · an arch over · down, then up · in and out; strokes off the middle no other Light word starts with)   // (20a: up and out, a burst · down into the dark · straight up, a sun)
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
   SPELLS.shrink.school = 'alteration';   // (grow and shrink one school — the user)
