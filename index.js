@@ -4100,6 +4100,47 @@ function magicPocketFold(room, obj, pk) { const map = roomObjects[room]; if (!ma
   const rec = Object.assign({}, obj, { x: Math.round(P.x), y: Math.round(P.y), angle: +(+P.a || 0).toFixed(4) }); delete rec.ch; delete rec.chs; for (const k of Object.keys(rec)) if (k[0] === '_') delete rec[k];
   magicPocketPut(pk, { room, obj: rec, at: Date.now() }); return true; }
 // UNFOLDED with its box's middle at (x, y) in the room it came from, its driving given to `by` (it falls from there) → the object
+// ⭐⭐ (magic 19, 2026-11-27) SUMMONING. A BOUND TOOL: a tool of spirit made here, in its caster's hand — `eq` theirs (never written to storage, gone with them: `eqDropSocket`),
+//   `bnd` its mark (every screen draws its spirit), `bndBy` its caster, `bndU` when it goes (Date.now ms). Out of their hand it is gone (`itemObjMove`, the hold's let-go,
+//   their own put-away); nobody else takes hold of it or tugs it. One a caster (a new one takes the old). No `item`: nothing in any pouch moves.
+const _magicBound = new Map();   // socket id → { room, id }
+function magicBoundMake(room, sock, name, look, x, y, secs) {
+  if (!HELD.is(look) || !roomObjects[room] || !isFinite(x) || !isFinite(y)) return null; const L = HELD.LOOKS[look], now = Date.now();
+  const old = _magicBound.get(sock.id); if (old) { const o0 = roomObjects[old.room] && roomObjects[old.room].get(old.id); if (o0) magicBoundGone(old.room, o0); }
+  const id = sock.id + '-bd' + now.toString(36);
+  const o = buildWorldObject('stamp', { type: 'stamp', content: L.content, shape: 'rect', x: Math.round(x), y: Math.round(y), w: L.w || 40, h: L.h || 3, angle: 0,
+    breakable: false, loose: 1, look, lwt: L.wt || 1, lbnc: 0 }, id, sock.id, name || '', room);
+  if (!o) return null;
+  o.bnd = 1; o.bndBy = sock.id; o.bndU = now + Math.round(secs * 1000); o.eq = sock.id; eqNote(sock.id, o.id, 1);
+  objIndex(room, o);
+  if (objChunked(room)) emitObjToChunks(room, o, 'avatar-object-add', o); else io.to(room).emit('avatar-object-add', o);
+  _magicBound.set(sock.id, { room, id: o.id });
+  setTimeout(() => { const o2 = roomObjects[room] && roomObjects[room].get(o.id); if (o2 === o) magicBoundGone(room, o2); }, Math.round(secs * 1000) + 200);
+  return o;
+}
+function magicBoundGone(room, o) { const map = roomObjects[room]; if (!map || map.get(o.id) !== o) return false;
+  { const q = _magicBound.get(o.bndBy); if (q && q.id === o.id) _magicBound.delete(o.bndBy); }
+  if (o.eq) { eqNote(o.eq, o.id, 0); delete o.eq; }
+  { const hm = roomObjHeld[room]; if (hm) { hm.delete(o.id); if (!hm.size) delete roomObjHeld[room]; } const os = roomObjHeldOff[room]; if (os) { os.delete(o.id); if (!os.size) delete roomObjHeldOff[room]; }
+    const dm = roomObjDrv[room]; if (dm) dm.delete(o.id); const dl = roomObjDrvAt[room]; if (dl) dl.delete(o.id); }
+  bodyUnstamp(room, o.id, true); objStOf(room).delete(o.id); coverDrop(room, o.id);
+  objUnindex(room, o);
+  emitObjToChunks(room, o, 'avatar-object-removed', { id: o.id, quiet: 1, bound: 1 });
+  { const s = io.sockets.sockets.get(o.bndBy); if (s && objChunked(room)) s.emit('avatar-object-removed', { id: o.id, quiet: 1, bound: 1 }); }   // (…its caster may not be subscribed there)
+  broadcastObjSt(room); return true; }
+// A SPIRIT STEP: `thick` rows of `wide` cells, its top row at the point, each grown out both ways from under the point, only into open cells (`magicWallLines`: rock or liquid
+//   ends a side). 0 = the point is not open.
+function magicStepMake(room, x, y, S) {
+  const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); if (!grid) return 0;
+  const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, c0 = Math.floor(x / T), r = Math.floor(y / T), W = Math.max(2, S.wide || 6), floorRow = Math.floor(roomFloorTop(room) / T);
+  if (c0 < 0 || c0 >= COLS || r < 1 || r >= floorRow || !peekAir(grid, c0 * ROWS + r)) return 0;
+  const half = Math.floor(W / 2), lines = [];
+  for (let d = 0; d < Math.max(1, S.thick || 1); d++) { const rr = r + d; if (rr >= floorRow) break; const Lc = [], Rc = [];
+    for (let k = 0; k < W - half; k++) { const c = c0 + k; Rc.push(c < COLS ? c * ROWS + rr : -1); }
+    for (let k = 0; k < half; k++) { const c = c0 - 1 - k; Lc.push(c >= 0 ? c * ROWS + rr : -1); }
+    lines.push({ cells: Rc, mat: S.mat || 16 }, { cells: Lc, mat: S.mat || 16 }); }
+  return magicWallLines(room, lines, S);
+}
 function magicPocketUnfold(room, q, x, y, by, pk) { const obj = Object.assign({}, q.obj, { x: Math.round(x), y: Math.round(y) });
   if (roomObjects[room] && roomObjects[room].has(obj.id)) obj.id = obj.id + '-u' + (Date.now() % 1e8).toString(36);
   magicPocketPut(pk, null); objIndex(room, obj); emitObjToChunks(room, obj, 'avatar-object-add', obj);
@@ -5224,7 +5265,7 @@ function magicWallSide(room, x, y, dir, S) {
 //   end first. `S.sink`: the cells are kind 'sink' (the pillar SINKS back the way it rose: no cracks, no rubble). `S.crackS` 0 = no cracks.
 function magicWallLines(room, lines, S) {
   const st = cellsOf(room), grid = st.terrain; if (!lines.length || !grid) return 0;
-  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS != null ? S.crackS : 6) * 1000, gap = S.crumbleMs || 30, mats = roomMats[room] || {}, kind = S.sink ? 'sink' : S.melts ? 'melt' : 'wall', rowMs = S.rowMs || 70, waitN = S.waitN || 0;
+  const until = Date.now() + (S.secs || 45) * 1000, crack = (S.crackS != null ? S.crackS : 6) * 1000, gap = S.crumbleMs || 30, mats = roomMats[room] || {}, kind = S.tkind || (S.sink ? 'sink' : S.melts ? 'melt' : 'wall'), rowMs = S.rowMs || 70, waitN = S.waitN || 0;
   const avoid = new Set(); let total = 0; for (const L of lines) { L.k = 0; L.w = 0; total += L.cells.length; for (const i of L.cells) if (i >= 0) avoid.add(i); }
   const tick = (h) => {
     const s2 = cellsOf(room); if (s2.terrain !== grid) return; const cells = [], liq = [], t2 = s2.fineTotal, el = h * rowMs; let live = false;
@@ -23055,6 +23096,7 @@ function vesselSpill(room, o, x, y, vx, vy) {
 // `toSid` = whose hand it is going into, or null = into the world. False when the thing had to be removed instead: its holder
 // no longer carries one (their pouch was emptied under it), and leaving it lying would make a second one out of nothing.
 function itemObjMove(room, o, toSid) {
+  if (o && o.bnd) { if (!toSid || toSid !== o.bndBy) { magicBoundGone(room, o); return false; } return true; }   // (magic 19) a bound tool: out of its caster's hand it is gone
   if (!o || !o.item) return true;
   // (2026-10-20) an object saved before its item was taken out of the table (the stand-ins) is a plain object now — no count moves
   if (!ITEMS.isItem(o.item)) return true;
@@ -28053,6 +28095,7 @@ io.on('connection', (socket) => {
     // (hand items) …and what is in your own HAND is yours to put away whoever first brought it into the world — a sword somebody
     //   else dropped and you picked up. Without this it stayed in the world, held by you for ever, the moment you chose another number.
     if (!obj || !(mine || obj.eq === socket.id || adminSockets.has(socket.id))) return;
+    if (obj.bnd) { magicBoundGone(currentAvatarRoom, obj); return; }   // (magic 19) a bound tool put away: gone, in its own motes
     if (obj.eq) vesselPutAway(obj);                         // (tools piece 8) put away, a bucket's contents go in the pouch with it
     objUnindex(currentAvatarRoom, obj);
     if (HELD.is(obj.look) && HELD.LOOKS[obj.look].hook) hookRopesDrop(currentAvatarRoom, obj.id);   // (tools piece 6) …and a grappling hook's rope with it
@@ -29169,6 +29212,7 @@ io.on('connection', (socket) => {
     if (on) {
       // (magic 11d) …or SEALED by somebody else
       if (!holdable(o) || (hs && hs !== socket.id) || magicSealedOther(room, id, socket.id)) { socket.emit('obj-hold-no', { id, sealed: magicSealedOther(room, id, socket.id) ? 1 : 0 }); if (!hm.size) delete roomObjHeld[room]; return; }
+      if (o.bnd && o.bndBy !== socket.id) { socket.emit('obj-hold-no', { id }); if (!hm.size) delete roomObjHeld[room]; return; }   // (magic 19) a bound tool is its caster's alone
       if (hs === socket.id) { if (setHand()) broadcastObjSt(room); return; }   // …already theirs: it may have changed HANDS
       setHand();
       hm.set(id, socket.id); (roomObjDrv[room] || (roomObjDrv[room] = new Map())).set(id, socket.id);
@@ -29177,6 +29221,7 @@ io.on('connection', (socket) => {
     } else {
       if (hs !== socket.id) { if (!hm.size) delete roomObjHeld[room]; return; }
       hm.delete(id); if (!hm.size) delete roomObjHeld[room];
+      if (o && o.bnd) { magicBoundGone(room, o); return; }   // (magic 19) a bound tool let go of: gone
       if (o && o.item && o.eq === socket.id) { if (o._burnt) { eqRemoveObj(room, o); broadcastObjSt(room); return; } itemObjMove(room, o, null); }   // …out of their hand into the world: one fewer in their pouch (a scroll burning away — magic step 2 — is already spent: it goes)
     }
     broadcastObjSt(room);
@@ -29352,6 +29397,9 @@ io.on('connection', (socket) => {
     // (magic step 3g) a LIFT names a loose thing nobody holds · a DOUBLE starts by its caster and walks no faster than a run
     if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
     if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    // (magic 19) a BOUND TOOL: a look this spell may make (the caster's game picked it by what they point at) · a SPIRIT STEP: where it goes
+    if (S.kind === 'bound' && (typeof m.look !== 'string' || !Array.isArray(S.looks) || S.looks.indexOf(m.look) < 0)) return no('bad');
+    if (S.kind === 'step' && (!isFinite(m.tx) || !isFinite(m.ty))) return no('bad');
     // (magic 10a) BLINK / PASS THROUGH: where you stand (by the hand) and where you go — the caster's game found it; held to the spell's reach from the hand below
     // (magic 10b) MARK: where the caster's feet are · RECALL: only with a mark of theirs here (REWIND's path comes with its let-go: 'magic-chan-stop')
     if (S.kind === 'mark' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
@@ -29616,6 +29664,10 @@ io.on('connection', (socket) => {
       out.tx = Math.round(out.tx); out.ty = g.y; out.secs = +(SK.secs || 10).toFixed(2);
       if (S.kind === 'pcloud') { out.w = (S.wide || 16) * TERRAIN_CELL; out.h = (S.high || 4) * TERRAIN_CELL; M.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, h: out.h, until: now + out.secs * 1000 }); }
       else M.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, until: now + out.secs * 1000, armAt: now + (S.armS || 1.2) * 1000 }); }
+    // ⭐ (magic 19) A BOUND TOOL in the caster's hand (made at the catalyst's tip; their game takes it at once) · A SPIRIT STEP at the point (not open there: refused)
+    if (S.kind === 'bound') { const secs = +(SK.secs || 60).toFixed(2), B = magicBoundMake(room, socket, currentUsername, m.look, out.x, out.y, secs); if (!B) return no('bad'); out.obj = B.id; out.look = B.look; out.secs = secs; }
+    if (S.kind === 'step') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const n = magicStepMake(room, out.tx, out.ty, SK); if (!n) return no('room');
+      out.tx = Math.round(out.tx); out.ty = Math.round(out.ty); out.n = n; out.wide = S.wide || 10; out.thick = S.thick || 1; out.secs = +(SK.secs || 20).toFixed(2); }
     if (S.kind === 'dispel') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = S.R || 120; out.ms = S.ms || 450; out.n = magicDispel(room, out.tx, out.ty, out.R, out.ms, socket.id); }
     io.to(room).emit('magic-cast', out);
   });
@@ -29929,6 +29981,7 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || typeof id !== 'string') return;
     const hm = roomObjHeld[room], hs = hm && hm.get(id);
     if (!hs || hs === socket.id) return;
+    { const o = roomObjects[room] && roomObjects[room].get(id); if (o && o.bnd) return; }   // (magic 19) a bound tool cannot be tugged away
     io.to(hs).emit('obj-tug', { id, from: socket.id });
   });
   socket.on('obj-tug-res', ({ id, to, win }) => {
