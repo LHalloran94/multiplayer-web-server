@@ -825,21 +825,79 @@
   };
 
   // ⭐ 4c (2026-11-18, Trello #707 — kickoff §ROUND 4): MODIFIERS, a THIRD PIECE put in after a whole spell (after its tier's ups). Learnt from tomes as spells are (a page each; your
-  //   own part of it as a spell's, per world, a death forgets it). ONE a cast. It costs more keys and `cdK` × the spell's cooldown. `kinds` = the spells it goes on (their `kind`).
+  //   own part of it as a spell's, per world, a death forgets it). It costs more keys and `cdK` × the spell's cooldown.
   //   ITS PIECE, the same in the language and plain:  keys — a DOWN that opens it (a tier adds only ups, so the two never mix), YOUR OWN KEY, then its two `keys`;
   //   rune — on to the top left point and along the TOP ROW (the tier's underline is the bottom row), YOUR OWN POINT, then its `rune` stroke.
   //   follow  the caster's game turns it towards the pointer (`turn` radians a second, up to 3 × close to it; the client's dial overrides), `speedK` its speed, `lifeK` its time, `gravK` its gravity; others are sent where it is
   //   arc     a lob that comes down on the pointer (`g` px/s² its gravity, `reach` px the farthest point) — every screen works the same arc out of the cast (`arcAim`)
-  //   split   at `at` seconds it becomes `n`, `fan` degrees apart, each `dmgK` of the blow · faint  drawn at `seen` of its strength on others' screens, `seenOwn` on yours
+  //   split   at `at` seconds it becomes `n`, `fan` degrees apart, each `dmgK` of the blow (a SHOT's pieces each land `shotK` of its size) · faint  drawn at `seen` of its strength on others' screens, `seenOwn` on yours
+  // ⭐⭐ STEP 21 M1 (2026-11-27, kickoff §'STEP 21' — the user: modifiers as WIDELY as they make sense, STACKING as many compatible ones as you like, and the table of what cannot go
+  //   together must know the modifiers STILL TO COME): any number of pieces after the spell (up to `MOD_MAX`), in ANY ORDER; the cooldown × every piece's `cdK`.
+  //   fits   the ways of DELIVERY it goes on (`delivOf`): 'fly' a thing that flies and ends (a bolt; a SHOT — freeze, the walls, Earth's changes, the tunnelling bolt, the fire
+  //          walls) · 'thrown' a real thing flown (the ice shard, a ball of water, a chunk of ground) · 'held' a held spell (stream, beam, jet) · 'placed' made where you point ·
+  //          'round' round you · 'self' on yourself · 'touch' on the one nearest the pointer · 'paint' painted with the pointer
+  //   group  at most ONE of each group in a cast: 'path' what steers it · 'fall' what pulls it down · 'size' · 'pace' its speed · 'wall' what it does at rock · 'body' what it
+  //          does at a body · 'wait' what holds it back before it goes
+  //   clash  further ones it never goes with · rep  how many times it may be put in (each one more of it; 1 = once) · hit  only on a bolt that stops at bodies
+  //   A spell's `noMods` = ones that would mean nothing on it (the tunnelling bolt goes through rock already).
   const MODS = {
-    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [4, 3], kinds: ['bolt'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 2, gravK: 0.3 },
-    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [6, 4, 8], kinds: ['bolt'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },
-    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [3, 7, 5], kinds: ['bolt'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45 },
-    mod_faint:  { name: 'Faint', keys: [D, D], rune: [6, 7], kinds: ['bolt'], cdK: 1.5, learn: 3, seen: 0.22, seenOwn: 0.5 },
+    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [4, 3], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 2, gravK: 0.3 },
+    // (21 M1) its stroke was 6 → 4 → 8: ending on the bottom right, the next piece's jump back to the top left ran back over it through the middle (a fold) — now an arch ∧, split's V turned over
+    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [3, 1, 5], fits: ['fly'], group: ['path', 'fall'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },
+    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [3, 7, 5], fits: ['fly'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6 },
+    mod_faint:  { name: 'Faint', keys: [D, D], rune: [6, 7], fits: ['fly'], cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5 },
   };
+  // (21 M1) THE MODIFIERS TO COME — no keys, no page, not castable: only the rules (`modFits`, `modClash`, `modsOk`) know them, so what is built now already leaves room for them
+  const MOD_PLAN = {
+    mod_bounce:    { name: 'Bounces', fits: ['fly', 'thrown'], group: ['wall'], cdK: 1.5 },
+    mod_thru:      { name: 'Through walls', fits: ['fly'], group: ['wall'], cdK: 2 },
+    mod_delay:     { name: 'Delayed', fits: ['fly', 'placed', 'round'], group: ['wait'], rep: 3, cdK: 1.25 },
+    mod_cluster:   { name: 'Cluster', fits: ['fly'], cdK: 1.5 },
+    mod_bigger:    { name: 'Bigger', fits: ['fly', 'thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.5 },
+    mod_smaller:   { name: 'Smaller', fits: ['fly', 'thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.2 },
+    mod_pierce:    { name: 'Pierces', fits: ['fly'], group: ['body'], hit: 1, cdK: 1.5 },
+    mod_chain:     { name: 'Chains', fits: ['fly'], group: ['body'], hit: 1, cdK: 2 },
+    mod_explode:   { name: 'Bursts on hitting', fits: ['fly'], group: ['body'], hit: 1, cdK: 1.5 },
+    mod_homing:    { name: 'Homing', fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 2 },
+    mod_boomerang: { name: 'Comes back', fits: ['fly', 'thrown'], group: ['path'], cdK: 1.5 },
+    mod_orbit:     { name: 'Circles you', fits: ['fly'], group: ['path', 'wait'], clash: ['mod_wavy'], cdK: 1.5 },
+    mod_wavy:      { name: 'Wavy', fits: ['fly'], cdK: 1.25 },
+    mod_faster:    { name: 'Faster', fits: ['fly', 'thrown'], group: ['pace'], rep: 2, cdK: 1.25 },
+    mod_slower:    { name: 'Slower', fits: ['fly'], group: ['pace'], rep: 2, cdK: 1.25 },
+    mod_accel:     { name: 'Speeds up', fits: ['fly'], group: ['pace'], cdK: 1.25 },
+    mod_heavy:     { name: 'Heavy', fits: ['fly', 'thrown'], group: ['fall'], cdK: 1.25 },
+    mod_weightless: { name: 'Weightless', fits: ['fly', 'thrown'], group: ['fall'], cdK: 1.25 },
+    mod_trail:     { name: 'Leaves a trail', fits: ['fly'], cdK: 1.5 },
+    mod_hang:      { name: 'Hangs, then flies', fits: ['fly'], group: ['wait'], cdK: 1.25 },
+    mod_double:    { name: 'Twice', fits: ['fly'], cdK: 1.75 },
+    mod_trigger:   { name: 'Casts the next where it lands', fits: ['fly', 'placed'], cdK: 1.5 },
+    mod_lasting:   { name: 'Lasts longer', fits: ['held', 'placed', 'round', 'self'], rep: 2, cdK: 1.5 },
+  };
+  const MOD_MAX = 6;   // (21 M1) the most pieces a cast takes — the input time and the cooldowns are the real limit; this only stops nonsense
   const isMod = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(MODS, id);
   const modOf = (id) => isMod(id) ? MODS[id] : null;
-  const modFits = (mid, spell) => { const M = modOf(mid), S = SPELLS[spell] && Object.prototype.hasOwnProperty.call(SPELLS, spell) ? SPELLS[spell] : null; return !!M && !!S && !S.innate && M.kinds.indexOf(S.kind) >= 0; };
+  const modAny = (id) => isMod(id) ? MODS[id] : (typeof id === 'string' && Object.prototype.hasOwnProperty.call(MOD_PLAN, id) ? MOD_PLAN[id] : null);
+  const modList = (m) => Array.isArray(m) ? m : (m ? [m] : []);
+  // (21 M1) HOW A SPELL IS DELIVERED (what `fits` means) — by its kind and form
+  const SHOT_KINDS = ['freeze', 'wall', 'change', 'tunnel', 'firewall'], THROWN_KINDS = ['shard', 'waterball', 'chunk'], PAINT_KINDS = ['paint', 'rainbow'];
+  const isShot = (S) => !!S && SHOT_KINDS.indexOf(S.kind) >= 0 && S.speed > 0;
+  const delivOf = (S) => { if (!S || S.innate) return null; if (S.kind === 'bolt' || isShot(S)) return 'fly'; if (THROWN_KINDS.indexOf(S.kind) >= 0) return 'thrown';
+    if (PAINT_KINDS.indexOf(S.kind) >= 0) return 'paint'; if (S.chan) return 'held'; if (S.form === 'touch') return 'touch'; if (S.form === 'burst' || S.aim === 'self') return 'round';
+    if (S.form === 'self') return 'self'; return 'placed'; };
+  const modFits = (mid, spell) => { const M = modAny(mid), S = SPELLS[spell] && Object.prototype.hasOwnProperty.call(SPELLS, spell) ? SPELLS[spell] : null; if (!M || !S || S.innate) return false;
+    if (M.fits.indexOf(delivOf(S)) < 0 || (S.noMods && S.noMods.indexOf(mid) >= 0)) return false;
+    return !(M.hit && (S.kind !== 'bolt' || S.thru)); };
+  // two modifiers that never go together: one of the same group, or named in a `clash` (either way round). The same one twice is a repeat (`rep`), not a clash
+  const modClash = (a, b) => { if (a === b) return false; const A = modAny(a), B = modAny(b); if (!A || !B) return true;
+    if ((A.clash || []).indexOf(b) >= 0 || (B.clash || []).indexOf(a) >= 0) return true; for (const g of A.group || []) if ((B.group || []).indexOf(g) >= 0) return true; return false; };
+  // a list of modifiers on a spell: each fits, none put in more often than its `rep`, no two that clash, no more than `most` (and `MOD_MAX`)
+  const modsOk = (spell, list, most) => { if (!Array.isArray(list) || list.length > Math.min(MOD_MAX, most || MOD_MAX)) return false; const n = {};
+    for (let i = 0; i < list.length; i++) { const id = list[i]; if (!modFits(id, spell)) return false; n[id] = (n[id] || 0) + 1; if (n[id] > (modAny(id).rep || 1)) return false;
+      for (let j = 0; j < i; j++) if (modClash(id, list[j])) return false; }
+    return true; };
+  // every way the modifiers in `mods` may follow a spell, in every order, up to `most` long (with none first) — for reading a rune drawn freely
+  const modSeqs = (spell, mods, most) => { const out = [[]], lim = Math.min(MOD_MAX, most || MOD_MAX), go = (cur) => { if (cur.length >= lim) return;
+    for (const md of mods || []) { const nx = cur.concat([md]); if (!modsOk(spell, nx, lim)) continue; out.push(nx); go(nx); } }; go([]); return out; };
   // ⭐ (4e round 3, 2026-11-18 — the user: 'On yourself' as a shared form forced similar spells into different schools; 'the school be the thing held static and the form part simply
   //   something unique for every spell … similar spells could be similar') A SPELL'S INPUT IN THE LANGUAGE = its SCHOOL's piece · your own key · its own WORD (`word`: two keys and a
   //   stroke from the middle, unique within its school) · an up / an underline a tier. SHARED ENDINGS kept where they mean the same in every school: a BOLT ends → → (stroke middle →
@@ -943,6 +1001,7 @@
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
   SPELLS.shrink.school = 'alteration';   // (grow and shrink one school — the user)
+  SPELLS.tunnelbolt.noMods = ['mod_thru'];   // (21 M1) it bores through rock already
   const wordOf = (S) => S.word || FORMS[S.form] || { keys: [], rune: [] };
   // (step 3h, the user: "add a contents page to the master tome … the tabs should probably just be for each school and the spells should be arranged by schools") its first page
   //   is the CONTENTS (`contents`: no spell — the client lists the schools and their spells there, each a link), then the spells school by school, in the schools' order
@@ -977,7 +1036,9 @@
   const modRune = (mid, own) => { const M = modOf(mid); if (!M) return null; const pts = [0, 2]; let o = null; if (own && own.p != null) { o = 2; pts.push(own.p); } return { pts: pts.concat(M.rune), own: o }; };
   // the keys of a spell: `lang` = school + form (+ an "up" a tier), else its plain sequence; `own` (from `ownOf`) put in after the first two. (4c) `mod` = a modifier put in after
   //   it, `modOwn` its own part · a MODIFIER's id alone = its piece alone (what its page practises)
-  const keysOf = (id, lang, own, mod, modOwn) => { if (isMod(id)) return modKeys(id, own); const k0 = keysCore(id, lang, own); if (!k0 || !mod) return k0; const mk = modKeys(mod, modOwn); return mk ? k0.concat(mk) : null; };
+  //   (21 M1) `mod` may be a LIST (each piece after the last), `modOwn` then the list of their own parts
+  const keysOf = (id, lang, own, mod, modOwn) => { if (isMod(id)) return modKeys(id, own); const k0 = keysCore(id, lang, own), ms = modList(mod); if (!k0 || !ms.length) return k0;
+    const mo = Array.isArray(modOwn) ? modOwn : [modOwn]; let k = k0; for (let i = 0; i < ms.length; i++) { const mk = modKeys(ms[i], mo[i] || null); if (!mk) return null; k = k.concat(mk); } return k; };
   const keysCore = (id, lang, own) => { const S = of(id); if (!S || S.innate) return null; let k;
     if (!lang) { if (!S.plain) return null; k = S.plain.keys.slice(); }
     else { k = SCHOOLS[S.school].keys.concat(wordOf(S).keys); for (let i = 0; i < (S.tier || 0); i++) k.push(U); }
@@ -996,8 +1057,10 @@
   // (4c) …with a modifier's stroke after it (`mod` = where it begins, `modOwn` = your own point in it) · a modifier alone: its stroke (`parts` 2 = the top row is its opening)
   const runeOf = (id, lang, own, mod, modOwn) => {
     if (isMod(id)) { const Q = modRune(id, own); return Q ? { pts: Q.pts, parts: 2, own: Q.own != null ? Q.own : undefined } : null; }
-    const R0 = runeSpell(id, lang, own); if (!R0 || !mod) return R0; const Q = modRune(mod, modOwn); if (!Q) return null;
-    return Object.assign({}, R0, { pts: R0.pts.concat(Q.pts), mod: R0.pts.length, modOwn: Q.own != null ? R0.pts.length + Q.own : null }); };
+    const R0 = runeSpell(id, lang, own), ms = modList(mod); if (!R0 || !ms.length) return R0; const mo = Array.isArray(modOwn) ? modOwn : [modOwn];
+    let pts = R0.pts, first = null; const at = [];   // (21 M1) one stroke after another; `mods` = where each begins
+    for (let i = 0; i < ms.length; i++) { const Q = modRune(ms[i], mo[i] || null); if (!Q) return null; at.push(pts.length); if (i === 0) first = Q.own != null ? pts.length + Q.own : null; pts = pts.concat(Q.pts); }
+    return Object.assign({}, R0, { pts, mod: at[0], modOwn: first, mods: at }); };
   // a path through the points with every point that lies exactly between its neighbours taken out (6 → 0 passes over 3: the same line)
   const runeNorm = (pts) => { const p = []; for (const n of pts) if (!p.length || p[p.length - 1] !== n) p.push(n);
     for (let i = 1; i < p.length - 1;) { const a = p[i - 1], b = p[i], c = p[i + 1];
@@ -1008,21 +1071,34 @@
   //   { more: true } while some spell still begins with them · null = wrong. `ownH(id)` = that spell's own number, or null
   //   (4c) `mods` = the modifiers that may follow (each spell is tried alone, then with each that goes on it) → also `mod` (the one put in) and `moreOf` (the spells a modifier
   //   is still being put in after) · a modifier's id in `ids` = its piece alone
-  const inputsOf = (ids, mods) => { const out = []; for (const id of ids || castable()) { out.push([id, null]); if (mods && !isMod(id)) for (const m of mods) if (modFits(m, id)) out.push([id, m]); } return out; };
   const ownFor = (id, lang, ownH) => ownH ? ownOf(id, lang, ownH(id)) : null;
-  const matchKeys = (seq, lang, ids, ownH, mods) => { let more = false, spell = null, mod = null; const moreOf = [];
-    for (const [id, md] of inputsOf(ids, mods)) { const k = keysOf(id, lang, ownFor(id, lang, ownH), md, md ? ownFor(md, lang, ownH) : null); if (!k || k.length < seq.length) continue;
-      let ok = true; for (let i = 0; i < seq.length; i++) if (k[i] !== seq[i]) { ok = false; break; }
-      if (!ok) continue; if (k.length === seq.length) { if (!spell) { spell = id; mod = md; } } else { more = true; if (md && moreOf.indexOf(id) < 0) moreOf.push(id); } }
-    return spell ? { spell, mod, more, moreOf } : more ? { more: true, moreOf } : null; };
   // points joined so far → the same answers. (step 2) A point just passed over on the way to the next — 8 → 6 runs over 7 — is not wrong yet: the stroke is still going
   const midOf = (a, b, c) => a !== c && (a % 3) + (c % 3) === 2 * (b % 3) && Math.floor(a / 3) + Math.floor(c / 3) === 2 * Math.floor(b / 3);
-  const matchRune = (pts, lang, ids, ownH, mods) => { const p = runeNorm(pts); let more = false, spell = null, mod = null; const moreOf = [];
-    for (const [id, md] of inputsOf(ids, mods)) { const R0 = runeOf(id, lang, ownFor(id, lang, ownH), md, md ? ownFor(md, lang, ownH) : null); if (!R0) continue; const k = runeNorm(R0.pts); if (k.length < p.length) continue;
-      let ok = true, bad = -1; for (let i = 0; i < p.length; i++) if (k[i] !== p[i]) { ok = false; bad = i; break; }
-      if (!ok) { if (bad === p.length - 1 && bad > 0 && midOf(p[bad - 1], p[bad], k[bad])) { more = true; if (md && moreOf.indexOf(id) < 0) moreOf.push(id); } continue; }
-      if (k.length === p.length) { if (!spell) { spell = id; mod = md; } } else { more = true; if (md && moreOf.indexOf(id) < 0) moreOf.push(id); } }
-    return spell ? { spell, mod, more, moreOf } : more ? { more: true, moreOf } : null; };
+  // ⭐ (21 M1) STACKING: one reader for keys and runes. Each spell's own input first; once it is all there, what follows is read as modifier PIECES, one after another, in any
+  //   order — each one that fits, may be added (`modsOk`), and the input so far still agrees with — so the reading is a short walk, never every combination.
+  //   → { spell, mods (the list put in), mod (the first, as before), more, moreOf } · { more, moreOf } · null. `most` = how many pieces at most (the panel's switch: 1)
+  //   (a rune: the input and each whole input normalised, `runeNorm`; the last point of a piece may be passed over by the next piece's line, so a piece is gone on into when
+  //   all of it but its last point agrees)
+  const matchIn = (rune) => (seq, lang, ids, ownH, mods, most) => {
+    const have = rune ? runeNorm(seq) : seq, enc = rune ? runeNorm : (q) => q; let more = false, spell = null, got = null; const moreOf = [];
+    const cmp = (want) => { if (want.length < have.length) return null; for (let i = 0; i < have.length; i++) if (want[i] !== have[i]) return rune && i === have.length - 1 && i > 0 && midOf(have[i - 1], have[i], want[i]) ? 'part' : null; return want.length === have.length ? 'full' : 'part'; };
+    const lead = (want) => { const n = want.length - 1; if (have.length <= n) return false; for (let i = 0; i < n; i++) if (have[i] !== want[i]) return false; return true; };
+    const canMore = (id, list) => (mods || []).some(md => modsOk(id, list.concat([md]), most));
+    const noteMore = (id) => { more = true; if (moreOf.indexOf(id) < 0) moreOf.push(id); };
+    const walk = (id, raw, list) => { for (const md of mods) { const nl = list.concat([md]); if (!modsOk(id, nl, most)) continue; const mo = ownFor(md, lang, ownH);
+      const pc = rune ? (modRune(md, mo) || {}).pts : modKeys(md, mo); if (!pc) continue; const r2 = raw.concat(pc), want = enc(r2), c = cmp(want);
+      if (c === 'full') { if (!spell) { spell = id; got = nl; } if (canMore(id, nl)) noteMore(id); } else if (c === 'part') noteMore(id); else if (lead(want)) walk(id, r2, nl); } };
+    for (const id of ids || castable()) { const own = ownFor(id, lang, ownH), base = rune ? (runeOf(id, lang, own) || {}).pts : keysOf(id, lang, own); if (!base) continue;
+      const want = enc(base), c = cmp(want), mm = !!mods && mods.length > 0 && !isMod(id);
+      if (c === 'full') { if (!spell) { spell = id; got = []; } if (mm && canMore(id, [])) noteMore(id); }
+      else if (c === 'part') more = true;
+      else if (mm && lead(want)) walk(id, base, []); }
+    return spell ? { spell, mods: got, mod: got[0] || null, more, moreOf } : more ? { more: true, moreOf } : null; };
+  // keys so far → { spell } when they are exactly a spell's (and `more` too when a longer spell also begins with them — firebolt is the start of great firebolt) ·
+  //   { more: true } while some spell still begins with them · null = wrong. `ownH(id)` = that spell's own number, or null · (4c) `mods` = the modifiers that may follow ·
+  //   a modifier's id in `ids` = its piece alone
+  const matchKeys = matchIn(false);
+  const matchRune = matchIn(true);
   // A RUNE DRAWN FREELY (moved here from the client in step 2, so the server checks a practice the same way): a path as `n` points evenly along it, fitted to a unit box
   //   (the longer side = 1), middle at 0,0 · how far one drawn path lies from a spell's rune, on average, as a share of its size (where and how big do not matter)
   function pathFit(flat, n) {
@@ -1040,7 +1116,8 @@
   const runeDist = (fit, id, lang, own, mod, modOwn) => { const R0 = runeOf(id, lang, own, mod, modOwn); if (!R0 || !fit) return 1e9; const flat = []; for (const p of R0.pts) flat.push(p % 3, Math.floor(p / 3));
     const T = pathFit(flat, fit.length / 2); if (!T) return 1e9; let d = 0; const n = fit.length / 2; for (let k = 0; k < n; k++) d += Math.hypot(fit[k * 2] - T[k * 2], fit[k * 2 + 1] - T[k * 2 + 1]); return d / n; };
   // a cooldown in ms with this catalyst
-  const cdMs = (id, cat, mod) => { const S = of(id), C = CATALYSTS[cat], M = modOf(mod); return S ? Math.round(S.cd * 1000 * (C ? C.cdK : 1) * (M ? M.cdK || 1 : 1)) : 0; };   // (4c: × a modifier's)
+  const cdMs = (id, cat, mod) => { const S = of(id), C = CATALYSTS[cat]; if (!S) return 0; let k = 1; for (const m of modList(mod)) { const M = modOf(m); if (M) k *= M.cdK || 1; }   // (4c: × a modifier's; 21 M1: × every one put in)
+    return Math.round(S.cd * 1000 * (C ? C.cdK : 1) * k); };
   // (4c) THE LOB (the arc modifier): from x, y it comes down on tx, ty — the time by how far (never under 0.45 s), the gravity the modifier's. Every screen works out the same
   const arcAim = (S, M, x, y, tx, ty) => { const dx = tx - x, dy = ty - y, g = (M && M.g) || 1100, T = Math.max(0.45, Math.min(1.8, Math.hypot(dx, dy) / Math.max(80, ((S && S.speed) || 600) * 0.75)));
     return { vx: dx / T, vy: (dy - 0.5 * g * T * T) / T, g, T, life: T + 0.6 }; };
@@ -1049,5 +1126,5 @@
   const learnN = (id) => { if (isMod(id)) return Math.max(1, MODS[id].learn || 3); const S = of(baseOf(id)); return S ? Math.max(1, S.learn || (S.tier ? 5 : 3)) : 0; };
   const tomeOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(TOMES, item) ? TOMES[item] : null;
   const scrollOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(SCROLLS, item) ? SCROLLS[item] : null;
-  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, MODS, is, of, isMod, modOf, modFits, arcAim, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
+  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, MODS, MOD_PLAN, MOD_MAX, is, of, isMod, modOf, modAny, modFits, modClash, modsOk, modSeqs, modList, delivOf, isShot, arcAim, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
 });

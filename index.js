@@ -3813,6 +3813,9 @@ const DRV_LEASE_MS = 350;
 // a TUG (`obj-tug`), which the HOLDER's machine decides and this end only carries and records.
 const roomObjHeld = {};   // room → Map<objId, socketId>
 let _magicSeq = 0; const _magicLive = new Map();   // (magic step 1) bolts in the air: cast id → { by, room, x, y, until, reach, burn } — `magic-hit` ends one
+// ⭐ (magic 21 M1, 2026-11-27) A SPLIT SHOT's pieces each land SMALLER (the user: 'split into several smaller walls'): its sizes × `k` — cells changed / frozen, a wall's width and
+//   height (in cells), how far a tunnel bores, a ring's reach — never under 1
+function magicModSplitSK(S, k) { const o = Object.assign({}, S); for (const f of ['cells', 'wide', 'high', 'len', 'rad', 'R']) if (isFinite(o[f]) && o[f] > 0) o[f] = Math.max(1, Math.round(o[f] * k)); return o; }
 // ⭐ MAGIC, STEP 2 (2026-11-17, `scratchpad/kickoff_magic.md` §ROUND 3 step 2): WHAT YOU HAVE LEARNT THIS LIFE, by player key (`playerKeyFor` — a Level's are its own): each spell's
 //   count of right practices with its tome open (learnt at `SPELLS.learnN`), and which LIFE it is — a death clears the counts and starts the next life, so YOUR OWN PART of
 //   every spell's input (`magicOwnH`: from a secret kept here, your key, your life, the spell) changes with it. Kept in the database: a reload or a restart is the same life.
@@ -29377,8 +29380,8 @@ io.on('connection', (socket) => {
     const out = { from: socket.id, on: m.on ? 1 : 0 };
     if (m.on) {
       if (typeof m.cat === 'string') out.cat = m.cat.slice(0, 64);
-      if (Array.isArray(m.k)) out.k = m.k.slice(0, 12).map(v => v & 3);
-      if (Number.isInteger(m.mi) && m.mi > 0 && m.mi < 12) out.mi = m.mi;   // (magic 4c round 2: where a modifier's marks begin — the others draw them on a second ring)
+      if (Array.isArray(m.k)) out.k = m.k.slice(0, 40).map(v => v & 3);   // (21 M1: 12 → 40, stacked modifiers)
+      if (Number.isInteger(m.mi) && m.mi > 0 && m.mi < 40) out.mi = m.mi; if (m.ml === 3 || m.ml === 4) out.ml = m.ml;   // (21 M1: each piece's length — a ring each)   // (magic 4c round 2: where a modifier's marks begin — the others draw them on a second ring)
       if (Array.isArray(m.r)) out.r = m.r.slice(0, 64).map(v => Math.max(-127, Math.min(127, Math.round(+v) || 0)));
       if (SPELLS.is(m.rdy)) out.rdy = m.rdy;
       if (m.ch) { out.ch = 1; out.h = m.h ? 1 : 0; if (isFinite(m.px) && isFinite(m.py)) { out.px = Math.max(-900, Math.min(900, Math.round(+m.px))); out.py = Math.max(-900, Math.min(900, Math.round(+m.py))); } }   // (step 2h: the spell is held in the HAND — a scroll's; step 3b: which hand, and where it points from the body)
@@ -29402,9 +29405,12 @@ io.on('connection', (socket) => {
     let powK = C.powK || 1; if (!SC && H.twoFree && C.powK1 != null) { const mine = eqObjs.get(socket.id); if (mine && [...mine].some(id => id !== o.id)) powK = C.powK1; }
     if (!SC && (S.innate ? C.innate !== m.spell : !magicKnows(socket, m.spell))) return no('unlearnt');
     // ⭐ (4c, kickoff §ROUND 4) A MODIFIER put in after the spell: one that goes on it, learnt (your world's), never on a scroll's spell or an innate ability
-    const MD = m.mod != null ? SPELLS.modOf(m.mod) : null;
-    if (m.mod != null && (!MD || SC || S.innate || !SPELLS.modFits(m.mod, m.spell))) return no('mod');
-    if (MD && !magicKnows(socket, m.mod)) return no('unlearnt');
+    // ⭐ (21 M1) …SEVERAL, stacked (`mods`, in any order): each built, fitting and learnt; together allowed (`modsOk`: no two that clash, none put in more often than it may be).
+    //   A shot that is not flying (the panel's 'shots' off) takes none. `MD` = the first (truthy when there are any), `MDo(id)` = that one's numbers if it was put in
+    const ML = Array.isArray(m.mods) ? m.mods.slice(0, SPELLS.MOD_MAX + 1) : m.mod != null ? [m.mod] : [];
+    if (ML.length && (SC || S.innate || !ML.every(q => SPELLS.isMod(q)) || !SPELLS.modsOk(m.spell, ML) || (SPELLS.isShot(S) && m.shot === 0))) return no('mod');
+    if (ML.some(q => !magicKnows(socket, q))) return no('unlearnt');
+    const MS = new Set(ML), MDo = (q) => MS.has(q) ? SPELLS.modOf(q) : null, MD = ML.length ? SPELLS.modOf(ML[0]) : null;
     const now = Date.now(), cds = socket._magicCd || (socket._magicCd = {}), left = (cds[m.spell] || 0) - now;
     if (!SC && left > 120 && !socket._magicNoCd) return no('cooldown', left);
     if (!isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return no('bad');
@@ -29495,7 +29501,7 @@ io.on('connection', (socket) => {
       if (S.kind === 'pool') { PL = magicPoolFind(room, m.x + dx * k, m.y + dy * k, S); if (!PL) return no('water'); }
       else { const st0 = cellsOf(room); ensureFineArrays(room, 1); if (!st0.fineAmt || (st0.fineSub || 1) !== 1) return no('water'); const g = magicWhirlGround(room, m.x + dx * k, m.y + dy * k); if (!g) return no('ground'); WV = { x: m.x + dx * k, gr: Math.round(g.y / TERRAIN_CELL), dir: dx >= 0 ? 1 : -1 }; } }
     if (SC) socket._magicCharge = null;
-    const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, MD ? m.mod : null); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's)
+    const cd = SC || socket._magicNoCd ? 0 : SPELLS.cdMs(m.spell, H.catalyst, ML); if (!SC) cds[m.spell] = now + cd;   // (4c: × the modifier's; 21 M1: × every one)
     const al = Math.hypot(m.ax, m.ay) || 1, id = ++_magicSeq;
     const out = { id, from: socket.id, spell: m.spell, cat: m.cat, x: Math.round(m.x), y: Math.round(m.y), ax: +(m.ax / al).toFixed(4), ay: +(m.ay / al).toFixed(4), cd, pow: powK };
     if (SC) { out.charge = 1; out.cat = ''; }
@@ -29505,8 +29511,8 @@ io.on('connection', (socket) => {
     if (S.kind === 'fareye') { const secs = +((S.secs || 30) * (socket._magicSecsK || 1)).toFixed(2); out.secs = secs; if (socket._eye) io.to(room).emit('magic-eye-end', { id: socket._eye.id }); socket._eye = { id, room, until: now + secs * 1000, reach: S.reach || 960 }; }   // (17c round 2: one eye a caster)
     if (S.kind === 'seekmark' && typeof out.tgt === 'string' && out.tgt !== 'mw-test-dummy') { const secs = +((S.secs || 120) * (socket._magicSecsK || 1)).toFixed(2); _magicSeekMarks.set(socket.id + '>' + out.tgt, now + secs * 1000); out.secs = secs; if (_magicSeekMarks.size > 2000) for (const [k, t] of _magicSeekMarks) if (t < now) _magicSeekMarks.delete(k); }
     // (step 3a) where a placed spell goes (the light orb): the caster's point, no further than its reach
-    if (isFinite(m.tx) && isFinite(m.ty)) { const dx = m.tx - out.x, dy = m.ty - out.y, d = Math.hypot(dx, dy), lim = ((MD && MD.reach) || S.reach || 400) + 8, k = d > lim ? lim / d : 1; out.tx = Math.round(out.x + dx * k); out.ty = Math.round(out.y + dy * k); }   // (4c: the lob's reach)
-    if (MD) { out.mod = m.mod; if (m.mod === 'mod_arc' && !isFinite(out.tx)) return no('bad'); }
+    if (isFinite(m.tx) && isFinite(m.ty)) { const dx = m.tx - out.x, dy = m.ty - out.y, d = Math.hypot(dx, dy), lim = ((MDo('mod_arc') && MDo('mod_arc').reach) || S.reach || 400) + 8, k = d > lim ? lim / d : 1; out.tx = Math.round(out.x + dx * k); out.ty = Math.round(out.y + dy * k); }   // (4c: the lob's reach)
+    if (ML.length) { out.mods = ML; if (MS.has('mod_arc') && !isFinite(out.tx)) return no('bad'); }
     const SK = socket._magicSecsK && socket._magicSecsK !== 1 && S.secs ? Object.assign({}, S, { secs: S.secs * socket._magicSecsK, crackS: (S.crackS || 0) * Math.min(1, socket._magicSecsK) }) : S;
     // (step 3e, the user) FREEZE and the STONE WALL are SHOTS: they fly from the hand (each screen flies them, as a bolt) and do what they do where they land — the caster's game says where (`magic-hit`)
     const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change' || S.kind === 'tunnel' || S.kind === 'firewall') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (6b: the wall of fire, lobbed as the stone wall's stone)   // (5a: the ground changed — a shot too; 5c: the tunnelling bolt)
@@ -29523,13 +29529,14 @@ io.on('connection', (socket) => {
       out.chan = 1; out.secs = secs; if (!SC && !socket._magicNoCd) cds[m.spell] = now + secs * 1000 + cd; }
     if (S.kind === 'bolt' || shot) { let lf = S.life || 1, g = (S.grav || 0) * 1500, v = S.speed;
       // (4c) a modifier's flight: the follower slower, longer, less pulled down · the lob by its own arc (every screen works out the same) · a split: an id for each piece
-      if (MD && m.mod === 'mod_follow') { lf *= MD.lifeK || 1; v *= MD.speedK || 1; g *= MD.gravK != null ? MD.gravK : 1; }
-      if (MD && m.mod === 'mod_arc') { const A = SPELLS.arcAim(S, MD, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
+      { const F = MDo('mod_follow'); if (F) { lf *= F.lifeK || 1; v *= F.speedK || 1; g *= F.gravK != null ? F.gravK : 1; } }
+      if (MDo('mod_arc')) { const A = SPELLS.arcAim(S, MDo('mod_arc'), out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
       // (12b) a LOBBED spell (entangle's seed) comes down on the pointer without the modifier: every screen works out the same arc
       else if (S.lob && isFinite(out.tx)) { const A = SPELLS.arcAim(S, { g: S.lobG || 1100 }, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
-      const ids = [id]; if (MD && m.mod === 'mod_split') { for (let i = 1; i < (MD.n || 3); i++) ids.push(++_magicSeq); out.ids = ids; }
-      const SKf = S.freezeN ? Object.assign({}, SK, { cells: S.freezeN, secs: (S.freezeS || 20) * (socket._magicSecsK || 1), ringMs: 60 }) : SK;   // (4e round 2: the chill bolt's freeze — a cell or two)
-      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (MD && m.mod === 'mod_split' ? 0.6 : 1)).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.seed ? 'seed' : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0, lux: S.lux || null, luxR: S.lux === 'dark' ? S.R || 8 : S.lux === 'snuff' ? S.R || 24 : 0 });
+      const SPL = MDo('mod_split'), ids = [id]; if (SPL) { for (let i = 1; i < (SPL.n || 3); i++) ids.push(++_magicSeq); out.ids = ids; }
+      const SKf0 = S.freezeN ? Object.assign({}, SK, { cells: S.freezeN, secs: (S.freezeS || 20) * (socket._magicSecsK || 1), ringMs: 60 }) : SK;   // (4e round 2: the chill bolt's freeze — a cell or two)
+      const SKf = shot && SPL ? magicModSplitSK(SKf0, SPL.shotK || 0.6) : SKf0;   // (21 M1) a split shot's pieces land smaller
+      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (SPL ? 0.6 : 1)).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.seed ? 'seed' : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MS.has('mod_follow') ? 1 : 0, modded: ML.length ? 1 : 0, lux: S.lux || null, luxR: S.lux === 'dark' ? S.R || 8 : S.lux === 'snuff' ? S.R || 24 : 0 });
       while (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     // ⭐ (step 6a) KINDLE: what burns at the caster's point (short of the first rock on the way — their game's) catches, no further than its reach (held to it above)
@@ -29793,7 +29800,7 @@ io.on('connection', (socket) => {
     socket.to(room).emit('magic-dbl', { id: m.id | 0, x: Math.round(+m.x), y: Math.round(+m.y), vx: Math.max(-600, Math.min(600, Math.round(+m.vx || 0))), f: m.f < 0 ? -1 : 1, yw: m.yw == null || !isFinite(m.yw) ? null : Math.max(-100, Math.min(100, Math.round(+m.yw))), c: m.c ? 1 : 0 }); });
   // ⭐ (4c) A BOLT THAT FOLLOWS ITS CASTER'S POINTER: only the caster's game knows the pointer — where the bolt is and how it flies, to everybody else (only its own caster's, a few a second)
   socket.on('magic-steer', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const L = _magicLive.get(m.id | 0); if (!L || L.by !== socket.id || !L.steer || L.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
-    const now = Date.now(); if (now - (socket._steerT || 0) < 35) return; socket._steerT = now; if (Math.hypot(+m.x - L.x, +m.y - L.y) > L.reach) return;
+    const now = Date.now(); if (now - (L.steerT || 0) < 35) return; L.steerT = now; if (Math.hypot(+m.x - L.x, +m.y - L.y) > L.reach) return;   // (21 M1: per piece — a split follower steers three)
     socket.to(room).emit('magic-steer', { id: m.id | 0, x: Math.round(+m.x), y: Math.round(+m.y), vx: Math.max(-2000, Math.min(2000, Math.round(+m.vx || 0))), vy: Math.max(-2000, Math.min(2000, Math.round(+m.vy || 0))) }); });
   // ⭐ (4d) A HELD SPELL from its caster: where it points (relayed), let go, and the ground lit at its end (near where it is, a few times a second)
   socket.on('magic-aim', (m) => { const room = currentAvatarRoom; if (!room || !m) return; const q = _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return;
@@ -29971,6 +29978,8 @@ io.on('connection', (socket) => {
       io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air: 0, land: 'burst', r: L.burst, liq, pow: +(L.pow || 1).toFixed(2), n: n0, spell: L.spell, from: L.by, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined }); return; }
     if (L.burn && !m.air) igniteBox(L.room, +m.x, +m.y, TERRAIN_CELL * (L.burnR || 1));
     // (step 3e) a shot that landed: the ice / the wall where it came down (a wall only on ground under it — else it falls apart in the air)
+    // (21 M1) a steered / lobbed tunnelling bolt bores the way it was GOING when it met rock (its caster's game says, `ux` `uy`)
+    if (L.land === 'tunnel' && L.modded && isFinite(m.ux) && isFinite(m.uy) && Math.hypot(+m.ux, +m.uy) > 0.5) { const l = Math.hypot(+m.ux, +m.uy); L.ax = +m.ux / l; L.ay = +m.uy / l; }
     let land = null, n = 0, tx = Math.round(m.x), ty = Math.round(m.y), air = m.air ? 1 : 0;
     if (L.land === 'freeze' && L.chill) { if (m.liq) { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); } }   // (4e round 2) the chill bolt: only where it went into water
     else if (L.land === 'freeze') { land = 'freeze'; n = magicFreeze(L.room, +m.x, +m.y, L.SK); air = 0; }
