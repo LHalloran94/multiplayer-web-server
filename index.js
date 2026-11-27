@@ -4101,25 +4101,25 @@ function magicPocketFold(room, obj, pk) { const map = roomObjects[room]; if (!ma
   magicPocketPut(pk, { room, obj: rec, at: Date.now() }); return true; }
 // UNFOLDED with its box's middle at (x, y) in the room it came from, its driving given to `by` (it falls from there) → the object
 // ⭐⭐ (magic 19, 2026-11-27) SUMMONING. A BOUND TOOL: a tool of spirit made here, in its caster's hand — `eq` theirs (never written to storage, gone with them: `eqDropSocket`),
-//   `bnd` its mark (every screen draws its spirit), `bndBy` its caster, `bndU` when it goes (Date.now ms). Out of their hand it is gone (`itemObjMove`, the hold's let-go,
-//   their own put-away); nobody else takes hold of it or tugs it. One a caster (a new one takes the old). No `item`: nothing in any pouch moves.
-const _magicBound = new Map();   // socket id → { room, id }
-function magicBoundMake(room, sock, name, look, x, y, secs) {
+//   `bnd` its mark (every screen draws it as light), `bndBy` its caster. (round 2, the user) NO TIME: it lasts until it leaves their hand — `itemObjMove`, the hold's let-go,
+//   their own put-away (switching away), leaving / dying (`eqDropSocket`); nobody else takes hold of it or tugs it. One cast's worth a caster (`keep`: the off hand's shield
+//   made beside the sword of the same cast). No `item`: nothing in any pouch moves.
+const _magicBound = new Map();   // socket id → [{ room, id }]
+function magicBoundMake(room, sock, name, look, x, y, keep) {
   if (!HELD.is(look) || !roomObjects[room] || !isFinite(x) || !isFinite(y)) return null; const L = HELD.LOOKS[look], now = Date.now();
-  const old = _magicBound.get(sock.id); if (old) { const o0 = roomObjects[old.room] && roomObjects[old.room].get(old.id); if (o0) magicBoundGone(old.room, o0); }
-  const id = sock.id + '-bd' + now.toString(36);
+  if (!keep) { const old = _magicBound.get(sock.id); if (old) for (const q of old.slice()) { const o0 = roomObjects[q.room] && roomObjects[q.room].get(q.id); if (o0) magicBoundGone(q.room, o0); } _magicBound.delete(sock.id); }
+  const id = sock.id + '-bd' + now.toString(36) + (keep ? 'o' : '');
   const o = buildWorldObject('stamp', { type: 'stamp', content: L.content, shape: 'rect', x: Math.round(x), y: Math.round(y), w: L.w || 40, h: L.h || 3, angle: 0,
     breakable: false, loose: 1, look, lwt: L.wt || 1, lbnc: 0 }, id, sock.id, name || '', room);
   if (!o) return null;
-  o.bnd = 1; o.bndBy = sock.id; o.bndU = now + Math.round(secs * 1000); o.eq = sock.id; eqNote(sock.id, o.id, 1);
+  o.bnd = 1; o.bndBy = sock.id; o.eq = sock.id; eqNote(sock.id, o.id, 1);
   objIndex(room, o);
   if (objChunked(room)) emitObjToChunks(room, o, 'avatar-object-add', o); else io.to(room).emit('avatar-object-add', o);
-  _magicBound.set(sock.id, { room, id: o.id });
-  setTimeout(() => { const o2 = roomObjects[room] && roomObjects[room].get(o.id); if (o2 === o) magicBoundGone(room, o2); }, Math.round(secs * 1000) + 200);
+  { const L2 = _magicBound.get(sock.id) || []; L2.push({ room, id: o.id }); _magicBound.set(sock.id, L2); }
   return o;
 }
 function magicBoundGone(room, o) { const map = roomObjects[room]; if (!map || map.get(o.id) !== o) return false;
-  { const q = _magicBound.get(o.bndBy); if (q && q.id === o.id) _magicBound.delete(o.bndBy); }
+  { const L2 = _magicBound.get(o.bndBy); if (L2) { const i = L2.findIndex(q => q.id === o.id); if (i >= 0) L2.splice(i, 1); if (!L2.length) _magicBound.delete(o.bndBy); } }
   if (o.eq) { eqNote(o.eq, o.id, 0); delete o.eq; }
   { const hm = roomObjHeld[room]; if (hm) { hm.delete(o.id); if (!hm.size) delete roomObjHeld[room]; } const os = roomObjHeldOff[room]; if (os) { os.delete(o.id); if (!os.size) delete roomObjHeldOff[room]; }
     const dm = roomObjDrv[room]; if (dm) dm.delete(o.id); const dl = roomObjDrvAt[room]; if (dl) dl.delete(o.id); }
@@ -29398,7 +29398,7 @@ io.on('connection', (socket) => {
     if (S.kind === 'lift') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
     if (S.kind === 'double' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 19) a BOUND TOOL: a look this spell may make (the caster's game picked it by what they point at) · a SPIRIT STEP: where it goes
-    if (S.kind === 'bound' && (typeof m.look !== 'string' || !Array.isArray(S.looks) || S.looks.indexOf(m.look) < 0)) return no('bad');
+    if (S.kind === 'bound' && (typeof m.look !== 'string' || !Array.isArray(S.looks) || S.looks.indexOf(m.look) < 0 || (m.off != null && (typeof m.off !== 'string' || !Array.isArray(S.offLooks) || S.offLooks.indexOf(m.off) < 0)))) return no('bad');
     if (S.kind === 'step' && (!isFinite(m.tx) || !isFinite(m.ty))) return no('bad');
     // (magic 10a) BLINK / PASS THROUGH: where you stand (by the hand) and where you go — the caster's game found it; held to the spell's reach from the hand below
     // (magic 10b) MARK: where the caster's feet are · RECALL: only with a mark of theirs here (REWIND's path comes with its let-go: 'magic-chan-stop')
@@ -29665,7 +29665,8 @@ io.on('connection', (socket) => {
       if (S.kind === 'pcloud') { out.w = (S.wide || 16) * TERRAIN_CELL; out.h = (S.high || 4) * TERRAIN_CELL; M.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, h: out.h, until: now + out.secs * 1000 }); }
       else M.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, until: now + out.secs * 1000, armAt: now + (S.armS || 1.2) * 1000 }); }
     // ⭐ (magic 19) A BOUND TOOL in the caster's hand (made at the catalyst's tip; their game takes it at once) · A SPIRIT STEP at the point (not open there: refused)
-    if (S.kind === 'bound') { const secs = +(SK.secs || 60).toFixed(2), B = magicBoundMake(room, socket, currentUsername, m.look, out.x, out.y, secs); if (!B) return no('bad'); out.obj = B.id; out.look = B.look; out.secs = secs; }
+    if (S.kind === 'bound') { const B = magicBoundMake(room, socket, currentUsername, m.look, out.x, out.y, false); if (!B) return no('bad'); out.obj = B.id; out.look = B.look;
+      if (typeof m.off === 'string') { const B2 = magicBoundMake(room, socket, currentUsername, m.off, out.x, out.y, true); if (B2) { out.offObj = B2.id; out.off = B2.look; } } }   // (round 2) a shield in the off hand
     if (S.kind === 'step') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const n = magicStepMake(room, out.tx, out.ty, SK); if (!n) return no('room');
       out.tx = Math.round(out.tx); out.ty = Math.round(out.ty); out.n = n; out.wide = S.wide || 10; out.thick = S.thick || 1; out.secs = +(SK.secs || 20).toFixed(2); }
     if (S.kind === 'dispel') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = S.R || 120; out.ms = S.ms || 450; out.n = magicDispel(room, out.tx, out.ty, out.R, out.ms, socket.id); }

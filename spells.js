@@ -272,17 +272,27 @@
     wayout: { name: 'The way out', school: 'knowing', form: 'self', tier: 0, cd: 15, stance: 'raise', kind: 'know', know: 'wayout', secs: 20, R: 160, Rv: 120, learn: 3, fx: '#8fe8e0',
       plain: { keys: [D, L, U, U, R], rune: [8, 7, 3, 0, 1] } },
     // ⭐⭐ STEP 19 (2026-11-27) SUMMONING — the user: the creatures (summon skeleton + its variants, the familiar, raise the dead) HELD until the enemies are reworked.
-    //   BOUND TOOL (kind 'bound') — a tool of pink spirit in your main hand for `secs` s with the real tool's rules: by what you point at, a hand pick (rock), a small spade
-    //   (loose ground, earth) or a hatchet (wood); the panel's switch gives the full-size ones (`looks` = every look the server may make). On no number: choosing anything else
-    //   puts it away and it is gone; out of your hand (let go, thrown, knocked out) it is gone; nobody else can take it. One a caster. BOUND BLADE (variant): a sword.
+    //   BOUND TOOL (kind 'bound') — the real tool's 3D model made of pink light in your main hand, its rules: by what you point at, a pick (rock), a spade (loose ground,
+    //   earth) or an axe (wood) — the two-handed one when your OTHER hand is empty, else the one-handed one (`looks` = every look the server may make). (round 2, the user)
+    //   It lasts until you switch away: on no number, choosing anything else puts it away and it is gone; out of your hand (let go, thrown, knocked out) it is gone; nobody else
+    //   can take it. One cast's worth a caster. BOUND BLADE + its variants (round 2: the real 3D weapons, not the old test sword) — `looks` [one-handed, two-handed]:
+    //   a sword, an axe, a spear / polearm, a mace / hammer; BOUND SWORD AND SHIELD: the arming sword + a heater shield in the off hand (`offLooks`; what was there put away).
     //   SPIRIT STEP (kind 'step') — a slab of pink spirit-stone `wide` cells long, `thick` deep, where you point (short of rock, in the air too), grown out both ways from the point into open
     //   cells only, `secs` s; solid to everything; its cells are glass (`mat`) under the drawn look, made matter that goes (`tkind` 'spirit': no rubble, nothing when dug).
-    boundtool: { name: 'Bound tool', school: 'summoning', form: 'self', tier: 0, cd: 20, stance: 'raise', kind: 'bound', learn: 3, secs: 60, alts: ['boundblade'], fx: '#e09a9a',
+    boundtool: { name: 'Bound tool', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', learn: 3, fx: '#e09a9a',
       looks: ['handpick', 'smallspade', 'hatchet', 'pickaxe', 'spade', 'fellingaxe'],
       plain: { keys: [D, R, U, L, U], rune: [2, 8, 7, 3, 0] } },
-    boundblade: { name: 'Bound blade', school: 'summoning', form: 'self', tier: 0, cd: 20, stance: 'raise', kind: 'bound', alt: 'boundtool', blade: true, secs: 60, fx: '#e09a9a',
-      looks: ['sword'],
+    boundblade: { name: 'Bound blade', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', learn: 3, weapon: 'sword', fx: '#e09a9a',
+      alts: ['boundaxe', 'boundspear', 'boundmace', 'boundshield'], looks: ['armingsword', 'greatsword'],
       plain: { keys: [D, R, U, R, U], rune: [2, 8, 4, 1, 0] } },
+    boundaxe: { name: 'Bound axe', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', alt: 'boundblade', weapon: 'axe', fx: '#e09a9a',
+      looks: ['beardedaxe', 'greataxe'], plain: { keys: [D, R, U, R, L], rune: [2, 8, 4, 0, 3] } },
+    boundspear: { name: 'Bound spear', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', alt: 'boundblade', weapon: 'spear', fx: '#e09a9a',
+      looks: ['spear', 'halberd'], plain: { keys: [D, R, U, U, U], rune: [2, 8, 4, 1, 2] } },
+    boundmace: { name: 'Bound mace', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', alt: 'boundblade', weapon: 'mace', fx: '#e09a9a',
+      looks: ['mace', 'maul'], plain: { keys: [D, R, U, D, D], rune: [2, 8, 4, 3, 6] } },
+    boundshield: { name: 'Bound sword and shield', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', alt: 'boundblade', weapon: 'shield', fx: '#e09a9a',
+      looks: ['armingsword'], offLooks: ['heatershield'], plain: { keys: [D, R, R, U, L], rune: [2, 8, 7, 4, 3] } },
     spiritstep: { name: 'Spirit step', school: 'summoning', form: 'placed', tier: 0, cd: 6, stance: 'level', kind: 'step', learn: 3, reach: 320, secs: 20, wide: 10, thick: 2, rowMs: 30,
       crumbleMs: 70, crackS: 0, mat: 16, tkind: 'spirit', fx: '#e09a9a',
       plain: { keys: [R, D, L, R, R], rune: [6, 7, 8, 5, 4] } },
@@ -852,7 +862,9 @@
     // (17d) read: along a line and down the page · foresight: back, up over the top and down ahead to where it lands · the way out: down into the dark, then up and out
     read: [[R, D], [4, 5, 8]], foresight: [[R, R], [4, 3, 1, 5]], wayout: [[U, L], [4, 7, 3, 0]],
     // (19) the bound tool: down to the hand and up the haft · the blade as the flaming weapon's (up and along) · the spirit step: down to it, then along it
+    // (19 round 2) the weapons: up into the hand, then — the axe's head back · the spear straight on, then out · the mace's head down · the shield across before you
     boundtool: [[D, U], [4, 8, 2]], boundblade: [[U, R], [4, 1, 2]], spiritstep: [[D, R], [4, 7, 8]],
+    boundaxe: [[U, L], [4, 1, 0]], boundspear: [[U, U], [4, 1, 5]], boundmace: [[U, D], [4, 1, 3]], boundshield: [[R, U], [4, 5, 2]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
