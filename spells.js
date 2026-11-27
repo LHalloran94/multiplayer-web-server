@@ -842,52 +842,65 @@
   //          does at a body · 'wait' what holds it back before it goes
   //   clash  further ones it never goes with · rep  how many times it may be put in (each one more of it; 1 = once) · hit  only on a bolt that stops at bodies
   //   A spell's `noMods` = ones that would mean nothing on it (the tunnelling bolt goes through rock already).
+  // ⭐⭐ (M4, 2026-11-28 — the user: 'whenever we're putting constraints like this in, we should really be asking ourselves whether they are necessary') REPEATS: `rep: 0` = as
+  //   many times as you like, each one MORE of it (bigger again bigger, three bounces more, …) — the input and the cooldowns limit it, and what grows slower is easier to dodge;
+  //   `rep: 1` only where a second means nothing (arcs, comes back, weightless). GROUPS: only 'path' is kept — follows and homing both steer it all the way and would fight;
+  //   everything else COMBINES (bigger + smaller multiply, bounce + through walls: through first, then it bounces; delay + hang + circling: one after another; arcs / comes
+  //   back / circling are phases, so they go with a steerer; heavy / weightless change an arc's own fall). 'body' stays for the planned chains / bursts on hitting.
   const MODS = {
-    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [2, 4], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3 },   // (21 M1 round 2, the user: it ran out too soon — lifeK 2 → 3.5: a firebolt follows ~3.7 s)
-    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [2, 5], fits: ['fly'], group: ['path', 'fall'], cdK: 1.5,   /* (M3 round 2: on pieces too — they lob onto the cast's point) */ learn: 3, g: 1100, reach: 560 },
-    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6, szK: 0.75 },   // (M3 round 2, the user: each split smaller and weaker — they compound, so stacking balances itself)
-    mod_faint:  { name: 'Faint', keys: [D, D], rune: [0, 5], fits: ['fly'], cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5 },
+    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [2, 4], fits: ['fly'], group: ['path'], rep: 0, cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3, more: 1.5 },   // (again: turns × `more`)
+    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [2, 5], fits: ['fly'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },   // (M3 round 2: on pieces too — they lob onto the cast's point)
+    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly'], rep: 0, cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6, szK: 0.75 },   // (M3 round 2: smaller and weaker each split, compounding; M4: again — each of the three in three)
+    mod_faint:  { name: 'Faint', keys: [D, D], rune: [0, 5], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5, more: 0.5 },   // (again: × `more` as seen)
     // ⭐ M2 (2026-11-27 — the user's four):
-    //   bounce   off rock (and a level's floor) up to `n` times, `keep` of its speed each time, its time × `lifeK`; a lobbed wall / fire wall bounces on the ground before it stands
-    //   thru     through up to `cells` cells of rock, then as ever (a lobbed wall or fire wall would come down inside the ground — `noLob`)
-    //   delay    it waits `secs` where it was cast, then goes (put in again: longer — up to `rep`); placed spells and spells round you take it LATER (`later`)
-    //   cluster  where it ends it bursts into `n` small pieces over `fan` degrees, back the way it came (up, in the air): each `speedK` of its speed, `life` s, `dmgK` of the blow
-    //            at `powK` of its strength; a shot's pieces land `shotK` of its size
-    mod_bounce:  { name: 'Bounces', keys: [U, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], group: ['wall'], cdK: 1.5, learn: 3, n: 3, keep: 0.75, lifeK: 1.6 },
-    mod_thru:    { name: 'Through walls', keys: [R, R], rune: [2, 4], fits: ['fly'], group: ['wall'], noLob: 1, cdK: 2, learn: 3, cells: 10 },
-    mod_delay:   { name: 'Delayed', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['placed', 'round'], group: ['wait'], rep: 3, cdK: 1.25, learn: 3, secs: 2.5 },   // (M2 round 3, the user: a bit longer — 1.5 → 2.5 s a piece)
+    //   bounce   off rock (and a level's floor) `n` times a piece put in, `keep` of its speed each time, its time × (1 + (`lifeK` − 1) a piece); a stone / ember bounces before it stands
+    //   thru     through `cells` cells of rock a piece put in, then as ever (a lobbed wall or fire wall would come down inside the ground — `noLob`)
+    //   delay    it waits `secs` a piece put in where it was cast, then goes; placed spells and spells round you take it LATER (`later`)
+    //   cluster  where it ends it bursts into `n` small pieces over `fan` degrees out from the face it struck: each `speedK` of its speed, `life` s, `dmgK` of the blow at `powK` of
+    //            its strength; a shot's pieces land `shotK` of its size
+    mod_bounce:  { name: 'Bounces', keys: [U, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], rep: 0, cdK: 1.5, learn: 3, n: 3, keep: 0.75, lifeK: 1.6 },
+    mod_thru:    { name: 'Through walls', keys: [R, R], rune: [2, 4], fits: ['fly'], noLob: 1, rep: 0, cdK: 2, learn: 3, cells: 10 },
+    mod_delay:   { name: 'Delayed', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['placed', 'round'], rep: 0, cdK: 1.25, learn: 3, secs: 2.5 },   // (M2 round 3, the user: a bit longer — 1.5 → 2.5 s a piece)
     mod_cluster: { name: 'Cluster', keys: [U, D], rune: [7, 5], fits: ['fly'], maker: 1, cdK: 1.5, learn: 3, n: 5, fan: 150, speedK: 0.55, life: 0.45, dmgK: 0.5, powK: 0.6, shotK: 0.4, szK: 0.6 },
     // ⭐ M3 (2026-11-28; each in ITS generation):
-    //   bigger / smaller  drawn and striking × `k` (its burst, a shot's size, a ball of darkness × `k` too), its blow × `dmgK`, its speed × `speedK` (not a lob's); put in again: more
-    //   pierce   goes on through up to `n` bodies, each once, each blow × `dmgK` (a burst / seed / carrier of light passes them by)
-    //   homing   its caster's game turns it towards the nearest body AHEAD (within `cone` degrees, `range` px) at `turn` rad/s; flies × `lifeK`, less pulled down (`gravK`)
-    //   boomerang  out for `out` of its time, then its caster's game turns it back to its caster at `turn` rad/s — it ends harmlessly back in their hand; × `lifeK` its time;
-    //            not on a stone or ember that must come down (`noLob`)
-    mod_bigger:    { name: 'Bigger', keys: [U, U], rune: [0, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.5, learn: 3, k: 1.5, dmgK: 1.4, speedK: 0.85 },
-    mod_smaller:   { name: 'Smaller', keys: [D, D], rune: [2, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.2, learn: 3, k: 0.65, dmgK: 0.75, speedK: 1.2 },
-    mod_pierce:    { name: 'Pierces', keys: [R, R], rune: [6, 4], fits: ['fly'], group: ['body'], hit: 1, cdK: 1.5, learn: 3, n: 3, dmgK: 0.8 },
-    mod_homing:    { name: 'Homing', keys: [D, U], rune: [8, 5], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 2, learn: 3, turn: 5, range: 320, cone: 70, lifeK: 1.5, gravK: 0.3 },
-    mod_boomerang: { name: 'Comes back', keys: [L, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], group: ['path'], noLob: 1, cdK: 1.5, learn: 3, out: 0.35, turn: 7, lifeK: 2.6, gravK: 0, catchR: 20 },   // (rig: × 2 ran out 250 px short — longer, no fall, back sooner)
+    //   bigger / smaller  drawn and striking × `k` a piece put in (its burst, a shot's size, a ball of darkness too), its blow × `dmgK`, its speed × `speedK` (not a lob's)
+    //   pierce   goes on through `n` bodies a piece put in, each once, each blow × `dmgK` (a burst / seed / carrier of light passes them by)
+    //   homing   (M4, the user: 'it should actually home in on people') its caster's game LOCKS onto the nearest body ahead (within `cone` degrees, `range` px) and chases it at
+    //            `turn` rad/s, behind or not, while it is within 1.5 × `range`; again: × `more` its turn and range; flies × `lifeK`, less pulled down (`gravK`)
+    //   boomerang  out for `out` of its time, then its caster's game turns it back to its caster at `turn` rad/s — it ends harmlessly back in their hand; × `lifeK` its time
+    mod_bigger:    { name: 'Bigger', keys: [U, U], rune: [0, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.5, learn: 3, k: 1.5, dmgK: 1.4, speedK: 0.85 },
+    mod_smaller:   { name: 'Smaller', keys: [D, D], rune: [2, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.2, learn: 3, k: 0.65, dmgK: 0.75, speedK: 1.2 },
+    mod_pierce:    { name: 'Pierces', keys: [R, R], rune: [6, 4], fits: ['fly'], group: ['body'], hit: 1, rep: 0, cdK: 1.5, learn: 3, n: 3, dmgK: 0.8 },
+    mod_homing:    { name: 'Homing', keys: [D, U], rune: [8, 5], fits: ['fly'], group: ['path'], rep: 0, cdK: 2, learn: 3, turn: 14, range: 560, cone: 110, lifeK: 1.6, gravK: 0.15, more: 1.4 },
+    mod_boomerang: { name: 'Comes back', keys: [L, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], noLob: 1, cdK: 1.5, learn: 3, out: 0.35, turn: 7, lifeK: 2.6, gravK: 0, catchR: 20 },   // (rig: × 2 ran out 250 px short — longer, no fall, back sooner)
+    // ⭐ M4 (2026-11-28) THE FLIGHT ONES — each in its generation, each put in again MORE of it:
+    //   wavy      weaves side to side across its way, `amp` px at `hz` a second (again: × `more` wider)
+    //   orbit     circles its caster `r` px out at `w` rad/s for `secs` (a piece put in), striking what it meets, then flies off at the pointer (its caster's game steers both)
+    //   faster / slower  its speed × `k` a piece put in (slower flies × 1/`k` as long — the same reach, only slower)
+    //   accel     starts at `lo` of its speed and climbs to `hi` over `t` s (again: `hi` × `more`)
+    //   heavy     falls: + `g` px/s² a piece put in, its blow × `dmgK` (an arc: its lob × (1 + `arcK`) steeper) · weightless  no fall (an arc: nearly straight onto the point)
+    //   hang      flies out `out` s (or to the point, sooner), stops and hangs `secs` (a piece put in), then flies on at the pointer (its caster's game)
+    //   lasting   flies × `k` as long a piece put in (thrown, held, placed and the rest LATER)
+    mod_wavy:       { name: 'Wavy', keys: [U, L], rune: [6, 4], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, amp: 12, hz: 2.2, more: 1.6 },
+    mod_orbit:      { name: 'Circles you', keys: [L, L], rune: [6, 5], fits: ['fly'], rep: 0, cdK: 1.5, learn: 3, r: 42, w: 5, secs: 2.5 },
+    mod_faster:     { name: 'Faster', keys: [R, R], rune: [0, 5], fits: ['fly'], later: ['thrown'], rep: 0, cdK: 1.25, learn: 3, k: 1.4 },
+    mod_slower:     { name: 'Slower', keys: [L, L], rune: [2, 4], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, k: 0.65 },
+    mod_accel:      { name: 'Speeds up', keys: [U, U], rune: [6, 4], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, lo: 0.35, hi: 2.2, t: 0.9, more: 1.3 },
+    mod_heavy:      { name: 'Heavy', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['thrown'], rep: 0, cdK: 1.25, learn: 3, g: 900, dmgK: 1.25, arcK: 0.8 },
+    mod_weightless: { name: 'Weightless', keys: [U, U], rune: [6, 4], fits: ['fly'], later: ['thrown'], cdK: 1.25, learn: 3, arcG: 0.12 },
+    mod_hang:       { name: 'Hangs, then flies', keys: [U, U], rune: [0, 5], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, out: 0.35, secs: 2 },
+    mod_lasting:    { name: 'Lasts longer', keys: [R, R], rune: [2, 4], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round', 'self'], rep: 0, cdK: 1.5, learn: 3, k: 1.6 },   // (21 M1 round 3, the user: a firebolt flies longer before it fizzles — with follows, longer steered)
   };
   // (21 M1) THE MODIFIERS TO COME — no keys, no page, not castable: only the rules (`modFits`, `modClash`, `modsOk`) know them, so what is built now already leaves room for them
   const MOD_PLAN = {
     mod_chain:     { name: 'Chains', fits: ['fly'], group: ['body'], hit: 1, cdK: 2 },
     mod_explode:   { name: 'Bursts on hitting', fits: ['fly'], group: ['body'], hit: 1, cdK: 1.5 },
-    mod_orbit:     { name: 'Circles you', fits: ['fly'], group: ['path', 'wait'], clash: ['mod_wavy'], cdK: 1.5 },
-    mod_wavy:      { name: 'Wavy', fits: ['fly'], cdK: 1.25 },
-    mod_faster:    { name: 'Faster', fits: ['fly', 'thrown'], group: ['pace'], rep: 2, cdK: 1.25 },
-    mod_slower:    { name: 'Slower', fits: ['fly'], group: ['pace'], rep: 2, cdK: 1.25 },
-    mod_accel:     { name: 'Speeds up', fits: ['fly'], group: ['pace'], cdK: 1.25 },
-    mod_heavy:     { name: 'Heavy', fits: ['fly', 'thrown'], group: ['fall'], cdK: 1.25 },
-    mod_weightless: { name: 'Weightless', fits: ['fly', 'thrown'], group: ['fall'], cdK: 1.25 },
     mod_trail:     { name: 'Leaves a trail', fits: ['fly'], cdK: 1.5 },
-    mod_hang:      { name: 'Hangs, then flies', fits: ['fly'], group: ['wait'], cdK: 1.25 },
     mod_double:    { name: 'Twice', fits: ['fly'], cdK: 1.75 },
     mod_trigger:   { name: 'Casts the next where it lands', fits: ['fly', 'placed'], cdK: 1.5 },
-    mod_lasting:   { name: 'Lasts longer', fits: ['fly', 'thrown', 'held', 'placed', 'round', 'self'], rep: 2, cdK: 1.5 },   // (21 M1 round 3, the user: a firebolt flies longer before it fizzles — with follows, longer steered)
   };
-  const MOD_MAX = 6;   // (21 M1) the most pieces a cast takes — the input time and the cooldowns are the real limit; this only stops nonsense (M3: in ONE GENERATION)
-  const MOD_TOTAL = 40;   // (21 M3) …and in the whole cast, any number of generations (the user: no limit — the input itself limits it; this only stops nonsense)
+  const MOD_MAX = 40;   // (21 M1) the most pieces a cast takes — the input time and the cooldowns are the real limit; this only stops nonsense (M3: in ONE GENERATION; M4: 6 → 40, the user: no limits we do not need)
+  const MOD_TOTAL = 80;   // (21 M3) …and in the whole cast, any number of generations (the user: no limit — the input itself limits it; this only stops nonsense)
   const isMod = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(MODS, id);
   const modOf = (id) => isMod(id) ? MODS[id] : null;
   const modAny = (id) => isMod(id) ? MODS[id] : (typeof id === 'string' && Object.prototype.hasOwnProperty.call(MOD_PLAN, id) ? MOD_PLAN[id] : null);
@@ -903,8 +916,8 @@
   //   either lies straight on from some spell's last line (it would merge into it) or turns one spell's rune into another's — cool lava + 5 = grease, firebolt + 7 = great firebolt) and the modifiers' own were FOUND BY A SEARCH: no piece goes back over its own line, none where one piece runs into the next, every piece
   //   its own path (`scratchpad/probe_mod_stack.js` checks; a new modifier's stroke must keep it so)
   const MOD_OPEN = { path: { keys: [R, U], rune: [3, 1] }, many: { keys: [L, R], rune: [3, 2] }, seen: { keys: [L, L], rune: [1, 6] }, wait: { keys: [D, L], rune: [3, 8] },
-    size: { keys: [R, L], rune: [3, 7] }, pace: { keys: [R, R], rune: [1, 5] }, fall: { keys: [D, D], rune: [1, 8] }, wall: { keys: [D, R], rune: [1, 3] }, body: { keys: [R, D], rune: [1, 0] },   // (M3: size and body's strokes picked with their first modifiers — a search; checked by the probe)
-    more: { keys: [D, U], rune: [3, 5] } };
+    size: { keys: [R, L], rune: [3, 7] }, pace: { keys: [R, R], rune: [1, 8] }, fall: { keys: [D, D], rune: [4, 8] }, wall: { keys: [D, R], rune: [1, 3] }, body: { keys: [R, D], rune: [1, 0] },   // (M3: size and body's strokes picked with their first modifiers — a search; checked by the probe)
+    more: { keys: [D, U], rune: [4, 1] } };   // (M4: pace, fall and more's strokes picked with their first modifiers — a search; checked by the probe)
   // (21 M1) HOW A SPELL IS DELIVERED (what `fits` means) — by its kind and form
   const SHOT_KINDS = ['freeze', 'wall', 'change', 'tunnel', 'firewall'], THROWN_KINDS = ['shard', 'waterball', 'chunk'], PAINT_KINDS = ['paint', 'rainbow'];
   const isShot = (S) => !!S && SHOT_KINDS.indexOf(S.kind) >= 0 && S.speed > 0;
@@ -929,8 +942,22 @@
   const modsOk = (spell, list, most) => { if (!Array.isArray(list) || list.length > Math.min(MOD_TOTAL, most || MOD_TOTAL)) return false; const G = modGens(list);
     for (let gi = 0; gi < G.length; gi++) { const L = G[gi], n = {}; if (L.length > MOD_MAX) return false;
       for (let i = 0; i < L.length; i++) { const id = L[i], M = modAny(id); if (!M || !modFits(id, spell) || (gi > 0 && (M.noPiece || M.fits.indexOf('fly') < 0))) return false;
-        n[id] = (n[id] || 0) + 1; if (n[id] > (M.rep || 1)) return false; for (let j = 0; j < i; j++) if (modClash(id, L[j])) return false; } }
+        // (M4: `rep: 0` — no limit)
+        n[id] = (n[id] || 0) + 1; if (M.rep !== 0 && n[id] > (M.rep || 1)) return false; for (let j = 0; j < i; j++) if (modClash(id, L[j])) return false; } }
     return true; };
+  // ⭐ (M4) A GENERATION'S FLIGHT, worked out the same on the server and every screen: `k` its size, `dk` its blow, `sp` its speed (bigger / smaller, faster / slower), `life` ×
+  //   and `add` s to its time (bounces, slower keeping its reach, lasting, circling, hanging), `gAdd` its extra fall (heavy) or `wl` none (weightless), `arc` the arc's numbers
+  //   with its fall changed by heavy / weightless, `accHi` the top of speeding up, and how many of each was put in (`n.<id>`)
+  const modFlight = (list) => { const n = {}; for (const q of list || []) n[q] = (n[q] || 0) + 1; const c = (q) => n[q] || 0, mk = (q) => MODS[q] || {};
+    let k = 1, sp = 1, dk = 1, life = 1, add = 0; for (const q of list || []) if (q === 'mod_bigger' || q === 'mod_smaller') { k *= mk(q).k || 1; sp *= mk(q).speedK || 1; dk *= mk(q).dmgK || 1; }
+    sp *= Math.pow(mk('mod_faster').k || 1.4, c('mod_faster')) * Math.pow(mk('mod_slower').k || 0.65, c('mod_slower'));
+    life *= Math.pow(1 / (mk('mod_slower').k || 0.65), c('mod_slower')) * Math.pow(mk('mod_lasting').k || 1.6, c('mod_lasting'));
+    if (c('mod_bounce')) life *= 1 + ((mk('mod_bounce').lifeK || 1.6) - 1) * c('mod_bounce');
+    add += c('mod_orbit') * (mk('mod_orbit').secs || 2.5) + c('mod_hang') * (mk('mod_hang').secs || 2);
+    const gAdd = c('mod_heavy') * (mk('mod_heavy').g || 900); dk *= Math.pow(mk('mod_heavy').dmgK || 1.25, c('mod_heavy'));
+    const wl = c('mod_weightless') > 0, AR = mk('mod_arc'), arc = Object.assign({}, AR, { g: (AR.g || 1100) * (wl ? (mk('mod_weightless').arcG || 0.12) : 1 + (mk('mod_heavy').arcK || 0.8) * c('mod_heavy')) });
+    const accHi = c('mod_accel') ? (mk('mod_accel').hi || 2.2) * Math.pow(mk('mod_accel').more || 1.3, c('mod_accel') - 1) : 1;
+    return { n, k, sp, dk, life, add, gAdd, wl, arc, accHi }; };
   // every way the modifiers in `mods` may follow a spell, in every order, up to `most` long (with none first) — for reading a rune drawn freely
   const modSeqs = (spell, mods, most) => { const out = [[]], lim = Math.min(MOD_TOTAL, most || MOD_TOTAL), go = (cur) => { if (cur.length >= lim) return;
     for (const md of mods || []) { const nx = cur.concat([md]); if (!modsOk(spell, nx, lim)) continue; out.push(nx); go(nx); } }; go([]); return out; };
@@ -1166,5 +1193,5 @@
   const learnN = (id) => { if (isMod(id)) return Math.max(1, MODS[id].learn || 3); const S = of(baseOf(id)); return S ? Math.max(1, S.learn || (S.tier ? 5 : 3)) : 0; };
   const tomeOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(TOMES, item) ? TOMES[item] : null;
   const scrollOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(SCROLLS, item) ? SCROLLS[item] : null;
-  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, MODS, MOD_PLAN, MOD_MAX, MOD_TOTAL, MOD_OPEN, modGens, is, of, isMod, modOf, modAny, modFits, modClash, modsOk, modSeqs, modList, delivOf, isShot, arcAim, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
+  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, MODS, MOD_PLAN, MOD_MAX, MOD_TOTAL, MOD_OPEN, modGens, modFlight, is, of, isMod, modOf, modAny, modFits, modClash, modsOk, modSeqs, modList, delivOf, isShot, arcAim, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
 });
