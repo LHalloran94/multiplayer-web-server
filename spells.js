@@ -826,8 +826,10 @@
 
   // ⭐ 4c (2026-11-18, Trello #707 — kickoff §ROUND 4): MODIFIERS, a THIRD PIECE put in after a whole spell (after its tier's ups). Learnt from tomes as spells are (a page each; your
   //   own part of it as a spell's, per world, a death forgets it). It costs more keys and `cdK` × the spell's cooldown.
-  //   ITS PIECE, the same in the language and plain:  keys — a DOWN that opens it (a tier adds only ups, so the two never mix), YOUR OWN KEY, then its two `keys`;
-  //   rune — on to the top left point and along the TOP ROW (the tier's underline is the bottom row), YOUR OWN POINT, then its `rune` stroke.
+  //   ITS PIECE (⭐ 21 M2, 2026-11-27 — the user: modifiers need not open with a down, each FAMILY its own opening as schools have, FOUR keys): keys — its family's two (`MOD_OPEN`,
+  //   never starting with an up: a tier adds ups, so the two never mix), then its own two `keys`; rune — its family's stroke, then its own `rune` stroke. NO OWN PART (the spell
+  //   in front of it carries yours — a copied modifier is nothing without it). A spell grows by ONE key (a tier, a word's third key) and a piece is FOUR, so a spell + pieces can
+  //   never read as a longer spell + pieces. Was (4c–M1): a down, your own key, its two; the top row, your own point, its stroke.
   //   follow  the caster's game turns it towards the pointer (`turn` radians a second, up to 3 × close to it; the client's dial overrides), `speedK` its speed, `lifeK` its time, `gravK` its gravity; others are sent where it is
   //   arc     a lob that comes down on the pointer (`g` px/s² its gravity, `reach` px the farthest point) — every screen works the same arc out of the cast (`arcAim`)
   //   split   at `at` seconds it becomes `n`, `fan` degrees apart, each `dmgK` of the blow (a SHOT's pieces each land `shotK` of its size) · faint  drawn at `seen` of its strength on others' screens, `seenOwn` on yours
@@ -841,18 +843,23 @@
   //   clash  further ones it never goes with · rep  how many times it may be put in (each one more of it; 1 = once) · hit  only on a bolt that stops at bodies
   //   A spell's `noMods` = ones that would mean nothing on it (the tunnelling bolt goes through rock already).
   const MODS = {
-    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [4, 3], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3 },   // (21 M1 round 2, the user: it ran out too soon — lifeK 2 → 3.5: a firebolt follows ~3.9 s)
-    // (21 M1) its stroke was 6 → 4 → 8: ending on the bottom right, the next piece's jump back to the top left ran back over it through the middle (a fold) — now an arch ∧, split's V turned over
-    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [3, 1, 5], fits: ['fly'], group: ['path', 'fall'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },
-    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [3, 7, 5], fits: ['fly'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6 },
-    mod_faint:  { name: 'Faint', keys: [D, D], rune: [6, 7], fits: ['fly'], cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5 },
+    mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [2, 4], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3 },   // (21 M1 round 2, the user: it ran out too soon — lifeK 2 → 3.5: a firebolt follows ~3.7 s)
+    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [2, 5], fits: ['fly'], group: ['path', 'fall'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },
+    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6 },
+    mod_faint:  { name: 'Faint', keys: [D, D], rune: [0, 5], fits: ['fly'], cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5 },
+    // ⭐ M2 (2026-11-27 — the user's four):
+    //   bounce   off rock (and a level's floor) up to `n` times, `keep` of its speed each time, its time × `lifeK`; a lobbed wall / fire wall bounces on the ground before it stands
+    //   thru     through up to `cells` cells of rock, then as ever (a lobbed wall or fire wall would come down inside the ground — `noLob`)
+    //   delay    it waits `secs` where it was cast, then goes (put in again: longer — up to `rep`); placed spells and spells round you take it LATER (`later`)
+    //   cluster  where it ends it bursts into `n` small pieces over `fan` degrees, back the way it came (up, in the air): each `speedK` of its speed, `life` s, `dmgK` of the blow
+    //            at `powK` of its strength; a shot's pieces land `shotK` of its size
+    mod_bounce:  { name: 'Bounces', keys: [U, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], group: ['wall'], cdK: 1.5, learn: 3, n: 3, keep: 0.75, lifeK: 1.6 },
+    mod_thru:    { name: 'Through walls', keys: [R, R], rune: [2, 4], fits: ['fly'], group: ['wall'], noLob: 1, cdK: 2, learn: 3, cells: 10 },
+    mod_delay:   { name: 'Delayed', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['placed', 'round'], group: ['wait'], rep: 3, cdK: 1.25, learn: 3, secs: 1.5 },
+    mod_cluster: { name: 'Cluster', keys: [U, D], rune: [7, 5], fits: ['fly'], cdK: 1.5, learn: 3, n: 5, fan: 150, speedK: 0.55, life: 0.45, dmgK: 0.5, powK: 0.6, shotK: 0.4 },
   };
   // (21 M1) THE MODIFIERS TO COME — no keys, no page, not castable: only the rules (`modFits`, `modClash`, `modsOk`) know them, so what is built now already leaves room for them
   const MOD_PLAN = {
-    mod_bounce:    { name: 'Bounces', fits: ['fly', 'thrown'], group: ['wall'], cdK: 1.5 },
-    mod_thru:      { name: 'Through walls', fits: ['fly'], group: ['wall'], cdK: 2 },
-    mod_delay:     { name: 'Delayed', fits: ['fly', 'placed', 'round'], group: ['wait'], rep: 3, cdK: 1.25 },
-    mod_cluster:   { name: 'Cluster', fits: ['fly'], cdK: 1.5 },
     mod_bigger:    { name: 'Bigger', fits: ['fly', 'thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.5 },
     mod_smaller:   { name: 'Smaller', fits: ['fly', 'thrown', 'held', 'placed', 'round'], group: ['size'], rep: 2, cdK: 1.2 },
     mod_pierce:    { name: 'Pierces', fits: ['fly'], group: ['body'], hit: 1, cdK: 1.5 },
@@ -884,6 +891,13 @@
     mod_faint: 'seen', mod_delay: 'wait', mod_hang: 'wait', mod_bigger: 'size', mod_smaller: 'size', mod_faster: 'pace', mod_slower: 'pace', mod_accel: 'pace', mod_heavy: 'fall', mod_weightless: 'fall',
     mod_bounce: 'wall', mod_thru: 'wall', mod_pierce: 'body', mod_chain: 'body', mod_explode: 'body', mod_trail: 'more', mod_trigger: 'more', mod_lasting: 'more' };
   for (const id in MOD_FAM) { const M = modAny(id); if (M) M.fam = MOD_FAM[id]; }
+  // ⭐ (21 M2) EACH FAMILY'S OPENING — two keys (never an up first) and a stroke across the grid, as a school's: steering → ↑ up and away · more of it ← → spread · how it is seen
+  //   ← ← · holding back ↓ ← · size → ← · speed → → · weight ↓ ↓ · at rock ↓ → · at a body → ↓ · anything else ↓ ↑. The STROKES (one straight line each, starting only on 1 or 3 or 4: every other point
+  //   either lies straight on from some spell's last line (it would merge into it) or turns one spell's rune into another's — cool lava + 5 = grease, firebolt + 7 = great firebolt) and the modifiers' own were FOUND BY A SEARCH: no piece goes back over its own line, none where one piece runs into the next, every piece
+  //   its own path (`scratchpad/probe_mod_stack.js` checks; a new modifier's stroke must keep it so)
+  const MOD_OPEN = { path: { keys: [R, U], rune: [3, 1] }, many: { keys: [L, R], rune: [3, 2] }, seen: { keys: [L, L], rune: [1, 6] }, wait: { keys: [D, L], rune: [3, 8] },
+    size: { keys: [R, L], rune: [1, 4] }, pace: { keys: [R, R], rune: [1, 5] }, fall: { keys: [D, D], rune: [1, 8] }, wall: { keys: [D, R], rune: [1, 3] }, body: { keys: [R, D], rune: [3, 7] },
+    more: { keys: [D, U], rune: [3, 5] } };
   // (21 M1) HOW A SPELL IS DELIVERED (what `fits` means) — by its kind and form
   const SHOT_KINDS = ['freeze', 'wall', 'change', 'tunnel', 'firewall'], THROWN_KINDS = ['shard', 'waterball', 'chunk'], PAINT_KINDS = ['paint', 'rainbow'];
   const isShot = (S) => !!S && SHOT_KINDS.indexOf(S.kind) >= 0 && S.speed > 0;
@@ -892,6 +906,7 @@
     if (S.form === 'self') return 'self'; return 'placed'; };
   const modFits = (mid, spell) => { const M = modAny(mid), S = SPELLS[spell] && Object.prototype.hasOwnProperty.call(SPELLS, spell) ? SPELLS[spell] : null; if (!M || !S || S.innate) return false;
     if (M.fits.indexOf(delivOf(S)) < 0 || (S.noMods && S.noMods.indexOf(mid) >= 0)) return false;
+    if (M.noLob && (S.kind === 'wall' || S.kind === 'firewall')) return false;   // (21 M2) through walls: not a stone or ember that must come down on the ground
     return !(M.hit && (S.kind !== 'bolt' || S.thru)); };
   // two modifiers that never go together: one of the same group, or named in a `clash` (either way round). The same one twice is a repeat (`rep`), not a clash
   const modClash = (a, b) => { if (a === b) return false; const A = modAny(a), B = modAny(b); if (!A || !B) return true;
@@ -1034,12 +1049,16 @@
     for (let p = 0; p < 9; p++) { if (p === a[a.length - 1] || p === b[0]) continue; const full = a.concat([p], b); if (runeNorm(full).length === runeNorm(R0.pts).length + 1) ok.push(p); }
     return { k: h & 3, p: ok.length ? ok[(h >> 2) % ok.length] : null }; };
   // (4c) A MODIFIER'S OWN PART: a key after its opening down, and a point after the top row (one that makes its stroke one point longer, as a spell's own point does)
-  const modOwnOf = (mid, h) => { const M = modOf(mid); if (!M) return null; h = Math.abs(Math.floor(h)); const L0 = runeNorm([0, 2].concat(M.rune)).length, ok = [];
+  const modOwnOf = (mid, h) => { if (MOD_OWN_OFF) return null; const M = modOf(mid); if (!M) return null; h = Math.abs(Math.floor(h)); const L0 = runeNorm([0, 2].concat(M.rune)).length, ok = [];
     for (let p = 3; p < 9; p++) { if (p === M.rune[0]) continue; if (runeNorm([0, 2, p].concat(M.rune)).length === L0 + 1) ok.push(p); }
     return { k: h & 3, p: ok.length ? ok[(h >> 2) % ok.length] : null }; };
   // (4c) a modifier's piece alone: keys (the opening down, your own key, its two) · its rune (the top row, your own point, its stroke; `own` = where your point is)
-  const modKeys = (mid, own) => { const M = modOf(mid); if (!M) return null; const k = [D]; if (own && own.k != null) k.push(own.k & 3); return k.concat(M.keys); };
-  const modRune = (mid, own) => { const M = modOf(mid); if (!M) return null; const pts = [0, 2]; let o = null; if (own && own.p != null) { o = 2; pts.push(own.p); } return { pts: pts.concat(M.rune), own: o }; };
+  //   (21 M2) the family's opening + its own two, no own part (`MOD_OWN_OFF`; the old opening kept behind it for a switch back)
+  const MOD_OWN_OFF = true;
+  const modKeys = (mid, own) => { const M = modOf(mid); if (!M) return null; const F = M.fam && MOD_OPEN[M.fam]; if (MOD_OWN_OFF && F) return F.keys.concat(M.keys);
+    const k = [D]; if (own && own.k != null) k.push(own.k & 3); return k.concat(M.keys); };
+  const modRune = (mid, own) => { const M = modOf(mid); if (!M) return null; const F = M.fam && MOD_OPEN[M.fam]; if (MOD_OWN_OFF && F) return { pts: F.rune.concat(M.rune), own: null };
+    const pts = [0, 2]; let o = null; if (own && own.p != null) { o = 2; pts.push(own.p); } return { pts: pts.concat(M.rune), own: o }; };
   // the keys of a spell: `lang` = school + form (+ an "up" a tier), else its plain sequence; `own` (from `ownOf`) put in after the first two. (4c) `mod` = a modifier put in after
   //   it, `modOwn` its own part · a MODIFIER's id alone = its piece alone (what its page practises)
   //   (21 M1) `mod` may be a LIST (each piece after the last), `modOwn` then the list of their own parts
@@ -1132,5 +1151,5 @@
   const learnN = (id) => { if (isMod(id)) return Math.max(1, MODS[id].learn || 3); const S = of(baseOf(id)); return S ? Math.max(1, S.learn || (S.tier ? 5 : 3)) : 0; };
   const tomeOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(TOMES, item) ? TOMES[item] : null;
   const scrollOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(SCROLLS, item) ? SCROLLS[item] : null;
-  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, MODS, MOD_PLAN, MOD_MAX, is, of, isMod, modOf, modAny, modFits, modClash, modsOk, modSeqs, modList, delivOf, isShot, arcAim, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
+  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, MODS, MOD_PLAN, MOD_MAX, MOD_OPEN, is, of, isMod, modOf, modAny, modFits, modClash, modsOk, modSeqs, modList, delivOf, isShot, arcAim, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
 });
