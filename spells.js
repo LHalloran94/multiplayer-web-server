@@ -105,6 +105,25 @@
       plain: { keys: [L, D, R, R, R], rune: [1, 4, 2, 5, 8] } },
     sunbeam: { name: 'Sunbeam', school: 'light', form: 'stream', tier: 1, cd: 10, stance: 'level', kind: 'beam', learn: 5, chan: true, chanS: 4, reach: 320, speed: 900, turn: 2.2, hw: 4,
       dmg: 0.4, every: 0.5, fx: '#fff1c8', plain: { keys: [L, D, R, R, D], rune: [1, 4, 5, 7, 8] } },
+    // ⭐ STEP 20c (2026-11-27) LIGHT FOR SHOW — each that acts somewhere a PROJECTILE (the user: modifiers as widely as they can go):
+    //   FIREWORKS, a bolt (`lux` 'fw'): a rocket of light trailing sparks to the pointer (`fuse`); it BURSTS into a shell of coloured sparks (its colours from its id, the same on
+    //     every screen), a brief light in its colour. Harmless. Variant A DISPLAY (kind 'display', HELD `chanS` s): a rocket every `every` s up along your aim, each bursting
+    //     on its own (every screen from the same aim and seed — nothing for the server).
+    //   RAINBOW (kind 'rainbow', placed): an arch from your feet to where you point (short of rock), `secs` s; only a look.
+    //   BEACON, a bolt (`lux` 'beacon', through bodies): where it ends a column of light stands `secs` s, up to the rock above it; whoever is within `screens` screens of it and
+    //     cannot see it gets an arrow at the edge of their view. Three a caster.
+    //   SNUFF, a bolt (`lux` 'snuff'): a dart of shadow; where it ends every light within `R` px goes out — a torch's flame, a lantern, a headlamp, a flashlight (16k
+    //     `torch-out`), a light orb, a daylight's sun. Flares and glowsticks burn on (they are never put out).
+    fireworks: { name: 'Fireworks', school: 'light', form: 'bolt', tier: 0, cd: 3, stance: 'level', kind: 'bolt', lux: 'fw', fuse: true, learn: 3, reach: 480, speed: 620, life: 0.9, grav: 0.03, r: 3,
+      dmg: 0, alts: ['display'], fx: '#ffd0f0', plain: { keys: [L, D, U, U, L], rune: [1, 4, 0, 3, 7] } },
+    display: { name: 'Fireworks (a display)', school: 'light', form: 'stream', tier: 0, cd: 10, stance: 'level', kind: 'display', alt: 'fireworks', chan: true, chanS: 6, every: 0.4, reach: 380,
+      fx: '#ffd0f0', plain: { keys: [L, D, U, U, D], rune: [1, 4, 3, 7, 5] } },
+    rainbow: { name: 'Rainbow', school: 'light', form: 'placed', tier: 0, cd: 10, stance: 'raise', kind: 'rainbow', learn: 3, reach: 480, secs: 20, fx: '#ffe08a',
+      plain: { keys: [L, D, L, U, R], rune: [1, 4, 3, 0, 1] } },
+    beacon: { name: 'Beacon', school: 'light', form: 'placed', tier: 0, cd: 20, stance: 'level', kind: 'bolt', lux: 'beacon', fuse: true, thru: true, learn: 3, reach: 420, speed: 650, life: 0.8,
+      grav: 0, r: 4, dmg: 0, secs: 60, screens: 3, fx: '#bcd8ff', plain: { keys: [L, D, D, U, U], rune: [1, 4, 6, 3, 0] } },
+    snuff: { name: 'Snuff', school: 'light', form: 'bolt', tier: 0, cd: 6, stance: 'level', kind: 'bolt', lux: 'snuff', fuse: true, learn: 3, reach: 420, speed: 760, life: 0.7, grav: 0, r: 3,
+      dmg: 0, R: 24, fx: '#5a4a7a', plain: { keys: [L, D, R, U, D], rune: [1, 4, 5, 7, 3] } },
     // ⭐ STEP 3d (2026-11-17), BATCH b — the server changes the world; what it changes goes back by itself (server `magicTemp`, kept in the database so a restart does not strand it):
     //   FREEZE (4A: clear blue ice) — the WATER at the pointer turns to ice cell by cell, outward from where it struck; walkable; melts back to the same water after `secs`.
     //     cells  at most this many · ringMs  between one ring of cells and the next
@@ -897,7 +916,8 @@
     // (19 round 5) the bow: drawn back along its curve
     boundbow: [[D, D], [4, 3, 6]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
-    flash: [[U, R], [4, 1, 2]], darkness: [[L, D], [4, 3, 6]], daylight: [[U, U], [4, 1]], sunbolt: [[R, R], [4, 5]], sunbeam: [[R, D], [4, 8]],   // (20b: the shared bolt and stream endings)   // (20a: up and out, a burst · down into the dark · straight up, a sun)
+    flash: [[U, R], [4, 1, 2]], darkness: [[L, D], [4, 3, 6]], daylight: [[U, U], [4, 1]], sunbolt: [[R, R], [4, 5]], sunbeam: [[R, D], [4, 8]],   // (20b: the shared bolt and stream endings)
+    fireworks: [[U, L], [4, 1, 0]], display: [[L, U], [4, 3, 0]], rainbow: [[L, R], [4, 3, 1, 5]], beacon: [[D, U], [4, 0, 1]], snuff: [[D, R], [4, 0, 3]],   // (20c: up and off · its variant the other way round · an arch over · down, then up · in and out; strokes off the middle no other Light word starts with)   // (20a: up and out, a burst · down into the dark · straight up, a sun)
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
   SPELLS.shrink.school = 'alteration';   // (grow and shrink one school — the user)
