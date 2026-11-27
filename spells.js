@@ -844,8 +844,8 @@
   //   A spell's `noMods` = ones that would mean nothing on it (the tunnelling bolt goes through rock already).
   const MODS = {
     mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [2, 4], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3 },   // (21 M1 round 2, the user: it ran out too soon — lifeK 2 → 3.5: a firebolt follows ~3.7 s)
-    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [2, 5], fits: ['fly'], group: ['path', 'fall'], noPiece: 1, cdK: 1.5, learn: 3, g: 1100, reach: 560 },
-    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly'], noPiece: 1, cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6 },
+    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [2, 5], fits: ['fly'], group: ['path', 'fall'], cdK: 1.5,   /* (M3 round 2: on pieces too — they lob onto the cast's point) */ learn: 3, g: 1100, reach: 560 },
+    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6, szK: 0.75 },   // (M3 round 2, the user: each split smaller and weaker — they compound, so stacking balances itself)
     mod_faint:  { name: 'Faint', keys: [D, D], rune: [0, 5], fits: ['fly'], cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5 },
     // ⭐ M2 (2026-11-27 — the user's four):
     //   bounce   off rock (and a level's floor) up to `n` times, `keep` of its speed each time, its time × `lifeK`; a lobbed wall / fire wall bounces on the ground before it stands
@@ -856,7 +856,7 @@
     mod_bounce:  { name: 'Bounces', keys: [U, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], group: ['wall'], cdK: 1.5, learn: 3, n: 3, keep: 0.75, lifeK: 1.6 },
     mod_thru:    { name: 'Through walls', keys: [R, R], rune: [2, 4], fits: ['fly'], group: ['wall'], noLob: 1, cdK: 2, learn: 3, cells: 10 },
     mod_delay:   { name: 'Delayed', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['placed', 'round'], group: ['wait'], rep: 3, cdK: 1.25, learn: 3, secs: 2.5 },   // (M2 round 3, the user: a bit longer — 1.5 → 2.5 s a piece)
-    mod_cluster: { name: 'Cluster', keys: [U, D], rune: [7, 5], fits: ['fly'], maker: 1, cdK: 1.5, learn: 3, n: 5, fan: 150, speedK: 0.55, life: 0.45, dmgK: 0.5, powK: 0.6, shotK: 0.4 },
+    mod_cluster: { name: 'Cluster', keys: [U, D], rune: [7, 5], fits: ['fly'], maker: 1, cdK: 1.5, learn: 3, n: 5, fan: 150, speedK: 0.55, life: 0.45, dmgK: 0.5, powK: 0.6, shotK: 0.4, szK: 0.6 },
   };
   // (21 M1) THE MODIFIERS TO COME — no keys, no page, not castable: only the rules (`modFits`, `modClash`, `modsOk`) know them, so what is built now already leaves room for them
   const MOD_PLAN = {
