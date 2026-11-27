@@ -4130,6 +4130,9 @@ function magicBoundGone(room, o) { const map = roomObjects[room]; if (!map || ma
   broadcastObjSt(room); return true; }
 // A SPIRIT STEP: `thick` rows of `wide` cells, its top row at the point, each grown out both ways from under the point, only into open cells (`magicWallLines`: rock or liquid
 //   ends a side). 0 = the point is not open.
+// (round 5) does this socket hold a bound bow right now?
+function magicBoundBowOf(room, sid) { const mine = eqObjs.get(sid), map = room && roomObjects[room]; if (!mine || !map) return false;
+  for (const oid of mine) { const o = map.get(oid); if (o && o.bnd && HELD.is(o.look) && HELD.LOOKS[o.look].bow) return true; } return false; }
 function magicStepMake(room, x, y, S) {
   const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); if (!grid) return 0;
   const ROWS = st.rows, COLS = st.cols, T = TERRAIN_CELL, c0 = Math.floor(x / T), r = Math.floor(y / T), W = Math.max(2, S.wide || 6), floorRow = Math.floor(roomFloorTop(room) / T);
@@ -23239,7 +23242,7 @@ function objectFlush(max) {
       // class of bug the whole economy track exists to stop.
       if (ids && map) for (const id of ids) {
         const o = map.get(id);
-        if (o && o.ch === ch && !o.eq) { const c = Object.assign({}, o); delete c.chs; list.push(c); }   // (`eq`: in somebody's hand — still in their pouch, never stored)
+        if (o && o.ch === ch && !o.eq && !o.bnd) { const c = Object.assign({}, o); delete c.chs; list.push(c); }   // (`eq`: in somebody's hand — still in their pouch, never stored)
       }
       try {
         if (list.length) { _putObjRow.run(room, ch, JSON.stringify(list)); objsSaved++; }
@@ -27970,7 +27973,9 @@ io.on('connection', (socket) => {
     // (magic 7a) …or an ICE SHARD its caster's game makes for the cast the server just passed (`socket._magicShard`, one a cast): free as an arrow is, never an item, and it melts
     const SHD = socket._magicShard, shardAsk = !!(data.shard != null && data.type === 'stamp' && data.look === 'iceshard' && data.loose && !data.item && SHD && SHD.id === (data.shard | 0) && Date.now() < SHD.until);
     if (shardAsk) { socket._magicShard = null; data.melt = Date.now() + SHD.secs * 1000; }
-    const ammoAsk = shardAsk || !!(data.ammo && data.type === 'stamp' && ITEMS.isItem(data.item) && ITEMS.ITEMS[data.item].kind === 'ammo');
+    // (magic 19 round 5) …or an ARROW OF LIGHT from the asker's own BOUND BOW (`bndArrow`): free, never an item, gone a few seconds after it is loosed, never stored
+    const boundArrowAsk = !!(data.bndArrow && data.type === 'stamp' && !data.item && typeof data.look === 'string' && data.look.startsWith('arrow_') && HELD.is(data.look) && magicBoundBowOf(currentAvatarRoom, socket.id));
+    const ammoAsk = shardAsk || boundArrowAsk || !!(data.ammo && data.type === 'stamp' && ITEMS.isItem(data.item) && ITEMS.ITEMS[data.item].kind === 'ammo');
     // (2026-10-26, tools piece 6) …nor is the ROPE a grappling hook takes with it as it is thrown (client 16za `hookOnLaunch`): asked while the hook is still in the
     //   asker's hand — checked below, once the room's props are loaded. Like an arrow it is free, not counted, and allowed on the spawn.
     const hookAsk = !!(data.hookRope && data.type === 'platform' && data.look === 'rope' && typeof data.rh === 'string');
@@ -27992,6 +27997,9 @@ io.on('connection', (socket) => {
     //   than is already out, and never more than two at once (two hands). Anything else naming an item is refused and the asker's
     //   own copy is taken back — an item must not come into the world from nothing.
     if (shardAsk) { const m = roomObjDrv[currentAvatarRoom] || (roomObjDrv[currentAvatarRoom] = new Map()), L = roomObjDrvAt[currentAvatarRoom] || (roomObjDrvAt[currentAvatarRoom] = new Map()); m.set(id, socket.id); L.set(id, Date.now()); }   // (7a) …its caster flies it
+    else if (boundArrowAsk) { delete obj.item; obj.bnd = 1; obj.bndBy = socket.id; const rm = currentAvatarRoom, BS = SPELLS.of('boundbow') || {};
+      { const m = roomObjDrv[rm] || (roomObjDrv[rm] = new Map()), L = roomObjDrvAt[rm] || (roomObjDrvAt[rm] = new Map()); m.set(id, socket.id); L.set(id, Date.now()); }   // …the shooter flies it
+      setTimeout(() => { const o2 = roomObjects[rm] && roomObjects[rm].get(id); if (o2 === obj) magicBoundGone(rm, o2); }, Math.round((BS.arrowS || 4) * 1000)); }
     else if (obj.item && ammoAsk) {
       if (invGatedRoom(currentAvatarRoom)) { if (!ledger.spendItem(playerKeyFor(socket.id), obj.item, 1)) { socket.emit('avatar-object-removed', { id }); return; } sendInvSync(socket, currentAvatarRoom); }
       { const m = roomObjDrv[currentAvatarRoom] || (roomObjDrv[currentAvatarRoom] = new Map()), L = roomObjDrvAt[currentAvatarRoom] || (roomObjDrvAt[currentAvatarRoom] = new Map()); m.set(id, socket.id); L.set(id, Date.now()); }   // …the shooter flies it

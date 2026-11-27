@@ -283,7 +283,7 @@
       looks: ['handpick', 'smallspade', 'hatchet', 'pickaxe', 'spade', 'fellingaxe'],
       plain: { keys: [D, R, U, L, U], rune: [2, 8, 7, 3, 0] } },
     boundblade: { name: 'Bound blade', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', learn: 3, weapon: 'sword', fx: '#e09a9a',
-      alts: ['boundaxe', 'boundspear', 'boundmace', 'boundshield'], looks: ['armingsword', 'greatsword'],
+      alts: ['boundaxe', 'boundspear', 'boundmace', 'boundshield', 'boundbow'], looks: ['armingsword', 'greatsword'],
       plain: { keys: [D, R, U, R, U], rune: [2, 8, 4, 1, 0] } },
     boundaxe: { name: 'Bound axe', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', alt: 'boundblade', weapon: 'axe', fx: '#e09a9a',
       looks: ['beardedaxe', 'greataxe'], plain: { keys: [D, R, U, R, L], rune: [2, 8, 4, 0, 3] } },
@@ -293,6 +293,10 @@
       looks: ['mace', 'maul'], plain: { keys: [D, R, U, D, D], rune: [2, 8, 4, 3, 6] } },
     boundshield: { name: 'Bound sword and shield', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', alt: 'boundblade', weapon: 'shield', fx: '#e09a9a',
       looks: ['armingsword'], offLooks: ['heatershield'], plain: { keys: [D, R, R, U, L], rune: [2, 8, 7, 4, 3] } },
+    // (round 5, the user) BOUND BOW: a longbow of light (both hands, as every bow); it nocks ARROWS OF LIGHT without end — none from the pouch, never an item, gone `arrowS` s
+    //   after they are loosed (client 16w `bowKind` / `bowShoot` `bndArrow`, server 'avatar-object-spawn')
+    boundbow: { name: 'Bound bow', school: 'summoning', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'bound', alt: 'boundblade', weapon: 'bow', fx: '#e09a9a', arrowS: 4,
+      looks: ['longbow'], plain: { keys: [D, R, L, L, U], rune: [2, 8, 4, 6, 3] } },
     spiritstep: { name: 'Spirit step', school: 'summoning', form: 'placed', tier: 0, cd: 6, stance: 'level', kind: 'step', learn: 3, reach: 320, secs: 20, wide: 10, thick: 2, rowMs: 30,
       crumbleMs: 70, crackS: 0, mat: 16, tkind: 'spirit', fx: '#e09a9a',
       plain: { keys: [R, D, L, R, R], rune: [6, 7, 8, 5, 4] } },
@@ -865,6 +869,8 @@
     // (19 round 2) the weapons: up into the hand, then — the axe's head back · the spear straight on, then out · the mace's head down · the shield across before you
     boundtool: [[D, U], [4, 8, 2]], boundblade: [[U, R], [4, 1, 2]], spiritstep: [[D, R], [4, 7, 8]],
     boundaxe: [[U, L], [4, 1, 0]], boundspear: [[U, U], [4, 1, 5]], boundmace: [[U, D], [4, 1, 3]], boundshield: [[R, U], [4, 5, 2]],
+    // (19 round 5) the bow: drawn back along its curve
+    boundbow: [[D, D], [4, 3, 6]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
