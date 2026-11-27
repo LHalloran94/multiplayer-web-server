@@ -3892,6 +3892,15 @@ function magicFalseAt(q) { const T = TERRAIN_CELL; if (q.fb) return [(q.fb.c0 + 
 const _magicGroves = new Map();
 // ⭐ (magic 13a) POISON CLOUDS: cast id → { id, by, room, x, y (the ground under the point), w, h (px), until } · SPORE PODS: cast id → { id, by, room, x, y (the ground), until, armAt }
 const _magicPClouds = new Map(), _magicSpores = new Map();
+// ⭐ (magic 20a) LIGHT: the placed fields that last — a DAYLIGHT's sun ('sun') and a ball of DARKNESS ('dark'): id → { id, k, by, room, x, y, R, until }.
+//   Each screen draws them from the cast / the landing; kept here for whoever comes in later ('magic-luxes') and for dispel. `cap` a caster: the oldest goes.
+const _magicLux = new Map();
+function magicLuxAdd(room, by, id, k, x, y, R, secs, cap) {
+  const now = Date.now(); for (const [q, L] of _magicLux) if (now > L.until) _magicLux.delete(q);
+  const mine = [..._magicLux.values()].filter(L => L.by === by && L.k === k).sort((a, b) => a.until - b.until);
+  while (mine.length >= cap) { const old = mine.shift(); _magicLux.delete(old.id); io.to(old.room).emit('magic-lux-gone', { id: old.id, why: 'new' }); }
+  _magicLux.set(id, { id, k, by, room, x: Math.round(x), y: Math.round(y), R, until: now + secs * 1000 });
+}
 // (13a) any fire lit at (x, y, r) inside a poison cloud sets it off: gone, a flash on every screen (each game hurts its own body in it), what can burn there lit
 function magicPCloudFire(room, x, y, r) { if (!_magicPClouds.size) return; const now = Date.now();
   for (const [k, q] of _magicPClouds) { if (q.room !== room || now > q.until) continue; if (Math.abs(x - q.x) > q.w / 2 + (r || 0) + 4 || y < q.y - q.h - (r || 0) - 4 || y > q.y + (r || 0) + 8) continue;
@@ -4065,6 +4074,8 @@ function magicDispel(room, cx, cy, R, ms, by) {
     if (t >= 0) { n++; later(t, () => { if (_magicVeils.get(oid) === q) { _magicVeils.delete(oid); io.to(room).emit('magic-veil-gone', { obj: oid, why: 'dispel' }); } }); } }
   for (const [k, q] of _magicFalse) { if (q.room !== room || now > q.until) continue; const P = magicFalseAt(q), t = P ? at(P[0], P[1], P[2]) : -1; if (t >= 0) { n++; later(t, () => { if (_magicFalse.delete(k)) io.to(room).emit('magic-false-gone', { id: k, why: 'dispel' }); }); } }   // (16c) false things
   for (const [k, q] of _magicHides) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y, q.R); if (t >= 0) { n++; later(t, () => { if (_magicHides.delete(k)) io.to(room).emit('magic-hide-gone', { id: k, why: 'dispel' }); }); } }
+  // (20a) suns and balls of darkness
+  for (const [k, q] of _magicLux) { if (q.room !== room || now > q.until) continue; const t = at(q.x, q.y, q.k === 'dark' ? (q.R || 0) * TERRAIN_CELL : 0); if (t >= 0) { n++; later(t, () => { if (_magicLux.delete(k)) io.to(room).emit('magic-lux-gone', { id: k, why: 'dispel' }); }); } }
   // (12c) vines
   for (const [k, q] of _magicVines) { if (q.room !== room) continue; const t = at(q.x, q.y + q.L / 2, q.L / 2); if (t >= 0) { n++; later(t, () => { if (_magicVines.delete(k)) magicObjDrop(room, q.oid); }); } }
   // (12b) entangle's snares, thorn hedges
@@ -29518,7 +29529,7 @@ io.on('connection', (socket) => {
       else if (S.lob && isFinite(out.tx)) { const A = SPELLS.arcAim(S, { g: S.lobG || 1100 }, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
       const ids = [id]; if (MD && m.mod === 'mod_split') { for (let i = 1; i < (MD.n || 3); i++) ids.push(++_magicSeq); out.ids = ids; }
       const SKf = S.freezeN ? Object.assign({}, SK, { cells: S.freezeN, secs: (S.freezeS || 20) * (socket._magicSecsK || 1), ringMs: 60 }) : SK;   // (4e round 2: the chill bolt's freeze — a cell or two)
-      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (MD && m.mod === 'mod_split' ? 0.6 : 1)).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.seed ? 'seed' : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0 });
+      for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (MD && m.mod === 'mod_split' ? 0.6 : 1)).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.seed ? 'seed' : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MD && m.mod === 'mod_follow' ? 1 : 0, lux: S.lux || null, luxR: S.R || 0 });
       while (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     // ⭐ (step 6a) KINDLE: what burns at the caster's point (short of the first rock on the way — their game's) catches, no further than its reach (held to it above)
@@ -29637,6 +29648,8 @@ io.on('connection', (socket) => {
       for (const [k, q] of _magicHides) if (now > q.until) _magicHides.delete(k);
       { const mine = [..._magicHides.values()].filter(q => q.by === socket.id).sort((a, b) => a.until - b.until); while (mine.length >= 2) _magicHides.delete(mine.shift().id); }
       out.R = S.R || 56; out.secs = secs; _magicHides.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, R: out.R, until: now + secs * 1000 }); }
+    // ⭐ (magic 20a) DAYLIGHT: a small sun where its caster pointed (short of rock — their game; held to its reach above), `secs` s, one a caster
+    if (S.kind === 'sun') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const secs = +(SK.secs || 30).toFixed(2); out.secs = secs; magicLuxAdd(room, socket.id, id, 'sun', out.tx, out.ty, 0, secs, 1); }
     // ⭐ (magic 16c) A FALSE WALL / OPENING, A MIRAGE: the box and its cells as the caster's game found them (only drawn — nothing here changes a cell), within reach
     if (S.kind === 'falseterr' || S.kind === 'mirage') { const F = magicFalseBox(m.fb, S.kind === 'mirage'); if (!F) return no('nothing'); const P = magicFalseAt({ fb: F });
       if (Math.hypot(P[0] - out.x, P[1] - out.y) > (S.reach || 320) + 120) return no('far'); if (S.kind === 'mirage') F.liq = S.liq ? 1 : 0;
@@ -29916,6 +29929,7 @@ io.on('connection', (socket) => {
       socket.emit('magic-veils', { list: [..._magicVeils.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, obj: q.obj, by: q.by, left: q.until - now })) });
       socket.emit('magic-falses', { list: [..._magicFalse.values()].filter(q => q.room === room && now < q.until).map(q => magicFalseWire(q, now)) });   // (magic 16c) false things
       socket.emit('magic-hides', { list: [..._magicHides.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, R: q.R, left: q.until - now })) });
+      socket.emit('magic-luxes', { list: [..._magicLux.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, k: q.k, by: q.by, x: q.x, y: q.y, R: q.R, left: q.until - now })) });   // (magic 20a) suns, balls of darkness
       // (magic 13a) poison clouds, spore pods
       socket.emit('magic-pclouds', { list: [..._magicPClouds.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, w: q.w, h: q.h, left: q.until - now })) });
       socket.emit('magic-spores', { list: [..._magicSpores.values()].filter(q => q.room === room && now < q.until).map(q => ({ id: q.id, by: q.by, x: q.x, y: q.y, left: q.until - now, arm: Math.max(0, q.armAt - now) })) });
@@ -29939,6 +29953,11 @@ io.on('connection', (socket) => {
     const L = m && _magicLive.get(m.id); if (!L || L.by !== socket.id || !isFinite(m.x) || !isFinite(m.y)) return;
     _magicLive.delete(m.id);
     if (Date.now() > L.until || Math.hypot(m.x - L.x, m.y - L.y) > L.reach) return;
+    // ⭐ (magic 20a) A CARRIER OF LIGHT ends — on rock, a body, at its pointer or in the air: a FLASH bursts there (each screen whites out its own player, as a flash-bang's);
+    //   a mote of DARKNESS opens into its ball there (kept here: arrivals, dispel)
+    if (L.lux) { const x = Math.round(+m.x), y = Math.round(+m.y), out = { id: m.id, x, y, air: m.air ? 1 : 0, land: 'lux', lk: L.lux, R: L.luxR, spell: L.spell, from: L.by, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined };
+      if (L.lux === 'dark') { const secs = +((L.SK && L.SK.secs) || 15).toFixed(2); out.secs = secs; magicLuxAdd(L.room, L.by, m.id, 'dark', x, y, L.luxR, secs, 2); }
+      io.to(L.room).emit('magic-end', out); return; }
     // ⭐ (step 6a) A FIREBALL BURSTS wherever it ends — on what it touched, or in the air at the end of its flight: everything that burns in its reach catches (not in liquid: steam)
     if (L.burst) { const liq = m.liq ? 1 : 0, n0 = liq ? 0 : magicFireBurst(L.room, +m.x, +m.y, L.burst);
       io.to(L.room).emit('magic-end', { id: m.id, x: Math.round(m.x), y: Math.round(m.y), air: 0, land: 'burst', r: L.burst, liq, pow: +(L.pow || 1).toFixed(2), n: n0, spell: L.spell, from: L.by, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined }); return; }

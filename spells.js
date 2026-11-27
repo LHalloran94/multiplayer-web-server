@@ -80,6 +80,21 @@
       plain: { keys: [L, D, D, L], rune: [1, 4, 7, 6] } },
     lightorb_f: { name: 'Light orb (following)', school: 'light', form: 'self', aim: 'self', reach: 240, tier: 0, cd: 4, stance: 'level', kind: 'orb', alt: 'lightorb', stay: false, secs: 60, pow: 1.6, rr: 170,
       plain: { keys: [L, D, D, D], rune: [1, 4, 7, 8] } },
+    // ⭐ STEP 20a (2026-11-27, kickoff §'STEP 20') LIGHT — CARRIED BY A PROJECTILE where it acts on others (the user: spells on others should fly and HIT, to be dodged or blocked):
+    //   FLASH, a bolt (`lux` 'flash'): an orb of light flies straight (no drop) and BURSTS where you pointed (`fuse`: at the pointer, no further than `reach`), on rock or on a body
+    //   first. Whoever is within `R` px and LOOKING at it, with nothing solid between, is whited out and dazed as by a flash-bang (16x's whiteout); facing away a glare; the dummy
+    //   too; its caster spared (Debug › Move 'Try illusions and Knowing on yourself' flashes them). No bang, no ear ring: light only.
+    //   DARKNESS, a bolt (`lux` 'dark'): a mote of dark LOBBED onto the pointer (`lob`); where it lands (or at the pointer in the air) a ball of darkness `R` cells across
+    //   stays `secs` s: every light inside shines at `dim` of itself (flames burn on); from outside it is black — nothing inside is seen, names neither; inside you see `see`
+    //   cells round you (`soft` the edge). Drawn over the picture (16zj `magicSenseScreen`), so every room. Two a caster.
+    //   DAYLIGHT, kind 'sun' (placed): a small sun hangs where you point (short of rock), `secs` s — a big warm light (`pow`, `rr` as the light orb's) that lights the dark and
+    //   the underground round it as day. One a caster.
+    flash: { name: 'Flash', school: 'light', form: 'bolt', tier: 0, cd: 8, stance: 'level', kind: 'bolt', lux: 'flash', fuse: true, learn: 3, reach: 460, speed: 820, life: 0.75, grav: 0, r: 4,
+      dmg: 0, R: 300, fx: '#eef4ff', plain: { keys: [L, D, U, R, R], rune: [1, 4, 2, 5, 7] } },
+    darkness: { name: 'Darkness', school: 'light', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'bolt', lux: 'dark', lob: true, lobG: 1100, learn: 5, reach: 400, speed: 520, life: 1.6,
+      grav: 0.35, r: 5, dmg: 0, secs: 15, R: 8, see: 2, soft: 2, dim: 0.12, fx: '#3a3450', plain: { keys: [L, D, R, D, D], rune: [1, 4, 3, 7, 6] } },
+    daylight: { name: 'Daylight', school: 'light', form: 'placed', tier: 1, cd: 30, stance: 'raise', kind: 'sun', learn: 5, reach: 420, secs: 30, pow: 5, rr: 720, fx: '#fff1c8',
+      plain: { keys: [L, D, U, U, U], rune: [1, 4, 0, 3, 6] } },
     // ⭐ STEP 3d (2026-11-17), BATCH b — the server changes the world; what it changes goes back by itself (server `magicTemp`, kept in the database so a restart does not strand it):
     //   FREEZE (4A: clear blue ice) — the WATER at the pointer turns to ice cell by cell, outward from where it struck; walkable; melts back to the same water after `secs`.
     //     cells  at most this many · ringMs  between one ring of cells and the next
@@ -872,6 +887,7 @@
     // (19 round 5) the bow: drawn back along its curve
     boundbow: [[D, D], [4, 3, 6]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
+    flash: [[U, R], [4, 1, 2]], darkness: [[L, D], [4, 3, 6]], daylight: [[U, U], [4, 1]],   // (20a: up and out, a burst · down into the dark · straight up, a sun)
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
   SPELLS.shrink.school = 'alteration';   // (grow and shrink one school — the user)
