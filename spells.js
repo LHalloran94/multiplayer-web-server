@@ -846,7 +846,7 @@
   //   many times as you like, each one MORE of it (bigger again bigger, three bounces more, …) — the input and the cooldowns limit it, and what grows slower is easier to dodge;
   //   `rep: 1` only where a second means nothing (arcs, comes back, weightless). GROUPS: only 'path' is kept — follows and homing both steer it all the way and would fight;
   //   everything else COMBINES (bigger + smaller multiply, bounce + through walls: through first, then it bounces; delay + hang + circling: one after another; arcs / comes
-  //   back / circling are phases, so they go with a steerer; heavy / weightless change an arc's own fall). 'body' stays for the planned chains / bursts on hitting.
+  //   back / circling are phases, so they go with a steerer; heavy / weightless change an arc's own fall). (M5: 'body' gone too — pierces and chains queue in the order put in, bursts layer on every strike.)
   const MODS = {
     mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [2, 4], fits: ['fly'], group: ['path'], rep: 0, cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3, more: 1.5 },   // (again: turns × `more`)
     mod_arc:    { name: 'Arcs', keys: [U, R], rune: [2, 5], fits: ['fly'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },   // (M3 round 2: on pieces too — they lob onto the cast's point)
@@ -870,7 +870,7 @@
     //   boomerang  out for `out` of its time, then its caster's game turns it back to its caster at `turn` rad/s — it ends harmlessly back in their hand; × `lifeK` its time
     mod_bigger:    { name: 'Bigger', keys: [U, U], rune: [0, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.5, learn: 3, k: 1.5, dmgK: 1.4, speedK: 0.85 },
     mod_smaller:   { name: 'Smaller', keys: [D, D], rune: [2, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.2, learn: 3, k: 0.65, dmgK: 0.75, speedK: 1.2 },
-    mod_pierce:    { name: 'Pierces', keys: [R, R], rune: [6, 4], fits: ['fly'], group: ['body'], hit: 1, rep: 0, cdK: 1.5, learn: 3, n: 3, dmgK: 0.8 },
+    mod_pierce:    { name: 'Pierces', keys: [R, R], rune: [6, 4], fits: ['fly'], hit: 1, rep: 0, cdK: 1.5, learn: 3, n: 3, dmgK: 0.8 },
     mod_homing:    { name: 'Homing', keys: [D, U], rune: [8, 5], fits: ['fly'], group: ['path'], rep: 0, cdK: 2, learn: 3, turn: 8, range: 420, cone: 90, lifeK: 1.6, gravK: 0.15, more: 1.5 },   // (M4 round 2, the user: a bit less good — stacking it makes it better)
     mod_boomerang: { name: 'Comes back', keys: [L, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], noLob: 1, cdK: 1.5, learn: 3, out: 0.35, turn: 7, lifeK: 2.6, gravK: 0, catchR: 20 },   // (rig: × 2 ran out 250 px short — longer, no fall, back sooner)
     // ⭐ M4 (2026-11-28) THE FLIGHT ONES — each in its generation, each put in again MORE of it:
@@ -889,14 +889,29 @@
     mod_heavy:      { name: 'Heavy', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['thrown'], rep: 0, cdK: 1.25, learn: 3, g: 900, dmgK: 1.25, arcK: 0.8 },
     mod_weightless: { name: 'Weightless', keys: [U, U], rune: [6, 4], fits: ['fly'], later: ['thrown'], cdK: 1.25, learn: 3, arcG: 0.12 },
     mod_hang:       { name: 'Hangs, then flies', keys: [U, U], rune: [0, 5], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, out: 0.35, secs: 2 },
+    // ⭐ M5 (2026-11-28 — the user agreed the proposal):
+    //   chain    after it strikes a body it JUMPS to the nearest other body within `range` px (never straight back to the one it left; back to one after another is fine), locked
+    //            on so it cannot miss, at its speed or `v` px/s if faster; `n` jumps a piece put in, each blow × `dmgK` of the one before (compounding), `addS` more time a jump;
+    //            none in reach: it ends there. ORDER (with pierces, in the order put in — 16zj `bodyQ`): pierces · chains = through `n` bodies, then it jumps; chains · pierces
+    //            = it jumps, then goes on through. 'Try illusions and Knowing on yourself' on: you count as a body it may jump to (dummy → you → dummy, with no second player)
+    //   explode  it BURSTS at every strike — each body it strikes (pierced, chained through or the last), each bounce, where it ends on rock or liquid (not running out in
+    //            the air): a ring `r` px round (× (1 + `more`) a piece put in again) in its school's colour; every other body in it takes `dmgK` of the blow (less towards the
+    //            edge) as a hit of that spell — its own touch comes with it (a chill bolt slows them, venom poisons) — but leeches, petrify and the bone spear's lodging stay
+    //            with the one it struck; thrown out `f`. Layers on everything (not ordered)
+    //   double   TWICE: the whole cast goes again `gap` s later (a piece put in: one more), from where its caster's catalyst is then, at the pointer then — a copy, as split is
+    //            (it copies its generation; after a cluster each piece is followed by another from the same burst)
+    //   trail    it leaves marks along its way (every phase — a ring round you while it circles), lasting `secs` (× the pieces put in), every `gap` px, by its SCHOOL (16zj
+    //            `MAGIC_TRAIL`): fire real flame (sets alight) · frost rime (slows) · storm sparks · earth grit (small blows) · decay mist (poisons) · blood drops (cut) · life
+    //            a glow (heals a little — its caster too) · light lingering light (lights the dark) · the rest a shimmer (a look only). Each screen its own body; the caster's the dummy
+    mod_chain:      { name: 'Chains', keys: [R, L], rune: [0, 4], fits: ['fly'], hit: 1, rep: 0, cdK: 2, learn: 3, n: 3, range: 220, dmgK: 0.8, v: 900, addS: 0.7 },
+    mod_explode:    { name: 'Bursts on hitting', keys: [U, D], rune: [7, 4], fits: ['fly'], hit: 1, rep: 0, cdK: 1.5, learn: 3, r: 26, more: 0.6, dmgK: 0.6, f: 7 },
+    mod_double:     { name: 'Twice', keys: [R, R], rune: [0, 4], fits: ['fly'], rep: 0, cdK: 1.75, learn: 3, gap: 0.35 },
+    mod_trail:      { name: 'Leaves a trail', keys: [L, R], rune: [6, 5], fits: ['fly'], rep: 0, cdK: 1.5, learn: 3, secs: 3, gap: 7 },
     mod_lasting:    { name: 'Lasts longer', keys: [R, R], rune: [2, 4], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round', 'self'], rep: 0, cdK: 1.5, learn: 3, k: 1.6 },   // (21 M1 round 3, the user: a firebolt flies longer before it fizzles — with follows, longer steered)
   };
   // (21 M1) THE MODIFIERS TO COME — no keys, no page, not castable: only the rules (`modFits`, `modClash`, `modsOk`) know them, so what is built now already leaves room for them
   const MOD_PLAN = {
-    mod_chain:     { name: 'Chains', fits: ['fly'], group: ['body'], hit: 1, cdK: 2 },
-    mod_explode:   { name: 'Bursts on hitting', fits: ['fly'], group: ['body'], hit: 1, cdK: 1.5 },
-    mod_trail:     { name: 'Leaves a trail', fits: ['fly'], cdK: 1.5 },
-    mod_double:    { name: 'Twice', fits: ['fly'], cdK: 1.75 },
+    // (M5: chains, bursts on hitting, leaves a trail and twice moved into MODS; the 'body' group gone — pierces and chains are ordered, bursts layer)
     mod_trigger:   { name: 'Casts the next where it lands', fits: ['fly', 'placed'], cdK: 1.5 },
   };
   const MOD_MAX = 200;   // (M4 round 2, the user: no cap but a safety one, set high — the pieces a cast makes are stopped at 400 anyway)
@@ -958,7 +973,9 @@
     const gAdd = c('mod_heavy') * (mk('mod_heavy').g || 900); dk *= Math.pow(mk('mod_heavy').dmgK || 1.25, c('mod_heavy'));
     const wl = c('mod_weightless') > 0, AR = mk('mod_arc'), arc = Object.assign({}, AR, { g: (AR.g || 1100) * (wl ? (mk('mod_weightless').arcG || 0.12) : 1 + (mk('mod_heavy').arcK || 0.8) * c('mod_heavy')) });
     const accHi = c('mod_accel') ? (mk('mod_accel').hi || 2.2) * Math.pow(mk('mod_accel').more || 1.3, c('mod_accel') - 1) : 1;
-    return { n, k, sp, dk, life, add, gAdd, wl, arc, accHi }; };
+    // (M5) the room a CHAINING one needs on the server (`chT` s more, `chD` px further — its jumps; the client adds `addS` a jump only when it jumps) and TWICE's copies (`tw`)
+    const chN = c('mod_chain') * (mk('mod_chain').n || 3), chT = chN * ((mk('mod_chain').addS || 0.7) + 0.2), chD = chN * (mk('mod_chain').range || 220) * 1.3, tw = c('mod_double');
+    return { n, k, sp, dk, life, add, gAdd, wl, arc, accHi, chT, chD, tw }; };
   // every way the modifiers in `mods` may follow a spell, in every order, up to `most` long (with none first) — for reading a rune drawn freely
   const modSeqs = (spell, mods, most) => { const out = [[]], lim = Math.min(MOD_TOTAL, most || MOD_TOTAL), go = (cur) => { if (cur.length >= lim) return;
     for (const md of mods || []) { const nx = cur.concat([md]); if (!modsOk(spell, nx, lim)) continue; out.push(nx); go(nx); } }; go([]); return out; };
