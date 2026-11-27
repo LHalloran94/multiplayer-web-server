@@ -871,18 +871,18 @@
     mod_bigger:    { name: 'Bigger', keys: [U, U], rune: [0, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.5, learn: 3, k: 1.5, dmgK: 1.4, speedK: 0.85 },
     mod_smaller:   { name: 'Smaller', keys: [D, D], rune: [2, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.2, learn: 3, k: 0.65, dmgK: 0.75, speedK: 1.2 },
     mod_pierce:    { name: 'Pierces', keys: [R, R], rune: [6, 4], fits: ['fly'], group: ['body'], hit: 1, rep: 0, cdK: 1.5, learn: 3, n: 3, dmgK: 0.8 },
-    mod_homing:    { name: 'Homing', keys: [D, U], rune: [8, 5], fits: ['fly'], group: ['path'], rep: 0, cdK: 2, learn: 3, turn: 14, range: 560, cone: 110, lifeK: 1.6, gravK: 0.15, more: 1.4 },
+    mod_homing:    { name: 'Homing', keys: [D, U], rune: [8, 5], fits: ['fly'], group: ['path'], rep: 0, cdK: 2, learn: 3, turn: 8, range: 420, cone: 90, lifeK: 1.6, gravK: 0.15, more: 1.5 },   // (M4 round 2, the user: a bit less good — stacking it makes it better)
     mod_boomerang: { name: 'Comes back', keys: [L, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], noLob: 1, cdK: 1.5, learn: 3, out: 0.35, turn: 7, lifeK: 2.6, gravK: 0, catchR: 20 },   // (rig: × 2 ran out 250 px short — longer, no fall, back sooner)
     // ⭐ M4 (2026-11-28) THE FLIGHT ONES — each in its generation, each put in again MORE of it:
     //   wavy      weaves side to side across its way, `amp` px at `hz` a second (again: × `more` wider)
-    //   orbit     circles its caster `r` px out at `w` rad/s for `secs` (a piece put in), striking what it meets, then flies off at the pointer (its caster's game steers both)
+    //   orbit     circles its caster `r` px out at `w` rad/s, striking what it meets, till it strikes or runs out (`secs` more time a piece put in; round 2, the user: no flying off)
     //   faster / slower  its speed × `k` a piece put in (slower flies × 1/`k` as long — the same reach, only slower)
     //   accel     starts at `lo` of its speed and climbs to `hi` over `t` s (again: `hi` × `more`)
     //   heavy     falls: + `g` px/s² a piece put in, its blow × `dmgK` (an arc: its lob × (1 + `arcK`) steeper) · weightless  no fall (an arc: nearly straight onto the point)
     //   hang      flies out `out` s (or to the point, sooner), stops and hangs `secs` (a piece put in), then flies on at the pointer (its caster's game)
     //   lasting   flies × `k` as long a piece put in (thrown, held, placed and the rest LATER)
-    mod_wavy:       { name: 'Wavy', keys: [U, L], rune: [6, 4], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, amp: 12, hz: 2.2, more: 1.6 },
-    mod_orbit:      { name: 'Circles you', keys: [L, L], rune: [6, 5], fits: ['fly'], rep: 0, cdK: 1.5, learn: 3, r: 42, w: 5, secs: 2.5 },
+    mod_wavy:       { name: 'Wavy', keys: [U, L], rune: [6, 4], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, amp: 28, hz: 1.8, more: 1.6 },   // (M4 round 2, the user: not wavy enough — 12 → 28 px)
+    mod_orbit:      { name: 'Circles you', keys: [L, L], rune: [6, 5], fits: ['fly'], rep: 0, cdK: 1.5, learn: 3, r: 42, w: 5, secs: 4 },   // (M4 round 2, the user: it keeps circling you till it strikes or runs out — `secs` its extra time)
     mod_faster:     { name: 'Faster', keys: [R, R], rune: [0, 5], fits: ['fly'], later: ['thrown'], rep: 0, cdK: 1.25, learn: 3, k: 1.4 },
     mod_slower:     { name: 'Slower', keys: [L, L], rune: [2, 4], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, k: 0.65 },
     mod_accel:      { name: 'Speeds up', keys: [U, U], rune: [6, 4], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, lo: 0.35, hi: 2.2, t: 0.9, more: 1.3 },
@@ -899,8 +899,9 @@
     mod_double:    { name: 'Twice', fits: ['fly'], cdK: 1.75 },
     mod_trigger:   { name: 'Casts the next where it lands', fits: ['fly', 'placed'], cdK: 1.5 },
   };
-  const MOD_MAX = 40;   // (21 M1) the most pieces a cast takes — the input time and the cooldowns are the real limit; this only stops nonsense (M3: in ONE GENERATION; M4: 6 → 40, the user: no limits we do not need)
-  const MOD_TOTAL = 80;   // (21 M3) …and in the whole cast, any number of generations (the user: no limit — the input itself limits it; this only stops nonsense)
+  const MOD_MAX = 200;   // (M4 round 2, the user: no cap but a safety one, set high — the pieces a cast makes are stopped at 400 anyway)
+  const MOD_MAX_WAS = 40;   // (21 M1) the most pieces a cast takes — the input time and the cooldowns are the real limit; this only stops nonsense (M3: in ONE GENERATION; M4: 6 → 40, the user: no limits we do not need)
+  const MOD_TOTAL = 200;   // (21 M3) …and in the whole cast, any number of generations (the user: no limit — the input itself limits it; this only stops nonsense)
   const isMod = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(MODS, id);
   const modOf = (id) => isMod(id) ? MODS[id] : null;
   const modAny = (id) => isMod(id) ? MODS[id] : (typeof id === 'string' && Object.prototype.hasOwnProperty.call(MOD_PLAN, id) ? MOD_PLAN[id] : null);
