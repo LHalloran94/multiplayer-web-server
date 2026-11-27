@@ -29863,6 +29863,11 @@ io.on('connection', (socket) => {
     if (!(k > 0.15) || !S.dent) return;
     const fm = fallMats(obj), fw = fallWear(obj); for (let q = 0; q < fm.length; q++) if (fm[q]) fw[q] = Math.min(253, fw[q] + Math.round(k * S.dent * (0.6 + 0.4 * Math.random()) / 60 * 255));
     fallWearSet(obj, fw); if (objChunked(B.room)) objsTouch(B.room, obj.ch); emitObjToChunks(B.room, obj, 'body-fw', { id: obj.id, fw: obj.fw || '', fn: obj.fn || '' }); });
+  // ⭐ (magic 20b) A SUNBEAM's caster says where it runs (`x0`,`y0` the catalyst's tip → `x1`,`y1` its front): heat's rays along it, thin — ice and snow there melt
+  socket.on('magic-beam-melt', (m) => { const room = currentAvatarRoom, q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || ![m.x0, m.y0, m.x1, m.y1].every(isFinite)) return;
+    const S = SPELLS.of(q.spell); if (!S || S.kind !== 'beam') return; const now = Date.now(); if (now - (q.meltAt || 0) < 150) return; q.meltAt = now;
+    const dx = m.x1 - m.x0, dy = m.y1 - m.y0, len = Math.hypot(dx, dy); if (len < 1 || len > (S.reach || 320) + 40 || Math.hypot(m.x0 - q.x, m.y0 - q.y) > 120) return;
+    try { magicHeatTick(m.id | 0, { room, x: +m.x0, y: +m.y0, ax: dx / len, ay: dy / len, t0: now - 1e6 }, { reach: len + 10, half: 0.035, melt: 6, growMs: 1 }, now); } catch (e) {} });
   socket.on('magic-chan-burn', (m) => { const room = currentAvatarRoom, q = m && _magicChans.get(m.id | 0); if (!q || q.by !== socket.id || q.room !== room || !isFinite(m.x) || !isFinite(m.y)) return;
     const now = Date.now(); if (now - (q.burnT || 0) < 180) return; q.burnT = now; if (Math.hypot(m.x - q.x, m.y - q.y) > q.reach + 64) return; igniteBox(room, +m.x, +m.y, TERRAIN_CELL); });
   // ⭐ (6b) THE GROUND A FLAME RING'S FLAMES BRUSH, from its caster's game (which sees where they go) — near where its caster last said they were, a few times a second

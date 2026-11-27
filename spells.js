@@ -96,6 +96,15 @@
     daylight: { name: 'Daylight', school: 'light', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'bolt', lux: 'sun', fuse: true, thru: true, learn: 5, reach: 420, speed: 420, life: 1.2, grav: 0, r: 5, dmg: 0,
       secs: 30, pow: 5, rr: 720, fx: '#fff1c8',
       plain: { keys: [L, D, U, U, U], rune: [1, 4, 0, 3, 6] } },
+    // ⭐ STEP 20b (2026-11-27) LIGHT THAT HURTS. SUNBOLT, a bolt (`glare`): a fast straight dart of white-gold light, no drop, a small blow; the face it strikes is dazzled (16x's
+    //   glare, no daze); the dummy screws its eyes shut. Modifiers as every bolt. SUNBEAM, kind 'beam', HELD (`chanS` s at most, you stand still): a beam from the catalyst's tip;
+    //   its FRONT travels out at `speed` px/s to `reach`, stopped by rock (not by liquid — light goes through water); it TURNS towards the pointer no faster than `turn`
+    //   radians a second, so it can be stepped out of. A body in it (half width `hw`): `dmg` every `every` s, each its own game, and a glare if they face it; the caster's game
+    //   the dummy. Where its front meets ice or snow it melts it (server `magicHeatTick` along the beam, `magic-beam-melt`).
+    sunbolt: { name: 'Sunbolt', school: 'light', form: 'bolt', tier: 0, cd: 3, stance: 'level', kind: 'bolt', learn: 3, speed: 1150, life: 0.45, grav: 0, r: 3, dmg: 1, glare: true, fx: '#fff1c8',
+      plain: { keys: [L, D, R, R, R], rune: [1, 4, 2, 5, 8] } },
+    sunbeam: { name: 'Sunbeam', school: 'light', form: 'stream', tier: 1, cd: 10, stance: 'level', kind: 'beam', learn: 5, chan: true, chanS: 4, reach: 320, speed: 900, turn: 2.2, hw: 4,
+      dmg: 0.4, every: 0.5, fx: '#fff1c8', plain: { keys: [L, D, R, R, D], rune: [1, 4, 5, 7, 8] } },
     // ⭐ STEP 3d (2026-11-17), BATCH b — the server changes the world; what it changes goes back by itself (server `magicTemp`, kept in the database so a restart does not strand it):
     //   FREEZE (4A: clear blue ice) — the WATER at the pointer turns to ice cell by cell, outward from where it struck; walkable; melts back to the same water after `secs`.
     //     cells  at most this many · ringMs  between one ring of cells and the next
@@ -888,7 +897,7 @@
     // (19 round 5) the bow: drawn back along its curve
     boundbow: [[D, D], [4, 3, 6]],
     lightorb: [[D, L], [4, 7]], lightorb_f: [[D, D], [4, 6]],
-    flash: [[U, R], [4, 1, 2]], darkness: [[L, D], [4, 3, 6]], daylight: [[U, U], [4, 1]],   // (20a: up and out, a burst · down into the dark · straight up, a sun)
+    flash: [[U, R], [4, 1, 2]], darkness: [[L, D], [4, 3, 6]], daylight: [[U, U], [4, 1]], sunbolt: [[R, R], [4, 5]], sunbeam: [[R, D], [4, 8]],   // (20b: the shared bolt and stream endings)   // (20a: up and out, a burst · down into the dark · straight up, a sun)
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
   SPELLS.shrink.school = 'alteration';   // (grow and shrink one school — the user)
