@@ -871,7 +871,7 @@
     mod_hang:      { name: 'Hangs, then flies', fits: ['fly'], group: ['wait'], cdK: 1.25 },
     mod_double:    { name: 'Twice', fits: ['fly'], cdK: 1.75 },
     mod_trigger:   { name: 'Casts the next where it lands', fits: ['fly', 'placed'], cdK: 1.5 },
-    mod_lasting:   { name: 'Lasts longer', fits: ['held', 'placed', 'round', 'self'], rep: 2, cdK: 1.5 },
+    mod_lasting:   { name: 'Lasts longer', fits: ['fly', 'thrown', 'held', 'placed', 'round', 'self'], rep: 2, cdK: 1.5 },   // (21 M1 round 3, the user: a firebolt flies longer before it fizzles — with follows, longer steered)
   };
   const MOD_MAX = 6;   // (21 M1) the most pieces a cast takes — the input time and the cooldowns are the real limit; this only stops nonsense
   const isMod = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(MODS, id);
