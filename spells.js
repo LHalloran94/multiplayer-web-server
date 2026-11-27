@@ -103,14 +103,15 @@
     //   the dummy. Where its front meets ice or snow it melts it (server `magicHeatTick` along the beam, `magic-beam-melt`).
     sunbolt: { name: 'Sunbolt', school: 'light', form: 'bolt', tier: 0, cd: 3, stance: 'level', kind: 'bolt', learn: 3, speed: 1150, life: 0.45, grav: 0, r: 3, dmg: 1, glare: true, fx: '#fff1c8',
       plain: { keys: [L, D, R, R, R], rune: [1, 4, 2, 5, 8] } },
-    sunbeam: { name: 'Sunbeam', school: 'light', form: 'stream', tier: 1, cd: 10, stance: 'level', kind: 'beam', learn: 5, chan: true, chanS: 4, reach: 320, speed: 900, turn: 2.2, hw: 4,
+    sunbeam: { name: 'Sunbeam', school: 'light', form: 'stream', tier: 1, cd: 10, stance: 'level', kind: 'beam', learn: 5, chan: true, chanS: 4, reach: 320, speed: 900, turn: 30, hw: 4,   // (20c round 2, the user: it must keep up with the pointer — `turn` was 2.2)
       dmg: 0.4, every: 0.5, fx: '#fff1c8', plain: { keys: [L, D, R, R, D], rune: [1, 4, 5, 7, 8] } },
     // ⭐ STEP 20c (2026-11-27) LIGHT FOR SHOW — each that acts somewhere a PROJECTILE (the user: modifiers as widely as they can go):
     //   FIREWORKS, a bolt (`lux` 'fw'): a rocket of light trailing sparks to the pointer (`fuse`); it BURSTS into a shell of coloured sparks (its colours from its id, the same on
     //     every screen), a brief light in its colour. Harmless. Variant A DISPLAY (kind 'display', HELD `chanS` s): a rocket every `every` s up along your aim, each bursting
     //     on its own (every screen from the same aim and seed — nothing for the server).
-    //   RAINBOW (kind 'rainbow', placed): an arch from your feet to where you point (short of rock), `secs` s; only a look.
-    //   BEACON, a bolt (`lux` 'beacon', through bodies): where it ends a column of light stands `secs` s, up to the rock above it; whoever is within `screens` screens of it and
+    //   RAINBOW (kind 'rainbow'; round 2, the user: drawn by the player, not an arch made for them — purely visual spells should let players express themselves): HELD up to
+    //     `chanS` s — a ribbon of rainbow is painted along wherever the pointer goes (within `reach` of you, at most `pts` points); let go, it stays `secs` s, then fades.
+    //   BEACON, a bolt (`lux` 'beacon', through bodies): where it ends (round 2, the user: out of the nearest ground UNDER it, ≤ `down` cells) a column of light stands `secs` s, up to the rock above it; whoever is within `screens` screens of it and
     //     cannot see it gets an arrow at the edge of their view. Three a caster.
     //   SNUFF, a bolt (`lux` 'snuff'): a dart of shadow; where it ends every light within `R` px goes out — a torch's flame, a lantern, a headlamp, a flashlight (16k
     //     `torch-out`), a light orb, a daylight's sun. Flares and glowsticks burn on (they are never put out).
@@ -118,10 +119,10 @@
       dmg: 0, alts: ['display'], fx: '#ffd0f0', plain: { keys: [L, D, U, U, L], rune: [1, 4, 0, 3, 7] } },
     display: { name: 'Fireworks (a display)', school: 'light', form: 'stream', tier: 0, cd: 10, stance: 'level', kind: 'display', alt: 'fireworks', chan: true, chanS: 6, every: 0.4, reach: 380,
       fx: '#ffd0f0', plain: { keys: [L, D, U, U, D], rune: [1, 4, 3, 7, 5] } },
-    rainbow: { name: 'Rainbow', school: 'light', form: 'placed', tier: 0, cd: 10, stance: 'raise', kind: 'rainbow', learn: 3, reach: 480, secs: 20, fx: '#ffe08a',
+    rainbow: { name: 'Rainbow', school: 'light', form: 'stream', tier: 0, cd: 10, stance: 'level', kind: 'rainbow', learn: 3, chan: true, chanS: 8, reach: 480, secs: 20, pts: 240, wide: 16, fx: '#ffe08a',
       plain: { keys: [L, D, L, U, R], rune: [1, 4, 3, 0, 1] } },
     beacon: { name: 'Beacon', school: 'light', form: 'placed', tier: 0, cd: 20, stance: 'level', kind: 'bolt', lux: 'beacon', fuse: true, thru: true, learn: 3, reach: 420, speed: 650, life: 0.8,
-      grav: 0, r: 4, dmg: 0, secs: 60, screens: 3, fx: '#bcd8ff', plain: { keys: [L, D, D, U, U], rune: [1, 4, 6, 3, 0] } },
+      grav: 0, r: 4, dmg: 0, secs: 60, screens: 3, down: 80, fx: '#bcd8ff', plain: { keys: [L, D, D, U, U], rune: [1, 4, 6, 3, 0] } },
     snuff: { name: 'Snuff', school: 'light', form: 'bolt', tier: 0, cd: 6, stance: 'level', kind: 'bolt', lux: 'snuff', fuse: true, learn: 3, reach: 420, speed: 760, life: 0.7, grav: 0, r: 3,
       dmg: 0, R: 24, fx: '#5a4a7a', plain: { keys: [L, D, R, U, D], rune: [1, 4, 5, 7, 3] } },
     // ⭐ STEP 3d (2026-11-17), BATCH b — the server changes the world; what it changes goes back by itself (server `magicTemp`, kept in the database so a restart does not strand it):

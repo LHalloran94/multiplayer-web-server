@@ -4244,11 +4244,11 @@ function magicHeatTick(id, q, S, now) {
 setInterval(() => { if (!_magicChans.size) return; const now = Date.now(); for (const [id, q] of _magicChans) { if (now > q.until) continue; const S = SPELLS.of(q.spell); if (S && S.kind === 'heat') { try { magicHeatTick(id, q, S, now); } catch (e) { console.error('[magic heat] ' + (e && e.message)); } } } }, 150);
 const _magicBlades = new Map();   // (6c) the flaming weapons: caster's socket → { room, wpn, id, until, burnT }
 const _magicAuras = new Map();   // (6b) the flame rings burning: cast id → { by, room, until, burnT }
-function magicGroundAt(room, x, y) {
+function magicGroundAt(room, x, y, down) {   // (`down`: how many cells it looks below — 12 unless told; magic 20c round 2's beacon looks further)
   const st = cellsOf(room), grid = ensureTerrain(room); ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, c = Math.floor(x / TERRAIN_CELL); let r = Math.floor(y / TERRAIN_CELL); if (c < 0 || c >= COLS) return null;   // (a room nobody has painted has no grid yet: made, as a brush makes it)
   const floorRow = Math.floor(roomFloorTop(room) / TERRAIN_CELL), solid = (rr) => { if (rr >= floorRow) return true; const v = peekCellAt(grid, c * ROWS + rr); return v > 0 && isSolidCell(v); };   // (a level's floor is a line, not cells — the rig's room stands on one)
   if (solid(r)) { let k = 0; while (k < 8 && r > 0 && solid(r)) { r--; k++; } if (solid(r)) return null; }
-  else { let k = 0; while (k < 12 && r < ROWS - 1 && !solid(r + 1)) { r++; k++; } if (!solid(r + 1)) return null; }
+  else { let k = 0; const kn = down || 12; while (k < kn && r < ROWS - 1 && !solid(r + 1)) { r++; k++; } if (!solid(r + 1)) return null; }
   return { x: Math.round((c + 0.5) * TERRAIN_CELL), y: (r + 1) * TERRAIN_CELL, c, r };
 }
 // ⭐ (step 6a, 2026-11-19 — FIRE) THE FIREBALL'S BURST: everything that can burn within `R` px of (x, y) catches — the world's own fire (`FIRE_RATE`, oil), as `igniteBox` lights,
@@ -29800,7 +29800,8 @@ io.on('connection', (socket) => {
     const now = Date.now(); if (now - (socket._aimT || 0) < 35) return; socket._aimT = now; const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > 520) return;
     const al = Math.hypot(m.ax, m.ay) || 1; q.x = Math.round(+m.x); q.y = Math.round(+m.y); q.ax = m.ax / al; q.ay = m.ay / al;
     const K = q.chunk || q.water; if (K && isFinite(m.cx) && isFinite(m.cy) && Math.hypot(+m.cx - q.x, +m.cy - q.y) < (SPELLS.of(q.spell) || {}).reach + 120) { K.cx = Math.round(+m.cx); K.cy = Math.round(+m.cy); }   // (5b) where the held chunk is (7b: or the ball of water)
-    socket.to(room).emit('magic-aim', Object.assign({ id: m.id | 0, x: q.x, y: q.y, ax: +q.ax.toFixed(3), ay: +q.ay.toFixed(3) }, K ? { cx: K.cx, cy: K.cy } : {})); });
+    const PT = isFinite(m.px) && isFinite(m.py) && Math.hypot(+m.px - q.x, +m.py - q.y) < ((SPELLS.of(q.spell) || {}).reach || 480) + 200 ? { px: Math.round(+m.px), py: Math.round(+m.py) } : null;   // (magic 20c round 2) where a rainbow's painter points
+    socket.to(room).emit('magic-aim', Object.assign({ id: m.id | 0, x: q.x, y: q.y, ax: +q.ax.toFixed(3), ay: +q.ay.toFixed(3) }, K ? { cx: K.cx, cy: K.cy } : {}, PT || {})); });
   // ⭐ (magic 17c round 2) THE FAR EYE: its caster's game says where it is (≤ `reach` + 200 from them, ~16 a second) and when it closes — passed to the room
   socket.on('magic-eye', (m) => { const room = currentAvatarRoom, E = socket._eye; if (!room || !m || !E || E.id !== (m.id | 0) || E.room !== room || !isFinite(m.x) || !isFinite(m.y)) return; const now = Date.now(); if (now > E.until + 1000 || now - (socket._eyeT || 0) < 40) return; socket._eyeT = now;
     const p = socket._avPos; if (p && now - p.t < 4000 && Math.hypot(m.x - p.x, m.y - p.y) > E.reach + 200) return; socket.to(room).emit('magic-eye', { from: socket.id, id: E.id, x: Math.round(+m.x), y: Math.round(+m.y) }); });
@@ -29961,7 +29962,7 @@ io.on('connection', (socket) => {
     if (L.lux) { const x = Math.round(+m.x), y = Math.round(+m.y), out = { id: m.id, x, y, air: m.air ? 1 : 0, land: 'lux', lk: L.lux, R: L.luxR, spell: L.spell, from: L.by, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined };
       if (L.lux === 'dark') { const secs = +((L.SK && L.SK.secs) || 15).toFixed(2); out.secs = secs; magicLuxAdd(L.room, L.by, m.id, 'dark', x, y, L.luxR, secs, 2); }
       else if (L.lux === 'sun') { const secs = +((L.SK && L.SK.secs) || 30).toFixed(2); out.secs = secs; magicLuxAdd(L.room, L.by, m.id, 'sun', x, y, 0, secs, 3); }   // (round 2: a projectile; three a caster, a split's three)
-      else if (L.lux === 'beacon') { const secs = +((L.SK && L.SK.secs) || 60).toFixed(2); out.secs = secs; magicLuxAdd(L.room, L.by, m.id, 'beacon', x, y, 0, secs, 3); }   // (20c) a column of light, three a caster
+      else if (L.lux === 'beacon') { const secs = +((L.SK && L.SK.secs) || 60).toFixed(2); out.secs = secs; const g = magicGroundAt(L.room, x, y, (L.SK && L.SK.down) || 80); if (g) { out.x = g.x; out.y = g.y; } magicLuxAdd(L.room, L.by, m.id, 'beacon', out.x, out.y, 0, secs, 3); }   // (20c) a column of light, three a caster (round 2: out of the ground under it)
       else if (L.lux === 'snuff') { for (const [k, q] of _magicLux) if (q.room === L.room && (q.k === 'sun' || q.k === 'beacon') && Math.hypot(q.x - x, q.y - y) <= (L.luxR || 24) + 12) { _magicLux.delete(k); io.to(L.room).emit('magic-lux-gone', { id: k, why: 'snuff' }); } }   // (20c) suns and beacons it reaches end
       io.to(L.room).emit('magic-end', out); return; }
     // ⭐ (step 6a) A FIREBALL BURSTS wherever it ends — on what it touched, or in the air at the end of its flight: everything that burns in its reach catches (not in liquid: steam)
