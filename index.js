@@ -29408,10 +29408,11 @@ io.on('connection', (socket) => {
     // ⭐ (4c, kickoff §ROUND 4) A MODIFIER put in after the spell: one that goes on it, learnt (your world's), never on a scroll's spell or an innate ability
     // ⭐ (21 M1) …SEVERAL, stacked (`mods`, in any order): each built, fitting and learnt; together allowed (`modsOk`: no two that clash, none put in more often than it may be).
     //   A shot that is not flying (the panel's 'shots' off) takes none. `MD` = the first (truthy when there are any), `MDo(id)` = that one's numbers if it was put in
-    const ML = Array.isArray(m.mods) ? m.mods.slice(0, SPELLS.MOD_MAX + 1) : m.mod != null ? [m.mod] : [];
+    const ML = Array.isArray(m.mods) ? m.mods.slice(0, SPELLS.MOD_TOTAL + 1) : m.mod != null ? [m.mod] : [];
     if (ML.length && (SC || S.innate || !ML.every(q => SPELLS.isMod(q)) || !SPELLS.modsOk(m.spell, ML) || (SPELLS.isShot(S) && m.shot === 0))) return no('mod');
     if (ML.some(q => !magicKnows(socket, q))) return no('unlearnt');
-    const MS = new Set(ML), MDo = (q) => MS.has(q) ? SPELLS.modOf(q) : null, MD = ML.length ? SPELLS.modOf(ML[0]) : null;
+    // (21 M3) the ORDER: the spell itself takes its first generation (`MS`); each later one goes on the pieces a cluster makes (below)
+    const GENS = SPELLS.modGens(ML), MS = new Set(GENS[0]), MDo = (q) => MS.has(q) ? SPELLS.modOf(q) : null, MD = ML.length ? SPELLS.modOf(ML[0]) : null;
     const now = Date.now(), cds = socket._magicCd || (socket._magicCd = {}), left = (cds[m.spell] || 0) - now;
     if (!SC && left > 120 && !socket._magicNoCd) return no('cooldown', left);
     if (!isFinite(m.x) || !isFinite(m.y) || !isFinite(m.ax) || !isFinite(m.ay)) return no('bad');
@@ -29536,16 +29537,25 @@ io.on('connection', (socket) => {
       else if (S.lob && isFinite(out.tx)) { const A = SPELLS.arcAim(S, { g: S.lobG || 1100 }, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
       { const BN = MDo('mod_bounce'); if (BN) lf *= BN.lifeK || 1; }   // (21 M2) a bouncing one flies longer (after the lob, which sets its own time)
       const SPL = MDo('mod_split'), ids = [id]; if (SPL) { for (let i = 1; i < (SPL.n || 3); i++) ids.push(++_magicSeq); out.ids = ids; }
-      const DLm = ML.filter(q => q === 'mod_delay').length * (((SPELLS.modOf('mod_delay') || {}).secs) || 1.5) * 1000;   // (21 M2) DELAYED: it waits where it was cast, each piece put in longer
+      const DLm = GENS[0].filter(q => q === 'mod_delay').length * (((SPELLS.modOf('mod_delay') || {}).secs) || 1.5) * 1000;   // (21 M2) DELAYED: it waits where it was cast, each piece put in longer
       const SKf0 = S.freezeN ? Object.assign({}, SK, { cells: S.freezeN, secs: (S.freezeS || 20) * (socket._magicSecsK || 1), ringMs: 60 }) : SK;   // (4e round 2: the chill bolt's freeze — a cell or two)
       const SKf = shot && SPL ? magicModSplitSK(SKf0, SPL.shotK || 0.6) : SKf0;   // (21 M1) a split shot's pieces land smaller
       for (const q of ids) _magicLive.set(q, { by: socket.id, room, x: out.x, y: out.y, until: now + lf * 1000 + 800 + DLm, reach: v * lf + 0.5 * g * lf * lf + 64, burn: !!S.burn, burnR: S.burnR || 1, burst: S.burst ? +((S.burst.r || 64) * (SPL ? 0.6 : 1)).toFixed(1) : 0, pow: powK, land: shot ? S.kind : S.seed ? 'seed' : S.freezeN ? 'freeze' : null, ax: out.ax, ay: out.ay, chill: S.freezeN ? 1 : 0, SK: SKf, spell: m.spell, steer: MS.has('mod_follow') || MS.has('mod_bounce') ? 1 : 0, modded: ML.length ? 1 : 0, lux: S.lux || null, luxR: S.lux === 'dark' ? S.R || 8 : S.lux === 'snuff' ? S.R || 24 : 0 });
-      // ⭐ (21 M2) CLUSTER: for each one that flies, an id for each of its pieces — where it ends they burst out (every screen from its 'magic-end'), each kept here as a
-      //   smaller one of it: a burst × 0.4, a shot's size × `shotK`, further and longer than it by their own short flight
-      { const CL = MDo('mod_cluster'); if (CL) out.cl = ids.map(q => { const L0 = _magicLive.get(q), a = []; if (!L0) return a;
-        for (let i = 0; i < (CL.n || 5); i++) { const c = ++_magicSeq; a.push(c); _magicLive.set(c, Object.assign({}, L0, { until: L0.until + ((CL.life || 0.45) + 0.8) * 1000 + 1500, reach: L0.reach + v * (CL.speedK || 0.55) * (CL.life || 0.45) * 1.5 + 64,
-          burst: L0.burst ? +(L0.burst * 0.4).toFixed(1) : 0, SK: shot ? magicModSplitSK(L0.SK, CL.shotK || 0.4) : L0.SK, steer: 0, piece: 1 })); } return a; }); }
-      while (_magicLive.size > 512) _magicLive.delete(_magicLive.keys().next().value); }
+      // ⭐ (21 M2; M3 generations) CLUSTER: for each one that flies, an id for each of its pieces — where it ends they burst out (every screen from its 'magic-end'), each kept
+      //   here as a smaller one of it: a burst × 0.4, a shot's size × `shotK`; their time is THEIR generation's (its bounce, follower, delay), so a piece that clusters again has
+      //   ids for its own pieces. `out.cl` = { the id it burst out of: [its pieces' ids] }; at most 400 pieces a cast (each generation × 5 — the input limits it long before)
+      { const CLm = SPELLS.modOf('mod_cluster'), BNm = SPELLS.modOf('mod_bounce'), FOm = SPELLS.modOf('mod_follow'), DLs = ((SPELLS.modOf('mod_delay') || {}).secs || 1.5) * 1000, map = {}; let layer = ids.map(q => [q, _magicLive.get(q)]), budget = 400;
+        for (let gi = 0; gi + 1 < GENS.length && layer.length && CLm; gi++) { const Gn = GENS[gi + 1], has = (q) => Gn.indexOf(q) >= 0, next = [];
+          const lfP = (CLm.life || 0.45) * (has('mod_bounce') ? BNm.lifeK || 1 : 1) * (has('mod_follow') ? FOm.lifeK || 1 : 1), dl = Gn.filter(q => q === 'mod_delay').length * DLs;
+          for (const [q, L0] of layer) { if (!L0) continue; const a = [];
+            for (let i = 0; i < (CLm.n || 5) && budget > 0; i++, budget--) { const c = ++_magicSeq; a.push(c);
+              const L1 = Object.assign({}, L0, { until: L0.until + (lfP + 0.8) * 1000 + dl + 1500, reach: L0.reach + v * (CLm.speedK || 0.55) * lfP * 1.5 + 64, burst: L0.burst ? +(L0.burst * 0.4).toFixed(1) : 0,
+                SK: shot ? magicModSplitSK(L0.SK, CLm.shotK || 0.4) : L0.SK, steer: has('mod_follow') || has('mod_bounce') ? 1 : 0, modded: 1, piece: 1 });
+              _magicLive.set(c, L1); next.push([c, L1]); }
+            map[q] = a; }
+          layer = next; }
+        if (Object.keys(map).length) out.cl = map; }
+      while (_magicLive.size > 1536) _magicLive.delete(_magicLive.keys().next().value); }
     if (S.kind === 'spark') igniteBox(room, out.x, out.y, TERRAIN_CELL);
     // ⭐ (step 6a) KINDLE: what burns at the caster's point (short of the first rock on the way — their game's) catches, no further than its reach (held to it above)
     if (S.kind === 'kindle') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.n = igniteBox(room, out.tx, out.ty, 4); }

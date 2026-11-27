@@ -844,8 +844,8 @@
   //   A spell's `noMods` = ones that would mean nothing on it (the tunnelling bolt goes through rock already).
   const MODS = {
     mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [2, 4], fits: ['fly'], group: ['path'], clash: ['mod_heavy'], cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3 },   // (21 M1 round 2, the user: it ran out too soon — lifeK 2 → 3.5: a firebolt follows ~3.7 s)
-    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [2, 5], fits: ['fly'], group: ['path', 'fall'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },
-    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly'], cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6 },
+    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [2, 5], fits: ['fly'], group: ['path', 'fall'], noPiece: 1, cdK: 1.5, learn: 3, g: 1100, reach: 560 },
+    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly'], noPiece: 1, cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6 },
     mod_faint:  { name: 'Faint', keys: [D, D], rune: [0, 5], fits: ['fly'], cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5 },
     // ⭐ M2 (2026-11-27 — the user's four):
     //   bounce   off rock (and a level's floor) up to `n` times, `keep` of its speed each time, its time × `lifeK`; a lobbed wall / fire wall bounces on the ground before it stands
@@ -855,8 +855,8 @@
     //            at `powK` of its strength; a shot's pieces land `shotK` of its size
     mod_bounce:  { name: 'Bounces', keys: [U, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], group: ['wall'], cdK: 1.5, learn: 3, n: 3, keep: 0.75, lifeK: 1.6 },
     mod_thru:    { name: 'Through walls', keys: [R, R], rune: [2, 4], fits: ['fly'], group: ['wall'], noLob: 1, cdK: 2, learn: 3, cells: 10 },
-    mod_delay:   { name: 'Delayed', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['placed', 'round'], group: ['wait'], rep: 3, cdK: 1.25, learn: 3, secs: 1.5 },
-    mod_cluster: { name: 'Cluster', keys: [U, D], rune: [7, 5], fits: ['fly'], cdK: 1.5, learn: 3, n: 5, fan: 150, speedK: 0.55, life: 0.45, dmgK: 0.5, powK: 0.6, shotK: 0.4 },
+    mod_delay:   { name: 'Delayed', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['placed', 'round'], group: ['wait'], rep: 3, cdK: 1.25, learn: 3, secs: 2.5 },   // (M2 round 3, the user: a bit longer — 1.5 → 2.5 s a piece)
+    mod_cluster: { name: 'Cluster', keys: [U, D], rune: [7, 5], fits: ['fly'], maker: 1, cdK: 1.5, learn: 3, n: 5, fan: 150, speedK: 0.55, life: 0.45, dmgK: 0.5, powK: 0.6, shotK: 0.4 },
   };
   // (21 M1) THE MODIFIERS TO COME — no keys, no page, not castable: only the rules (`modFits`, `modClash`, `modsOk`) know them, so what is built now already leaves room for them
   const MOD_PLAN = {
@@ -880,7 +880,8 @@
     mod_trigger:   { name: 'Casts the next where it lands', fits: ['fly', 'placed'], cdK: 1.5 },
     mod_lasting:   { name: 'Lasts longer', fits: ['fly', 'thrown', 'held', 'placed', 'round', 'self'], rep: 2, cdK: 1.5 },   // (21 M1 round 3, the user: a firebolt flies longer before it fizzles — with follows, longer steered)
   };
-  const MOD_MAX = 6;   // (21 M1) the most pieces a cast takes — the input time and the cooldowns are the real limit; this only stops nonsense
+  const MOD_MAX = 6;   // (21 M1) the most pieces a cast takes — the input time and the cooldowns are the real limit; this only stops nonsense (M3: in ONE GENERATION)
+  const MOD_TOTAL = 40;   // (21 M3) …and in the whole cast, any number of generations (the user: no limit — the input itself limits it; this only stops nonsense)
   const isMod = (id) => typeof id === 'string' && Object.prototype.hasOwnProperty.call(MODS, id);
   const modOf = (id) => isMod(id) ? MODS[id] : null;
   const modAny = (id) => isMod(id) ? MODS[id] : (typeof id === 'string' && Object.prototype.hasOwnProperty.call(MOD_PLAN, id) ? MOD_PLAN[id] : null);
@@ -911,13 +912,21 @@
   // two modifiers that never go together: one of the same group, or named in a `clash` (either way round). The same one twice is a repeat (`rep`), not a clash
   const modClash = (a, b) => { if (a === b) return false; const A = modAny(a), B = modAny(b); if (!A || !B) return true;
     if ((A.clash || []).indexOf(b) >= 0 || (B.clash || []).indexOf(a) >= 0) return true; for (const g of A.group || []) if ((B.group || []).indexOf(g) >= 0) return true; return false; };
-  // a list of modifiers on a spell: each fits, none put in more often than its `rep`, no two that clash, no more than `most` (and `MOD_MAX`)
-  const modsOk = (spell, list, most) => { if (!Array.isArray(list) || list.length > Math.min(MOD_MAX, most || MOD_MAX)) return false; const n = {};
-    for (let i = 0; i < list.length; i++) { const id = list[i]; if (!modFits(id, spell)) return false; n[id] = (n[id] || 0) + 1; if (n[id] > (modAny(id).rep || 1)) return false;
-      for (let j = 0; j < i; j++) if (modClash(id, list[j])) return false; }
+  // ⭐ (21 M3, 2026-11-28 — the user: the ORDER matters) THE GENERATIONS of a cast: read left to right, a modifier shapes what it comes after; one that MAKES new things (`maker`:
+  //   the cluster; later the triggers that chain the next spell) ends a generation — everything after it shapes what it makes, everything before it the one that made them.
+  //   Nothing carries over unless put in again (bounce · cluster · bounce: both bounce). Split is a COPY (at the launch: the spell itself in three), not a maker. No limit on
+  //   how many generations. → [[…the spell's], [after the 1st maker…], …]
+  const modGens = (list) => { const g = [[]]; for (const q of list || []) { g[g.length - 1].push(q); const M = modAny(q); if (M && M.maker) g.push([]); } return g; };
+  // a list of modifiers on a spell, generation by generation: each fits (a later generation is PIECES — they fly; not one that needs the spell's own aim, `noPiece`), none put
+  //   in more often than its `rep`, no two that clash, no more than `MOD_MAX` — WITHIN its generation (the same one may come again after a maker); no more than `most` (and
+  //   `MOD_TOTAL`) in all
+  const modsOk = (spell, list, most) => { if (!Array.isArray(list) || list.length > Math.min(MOD_TOTAL, most || MOD_TOTAL)) return false; const G = modGens(list);
+    for (let gi = 0; gi < G.length; gi++) { const L = G[gi], n = {}; if (L.length > MOD_MAX) return false;
+      for (let i = 0; i < L.length; i++) { const id = L[i], M = modAny(id); if (!M || !modFits(id, spell) || (gi > 0 && (M.noPiece || M.fits.indexOf('fly') < 0))) return false;
+        n[id] = (n[id] || 0) + 1; if (n[id] > (M.rep || 1)) return false; for (let j = 0; j < i; j++) if (modClash(id, L[j])) return false; } }
     return true; };
   // every way the modifiers in `mods` may follow a spell, in every order, up to `most` long (with none first) — for reading a rune drawn freely
-  const modSeqs = (spell, mods, most) => { const out = [[]], lim = Math.min(MOD_MAX, most || MOD_MAX), go = (cur) => { if (cur.length >= lim) return;
+  const modSeqs = (spell, mods, most) => { const out = [[]], lim = Math.min(MOD_TOTAL, most || MOD_TOTAL), go = (cur) => { if (cur.length >= lim) return;
     for (const md of mods || []) { const nx = cur.concat([md]); if (!modsOk(spell, nx, lim)) continue; out.push(nx); go(nx); } }; go([]); return out; };
   // ⭐ (4e round 3, 2026-11-18 — the user: 'On yourself' as a shared form forced similar spells into different schools; 'the school be the thing held static and the form part simply
   //   something unique for every spell … similar spells could be similar') A SPELL'S INPUT IN THE LANGUAGE = its SCHOOL's piece · your own key · its own WORD (`word`: two keys and a
@@ -1151,5 +1160,5 @@
   const learnN = (id) => { if (isMod(id)) return Math.max(1, MODS[id].learn || 3); const S = of(baseOf(id)); return S ? Math.max(1, S.learn || (S.tier ? 5 : 3)) : 0; };
   const tomeOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(TOMES, item) ? TOMES[item] : null;
   const scrollOf = (item) => typeof item === 'string' && Object.prototype.hasOwnProperty.call(SCROLLS, item) ? SCROLLS[item] : null;
-  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, MODS, MOD_PLAN, MOD_MAX, MOD_OPEN, is, of, isMod, modOf, modAny, modFits, modClash, modsOk, modSeqs, modList, delivOf, isShot, arcAim, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
+  return { SCHOOLS, FORMS, SPELLS, CATALYSTS, TOMES, SCROLLS, MODS, MOD_PLAN, MOD_MAX, MOD_TOTAL, MOD_OPEN, modGens, is, of, isMod, modOf, modAny, modFits, modClash, modsOk, modSeqs, modList, delivOf, isShot, arcAim, ownOf, keysOf, runeOf, runeNorm, matchKeys, matchRune, pathFit, runeDist, castable, cdMs, learnN, baseOf, tomeOf, scrollOf };
 });
