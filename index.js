@@ -4334,6 +4334,9 @@ function magicFrostPathPlan(room, bx, by, tx, S) {
   }
   return cells.length ? { cells, pts } : null;
 }
+// (21 carriers) where a frost path's bolt struck: the ice spreads out both ways along the ground from there, half its length each way, both halves at once
+function magicFrostPathBoth(room, x, y, S) { const h = Object.assign({}, S, { len: Math.max(2, Math.ceil((S.len || 22) / 2)) }), a = magicFrostPathPlan(room, x, y, x - 1, h), b = magicFrostPathPlan(room, x, y, x + 1, h);
+  if (!a && !b) return null; return { cells: (a ? a.cells : []).concat(b ? b.cells.filter(q => q[2] > 0) : []), pts: (a ? a.pts : []).concat(b ? b.pts.slice(1) : []) }; }
 // …and written, a column every `colMs` (each cell checked again as it turns — dug out or changed meanwhile, it is left); every screen shown each cell turning (`magic-cells`)
 function magicFrostPath(room, P, S, sp) {
   const grid = cellsOf(room).terrain, mats = roomMats[room] || {}, until0 = Date.now() + (S.secs || 30) * 1000, ms = S.colMs || 32, byK = new Map();
@@ -29497,7 +29500,7 @@ io.on('connection', (socket) => {
       MADE = S.kind === 'spikes' ? magicSpikesPlan(room, +m.x, +m.y, +m.tx, S) : S.kind === 'pillar' ? magicPillarPlan(room, +m.bx, +m.by - 2, S) : magicBridgePlan(room, +m.bx, +m.by, +m.tx, +m.ty, S);
       if (!MADE) return no('ground'); }
     // (7a) THE FROST PATH: its cells worked out now, from the caster's feet towards the pointer — no ground to freeze, refused before anything is spent
-    let FP = null; if (S.kind === 'frostpath') { if (!isFinite(m.tx) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160) return no('bad'); FP = magicFrostPathPlan(room, +m.bx, +m.by, +m.tx, S); if (!FP) return no('ground'); }
+    let FP = null; if (S.kind === 'frostpath') { if (!isFinite(m.tx) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160) return no('bad'); FP = CAR ? magicFrostPathBoth(room, +m.bx, +m.by, S) : magicFrostPathPlan(room, +m.bx, +m.by, +m.tx, S); if (!FP) return no('ground'); }   // (carriers: out both ways from where it struck)
     // (7c) THE CLOUD: where it forms over the caster's point (held to its reach) — no open air there, refused before anything is spent · THE COLD SNAP: round the caster's body
     let CL = null; if (S.kind === 'cloud') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const dx = m.tx - m.x, dy = m.ty - m.y, d = Math.hypot(dx, dy), k = d > (S.reach || 360) + 8 ? ((S.reach || 360) + 8) / d : 1;
       CL = magicCloudAt(room, m.x + dx * k, m.y + dy * k, S); if (!CL) return no('room'); }
@@ -29554,10 +29557,11 @@ io.on('connection', (socket) => {
       const FL0 = SPELLS.modFlight(GENS[0]);   // (M4) the first generation's flight, shared with every screen
       if (MDo('mod_arc')) { const A = SPELLS.arcAim(S, FL0.arc, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
       // (12b) a LOBBED spell (entangle's seed) comes down on the pointer without the modifier: every screen works out the same arc
-      else if (S.lob && isFinite(out.tx)) { const A = SPELLS.arcAim(S, { g: S.lobG || 1100 }, out.x, out.y, out.tx, out.ty); lf = A.life; g = A.g; v = Math.hypot(A.vx, A.vy); }
+      // (21, the user 2026-11-28: a lob always went up at the same angle, wherever you pointed) a LOBBED spell is thrown along its aim and falls fast (`lobG`) — wherever that takes it
+      else if (S.lob) g = S.lobG || 1100;
       { const HO = MDo('mod_homing') || MDo('mod_boomerang'); if (HO) lf *= HO.lifeK || 1; }   // (21 M3) homing / coming back fly longer
       // (21 M3, M4) this generation's size, speed (not a lob's), time and fall — `modFlight`, the same on every screen
-      const sizeOf = (G) => SPELLS.modFlight(G), SZ0 = FL0, lobbed = MS.has('mod_arc') || (S.lob && isFinite(out.tx));
+      const sizeOf = (G) => SPELLS.modFlight(G), SZ0 = FL0, lobbed = MS.has('mod_arc');
       lf = lf * FL0.life + FL0.add; if (!lobbed) { v *= FL0.sp; if (FL0.wl) g = 0; else g += FL0.gAdd; }
       const vR = v * FL0.accHi;
       // (M4) split again: each of the three in three — (n)^(times) ids, a safety stop at 400

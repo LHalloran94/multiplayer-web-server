@@ -91,7 +91,7 @@
     //   and hangs there `secs` s — a big warm light (`pow`, `rr` as the light orb's) that lights the dark and the underground round it as day. Three a caster (a split's three).
     flash: { name: 'Flash', school: 'light', form: 'bolt', tier: 0, cd: 8, stance: 'level', kind: 'bolt', lux: 'flash', fuse: true, learn: 3, reach: 460, speed: 820, life: 0.75, grav: 0, r: 4,
       dmg: 0, R: 300, fx: '#eef4ff', plain: { keys: [L, D, U, R, R], rune: [1, 4, 2, 5, 7] } },
-    darkness: { name: 'Darkness', school: 'light', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'bolt', lux: 'dark', lob: true, lobG: 1100, learn: 5, reach: 400, speed: 520, life: 1.6,
+    darkness: { name: 'Darkness', school: 'light', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'bolt', lux: 'dark', lob: true, lobG: 1000, learn: 5, reach: 400, speed: 600, life: 1.6,
       grav: 0.35, r: 5, dmg: 0, secs: 15, R: 14, see: 2, soft: 2, dim: 0.12, fx: '#3a3450', plain: { keys: [L, D, R, D, D], rune: [1, 4, 3, 7, 6] } },
     daylight: { name: 'Daylight', school: 'light', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'bolt', lux: 'sun', fuse: true, thru: true, learn: 5, reach: 420, speed: 420, life: 1.2, grav: 0, r: 5, dmg: 0,
       secs: 30, pow: 5, rr: 720, fx: '#fff1c8',
@@ -181,9 +181,9 @@
     //   BARKSKIN (kind 'bark'): `secs` s — harm × `hurtK`, fire × `fireK`, your pace × `moveK`
     // (12b round 2, the user: roots over a much larger piece of ground; the hedge a seed you shoot that grows out over a wide area; the caster caught and scratched too)
     //   `seed` = what grows where it lands ('roots' / 'hedge') · the hedge grows out from where it landed to `wide` cells across over `growMs`
-    entangle: { name: 'Entangle', school: 'life', form: 'bolt', tier: 0, cd: 8, stance: 'level', kind: 'bolt', seed: 'roots', lob: true, lobG: 1100, learn: 3, reach: 400, speed: 520, life: 1.6, grav: 0.4, r: 3, dmg: 0,
+    entangle: { name: 'Entangle', school: 'life', form: 'bolt', tier: 0, cd: 8, stance: 'level', kind: 'bolt', seed: 'roots', lob: true, lobG: 1000, learn: 3, reach: 400, speed: 600, life: 1.6, grav: 0.4, r: 3, dmg: 0,
       R: 72, holdS: 2, press: 0.3, snareS: 6, plain: { keys: [D, D, U, L, R], rune: [7, 8, 4, 3, 0] } },
-    thorns: { name: 'Thorn hedge', school: 'life', form: 'bolt', tier: 0, cd: 12, stance: 'level', kind: 'bolt', seed: 'hedge', lob: true, lobG: 1100, learn: 3, reach: 400, speed: 520, life: 1.6, grav: 0.4, r: 3.5, dmg: 0,
+    thorns: { name: 'Thorn hedge', school: 'life', form: 'bolt', tier: 0, cd: 12, stance: 'level', kind: 'bolt', seed: 'hedge', lob: true, lobG: 1000, learn: 3, reach: 400, speed: 600, life: 1.6, grav: 0.4, r: 3.5, dmg: 0,
       secs: 30, wide: 30, high: 4, growMs: 1500, slowK: 0.5, thornDmg: 0.25, every: 0.5, burnS: 2, most: 2, plain: { keys: [R, D, D, U, L], rune: [3, 6, 8, 5, 1] } },
     // ⭐ STEP 12c (2026-11-23, kickoff §'STEP 12') LIFE — GROWING: VINE (kind 'vine'): a rope that is a vine, grown DOWN from the first rock at most `up` cells above the
     //   pointer, at most `len` cells long (to just over the ground under it), `secs` s, `most` a caster — climbed, swung on and burnt as a rope · GROW A TREE (kind 'tree'):
@@ -503,7 +503,7 @@
     //   a lash of your blood `len` px long trailing the pointer; its tip cuts whom it whips (`dmg`, each body at most every `gap` s).
     bloodshield: { name: 'Blood shield', school: 'blood', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'bshield', learn: 5, cost: 2, hp: 3, secs: 20,
       plain: { keys: [R, D, D, D, U], rune: [2, 3, 6, 7, 4] } },
-    bloodspikes: { name: 'Blood spikes', school: 'blood', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'bolt', seed: 'bspikes', lob: true, lobG: 1100, learn: 5, reach: 400, speed: 520, life: 1.8, grav: 0.4, r: 3.5, dmg: 0, wide: 10, spikeDmg: 1.5, toss: 6, secs: 2.2,
+    bloodspikes: { name: 'Blood spikes', school: 'blood', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'bolt', seed: 'bspikes', lob: true, lobG: 1000, learn: 5, reach: 400, speed: 600, life: 1.8, grav: 0.4, r: 3.5, dmg: 0, wide: 10, spikeDmg: 1.5, toss: 6, secs: 2.2,
       plain: { keys: [R, D, D, L, R], rune: [0, 3, 7, 8, 5] } },
     bloodgrip: { name: 'Blood grip', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'grip', learn: 5, other: true, chan: true, chanS: 10, reach: 280, slack: 60, holdS: 10, press: 0.6,
       fx: '#b3121f', plain: { keys: [R, D, L, L, L], rune: [8, 7, 3, 1, 2] } },
@@ -624,7 +624,7 @@
     fireball: { name: 'Fireball', school: 'fire', form: 'burst', tier: 1, cd: 8, stance: 'level', kind: 'bolt', learn: 5, uses: [['ember_salt', 1]], speed: 430, life: 1.6, grav: 0.16, r: 6,
       dmg: 0, burn: true, burst: { r: 64, dmg: 2.5, f: 14 }, plain: { keys: [U, D, R, U, D], rune: [6, 1, 5, 3, 8] } },
     // ⭐ (21, 2026-11-28 — THE SPELLS ON CARRIERS, the user's picks in kickoff §'STEP 21') `car`: it FLIES as a bolt (`speed` px/s, `life` s, `grav`, `r`; `fuse` it ends at the
-    //   pointer, as the flash; `lob` it comes down on the pointer, `lobG` its fall) and its spell OPENS where it ends — on rock, a body, liquid, at the pointer, or in the air
+    //   pointer, as the flash; `lob` it is THROWN along your aim and falls fast, `lobG` its fall) and its spell OPENS where it ends — on rock, a body, liquid, at the pointer, or in the air
     //   (server `magicCarryOpen`). Modifiers go on it. The panel's 'Fire and Frost spells fly out as carriers' off: placed as before
     //   KINDLE: a spark, quick and nearly straight, fused at the pointer — water puts it out (nothing burns there)
     kindle: { name: 'Kindle', school: 'fire', form: 'placed', tier: 0, cd: 2, stance: 'level', kind: 'kindle', learn: 3, reach: 400, car: 1, speed: 900, life: 0.6, grav: 0.02, r: 2.5, fuse: 1, fx: '#ffb060',
@@ -664,7 +664,9 @@
     //   does. Never ore, plants, wood or a loose thing's cells.
     iceshard: { name: 'Ice shard', school: 'frost', form: 'bolt', tier: 1, cd: 5, stance: 'level', kind: 'shard', learn: 5, speed: 34, grav: 0.8, dmg: 2, secs: 20,
       plain: { keys: [D, R, R, D, U], rune: [0, 4, 5, 8, 6] } },
-    frostpath: { name: 'Frost path', school: 'frost', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'frostpath', learn: 3, len: 22, step: 3, drop: 6, colMs: 32, secs: 30, fx: '#d8f4ff', look: 'frost',
+    // (21 carriers, the user 2026-11-28: 'more interesting and useful as a spell which ices up the ground you shoot it at') FROST PATH flies as a bolt of frost, fused at the
+    //   pointer; where it strikes the ice spreads out along the ground BOTH WAYS from there, `len` columns in all (server `magicFrostPathBoth`)
+    frostpath: { name: 'Frost path', school: 'frost', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'frostpath', learn: 3, reach: 420, car: 1, speed: 620, life: 1.2, grav: 0.04, r: 3.5, fuse: 1, len: 22, step: 3, drop: 6, colMs: 32, secs: 30, fx: '#d8f4ff', look: 'frost',
       plain: { keys: [D, L, L, D, R], rune: [2, 4, 3, 6, 8] } },
     // ⭐ STEP 7b (2026-11-20): SHAPE WATER, kind 'waterball' (held, as the rock chunk is held): REAL LIQUID near the pointer (within `grab` cells — any but lava, at most `cells` cells'
     //   worth) drawn up into a ball; it follows the pointer (`reach`, `holdV`); a SECOND CLICK throws it away from you (`speed`, `grav`); where it meets something it BURSTS into the
@@ -759,14 +761,14 @@
     //   middle out to its rim (`pump` units a tick) so its surface dips into a funnel — moved, nothing made or lost; bodies and loose things in the liquid within its reach are drawn
     //   in and carried round, and in its middle SUCKED DOWN to the bottom and held there spinning until it ends (the user: 'hold them and suck them downwards').
     //   (21 carriers) WHIRLPOOL: a swirling mote of water LOBBED onto the pointer — it opens where it goes into liquid (on dry ground it is lost) · WAVE: a lob, the wave rising
-    //   where it lands and rolling on away from you (`roll` px/s — was `speed`). `speed` 260 only sets how high the lob goes (a slower throw arcs higher — `arcAim`)
-    whirlpool: { name: 'Whirlpool', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'pool', learn: 5, reach: 400, car: 1, lob: 1, lobG: 1100, speed: 260, life: 2.4, grav: 0, r: 4, secs: 10, maxR: 12, minR: 3, pump: 60, pull: 2.2, turnS: 1.2, inward: 16,
+    //   where it lands and rolling on away from you (`roll` px/s — was `speed`)
+    whirlpool: { name: 'Whirlpool', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'pool', learn: 5, reach: 400, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 4, secs: 10, maxR: 12, minR: 3, pump: 60, pull: 2.2, turnS: 1.2, inward: 16,
       spin: 3.2, down: 5, core: 0.35, fx: '#7fd0ff', plain: { keys: [D, R, D, L, L], rune: [2, 5, 8, 7, 6] } },
     // WAVE, kind 'wave' (placed: it rises on the ground at the pointer and rolls AWAY from its caster along the terrain, `secs` s at most): REAL WATER, conjured — the server moves a
     //   mound of it (`len` cells long, `high` cells at its crest) forward `speed` px/s, taking its own water back each tick and putting it down ahead, over the ground or a pool's
     //   surface; climbs steps up to `step` cells, breaks against anything taller. Bodies and loose things are carried along and up its face, knocked down (no harm); fire under it
     //   is put out by the water; the surface's powder at its front swept along and dropped where it breaks. When it ends its water is gone (in spray and mist): nothing left.
-    wave: { name: 'Wave', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'wave', learn: 5, reach: 360, car: 1, lob: 1, lobG: 1100, speed: 260, life: 2.4, grav: 0, r: 4.5, secs: 4.5, roll: 130, len: 26, high: 8, step: 3, tickMs: 30,
+    wave: { name: 'Wave', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'wave', learn: 5, reach: 360, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 4.5, secs: 4.5, roll: 130, len: 26, high: 8, step: 3, tickMs: 30,
       grab: 2, carry: 60, push: 7, lift: 5, knockMs: 350, fx: '#7fd0ff', plain: { keys: [R, U, R, D, R], rune: [6, 4, 1, 5, 8] } },
     // ⭐ STEP 9a (2026-11-21, kickoff §'STEP 9') FORCE: PUSH and its variant PULL (one mark changed), kind 'push'. A LENS OF BENT AIR travels down a narrow cone (`cone`° each side)
     //   from the hand to `reach` px in `ms` (PULL `toward`: it forms out at the far end and sweeps IN to the hand), stopped by rock. What it passes: a player thrown away from the
