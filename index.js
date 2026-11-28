@@ -3830,7 +3830,11 @@ function magicCarryOpen(L, m, UU) { const x = Math.round(+m.x), y = Math.round(+
   // ⭐ (21 — Storm, 2026-11-28) a spell that opens ON A BODY (`carBody`: feather fall, the wind shield, the lightning weapon) opens on the one it struck — its caster (`pl` is their
   //   id), the dummy ('dummy'), another player — with the weapon that body holds (`wpn`, its caster's game found it); it met none: lost
   const S0 = SPELLS.of(L.spell), pl = typeof m.pl === 'string' && m.pl.length < 64 ? m.pl : null, BOD = S0 && S0.carBody ? { tgt: pl === 'dummy' ? 'mw-test-dummy' : pl } : null;
-  if (BOD && !BOD.tgt) return;
+  // (21 — Illusion / Knowing, 2026-11-29) a MIND or a SEEKER'S MARK may open on one of the creator's ENEMIES it struck (`enemy`, its caster's game found it) · one
+  //   pointless on its own caster (`selfLost`: fear, charm, the mark) that struck them: lost
+  const EN = BOD && !pl && (S0.kind === 'mind' || S0.kind === 'seekmark') && typeof m.enemy === 'string' && m.enemy.length < 64 ? m.enemy : null;
+  if (BOD && !BOD.tgt && !EN) return;
+  if (BOD && S0.selfLost && BOD.tgt === L.by) return;
   // ⭐ (21 — Force / Space / Wards, 2026-11-28) WHAT ITS CASTER'S GAME FOUND WHERE IT ENDED (`ex`, 16zj `magicCarEx` — the same code the cast used at the pointer, run at the
   //   carrier's end): the spot that fits (blink, a door, the pocket's unfolding, an alarm), the ward line's reach, the dome's body, a swap's / blink's caster's feet — every
   //   number then checked by the cast as ever. ON A BODY OR A THING (`carThing`): the body struck (`tgt`), else the thing (`obj`), else lost (an emptying pocket opens anyway)
@@ -3843,7 +3847,7 @@ function magicCarryOpen(L, m, UU) { const x = Math.round(+m.x), y = Math.round(+
   if (BOD && typeof m.wpn === 'string' && m.wpn.length < 64) BOD.wpn = m.wpn;
   // (21 — Earth) the RISING PILLAR rises under the FEET of the body struck (`fx`, `fy` — its caster's game found them; near where it struck, else under the strike)
   if (BOD && isFinite(m.fx) && isFinite(m.fy) && Math.hypot(+m.fx - x, +m.fy - y) < 80) { BOD.bx = Math.round(+m.fx); BOD.by = Math.round(+m.fy); }
-  try { s._magicCastFn(Object.assign({ spell, cat: C.cat, x: x - dir, y, ax: C.ax, ay: C.ay, tx: x, ty: y, bx: x, by: y + 10, br: 10, shot: C.shot, car: 0 }, EX, BOD || {}, TH || {}), C); } catch (e) { console.error('[magic carrier]', e && e.message); } }
+  try { s._magicCastFn(Object.assign({ spell, cat: C.cat, x: x - dir, y, ax: C.ax, ay: C.ay, tx: x, ty: y, bx: x, by: y + 10, br: 10, shot: C.shot, car: 0 }, EX, EN ? { enemy: EN } : BOD || {}, TH || {}), C); } catch (e) { console.error('[magic carrier]', e && e.message); } }
 // (carriers) a spell's numbers at a carrier's size: its cells, width, height, length, reach (the split shot's) and a whirlpool's reach and pump, a blizzard's clouds and their spread
 // (21 Storm) its maker's sizes too (`magicModSplitSK`): cells, width, height, length, a clap's reach, a shield's reach
 function magicCarScale(S, k) { const o = magicModSplitSK(S, k); for (const f of ['maxR', 'spread', 'pump']) if (isFinite(o[f]) && o[f] > 0) o[f] = Math.max(1, o[f] * k);

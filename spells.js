@@ -1148,6 +1148,16 @@
   };
   for (const id in WORDS) if (SPELLS[id]) SPELLS[id].word = { keys: WORDS[id][0], rune: WORDS[id][1] };
   SPELLS.shrink.school = 'alteration';   // (grow and shrink one school — the user)
+  // ⭐ (21 — ALTERATION, ILLUSION, KNOWING ONTO CARRIERS, 2026-11-29, the user's picks; batch 1) every spell on a BODY flies on (~1000 px) and opens on the body it
+  //   strikes — you when pointed at yourself; a thing or nobody: lost; a split / smaller piece gives less (its time). With them the two the audit found left behind: the
+  //   FLAMING WEAPON (the lightning weapon's twin) and the FOLLOWING LIGHT ORB. Minds and the seeker's mark open on one of the creator's ENEMIES they strike too
+  for (const id of ['grow', 'shrink', 'stoneskin', 'fins', 'nighteyes', 'gaseous', 'rubber', 'spider', 'jelly', 'mendgear', 'unseen', 'chameleon', 'images', 'displace',
+    'shroud', 'phantasms', 'bewilder', 'fear', 'calm', 'charm', 'truesight', 'read', 'foresight', 'wayout', 'seekmark', 'flameblade', 'lightorb_f'])
+    Object.assign(SPELLS[id], { car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3 });
+  //   `selfLost`: pointless on its own caster (fear, charm — towards / away from the caster; the mark — you know where you are): striking them it is lost
+  for (const id of ['fear', 'charm', 'seekmark']) SPELLS[id].selfLost = 1;
+  // (2026-11-29, the user: colour wash belongs with Light's painting spells) — its three-key word stands in Light (Light's two-key words are all taken)
+  SPELLS.colourwash.school = 'light';
   SPELLS.tunnelbolt.noMods = ['mod_thru'];   // (21 M1) it bores through rock already
   const wordOf = (S) => S.word || FORMS[S.form] || { keys: [], rune: [] };
   // (step 3h, the user: "add a contents page to the master tome … the tabs should probably just be for each school and the spells should be arranged by schools") its first page
