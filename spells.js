@@ -165,20 +165,20 @@
     //   LIFT AND THROW (7A — a thread of light to a loose thing; held while the button is, the other button throws) · A DOUBLE OF YOU (8Y — it walks on the way you were going;
     //   see-through on your own screen; struck, it bursts). hp  health it gives back · closeMs, gap  a cut's closing, between cuts · ms  the motes · reach  px (lift: how far
     //   the thing may be from you) · secs  how long it lasts · pull, vmax  how hard the thing is drawn to the pointer (px a tick) · throwV  its speed thrown · walk  px a second
-    // ⭐ (21 — LIFE, DECAY, BLOOD ONTO CARRIERS, 2026-11-28, the user's picks) FLIES ON, ON THE BODY OR THING IT STRIKES (`carThing`): close wounds (on a thing: its
-    //   damage mended — its hit points back), cure (on a thing: its fire put out, the spell ice round it thawed), barkskin (on a thing: a bark shell soaking `hp` blows, as
-    //   ward skin — fire goes through bark), the blood shield (on a thing: soaks blows as ward skin), rust (a body's metal gear, or a METAL thing struck — rusted `thingS` s:
+    // ⭐ (21 — LIFE, DECAY, BLOOD ONTO CARRIERS, 2026-11-28, the user's picks) FLIES ON, ON THE BODY IT STRIKES (`carBody` — round 2, the user: close wounds, cure and
+    //   barkskin are for the living; a thing stops them, lost; MEND ROCK mends things): close wounds, cure, barkskin. ON THE BODY OR THING (`carThing`): the blood shield
+    //   (on a thing: soaks blows as ward skin), rust (a body's metal gear, or a METAL thing struck — rusted `thingS` s:
     //   flakes, its blows duller; a thing not metal: lost). ON THE BODY IT STRIKES (`carBody`): plague, curse of weakness, wither, transfusion, haemorrhage, blood boil
     //   (a cost paid at the cast) · LIFE DRAIN, BLOOD GRIP fly only their thread's length (`life` 0.6 — ~300 px; past it nothing: lost), then HELD on the body struck.
     //   FLIES ON, ACTING WHERE IT STRIKES: rot, weathering (as Earth's changes) · the VINE (a seed sticking in the rock it strikes — on a wall's face it hangs from there;
     //   in the air / on a body: lost) · the SWING VINE (~600 px, `life` 1.15: from the rock it sticks in to your hands). LOBBED (a seed / a glob): healing grove, grow a tree,
     //   regrow the land, the poison cloud, spore pods. Stay: entangle, thorn hedge (already lobbed seeds), venom bolt, blood bolt, leeches, blood spikes, blood whip.
-    closewounds: { name: 'Close wounds', school: 'life', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'heal', learn: 3, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, hp: 3, closeMs: 700, gap: 350, ms: 2600, aim: 'self', reach: 240,
+    closewounds: { name: 'Close wounds', school: 'life', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'heal', learn: 3, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, hp: 3, closeMs: 700, gap: 350, ms: 2600, aim: 'self', reach: 240,
       plain: { keys: [U, D, U, D], rune: [7, 4, 1, 0] } },
     // ⭐ STEP 12a (2026-11-22, kickoff §'STEP 12') LIFE — HEALING: close wounds ON ANOTHER (its Touch variant: the player nearest the pointer, `reach` px; their own game heals
     //   itself) · CURE (kind 'cure', + on another): ends burning, the chill's slow, a daze, being frozen in — `ms` its leaves' spiral · HEALING GROVE (kind 'grove'): plants spring
     //   up along the ground under the point, `wide` cells across, `secs` s; every body standing in it heals `hp` health every `every` s; `most` a caster (the oldest goes)
-    cure: { name: 'Cure', school: 'life', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'cure', learn: 3, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, ms: 1400, aim: 'self', reach: 240,
+    cure: { name: 'Cure', school: 'life', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'cure', learn: 3, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, ms: 1400, aim: 'self', reach: 240,
       plain: { keys: [L, U, D, R, U], rune: [8, 6, 4, 0, 1] } },
     grove: { name: 'Healing grove', school: 'life', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'grove', learn: 5, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 3.5, reach: 360, secs: 12, wide: 14, every: 2, hp: 1, most: 2,
       plain: { keys: [D, U, R, D, L], rune: [6, 7, 3, 1, 2] } },
@@ -210,7 +210,7 @@
       plain: { keys: [D, R, U, U, L], rune: [7, 6, 3, 4, 2] } },
     regrow: { name: 'Regrow the land', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'regrow', learn: 5, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 3.5, reach: 300, R: 15, growMs: 2000,
       plain: { keys: [R, U, L, D, D], rune: [5, 4, 0, 1, 7] } },
-    barkskin: { name: 'Barkskin', school: 'life', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'bark', learn: 5, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, hp: 4, secs: 30, hurtK: 0.5, fireK: 1.5, moveK: 0.85,
+    barkskin: { name: 'Barkskin', school: 'life', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'bark', learn: 5, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, secs: 30, hurtK: 0.5, fireK: 1.5, moveK: 0.85,
       plain: { keys: [L, D, U, U, R], rune: [5, 8, 7, 3, 0] } },
     lift: { name: 'Lift and throw', school: 'force', form: 'shaping', tier: 0, cd: 3, stance: 'level', kind: 'lift', learn: 3, reach: 320, secs: 10, pull: 0.16, vmax: 11, throwV: 12,
       plain: { keys: [R, R, U, L], rune: [3, 4, 5, 2] } },
@@ -578,6 +578,8 @@
       map: { 3: 16 }, plain: { keys: [D, U, D, L, R], rune: [8, 5, 4, 3, 0] } },
     coollava: { name: 'Lava to rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 30, ringMs: 60, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#ff9a4a', look: 'cool',
       lava: true, to: 23, inLiq: true, plain: { keys: [D, U, D, R, U], rune: [2, 5, 4, 7, 8] } },
+    // (21 round 2, the user: 'a spell to repair objects, like half-burnt crates … the same spell as the one which repairs damaged terrain') MEND ROCK also MENDS THINGS: it
+    //   stops on the thing it meets and mends it, and the things within its reach where it lands — hit points back, a wooden thing's burnt cells whole (server `magicMendThings`)
     mend: { name: 'Mend rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 60, ringMs: 50, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#d9c08a', look: 'mend',
       mend: true, plain: { keys: [D, U, U, L, U], rune: [6, 7, 4, 1, 2] } },
     grease: { name: 'Grease', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, oil: 3, film: 0.5, oilR: 6, secs: 60, dryR: 30, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#caa12a', look: 'oil',
