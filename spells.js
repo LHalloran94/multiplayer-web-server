@@ -376,7 +376,7 @@
     //   form 'On yourself'; ON ANOTHER = its variant with 'Touch' (`other`): the player nearest your pointer within `reach` px of you (the server checks they are there).
     //   CHILL BOLT: a frost bolt that SLOWS whoever it hits (`slow` × their speed for `slowS` s — the new 'slow' power, 01_state `POWERUP_KINDS.slow`).
     leap: { name: 'Leap', school: 'force', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'boots', secs: 20, learn: 3, aim: 'self', reach: 240, plain: { keys: [R, U, U, D, R], rune: [6, 4, 2, 5, 8] } },
-    feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'feather', secs: 20, learn: 3, aim: 'self', reach: 240, plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
+    feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'feather', secs: 20, learn: 3, aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 0.9, grav: 0, r: 3, fuse: 1, plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
     haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, aim: 'self', reach: 240, plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
     // ⭐ STEP 10a (2026-11-21) SPACE: BLINK (kind 'blink') — to the free spot nearest the pointer, at most `blinkR` px from your middle and in sight (the caster's game finds it:
     //   client 16zj `magicBlinkSpot`; the server holds it to `reach` px from the hand); your speed kept. PASS THROUGH (kind 'pass') — through at most `cells` cells of rock met within `near` cells of
@@ -699,6 +699,10 @@
       mat: 4, melts: true, fx: '#cfefff', look: 'icemelt', plain: { keys: [D, R, L, R, U], rune: [2, 5, 4, 6, 3] } },
     coldsnap: { name: 'Cold snap', school: 'frost', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'coldsnap', learn: 5, reach: 360, car: 1, speed: 520, life: 0.9, grav: 0, r: 4, fuse: 1, rad: 96, cells: 220, ringMs: 22, secs: 30, hold: 1.5, crustS: 8, fx: '#cfefff',
       plain: { keys: [D, L, U, R, D], rune: [8, 4, 3, 1, 5] } },
+    // ⭐ (21 — STORM ONTO CARRIERS, 2026-11-28, the user's picks) call lightning, the thunderstorm (held, as the blizzard), the whirlwind, the updraft, ball lightning
+    //   (its flight out is the carrier — `drift` its own wandering speed) and the thunderclap (claps where it lands, as the cold snap) FLY OUT as carriers, fused at the pointer,
+    //   and open where they stop. `carBody` = it opens only ON THE BODY it strikes (you, the dummy, another player) — feather fall, the wind shield, the lightning weapon; one
+    //   that meets no body is lost; a smaller / split piece gives less (its time, the shield's reach and strength × its size — server `magicCarScale`)
     // ⭐ STEP 8a (2026-11-20, STORM — kickoff §'STEP 8'): LIGHTNING, kind 'zap': an instant jagged strike from the tip towards the pointer, `reach` px, stopped by the first rock,
     //   liquid or body on the way (the caster's game traces it); it JUMPS on to `jumps` more bodies within `jumpR` px (× `metalK` for one wearing plate or mail — they are found
     //   first), each jump `jumpK` of the blow. `dmg` health + `stunMs` of stun to whom it strikes (× `metalHurtK` in metal). IN LIQUID that conducts (water, brine, acid — not oil or
@@ -709,7 +713,7 @@
     // CALL LIGHTNING, kind 'skystrike': a dark thundercloud gathers ON the pointer (the rain cloud's place, `down` cells), `gatherMs` later one great strike falls straight down from
     //   it onto the first thing under it (a body within `side` px of its middle — one in metal from `side` × `metalK` — or the ground); `dmg` + alight + `stunMs`. Sand where it lands
     //   FUSES to glass (a small branching tube down into it, at most `glass` cells — for good, changed not made); liquid / ore as lightning's.
-    calllightning: { name: 'Call lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'skystrike', learn: 5, reach: 400, wide: 14, down: 1, gatherMs: 1800, formMs: 1200, side: 14, metalK: 1.8,
+    calllightning: { name: 'Call lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'skystrike', learn: 5, reach: 400, car: 1, speed: 480, life: 1.2, grav: 0, r: 4.5, fuse: 1, wide: 14, down: 1, gatherMs: 1800, formMs: 1200, side: 14, metalK: 1.8,
       dmg: 3, metalHurtK: 1.5, stunMs: 600, liqCells: 1000, liqDmg: 1.5, oreCells: 240, glass: 9, fx: '#cfe0ff', plain: { keys: [L, U, L, D, D], rune: [0, 1, 3, 7, 8] } },
     // ⭐ 8a ROUND 2 (2026-11-20, the user: 'a similar spell that calls more of a storm, with several clouds which all randomly shoot lightning down in the area over some period,
     //   perhaps as a channelled spell, with lesser lightning bolts also, but more of them'): THUNDERSTORM, kind 'storm', HELD (`chanS` s at most): `clouds` thunderclouds `spread` px
@@ -717,16 +721,16 @@
     //   (`dmg` + `stunMs`, no fire on a body, what burns on the ground catches; liquid / ore as lightning's, smaller). Its caster's game aims each (`magic-strike` with `st`).
     //   (8a round 3, the user: 'more plentiful and thick … and there should be rain as well') 5 clouds 64 px apart (a bank), each RAINING as the rain cloud does (`ups` units a
     //   second of made water, dried `drySecs` after) from when it has formed until it is let go.
-    thunderstorm: { name: 'Thunderstorm', school: 'storm', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'storm', learn: 5, chan: true, chanS: 10, reach: 400, clouds: 5, spread: 64, wide: 14, down: 1, formMs: 1400,
+    thunderstorm: { name: 'Thunderstorm', school: 'storm', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'storm', learn: 5, chan: true, chanS: 10, reach: 400, car: 1, speed: 420, life: 1.3, grav: 0, r: 5, fuse: 1, clouds: 5, spread: 64, wide: 14, down: 1, formMs: 1400,
       ups: 26, dropV: 6, dropR: 1.1, drySecs: 60, gapMin: 500, gapMax: 1400, side: 10, metalK: 1.8, dmg: 1, metalHurtK: 1.5, stunMs: 250, liqCells: 300, liqDmg: 1, oreCells: 80, fx: '#cfe0ff', plain: { keys: [L, D, L, U, U], rune: [0, 3, 7, 5, 1] } },
     // ⭐ STEP 8b (2026-11-20, STORM — kickoff §'STEP 8'): THUNDERCLAP, kind 'clap' (a burst round you): a flash and a ring of bent air out to `rad` px; every OTHER body in it
     //   thrown back (`push`) and DAZED (`dazeMs` at the middle, less at the edge — stood dizzy, no moving or punching); GLASS within `shatterR` px shatters (pick-ups where things
     //   cost), out to `rad` it cracks (`crack` wear); loose things hop; pools splash. No harm to health.
-    thunderclap: { name: 'Thunderclap', school: 'storm', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'clap', learn: 5, rad: 110, push: 10, dazeMs: 800, shatterR: 56, crack: 40, fx: '#e8eeff',
+    thunderclap: { name: 'Thunderclap', school: 'storm', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'clap', learn: 5, reach: 360, car: 1, speed: 520, life: 0.9, grav: 0, r: 4, fuse: 1, rad: 110, push: 10, dazeMs: 800, shatterR: 56, crack: 40, fx: '#e8eeff',
       plain: { keys: [L, D, R, D, L], rune: [0, 3, 1, 5, 7] } },
     // WIND SHIELD, kind 'windshield' (on yourself, `secs` s; the Touch variant on another): wind circling the body bends ARROWS, THROWN THINGS, ICE SHARDS and SPELL BOLTS that come
     //   within `R` px of it aside (turned along the wind, `k` how hard) — never its own owner's. Seen by motes and leaves circling and faint curved streaks.
-    windshield: { name: 'Wind shield', school: 'storm', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'windshield', learn: 3, secs: 12, R: 44, k: 24, aim: 'self', reach: 240, fx: '#dfe8f0',
+    windshield: { name: 'Wind shield', school: 'storm', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'windshield', learn: 3, secs: 12, R: 44, k: 24, aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 0.9, grav: 0, r: 3.5, fuse: 1, fx: '#dfe8f0',
       plain: { keys: [L, R, D, L, U], rune: [0, 5, 7, 3, 1] } },
     // ⭐ (8b, FROST — the user 2026-11-20: 'we should build the blizzard in Frost also') BLIZZARD, kind 'blizzard', HELD (`chanS` s at most): `clouds` snow clouds `spread` px apart
     //   over the pointer (in sight), formed from vapour out of the staff as the thunderstorm's; once formed each SNOWS (`cps` grains a second of real snow, as the snow cloud — melted
@@ -738,24 +742,24 @@
     //   its caster at `speed` px/s (turned back once by a wall, then it stays). It takes up the surface's loose powder (`grab` cells a tick, at most `carry` — never a spell's own snow)
     //   and liquid (at most `liq` units, not lava), and FLINGS it all back out when it ends (grains landing as ground, drops as liquid — moved, nothing made or lost); over fire it
     //   catches and becomes a FLAMING TORNADO that lights what it touches. A body it catches is lifted (`lift`) and spun round it, thrown out after `catchS` s (still steering).
-    whirlwind: { name: 'Whirlwind', school: 'storm', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'whirl', learn: 5, reach: 360, secs: 12, speed: 40, high: 150, grab: 3, carry: 90, liq: 200, liqTick: 20, throwV: 280,
+    whirlwind: { name: 'Whirlwind', school: 'storm', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'whirl', learn: 5, reach: 360, car: 1, speed: 460, life: 1.1, grav: 0, r: 4, fuse: 1, secs: 12, drift: 40, high: 150, grab: 3, carry: 90, liq: 200, liqTick: 20, throwV: 280,
       catchS: 2.6, lift: 8, turnS: 0.5, throwOut: 13, minRoom: 40, fx: '#dfe8f0', plain: { keys: [L, U, L, U, R], rune: [0, 3, 4, 1, 2] } },
     // UPDRAFT, kind 'draft' (placed, in sight; `secs` s): a column of rising air from the ground under the pointer up to `high` px (or the first rock), `wide` cells across. Bodies
     //   in it rise at `riseV` px a frame and hover near its top; leaving it near the top gives `featherS` s of feather fall. Loose things are lifted; now and then a grain of the
     //   surface's loose powder at its foot is flown up it (moved, as a throw).
     // (8c round 2, the user: 'it should be more powerful … something you could use on another player to launch them into the air, or an object'; no feather fall; it should lift
     //   liquid too) bodies and loose things in it are LAUNCHED up at `riseV` px a frame (on past its top); the liquid at its foot is thrown up it (`liq` units a tick), powder too.
-    updraft: { name: 'Updraft', school: 'storm', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'draft', learn: 3, reach: 360, secs: 8, high: 240, wide: 4, riseV: 10, grainMs: 150, liq: 6, fx: '#dfe8f0',
+    updraft: { name: 'Updraft', school: 'storm', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'draft', learn: 3, reach: 360, car: 1, speed: 460, life: 1.1, grav: 0, r: 3.5, fuse: 1, secs: 8, high: 240, wide: 4, riseV: 10, grainMs: 150, liq: 6, fx: '#dfe8f0',
       plain: { keys: [L, L, U, U, R], rune: [0, 6, 3, 1, 5] } },
     // ⭐ STEP 8d (2026-11-21, STORM): BALL LIGHTNING, kind 'ball' (placed: it leaves the tip at `speed` px/s for the pointer, then wanders; `secs` s): its caster's game flies it (wind
     //   spells push it: gust, whirlwind, updraft) and every `zapMs` sends a small arc to the nearest body (metal from further), or water, within `zapR` px — `dmg` health + `stunMs`;
     //   touching a body it BURSTS (`burstDmg`, thrown back, set alight); into water it bursts and its charge runs through the water; at its end it pops (what burns there catches).
-    balllightning: { name: 'Ball lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'ball', learn: 5, reach: 360, secs: 8, speed: 70, wander: 26, r: 7,
+    balllightning: { name: 'Ball lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'ball', learn: 5, reach: 360, car: 1, speed: 300, life: 1.4, grav: 0, fuse: 1, secs: 8, drift: 70, wander: 26, r: 7,
       zapMs: 700, zapR: 90, metalK: 1.6, dmg: 0.75, stunMs: 250, burstDmg: 2, burstR: 40, knock: 9, metalHurtK: 1.5, liqDmg: 1, liqCells: 400, oreCells: 80, fx: '#c9d6ff',
       plain: { keys: [L, U, R, U, D], rune: [0, 4, 6, 7, 5] } },
     // LIGHTNING WEAPON, kind 'stormblade' (on yourself, `secs` s — as the flaming weapon): the weapon in your other hand crackles with charge; its hits SHOCK (`dmg`, `stunMs`,
     //   metal ×`metalHurtK`); a blow stopped on a metal blade or shield shocks its holder; dipped in liquid it empties into it (everyone in that water shocked, you too) and ends.
-    stormblade: { name: 'Lightning weapon', school: 'storm', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'stormblade', learn: 5, secs: 30, dmg: 1, stunMs: 300, metalHurtK: 1.5,
+    stormblade: { name: 'Lightning weapon', school: 'storm', form: 'self', aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 0.9, grav: 0, r: 3, fuse: 1, tier: 1, cd: 20, stance: 'raise', kind: 'stormblade', learn: 5, secs: 30, dmg: 1, stunMs: 300, metalHurtK: 1.5,
       liqDmg: 1.5, liqCells: 600, oreCells: 120, fx: '#c9d6ff', plain: { keys: [L, R, U, R, D], rune: [0, 3, 4, 2, 8] } },
     // ⭐ FROST AND WATER (the user's ideas, 2026-11-20): WHIRLPOOL, kind 'pool' (placed IN liquid at the pointer, `secs` s): stationary; the server keeps pumping the liquid from its
     //   middle out to its rim (`pump` units a tick) so its surface dips into a funnel — moved, nothing made or lost; bodies and loose things in the liquid within its reach are drawn
@@ -862,8 +866,8 @@
     mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [2, 4], fits: ['fly'], group: ['path'], rep: 0, cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3, more: 1.5 },   // (again: turns × `more`)
     // (2026-11-28, the user: 'arcs and heavy … accomplishing the same thing really — just keep heavy') ARCS is gone: `mod_arc` { keys U R, rune 2 → 5, g 1100, reach 560 } — its
     //   code stays asleep (nothing can put it in), its keys and stroke free
-    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly'], rep: 0, cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6, szK: 0.75 },   // (M3 round 2: smaller and weaker each split, compounding; M4: again — each of the three in three)
-    mod_faint:  { name: 'Faint', keys: [D, D], rune: [0, 5], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5, more: 0.5 },   // (again: × `more` as seen)
+    mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly', 'strike'], rep: 0, cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6, szK: 0.75 },   // (M3 round 2: smaller and weaker each split, compounding; M4: again — each of the three in three)
+    mod_faint:  { name: 'Faint', keys: [D, D], rune: [0, 5], fits: ['fly', 'strike'], rep: 0, cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5, more: 0.5 },   // (again: × `more` as seen)
     // ⭐ M2 (2026-11-27 — the user's four):
     //   bounce   off rock (and a level's floor) `n` times a piece put in, `keep` of its speed each time, its time × (1 + (`lifeK` − 1) a piece); a stone / ember bounces before it stands
     //   thru     through `cells` cells of rock a piece put in, then as ever (a lobbed wall or fire wall would come down inside the ground — `noLob`)
@@ -872,7 +876,7 @@
     //            its strength; a shot's pieces land `shotK` of its size
     mod_bounce:  { name: 'Bounces', keys: [U, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], rep: 0, cdK: 1.5, learn: 3, n: 3, keep: 0.75, lifeK: 1.6 },
     mod_thru:    { name: 'Through walls', keys: [R, R], rune: [2, 4], fits: ['fly'], noLob: 1, rep: 0, cdK: 2, learn: 3, cells: 10 },
-    mod_delay:   { name: 'Delayed', keys: [D, D], rune: [2, 4], fits: ['fly'], later: ['placed', 'round'], rep: 0, cdK: 1.25, learn: 3, secs: 2.5 },   // (M2 round 3, the user: a bit longer — 1.5 → 2.5 s a piece)
+    mod_delay:   { name: 'Delayed', keys: [D, D], rune: [2, 4], fits: ['fly', 'strike'], later: ['placed', 'round'], rep: 0, cdK: 1.25, learn: 3, secs: 2.5 },   // (M2 round 3, the user: a bit longer — 1.5 → 2.5 s a piece)
     mod_cluster: { name: 'Cluster', keys: [U, D], rune: [7, 5], fits: ['fly'], maker: 1, cdK: 1.5, learn: 3, n: 5, fan: 150, speedK: 0.55, life: 0.45, dmgK: 0.5, powK: 0.6, shotK: 0.4, szK: 0.6 },
     // ⭐ M3 (2026-11-28; each in ITS generation):
     //   bigger / smaller  drawn and striking × `k` a piece put in (its burst, a shot's size, a ball of darkness too), its blow × `dmgK`, its speed × `speedK` (not a lob's)
@@ -880,8 +884,8 @@
     //   homing   (M4, the user: 'it should actually home in on people') its caster's game LOCKS onto the nearest body ahead (within `cone` degrees, `range` px) and chases it at
     //            `turn` rad/s, behind or not, while it is within 1.5 × `range`; again: × `more` its turn and range; flies × `lifeK`, less pulled down (`gravK`)
     //   boomerang  out for `out` of its time, then its caster's game turns it back to its caster at `turn` rad/s — it ends harmlessly back in their hand; × `lifeK` its time
-    mod_bigger:    { name: 'Bigger', keys: [U, U], rune: [0, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.5, learn: 3, k: 1.5, dmgK: 1.4, speedK: 0.85 },
-    mod_smaller:   { name: 'Smaller', keys: [D, D], rune: [2, 5], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.2, learn: 3, k: 0.65, dmgK: 0.75, speedK: 1.2 },
+    mod_bigger:    { name: 'Bigger', keys: [U, U], rune: [0, 5], fits: ['fly', 'strike'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.5, learn: 3, k: 1.5, dmgK: 1.4, speedK: 0.85 },
+    mod_smaller:   { name: 'Smaller', keys: [D, D], rune: [2, 5], fits: ['fly', 'strike'], later: ['thrown', 'held', 'placed', 'round'], rep: 0, cdK: 1.2, learn: 3, k: 0.65, dmgK: 0.75, speedK: 1.2 },
     mod_pierce:    { name: 'Pierces', keys: [R, R], rune: [6, 4], fits: ['fly'], hit: 1, rep: 0, cdK: 1.5, learn: 3, n: 3, dmgK: 0.8 },
     mod_homing:    { name: 'Homing', keys: [D, U], rune: [8, 5], fits: ['fly'], group: ['path'], rep: 0, cdK: 2, learn: 3, turn: 8, range: 420, cone: 90, lifeK: 1.6, gravK: 0.15, more: 1.5 },   // (M4 round 2, the user: a bit less good — stacking it makes it better)
     mod_boomerang: { name: 'Comes back', keys: [L, D], rune: [0, 5], fits: ['fly'], later: ['thrown'], noLob: 1, cdK: 1.5, learn: 3, out: 0.35, turn: 7, lifeK: 2.6, gravK: 0, catchR: 20 },   // (rig: × 2 ran out 250 px short — longer, no fall, back sooner)
@@ -915,9 +919,9 @@
     //   trail    it leaves marks along its way (every phase — a ring round you while it circles), lasting `secs` (× the pieces put in), every `gap` px, by its SCHOOL (16zj
     //            `MAGIC_TRAIL`): fire real flame (sets alight) · frost rime (slows) · storm sparks · earth grit (small blows) · decay mist (poisons) · blood drops (cut) · life
     //            a glow (heals a little — its caster too) · light lingering light (lights the dark) · the rest a shimmer (a look only). Each screen its own body; the caster's the dummy
-    mod_chain:      { name: 'Chains', keys: [R, L], rune: [0, 4], fits: ['fly'], hit: 1, rep: 0, cdK: 2, learn: 3, n: 3, range: 220, dmgK: 0.8, v: 900, addS: 0.7 },
-    mod_explode:    { name: 'Bursts on hitting', keys: [U, D], rune: [7, 4], fits: ['fly'], hit: 1, rep: 0, cdK: 1.5, learn: 3, r: 26, more: 0.6, dmgK: 0.6, f: 7 },
-    mod_double:     { name: 'Twice', keys: [R, R], rune: [0, 4], fits: ['fly'], rep: 0, cdK: 1.75, learn: 3, gap: 0.35 },
+    mod_chain:      { name: 'Chains', keys: [R, L], rune: [0, 4], fits: ['fly', 'strike'], hit: 1, rep: 0, cdK: 2, learn: 3, n: 3, range: 220, dmgK: 0.8, v: 900, addS: 0.7 },
+    mod_explode:    { name: 'Bursts on hitting', keys: [U, D], rune: [7, 4], fits: ['fly', 'strike'], hit: 1, rep: 0, cdK: 1.5, learn: 3, r: 26, more: 0.6, dmgK: 0.6, f: 7 },
+    mod_double:     { name: 'Twice', keys: [R, R], rune: [0, 4], fits: ['fly', 'strike'], rep: 0, cdK: 1.75, learn: 3, gap: 0.35 },
     mod_trail:      { name: 'Leaves a trail', keys: [L, R], rune: [6, 5], fits: ['fly'], rep: 0, cdK: 1.5, learn: 3, secs: 3, gap: 7 },
     mod_lasting:    { name: 'Lasts longer', keys: [R, R], rune: [2, 4], fits: ['fly'], later: ['thrown', 'held', 'placed', 'round', 'self'], rep: 0, cdK: 1.5, learn: 3, k: 1.6 },   // (21 M1 round 3, the user: a firebolt flies longer before it fizzles — with follows, longer steered)
   };
@@ -949,13 +953,15 @@
   // (21 M1) HOW A SPELL IS DELIVERED (what `fits` means) — by its kind and form
   const SHOT_KINDS = ['freeze', 'wall', 'change', 'tunnel', 'firewall'], THROWN_KINDS = ['shard', 'waterball', 'chunk'], PAINT_KINDS = ['paint', 'rainbow'];
   const isShot = (S) => !!S && SHOT_KINDS.indexOf(S.kind) >= 0 && S.speed > 0;
-  const delivOf = (S) => { if (!S || S.innate) return null; if (S.kind === 'bolt' || isShot(S) || S.car) return 'fly';   /* (21: the spells on carriers fly) */ if (THROWN_KINDS.indexOf(S.kind) >= 0) return 'thrown';
+  // (21 — Storm, the user 2026-11-28) LIGHTNING stays instant: its own delivery 'strike' — the modifiers that mean something on a strike (split forks, chains jump on, size its reach
+  //   and blow, bursts at each body and its end, twice, delayed, faint); no path ones
+  const delivOf = (S) => { if (!S || S.innate) return null; if (S.kind === 'zap') return 'strike'; if (S.kind === 'bolt' || isShot(S) || S.car) return 'fly';   /* (21: the spells on carriers fly) */ if (THROWN_KINDS.indexOf(S.kind) >= 0) return 'thrown';
     if (PAINT_KINDS.indexOf(S.kind) >= 0) return 'paint'; if (S.chan) return 'held'; if (S.form === 'touch') return 'touch'; if (S.form === 'burst' || S.aim === 'self') return 'round';
     if (S.form === 'self') return 'self'; return 'placed'; };
   const modFits = (mid, spell) => { const M = modAny(mid), S = SPELLS[spell] && Object.prototype.hasOwnProperty.call(SPELLS, spell) ? SPELLS[spell] : null; if (!M || !S || S.innate) return false;
     if (M.fits.indexOf(delivOf(S)) < 0 || (S.noMods && S.noMods.indexOf(mid) >= 0)) return false;
     if (M.noLob && (S.kind === 'wall' || S.kind === 'firewall')) return false;   // (21 M2) through walls: not a stone or ember that must come down on the ground
-    return !(M.hit && (S.kind !== 'bolt' || S.thru)); };
+    return !(M.hit && S.kind !== 'zap' && (S.kind !== 'bolt' || S.thru)); };
   // two modifiers that never go together: one of the same group, or named in a `clash` (either way round). The same one twice is a repeat (`rep`), not a clash
   const modClash = (a, b) => { if (a === b) return false; const A = modAny(a), B = modAny(b); if (!A || !B) return true;
     if ((A.clash || []).indexOf(b) >= 0 || (B.clash || []).indexOf(a) >= 0) return true; for (const g of A.group || []) if ((B.group || []).indexOf(g) >= 0) return true; return false; };
