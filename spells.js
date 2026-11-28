@@ -460,7 +460,9 @@
     venombolt: { name: 'Venom bolt', school: 'decay', form: 'bolt', tier: 0, cd: 3, stance: 'level', kind: 'bolt', learn: 3, speed: 520, life: 8, grav: 0.14, r: 3.5, dmg: 0.25, poison: 8, poisonDmg: 0.25, poisonEvery: 1,
       plain: { keys: [D, L, D, R, R], rune: [1, 3, 7, 8, 5] } },
     pcloud: { name: 'Poison cloud', school: 'decay', form: 'placed', tier: 1, cd: 18, stance: 'level', kind: 'pcloud', learn: 5, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 3.5, reach: 360, secs: 10, wide: 22, high: 7, grow: 1.8, most: 2, poisonS: 3, boomDmg: 1,
-      plain: { keys: [D, D, L, R, L], rune: [3, 6, 7, 8, 5] } },
+      plain: { keys: [D, D, L, R, L], rune: [3, 6, 7, 4, 5] } },
+    // (21 round 3, probe: the cloud's plain rune 3-6-7-8-5 ran straight along the bottom row — traced it is the thorn hedge's 3-6-8-5, so once the cloud took modifiers (a
+    //   carrier) cloud + a piece read as the hedge + it) its rune now turns up through the middle: 3-6-7-4-5
     spores: { name: 'Spore pods', school: 'decay', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'spores', learn: 3, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 3.5, reach: 360, secs: 90, most: 3, armS: 1.2, trip: 22, R: 44, puffW: 7, puffS: 4, poisonS: 6,
       plain: { keys: [D, U, D, U, R], rune: [6, 3, 7, 5, 8] } },
     plague: { name: 'Plague', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'plague', learn: 5, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, other: true, reach: 240, secs: 15, dmg: 0.25, every: 2, spreadR: 44, immuneS: 20,
@@ -580,7 +582,8 @@
       lava: true, to: 23, inLiq: true, plain: { keys: [D, U, D, R, U], rune: [2, 5, 4, 7, 8] } },
     // (21 round 2, the user: 'a spell to repair objects, like half-burnt crates … the same spell as the one which repairs damaged terrain') MEND ROCK also MENDS THINGS: it
     //   stops on the thing it meets and mends it, and the things within its reach where it lands — hit points back, a wooden thing's burnt cells whole (server `magicMendThings`)
-    mend: { name: 'Mend rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 60, ringMs: 50, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#d9c08a', look: 'mend',
+    // (21 round 3, 2026-11-28, the user) renamed REPAIR and moved to ALTERATION (it mends rock and things alike); its word there ↑ → (Alteration's ← ↑ is gaseous form's)
+    mend: { name: 'Repair', school: 'alteration', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 60, ringMs: 50, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#d9c08a', look: 'mend',
       mend: true, plain: { keys: [D, U, U, L, U], rune: [6, 7, 4, 1, 2] } },
     grease: { name: 'Grease', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, oil: 3, film: 0.5, oilR: 6, secs: 60, dryR: 30, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#caa12a', look: 'oil',
       plain: { keys: [D, U, U, R, D], rune: [0, 1, 4, 5, 8] } },
@@ -1057,7 +1060,7 @@
     gust: [[U, D], [1, 5, 7, 3, 1]], feather: [[D, U], [4, 6]],
     lightning: [[R, R], [4, 5]], calllightning: [[U, L], [4, 1, 3, 7]], thunderstorm: [[L, L], [4, 1, 0, 3]], thunderclap: [[D, D], [4, 3, 1, 5]], windshield: [[D, L], [4, 7]], whirlwind: [[L, U], [4, 3, 0, 1]], updraft: [[U, U], [4, 1]], balllightning: [[D, R], [4, 7, 5]], stormblade: [[U, R], [4, 1, 2]],   // (8b: round you, as the flame ring / cold snap · the on-another turned → and on to the top right)   // (8a: the bolt ending · up into the sky, then a zigzag down)
     stonewall: [[U, U], [4, 7]],
-    crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], mend: [[U, L], [4, 1]], grease: [[U, R], [4, 2, 5]],
+    crumble: [[L, D], [4, 6]], harden: [[L, U], [4, 0]], glassify: [[D, L], [4, 3]], coollava: [[D, R], [4, 2]], grease: [[U, R], [4, 2, 5]],
     rockchunk: [[L, R], [4, 3, 5]], soilfling: [[L, L], [4, 6, 3]], tunnelbolt: [[R, R], [4, 5]], quake: [[D, D], [4, 7, 8]],
     spikes: [[U, D], [4, 1, 5]], pillar: [[D, U], [4, 7, 1]], bridge: [[R, L], [4, 0, 2]],   // (5d: a peak ∧ · down into the ground and up · out and across)
     lift: [[L, R], [4, 2]], leap: [[U, U], [4, 1]],
@@ -1096,6 +1099,8 @@
     stoneskin: [[D, D], [4, 0, 3]], fins: [[R, L], [4, 3, 0]], nighteyes: [[U, U], [4, 0, 2]], gaseous: [[U, L], [4, 1, 0]], rubber: [[D, U], [4, 7, 8]], petrify: [[R, D], [4, 5, 8]], jelly: [[L, R], [4, 3, 6]],
     // (15c) spider climb: along to the wall and up it (a tier up) · mend gear: a stitch down and across, drawn shut
     spider: [[R, U], [4, 1, 2]], mendgear: [[D, R], [4, 6, 3]],
+    // (21 round 3) repair (moved from Earth): up and across, a patch laid over
+    mend: [[U, R], [4, 1, 2, 5]],
     // (13a) the venom bolt, the bolt ending · the cloud down and rolling out low · the pods down into the soil and up out of it · plague, its first mark → (towards them) and spreading out
     venombolt: [[R, R], [4, 5]], pcloud: [[D, L], [4, 3, 6]], spores: [[D, U], [4, 8, 5]], plague: [[R, L], [4, 3, 2]],
     // (13b) the curse laid over them, on to the top right · wither pulled down, then up and off to them · the bone spear, the bolt ending (a tier up: as great firebolt)

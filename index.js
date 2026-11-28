@@ -4147,6 +4147,9 @@ function magicMostCasts(entries, CASTK, most) { const casts = []; for (const [k,
 // (21 round 2) A VINE FROM A THING (`ob`, struck at x, y): tied there — to your hands (`hands`; a swing vine — none: null), or hanging down from there clear of the thing to
 //   just over the ground (at most `len` cells; at least 24 px — a short one rests on the ground). The client ties a rope's end to the thing it lies at (16b `ropeEndAt`)
 function magicVineThingPlan(room, ob, x, y, S, hands) { const T = TERRAIN_CELL; if (hands === null) return null;
+  // (round 3, rig: a vine that struck 4 px outside a crate's face was not tied — its end fell to the floor, and you hung from a loose end) the knot a little INSIDE the thing
+  //   (a rope may be tied inside a thing — 16b `ropeBuild`), so its end is always tied to it
+  { const P0 = magicBoulderPose(room, ob), dx = P0.x - x, dy = P0.y - y, d = Math.hypot(dx, dy); if (d > 1) { const k = Math.min(d, 8) / d; x += dx * k; y += dy * k; } }
   if (hands) { const L = Math.hypot(hands.x - x, hands.y - y); if (L < 24 || L > (S.reach || 520) + 120) return null; return { x: Math.round(x), y: Math.round(y), rp: [[0, 0, 0, 1], [Math.round(hands.x - x), Math.round(hands.y - y), 0, 1]], L: Math.round(L) }; }
   const st = cellsOf(room), grid = st.terrain; if (!grid) return null; const ROWS = st.rows, COLS = st.cols, floorRow = Math.floor(roomFloorTop(room) / T), c = Math.floor(x / T); if (c < 0 || c >= COLS) return null;
   const solidR = (r) => { if (r >= ROWS || r >= floorRow) return true; if (r < 0) return false; const v = peekCellAt(grid, c * ROWS + r); return v > 0 && isSolidCell(v); };
@@ -30016,6 +30019,11 @@ io.on('connection', (socket) => {
   socket.on('magic-pcloud-fire', (m) => { const room = currentAvatarRoom, q = m && _magicPClouds.get(m.id | 0); if (!room || !q || q.room !== room) return; const p = socket._avPos;
     if (p && Date.now() - p.t < 4000 && Math.abs(p.x - q.x) <= q.w / 2 + 30) magicPCloudFire(room, p.x, p.y - 4, 4); });
   // (13a) SPORE PODS TRIPPED by a body near them (its game says so — or its dummy's): gone, a burst on every screen, each game poisons its own body in reach
+  // ⭐ (21 round 3, 2026-11-28, the user: cure should show it curing) WHAT A CURE TOOK OFF A BODY: its own game says (its dummy: its caster's), every other screen shows each
+  //   ailment leaving it (16zj `magicCureBurst`)
+  socket.on('magic-cured', (m) => { const room = currentAvatarRoom; if (!room || !m || !Array.isArray(m.got)) return; const now = Date.now(); if (now - (socket._curedAt || 0) < 150) return; socket._curedAt = now;
+    const KS = ['burn', 'slow', 'daze', 'ice', 'roots', 'poison', 'plague', 'wither', 'haem'], got = m.got.filter(k => KS.indexOf(k) >= 0).slice(0, 9); if (!got.length) return;
+    socket.to(room).emit('magic-cured', { from: socket.id, to: m.to === 'mw-test-dummy' ? 'mw-test-dummy' : socket.id, got }); });
   socket.on('magic-spore-trip', (m) => { const room = currentAvatarRoom, q = m && _magicSpores.get(m.id | 0); if (!room || !q || q.room !== room) return; const now = Date.now(); if (now < q.armAt) return;
     const p = socket._avPos; if (!m.dm && p && now - p.t < 4000 && Math.hypot(p.x - q.x, p.y - q.y) > 120) return;
     _magicSpores.delete(q.id); io.to(room).emit('magic-spore-burst', { id: q.id, x: q.x, y: q.y, by: q.by }); });
