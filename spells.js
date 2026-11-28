@@ -376,7 +376,7 @@
     //   form 'On yourself'; ON ANOTHER = its variant with 'Touch' (`other`): the player nearest your pointer within `reach` px of you (the server checks they are there).
     //   CHILL BOLT: a frost bolt that SLOWS whoever it hits (`slow` × their speed for `slowS` s — the new 'slow' power, 01_state `POWERUP_KINDS.slow`).
     leap: { name: 'Leap', school: 'force', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'boots', secs: 20, learn: 3, aim: 'self', reach: 240, plain: { keys: [R, U, U, D, R], rune: [6, 4, 2, 5, 8] } },
-    feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'feather', secs: 20, learn: 3, aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 0.9, grav: 0, r: 3, fuse: 1, plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
+    feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'feather', secs: 20, learn: 3, aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
     haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, aim: 'self', reach: 240, plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
     // ⭐ STEP 10a (2026-11-21) SPACE: BLINK (kind 'blink') — to the free spot nearest the pointer, at most `blinkR` px from your middle and in sight (the caster's game finds it:
     //   client 16zj `magicBlinkSpot`; the server holds it to `reach` px from the hand); your speed kept. PASS THROUGH (kind 'pass') — through at most `cells` cells of rock met within `near` cells of
@@ -627,7 +627,7 @@
     //   pointer, as the flash; `lob` it is THROWN along your aim and falls fast, `lobG` its fall) and its spell OPENS where it ends — on rock, a body, liquid, at the pointer, or in the air
     //   (server `magicCarryOpen`). Modifiers go on it. The panel's 'Fire and Frost spells fly out as carriers' off: placed as before
     //   KINDLE: a spark, quick and nearly straight, fused at the pointer — water puts it out (nothing burns there)
-    kindle: { name: 'Kindle', school: 'fire', form: 'placed', tier: 0, cd: 2, stance: 'level', kind: 'kindle', learn: 3, reach: 400, car: 1, speed: 900, life: 0.6, grav: 0.02, r: 2.5, fuse: 1, fx: '#ffb060',
+    kindle: { name: 'Kindle', school: 'fire', form: 'placed', tier: 0, cd: 2, stance: 'level', kind: 'kindle', learn: 3, reach: 400, car: 1, speed: 900, life: 1.1, grav: 0.02, r: 2.5, fx: '#ffb060',
       plain: { keys: [U, R, U, L, U], rune: [6, 5, 1, 3, 2] } },
     // ⭐ 6b (2026-11-19, kickoff §'STEP 6' — the user's picks): WALL OF FIRE, kind 'firewall', two variants (`alt`, as the light orb's): lobbed as the stone wall's stone (`speed`,
     //   `life`, `grav`, `r`) — it goes OUT in liquid (steam) — and where it comes down on the ground a wall of flame stands `secs`: the CURTAIN `wide` × `high` cells upright, the
@@ -666,7 +666,7 @@
       plain: { keys: [D, R, R, D, U], rune: [0, 4, 5, 8, 6] } },
     // (21 carriers, the user 2026-11-28: 'more interesting and useful as a spell which ices up the ground you shoot it at') FROST PATH flies as a bolt of frost, fused at the
     //   pointer; where it strikes the ice spreads out along the ground BOTH WAYS from there, `len` columns in all (server `magicFrostPathBoth`)
-    frostpath: { name: 'Frost path', school: 'frost', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'frostpath', learn: 3, reach: 420, car: 1, speed: 620, life: 1.2, grav: 0.04, r: 3.5, fuse: 1, len: 22, step: 3, drop: 6, colMs: 32, secs: 30, fx: '#d8f4ff', look: 'frost',
+    frostpath: { name: 'Frost path', school: 'frost', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'frostpath', learn: 3, reach: 420, car: 1, speed: 620, life: 1.6, grav: 0.04, r: 3.5, len: 22, step: 3, drop: 6, colMs: 32, secs: 30, fx: '#d8f4ff', look: 'frost',
       plain: { keys: [D, L, L, D, R], rune: [2, 4, 3, 6, 8] } },
     // ⭐ STEP 7b (2026-11-20): SHAPE WATER, kind 'waterball' (held, as the rock chunk is held): REAL LIQUID near the pointer (within `grab` cells — any but lava, at most `cells` cells'
     //   worth) drawn up into a ball; it follows the pointer (`reach`, `holdV`); a SECOND CLICK throws it away from you (`speed`, `grav`); where it meets something it BURSTS into the
@@ -687,9 +687,9 @@
     //   to water after `secs`); burning ground there goes out; every OTHER player within reach (nothing solid between) is frosted and held still `hold` s and put out, as the frost
     //   flask does; a frost crust lies on the ground it reached for `crustS` s. You are untouched.
     //   (21 carriers) RAIN / SNOW CLOUD, COLD SNAP, BLIZZARD: a wisp of cold flies out to the pointer (`fuse`) and opens there, or where it meets something on the way
-    raincloud: { name: 'Rain cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', learn: 3, reach: 360, car: 1, speed: 420, life: 1.1, grav: 0, r: 4, fuse: 1, cloudS: 8, wide: 14, down: 3, ups: 40, dropV: 6, dropR: 1.1, drySecs: 60, alts: ['snowcloud'], fx: '#9fd2f4',
+    raincloud: { name: 'Rain cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', learn: 3, reach: 700, car: 1, speed: 420, life: 1.8, grav: 0, r: 4, fuse: 1, cloudS: 8, wide: 14, down: 3, ups: 40, dropV: 6, dropR: 1.1, drySecs: 60, alts: ['snowcloud'], fx: '#9fd2f4',
       plain: { keys: [D, U, L, U, L], rune: [6, 4, 1, 0, 3] } },
-    snowcloud: { name: 'Snow cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', alt: 'raincloud', snow: true, reach: 360, car: 1, speed: 420, life: 1.1, grav: 0, r: 4, fuse: 1, cloudS: 8, wide: 14, down: 3, cps: 8, flakeG: 4, flakeD: 1.2, meltSecs: 60, fx: '#eef7ff', look: 'melt',
+    snowcloud: { name: 'Snow cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', alt: 'raincloud', snow: true, reach: 700, car: 1, speed: 420, life: 1.8, grav: 0, r: 4, fuse: 1, cloudS: 8, wide: 14, down: 3, cps: 8, flakeG: 4, flakeD: 1.2, meltSecs: 60, fx: '#eef7ff', look: 'melt',
       plain: { keys: [D, U, L, U, R], rune: [6, 4, 1, 2, 5] } },
     // ⭐ STEP 7d (2026-11-20): ICE WALL, kind 'wall' (the stone wall's: lobbed, a wall `wide` × `high` where it lands, or level out of a rock face), MADE OF ICE (`mat` 4 —
     //   slippery), `melts`: when its time is up it MELTS away from the top, `meltMs` a cell — no rubble, no water left. Like all ice it falls straight down when nothing
@@ -697,12 +697,17 @@
     //   to ice and help you cross it — server commit 'Magic 7d' has it.)
     icewall: { name: 'Ice wall', school: 'frost', form: 'placed', tier: 1, cd: 8, stance: 'level', kind: 'wall', learn: 5, reach: 360, secs: 30, crackS: 0, wide: 2, high: 12, rowMs: 55, crumbleMs: 45, thruLiq: true, speed: 560, life: 3, grav: 0.35, r: 4.5,
       mat: 4, melts: true, fx: '#cfefff', look: 'icemelt', plain: { keys: [D, R, L, R, U], rune: [2, 5, 4, 6, 3] } },
-    coldsnap: { name: 'Cold snap', school: 'frost', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'coldsnap', learn: 5, reach: 360, car: 1, speed: 520, life: 0.9, grav: 0, r: 4, fuse: 1, rad: 96, cells: 220, ringMs: 22, secs: 30, hold: 1.5, crustS: 8, fx: '#cfefff',
+    coldsnap: { name: 'Cold snap', school: 'frost', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'coldsnap', learn: 5, reach: 700, car: 1, speed: 520, life: 1.5, grav: 0, r: 4, fuse: 1, rad: 96, cells: 220, ringMs: 22, secs: 30, hold: 1.5, crustS: 8, fx: '#cfefff',
       plain: { keys: [D, L, U, R, D], rune: [8, 4, 3, 1, 5] } },
     // ⭐ (21 — STORM ONTO CARRIERS, 2026-11-28, the user's picks) call lightning, the thunderstorm (held, as the blizzard), the whirlwind, the updraft, ball lightning
     //   (its flight out is the carrier — `drift` its own wandering speed) and the thunderclap (claps where it lands, as the cold snap) FLY OUT as carriers, fused at the pointer,
     //   and open where they stop. `carBody` = it opens only ON THE BODY it strikes (you, the dummy, another player) — feather fall, the wind shield, the lightning weapon; one
     //   that meets no body is lost; a smaller / split piece gives less (its time, the shield's reach and strength × its size — server `magicCarScale`)
+    // ⭐ (21, 2026-11-28 — the user: some only went to the pointer when they should keep going) THREE KINDS OF CARRIER, for every school from now on: FLIES ON — what acts on
+    //   what it HITS (no `fuse`: on till it strikes a body / rock / liquid or its time runs out; ~1000 px — feather fall, wind shield, lightning weapon, whirlwind, updraft,
+    //   kindle, frost path) · STOPS AT THE POINTER (`fuse`) — what is made in the open air where you choose, up to `reach` 700 (the clouds, blizzard, call lightning,
+    //   thunderstorm; ball lightning, the cold snap and thunderclap by the user's pick) · LOBBED (`lob`) — what must come down on the ground or into liquid. Ranges long
+    //   on purpose (the user: the travel time balances it; balancing later)
     // ⭐ STEP 8a (2026-11-20, STORM — kickoff §'STEP 8'): LIGHTNING, kind 'zap': an instant jagged strike from the tip towards the pointer, `reach` px, stopped by the first rock,
     //   liquid or body on the way (the caster's game traces it); it JUMPS on to `jumps` more bodies within `jumpR` px (× `metalK` for one wearing plate or mail — they are found
     //   first), each jump `jumpK` of the blow. `dmg` health + `stunMs` of stun to whom it strikes (× `metalHurtK` in metal). IN LIQUID that conducts (water, brine, acid — not oil or
@@ -713,7 +718,7 @@
     // CALL LIGHTNING, kind 'skystrike': a dark thundercloud gathers ON the pointer (the rain cloud's place, `down` cells), `gatherMs` later one great strike falls straight down from
     //   it onto the first thing under it (a body within `side` px of its middle — one in metal from `side` × `metalK` — or the ground); `dmg` + alight + `stunMs`. Sand where it lands
     //   FUSES to glass (a small branching tube down into it, at most `glass` cells — for good, changed not made); liquid / ore as lightning's.
-    calllightning: { name: 'Call lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'skystrike', learn: 5, reach: 400, car: 1, speed: 480, life: 1.2, grav: 0, r: 4.5, fuse: 1, wide: 14, down: 1, gatherMs: 1800, formMs: 1200, side: 14, metalK: 1.8,
+    calllightning: { name: 'Call lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'skystrike', learn: 5, reach: 700, car: 1, speed: 480, life: 1.6, grav: 0, r: 4.5, fuse: 1, wide: 14, down: 1, gatherMs: 1800, formMs: 1200, side: 14, metalK: 1.8,
       dmg: 3, metalHurtK: 1.5, stunMs: 600, liqCells: 1000, liqDmg: 1.5, oreCells: 240, glass: 9, fx: '#cfe0ff', plain: { keys: [L, U, L, D, D], rune: [0, 1, 3, 7, 8] } },
     // ⭐ 8a ROUND 2 (2026-11-20, the user: 'a similar spell that calls more of a storm, with several clouds which all randomly shoot lightning down in the area over some period,
     //   perhaps as a channelled spell, with lesser lightning bolts also, but more of them'): THUNDERSTORM, kind 'storm', HELD (`chanS` s at most): `clouds` thunderclouds `spread` px
@@ -721,45 +726,45 @@
     //   (`dmg` + `stunMs`, no fire on a body, what burns on the ground catches; liquid / ore as lightning's, smaller). Its caster's game aims each (`magic-strike` with `st`).
     //   (8a round 3, the user: 'more plentiful and thick … and there should be rain as well') 5 clouds 64 px apart (a bank), each RAINING as the rain cloud does (`ups` units a
     //   second of made water, dried `drySecs` after) from when it has formed until it is let go.
-    thunderstorm: { name: 'Thunderstorm', school: 'storm', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'storm', learn: 5, chan: true, chanS: 10, reach: 400, car: 1, speed: 420, life: 1.3, grav: 0, r: 5, fuse: 1, clouds: 5, spread: 64, wide: 14, down: 1, formMs: 1400,
+    thunderstorm: { name: 'Thunderstorm', school: 'storm', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'storm', learn: 5, chan: true, chanS: 10, reach: 700, car: 1, speed: 420, life: 1.8, grav: 0, r: 5, fuse: 1, clouds: 5, spread: 64, wide: 14, down: 1, formMs: 1400,
       ups: 26, dropV: 6, dropR: 1.1, drySecs: 60, gapMin: 500, gapMax: 1400, side: 10, metalK: 1.8, dmg: 1, metalHurtK: 1.5, stunMs: 250, liqCells: 300, liqDmg: 1, oreCells: 80, fx: '#cfe0ff', plain: { keys: [L, D, L, U, U], rune: [0, 3, 7, 5, 1] } },
     // ⭐ STEP 8b (2026-11-20, STORM — kickoff §'STEP 8'): THUNDERCLAP, kind 'clap' (a burst round you): a flash and a ring of bent air out to `rad` px; every OTHER body in it
     //   thrown back (`push`) and DAZED (`dazeMs` at the middle, less at the edge — stood dizzy, no moving or punching); GLASS within `shatterR` px shatters (pick-ups where things
     //   cost), out to `rad` it cracks (`crack` wear); loose things hop; pools splash. No harm to health.
-    thunderclap: { name: 'Thunderclap', school: 'storm', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'clap', learn: 5, reach: 360, car: 1, speed: 520, life: 0.9, grav: 0, r: 4, fuse: 1, rad: 110, push: 10, dazeMs: 800, shatterR: 56, crack: 40, fx: '#e8eeff',
+    thunderclap: { name: 'Thunderclap', school: 'storm', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'clap', learn: 5, reach: 700, car: 1, speed: 520, life: 1.5, grav: 0, r: 4, fuse: 1, rad: 110, push: 10, dazeMs: 800, shatterR: 56, crack: 40, fx: '#e8eeff',
       plain: { keys: [L, D, R, D, L], rune: [0, 3, 1, 5, 7] } },
     // WIND SHIELD, kind 'windshield' (on yourself, `secs` s; the Touch variant on another): wind circling the body bends ARROWS, THROWN THINGS, ICE SHARDS and SPELL BOLTS that come
     //   within `R` px of it aside (turned along the wind, `k` how hard) — never its own owner's. Seen by motes and leaves circling and faint curved streaks.
-    windshield: { name: 'Wind shield', school: 'storm', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'windshield', learn: 3, secs: 12, R: 44, k: 24, aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 0.9, grav: 0, r: 3.5, fuse: 1, fx: '#dfe8f0',
+    windshield: { name: 'Wind shield', school: 'storm', form: 'self', tier: 0, cd: 14, stance: 'raise', kind: 'windshield', learn: 3, secs: 12, R: 44, k: 24, aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, fx: '#dfe8f0',
       plain: { keys: [L, R, D, L, U], rune: [0, 5, 7, 3, 1] } },
     // ⭐ (8b, FROST — the user 2026-11-20: 'we should build the blizzard in Frost also') BLIZZARD, kind 'blizzard', HELD (`chanS` s at most): `clouds` snow clouds `spread` px apart
     //   over the pointer (in sight), formed from vapour out of the staff as the thunderstorm's; once formed each SNOWS (`cps` grains a second of real snow, as the snow cloud — melted
     //   `meltSecs` after) blown by a WIND away from the caster (`wind` cells a step on each flake); under them (and `lee` px downwind) bodies are pushed by the wind (`windPush`),
     //   loose things blown, and whoever stays `frostS` s is slowed (`slow`) and put out. Let go and it ends.
-    blizzard: { name: 'Blizzard', school: 'frost', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'blizzard', learn: 5, chan: true, chanS: 10, reach: 400, car: 1, speed: 420, life: 1.2, grav: 0, r: 5, fuse: 1, clouds: 4, spread: 76, wide: 14, down: 1, formMs: 1400,
+    blizzard: { name: 'Blizzard', school: 'frost', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'blizzard', learn: 5, chan: true, chanS: 10, reach: 700, car: 1, speed: 420, life: 1.8, grav: 0, r: 5, fuse: 1, clouds: 4, spread: 76, wide: 14, down: 1, formMs: 1400,
       cps: 14, flakeG: 4, flakeD: 1.2, meltSecs: 60, wind: 2.6, lee: 90, windPush: 30, frostS: 1.5, slow: 0.6, look: 'melt', fx: '#eef7ff', plain: { keys: [D, L, D, U, L], rune: [2, 5, 1, 3, 7] } },
     // ⭐ STEP 8c (2026-11-20, STORM): WHIRLWIND, kind 'whirl' (placed on the ground at the pointer, in sight; `secs` s): a funnel `high` px tall that DRIFTS along the ground away from
     //   its caster at `speed` px/s (turned back once by a wall, then it stays). It takes up the surface's loose powder (`grab` cells a tick, at most `carry` — never a spell's own snow)
     //   and liquid (at most `liq` units, not lava), and FLINGS it all back out when it ends (grains landing as ground, drops as liquid — moved, nothing made or lost); over fire it
     //   catches and becomes a FLAMING TORNADO that lights what it touches. A body it catches is lifted (`lift`) and spun round it, thrown out after `catchS` s (still steering).
-    whirlwind: { name: 'Whirlwind', school: 'storm', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'whirl', learn: 5, reach: 360, car: 1, speed: 460, life: 1.1, grav: 0, r: 4, fuse: 1, secs: 12, drift: 40, high: 150, grab: 3, carry: 90, liq: 200, liqTick: 20, throwV: 280,
+    whirlwind: { name: 'Whirlwind', school: 'storm', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'whirl', learn: 5, reach: 360, car: 1, speed: 460, life: 2.2, grav: 0, r: 4, secs: 12, drift: 40, high: 150, grab: 3, carry: 90, liq: 200, liqTick: 20, throwV: 280,
       catchS: 2.6, lift: 8, turnS: 0.5, throwOut: 13, minRoom: 40, fx: '#dfe8f0', plain: { keys: [L, U, L, U, R], rune: [0, 3, 4, 1, 2] } },
     // UPDRAFT, kind 'draft' (placed, in sight; `secs` s): a column of rising air from the ground under the pointer up to `high` px (or the first rock), `wide` cells across. Bodies
     //   in it rise at `riseV` px a frame and hover near its top; leaving it near the top gives `featherS` s of feather fall. Loose things are lifted; now and then a grain of the
     //   surface's loose powder at its foot is flown up it (moved, as a throw).
     // (8c round 2, the user: 'it should be more powerful … something you could use on another player to launch them into the air, or an object'; no feather fall; it should lift
     //   liquid too) bodies and loose things in it are LAUNCHED up at `riseV` px a frame (on past its top); the liquid at its foot is thrown up it (`liq` units a tick), powder too.
-    updraft: { name: 'Updraft', school: 'storm', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'draft', learn: 3, reach: 360, car: 1, speed: 460, life: 1.1, grav: 0, r: 3.5, fuse: 1, secs: 8, high: 240, wide: 4, riseV: 10, grainMs: 150, liq: 6, fx: '#dfe8f0',
+    updraft: { name: 'Updraft', school: 'storm', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'draft', learn: 3, reach: 360, car: 1, speed: 460, life: 2.2, grav: 0, r: 3.5, secs: 8, high: 240, wide: 4, riseV: 10, grainMs: 150, liq: 6, fx: '#dfe8f0',
       plain: { keys: [L, L, U, U, R], rune: [0, 6, 3, 1, 5] } },
     // ⭐ STEP 8d (2026-11-21, STORM): BALL LIGHTNING, kind 'ball' (placed: it leaves the tip at `speed` px/s for the pointer, then wanders; `secs` s): its caster's game flies it (wind
     //   spells push it: gust, whirlwind, updraft) and every `zapMs` sends a small arc to the nearest body (metal from further), or water, within `zapR` px — `dmg` health + `stunMs`;
     //   touching a body it BURSTS (`burstDmg`, thrown back, set alight); into water it bursts and its charge runs through the water; at its end it pops (what burns there catches).
-    balllightning: { name: 'Ball lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'ball', learn: 5, reach: 360, car: 1, speed: 300, life: 1.4, grav: 0, fuse: 1, secs: 8, drift: 70, wander: 26, r: 7,
+    balllightning: { name: 'Ball lightning', school: 'storm', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'ball', learn: 5, reach: 700, car: 1, speed: 300, life: 2.5, grav: 0, fuse: 1, secs: 8, drift: 70, wander: 26, r: 7,
       zapMs: 700, zapR: 90, metalK: 1.6, dmg: 0.75, stunMs: 250, burstDmg: 2, burstR: 40, knock: 9, metalHurtK: 1.5, liqDmg: 1, liqCells: 400, oreCells: 80, fx: '#c9d6ff',
       plain: { keys: [L, U, R, U, D], rune: [0, 4, 6, 7, 5] } },
     // LIGHTNING WEAPON, kind 'stormblade' (on yourself, `secs` s — as the flaming weapon): the weapon in your other hand crackles with charge; its hits SHOCK (`dmg`, `stunMs`,
     //   metal ×`metalHurtK`); a blow stopped on a metal blade or shield shocks its holder; dipped in liquid it empties into it (everyone in that water shocked, you too) and ends.
-    stormblade: { name: 'Lightning weapon', school: 'storm', form: 'self', aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 0.9, grav: 0, r: 3, fuse: 1, tier: 1, cd: 20, stance: 'raise', kind: 'stormblade', learn: 5, secs: 30, dmg: 1, stunMs: 300, metalHurtK: 1.5,
+    stormblade: { name: 'Lightning weapon', school: 'storm', form: 'self', aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, tier: 1, cd: 20, stance: 'raise', kind: 'stormblade', learn: 5, secs: 30, dmg: 1, stunMs: 300, metalHurtK: 1.5,
       liqDmg: 1.5, liqCells: 600, oreCells: 120, fx: '#c9d6ff', plain: { keys: [L, R, U, R, D], rune: [0, 3, 4, 2, 8] } },
     // ⭐ FROST AND WATER (the user's ideas, 2026-11-20): WHIRLPOOL, kind 'pool' (placed IN liquid at the pointer, `secs` s): stationary; the server keeps pumping the liquid from its
     //   middle out to its rim (`pump` units a tick) so its surface dips into a funnel — moved, nothing made or lost; bodies and loose things in the liquid within its reach are drawn
