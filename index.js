@@ -4092,6 +4092,16 @@ function magicObjFireWarded(room, oid) { const W = magicObjWardOf(room, oid); re
 // a blow on a thing: soaked by its ward skin (true — the blow does nothing), one off its strength, every screen shown
 function magicObjSkinSoak(room, oid) { const W = magicObjWardOf(room, oid); if (!W || !W.skin || Date.now() > W.skin || !(W.hp > 0)) return false; W.hp--;
   io.to(room).emit('magic-objward', { obj: oid, k: 'skin', hp: W.hp }); return true; }
+// (2026-11-28, rig: the fire ward called `bodyBurnOut` — which is a body BURNT AWAY, and took a cold resting crate out of the world) PUTTING A WARDED THING'S FIRE OUT:
+//   the burning cells over its box go out (a resting body is written into the grid — the rain's way, `fire-cells` with `lift`), and a moving one's burning marks (bit 4
+//   of its cells) are cleared; nothing else of it is touched
+function magicObjFireOut(room, ob) { const st = cellsOf(room), fs = st.fineFire, T = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols; if (!ROWS || !COLS) return;
+  const P = magicBoulderPose(room, ob), hw = Math.hypot(ob.w || 32, ob.h || 32) / 2 + T, out = [];
+  if (fs && fs.size) for (let c = Math.max(0, Math.floor((P.x - hw) / T)); c <= Math.min(COLS - 1, Math.floor((P.x + hw) / T)); c++) for (let r = Math.max(0, Math.floor((P.y - hw) / T)); r <= Math.min(ROWS - 1, Math.floor((P.y + hw) / T)); r++) {
+    const i = c * ROWS + r; if (fs.delete(i)) { out.push(i, 0); if (st.fireAge) st.fireAge.delete(i); } }
+  if (out.length) wireFanout(room, 'fire-cells', { cells: out, lift: 1 });
+  const ost = objStOf(room), rec = ost.get(ob.id); if (rec && rec.bc) { const cells = bodyCellsOf(rec, ob); let any = false; for (let k = 0; k < cells.length; k++) if (cells[k] & 4) { cells[k] &= ~4; any = true; } if (any) { bodyCellsSet(rec, ob, cells); ost.set(ob.id, rec); broadcastObjSt(room); } }
+  const bm = roomBodyBurn[room]; if (bm) bm.delete(ob.id); }
 function magicSealOf(room, oid) { const q = typeof oid === 'string' ? _magicSeals.get(oid) : null; return q && q.room === room && Date.now() < q.until ? q : null; }
 // sealed by somebody other than `sid`: their magic does not move it, they do not pick it up
 function magicSealedOther(room, oid, sid) { const q = magicSealOf(room, oid); return !!q && q.by !== sid; }
@@ -29717,7 +29727,7 @@ io.on('connection', (socket) => {
     if (CAR && typeof m.obj === 'string' && S0.carThing && (S.kind === 'boon' || S.kind === 'wardskin' || S.kind === 'mirror')) { const ob = roomObjects[room] && roomObjects[room].get(m.obj);
       if (!ob || ob.type !== 'stamp' || (S.pw === 'levitate' && !ob.loose)) return no('nothing'); out.obj = m.obj; delete out.tgt; out.secs = +(SK.secs || 20).toFixed(2);
       if (S.pw === 'fireproof' || S.kind === 'wardskin') { const W = _magicObjWards.get(m.obj) || { by: socket.id }; W.room = room; W.by = socket.id;
-        if (S.pw === 'fireproof') { W.fire = now + out.secs * 1000; if (bodySpec(ob)) { try { bodyBurnOut(room, ob); } catch (e) {} } } else { W.skin = now + out.secs * 1000; W.hp = out.hp = SK.hp || 4; }
+        if (S.pw === 'fireproof') { W.fire = now + out.secs * 1000; if (bodySpec(ob)) { try { magicObjFireOut(room, ob); } catch (e) {} } } else { W.skin = now + out.secs * 1000; W.hp = out.hp = SK.hp || 4; }
         _magicObjWards.set(m.obj, W); if (_magicObjWards.size > 4000) _magicObjWards.delete(_magicObjWards.keys().next().value); } }
     if (S.kind === 'mirror') { out.secs = +(SK.secs || 6).toFixed(2); _magicMirrors.set(S.aim && typeof m.tgt === 'string' && m.tgt !== 'mw-test-dummy' ? m.tgt : socket.id, now + out.secs * 1000 + 300); }   // (magic 15b round 8: on whom the pointer chose — its keeper's game catches)
     if (S.kind === 'blink' || S.kind === 'pass') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); }
