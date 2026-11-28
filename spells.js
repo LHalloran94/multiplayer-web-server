@@ -165,14 +165,22 @@
     //   LIFT AND THROW (7A — a thread of light to a loose thing; held while the button is, the other button throws) · A DOUBLE OF YOU (8Y — it walks on the way you were going;
     //   see-through on your own screen; struck, it bursts). hp  health it gives back · closeMs, gap  a cut's closing, between cuts · ms  the motes · reach  px (lift: how far
     //   the thing may be from you) · secs  how long it lasts · pull, vmax  how hard the thing is drawn to the pointer (px a tick) · throwV  its speed thrown · walk  px a second
-    closewounds: { name: 'Close wounds', school: 'life', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'heal', learn: 3, hp: 3, closeMs: 700, gap: 350, ms: 2600, aim: 'self', reach: 240,
+    // ⭐ (21 — LIFE, DECAY, BLOOD ONTO CARRIERS, 2026-11-28, the user's picks) FLIES ON, ON THE BODY OR THING IT STRIKES (`carThing`): close wounds (on a thing: its
+    //   damage mended — its hit points back), cure (on a thing: its fire put out, the spell ice round it thawed), barkskin (on a thing: a bark shell soaking `hp` blows, as
+    //   ward skin — fire goes through bark), the blood shield (on a thing: soaks blows as ward skin), rust (a body's metal gear, or a METAL thing struck — rusted `thingS` s:
+    //   flakes, its blows duller; a thing not metal: lost). ON THE BODY IT STRIKES (`carBody`): plague, curse of weakness, wither, transfusion, haemorrhage, blood boil
+    //   (a cost paid at the cast) · LIFE DRAIN, BLOOD GRIP fly only their thread's length (`life` 0.6 — ~300 px; past it nothing: lost), then HELD on the body struck.
+    //   FLIES ON, ACTING WHERE IT STRIKES: rot, weathering (as Earth's changes) · the VINE (a seed sticking in the rock it strikes — on a wall's face it hangs from there;
+    //   in the air / on a body: lost) · the SWING VINE (~600 px, `life` 1.15: from the rock it sticks in to your hands). LOBBED (a seed / a glob): healing grove, grow a tree,
+    //   regrow the land, the poison cloud, spore pods. Stay: entangle, thorn hedge (already lobbed seeds), venom bolt, blood bolt, leeches, blood spikes, blood whip.
+    closewounds: { name: 'Close wounds', school: 'life', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'heal', learn: 3, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, hp: 3, closeMs: 700, gap: 350, ms: 2600, aim: 'self', reach: 240,
       plain: { keys: [U, D, U, D], rune: [7, 4, 1, 0] } },
     // ⭐ STEP 12a (2026-11-22, kickoff §'STEP 12') LIFE — HEALING: close wounds ON ANOTHER (its Touch variant: the player nearest the pointer, `reach` px; their own game heals
     //   itself) · CURE (kind 'cure', + on another): ends burning, the chill's slow, a daze, being frozen in — `ms` its leaves' spiral · HEALING GROVE (kind 'grove'): plants spring
     //   up along the ground under the point, `wide` cells across, `secs` s; every body standing in it heals `hp` health every `every` s; `most` a caster (the oldest goes)
-    cure: { name: 'Cure', school: 'life', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'cure', learn: 3, ms: 1400, aim: 'self', reach: 240,
+    cure: { name: 'Cure', school: 'life', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'cure', learn: 3, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, ms: 1400, aim: 'self', reach: 240,
       plain: { keys: [L, U, D, R, U], rune: [8, 6, 4, 0, 1] } },
-    grove: { name: 'Healing grove', school: 'life', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'grove', learn: 5, reach: 360, secs: 12, wide: 14, every: 2, hp: 1, most: 2,
+    grove: { name: 'Healing grove', school: 'life', form: 'placed', tier: 1, cd: 25, stance: 'level', kind: 'grove', learn: 5, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 3.5, reach: 360, secs: 12, wide: 14, every: 2, hp: 1, most: 2,
       plain: { keys: [D, U, R, D, L], rune: [6, 7, 3, 1, 2] } },
     // ⭐ STEP 12b (2026-11-22, kickoff §'STEP 12') LIFE — HOLDING AND GUARDING: ENTANGLE (a bolt that is a SEED, `seed`: no blow; LOBBED onto the pointer, `lob` — every screen
     //   the same arc, `lobG` its gravity; where it lands roots burst out `R` px round and hold every body there `holdS` s at most (walk and jump, not turn, punch or cast), each
@@ -194,15 +202,15 @@
     //   each plant it brings back (up a whole tree), at most `spread` cells out, `cap` cells · the tree's trunk thicker, no roots, its fruit falling when its leaf is cut away
     // (12c round 3, the user: the swing vine, and 'improve the range of it') reach 520, the rock up to 60 cells over the point · SWING VINE (`swing`, a variant): from the rock
     //   the pointer is against (or over it) straight to your hands — you are holding it as it lands, to swing on; `secs` s
-    vine: { name: 'Vine', school: 'life', form: 'placed', tier: 0, cd: 6, stance: 'level', kind: 'vine', learn: 3, reach: 520, up: 60, len: 40, edge: 14, secs: 180, most: 3, alts: ['vine_s'],
+    vine: { name: 'Vine', school: 'life', form: 'placed', tier: 0, cd: 6, stance: 'level', kind: 'vine', learn: 3, car: 1, speed: 520, life: 1.9, grav: 0, r: 3, reach: 520, up: 60, len: 40, edge: 14, secs: 180, most: 3, alts: ['vine_s'],
       plain: { keys: [U, U, D, D, R], rune: [1, 2, 4, 8, 6] } },
-    vine_s: { name: 'Swing vine', school: 'life', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'vine', alt: 'vine', swing: true, reach: 520, up: 60, secs: 60, most: 3,
+    vine_s: { name: 'Swing vine', school: 'life', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'vine', car: 1, speed: 520, life: 1.15, grav: 0, r: 3, alt: 'vine', swing: true, reach: 520, up: 60, secs: 60, most: 3,
       plain: { keys: [U, U, D, L, R], rune: [1, 2, 5, 7, 6] } },
-    tree: { name: 'Grow a tree', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'tree', learn: 5, reach: 300, hmin: 12, hmax: 20, growMs: 3000, secs: 300, fruitS: 20, fruits: 3, fruitHeal: 2, most: 2,
+    tree: { name: 'Grow a tree', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'tree', learn: 5, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 3.5, reach: 300, hmin: 12, hmax: 20, growMs: 3000, secs: 300, fruitS: 20, fruits: 3, fruitHeal: 2, most: 2,
       plain: { keys: [D, R, U, U, L], rune: [7, 6, 3, 4, 2] } },
-    regrow: { name: 'Regrow the land', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'regrow', learn: 5, reach: 300, R: 15, growMs: 2000,
+    regrow: { name: 'Regrow the land', school: 'life', form: 'placed', tier: 1, cd: 30, stance: 'level', kind: 'regrow', learn: 5, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 3.5, reach: 300, R: 15, growMs: 2000,
       plain: { keys: [R, U, L, D, D], rune: [5, 4, 0, 1, 7] } },
-    barkskin: { name: 'Barkskin', school: 'life', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'bark', learn: 5, secs: 30, hurtK: 0.5, fireK: 1.5, moveK: 0.85,
+    barkskin: { name: 'Barkskin', school: 'life', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'bark', learn: 5, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, hp: 4, secs: 30, hurtK: 0.5, fireK: 1.5, moveK: 0.85,
       plain: { keys: [L, D, U, U, R], rune: [5, 8, 7, 3, 0] } },
     lift: { name: 'Lift and throw', school: 'force', form: 'shaping', tier: 0, cd: 3, stance: 'level', kind: 'lift', learn: 3, reach: 320, secs: 10, pull: 0.16, vmax: 11, throwV: 12,
       plain: { keys: [R, R, U, L], rune: [3, 4, 5, 2] } },
@@ -451,11 +459,11 @@
     //   any body within `spreadR` px; once it ends, `immuneS` s before it can be caught again.
     venombolt: { name: 'Venom bolt', school: 'decay', form: 'bolt', tier: 0, cd: 3, stance: 'level', kind: 'bolt', learn: 3, speed: 520, life: 8, grav: 0.14, r: 3.5, dmg: 0.25, poison: 8, poisonDmg: 0.25, poisonEvery: 1,
       plain: { keys: [D, L, D, R, R], rune: [1, 3, 7, 8, 5] } },
-    pcloud: { name: 'Poison cloud', school: 'decay', form: 'placed', tier: 1, cd: 18, stance: 'level', kind: 'pcloud', learn: 5, reach: 360, secs: 10, wide: 22, high: 7, grow: 1.8, most: 2, poisonS: 3, boomDmg: 1,
+    pcloud: { name: 'Poison cloud', school: 'decay', form: 'placed', tier: 1, cd: 18, stance: 'level', kind: 'pcloud', learn: 5, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 3.5, reach: 360, secs: 10, wide: 22, high: 7, grow: 1.8, most: 2, poisonS: 3, boomDmg: 1,
       plain: { keys: [D, D, L, R, L], rune: [3, 6, 7, 8, 5] } },
-    spores: { name: 'Spore pods', school: 'decay', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'spores', learn: 3, reach: 360, secs: 90, most: 3, armS: 1.2, trip: 22, R: 44, puffW: 7, puffS: 4, poisonS: 6,
+    spores: { name: 'Spore pods', school: 'decay', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'spores', learn: 3, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 3.5, reach: 360, secs: 90, most: 3, armS: 1.2, trip: 22, R: 44, puffW: 7, puffS: 4, poisonS: 6,
       plain: { keys: [D, U, D, U, R], rune: [6, 3, 7, 5, 8] } },
-    plague: { name: 'Plague', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'plague', learn: 5, other: true, reach: 240, secs: 15, dmg: 0.25, every: 2, spreadR: 44, immuneS: 20,
+    plague: { name: 'Plague', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'plague', learn: 5, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, other: true, reach: 240, secs: 15, dmg: 0.25, every: 2, spreadR: 44, immuneS: 20,
       plain: { keys: [R, L, D, L, R], rune: [8, 3, 2, 6, 1] } },
     // ⭐ STEP 13b (2026-11-23, kickoff §'STEP 13') DECAY — WITHERING. CURSE OF WEAKNESS (kind 'curse', on another): `secs` s — the blows they land on others do `weakK` (each victim's game
     //   halves a blow from a cursed striker, 16e `pvpHurt`), their natural healing stops; dispel ends it, cure does not. WITHER (kind 'wither', on another): `secs` s aged — greyed, dry
@@ -469,15 +477,15 @@
     //   (round 2, the user: 'the rot range should be bigger' — 8 → 14 cells; leaves it left hanging in mid-air rot away too)
     //   WEATHERING (kind 'weather', placed — the plan's 'crumble'; the user picked the weathering kind, as Earth's 'Rock to sand' is the instant one): cracks creep through the
     //   rock round the point over `ms` ms (wear, as a pick's, softer rock faster, faces open to the air faster still), and the weakest pieces on its faces break away as rubble.
-    rot: { name: 'Rot', school: 'decay', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'rot', learn: 3, reach: 360, R: 14, ms: 3000,
+    rot: { name: 'Rot', school: 'decay', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'rot', learn: 3, car: 1, speed: 620, life: 1.6, grav: 0, r: 3.5, reach: 360, R: 14, ms: 3000,
       plain: { keys: [D, R, D, R, L], rune: [7, 4, 6, 8, 5] } },
-    weather: { name: 'Weathering', school: 'decay', form: 'placed', tier: 0, cd: 14, stance: 'level', kind: 'weather', learn: 4, reach: 360, R: 7, ms: 5000, steps: 14, crack: 6, breakW: 50, loose: 14, weakL: 1.05,
+    weather: { name: 'Weathering', school: 'decay', form: 'placed', tier: 0, cd: 14, stance: 'level', kind: 'weather', learn: 4, car: 1, speed: 620, life: 1.6, grav: 0, r: 3.5, reach: 360, R: 7, ms: 5000, steps: 14, crack: 6, breakW: 50, loose: 14, weakL: 1.05,
       plain: { keys: [D, D, R, L, D], rune: [1, 4, 7, 3, 5] } },
-    rust: { name: 'Rust', school: 'decay', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'rust', learn: 3, other: true, reach: 260, rustK: 0.5,
+    rust: { name: 'Rust', school: 'decay', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'rust', learn: 3, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, thingS: 60, other: true, reach: 260, rustK: 0.5,
       plain: { keys: [R, D, U, U, L], rune: [2, 5, 4, 7, 6] } },
-    curse: { name: 'Curse of weakness', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'curse', learn: 5, other: true, reach: 260, secs: 20, weakK: 0.5,
+    curse: { name: 'Curse of weakness', school: 'decay', form: 'touch', tier: 1, cd: 20, stance: 'level', kind: 'curse', learn: 5, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, other: true, reach: 260, secs: 20, weakK: 0.5,
       plain: { keys: [R, U, L, D, U], rune: [6, 4, 2, 1, 0] } },
-    wither: { name: 'Wither', school: 'decay', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'wither', learn: 3, other: true, reach: 260, secs: 10, slowK: 0.65,
+    wither: { name: 'Wither', school: 'decay', form: 'touch', tier: 0, cd: 12, stance: 'level', kind: 'wither', learn: 3, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, other: true, reach: 260, secs: 10, slowK: 0.65,
       plain: { keys: [D, D, U, R, D], rune: [0, 3, 7, 5, 2] } },
     // ⭐ STEP 14a (2026-11-23, kickoff §'STEP 13' plan line 'STEP 14 BLOOD') BLOOD — its own school. Blood is the wound system's DRAWN blood (client 16o: its colours by the look
     //   picked, its drops and stains) — there is no blood liquid. `cost` = health (half-hearts, of 10) its caster's own game takes as it is cast, never below 1 (with 1 left: refused).
@@ -487,17 +495,17 @@
     //   into them over `ms` — `cost` off you, `hp` back to them (their own game).
     bloodbolt: { name: 'Blood bolt', school: 'blood', form: 'bolt', tier: 0, cd: 3, stance: 'level', kind: 'bolt', blood: true, cost: 2, learn: 3, speed: 620, life: 3, grav: 0.1, r: 4, dmg: 2.5,
       plain: { keys: [R, D, R, R, U], rune: [2, 3, 7, 5, 1] } },
-    lifedrain: { name: 'Life drain', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'drain', learn: 5, other: true, chan: true, chanS: 5, reach: 260, slack: 60, dmg: 0.5, every: 0.5,
+    lifedrain: { name: 'Life drain', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'drain', learn: 5, car: 1, carBody: 1, speed: 520, life: 0.6, grav: 0, r: 3.5, other: true, chan: true, chanS: 5, reach: 260, slack: 60, dmg: 0.5, every: 0.5,
       fx: '#b3121f', plain: { keys: [R, D, L, L, U], rune: [8, 5, 3, 7, 1] } },
-    transfusion: { name: 'Transfusion', school: 'blood', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'transfuse', learn: 3, other: true, reach: 240, cost: 2, hp: 2, ms: 1400,
+    transfusion: { name: 'Transfusion', school: 'blood', form: 'touch', tier: 0, cd: 10, stance: 'level', kind: 'transfuse', learn: 3, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, other: true, reach: 240, cost: 2, hp: 2, ms: 1400,
       plain: { keys: [R, D, U, R, R], rune: [6, 3, 1, 5, 2] } },
     // ⭐ STEP 14b (2026-11-23) BLOOD — HAEMORRHAGE (kind 'haem', on another): `secs` s their open wounds pour (none open: `cuts` cuts open first); their own game takes `dmg` every
     //   `every` s, `moveK` × as often while they move; cure or close wounds stops it. BLOOD BOIL (kind 'boil', on another): their blood heats for `ms` (flushed, bubbling in the skin,
     //   steaming), then bursts in red mist — `dmg` off them. LEECHES (kind 'bolt' + `leech`): a knot of `n` leeches flies; where it strikes a body they latch on for `secs` s and
     //   feed — `feed` off them and to its caster every `every` s, a trickle of drops running between; cure knocks them off.
-    haemorrhage: { name: 'Haemorrhage', school: 'blood', form: 'touch', tier: 1, cd: 16, stance: 'level', kind: 'haem', learn: 5, other: true, reach: 260, secs: 8, dmg: 0.25, every: 1, moveK: 2, cuts: 2,
+    haemorrhage: { name: 'Haemorrhage', school: 'blood', form: 'touch', tier: 1, cd: 16, stance: 'level', kind: 'haem', learn: 5, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, other: true, reach: 260, secs: 8, dmg: 0.25, every: 1, moveK: 2, cuts: 2,
       plain: { keys: [R, D, L, U, L], rune: [2, 3, 7, 4, 0] } },
-    bloodboil: { name: 'Blood boil', school: 'blood', form: 'touch', tier: 1, cd: 14, stance: 'level', kind: 'boil', learn: 5, other: true, reach: 260, ms: 1400, dmg: 2.5,
+    bloodboil: { name: 'Blood boil', school: 'blood', form: 'touch', tier: 1, cd: 14, stance: 'level', kind: 'boil', learn: 5, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, other: true, reach: 260, ms: 1400, dmg: 2.5,
       plain: { keys: [R, D, U, U, R], rune: [8, 5, 1, 3, 7] } },
     leeches: { name: 'Leeches', school: 'blood', form: 'bolt', tier: 0, cd: 10, stance: 'level', kind: 'bolt', leech: true, learn: 3, speed: 460, life: 3, grav: 0.3, r: 3.5, dmg: 0.25, n: 3, secs: 10, feed: 0.25, every: 1,
       plain: { keys: [R, D, R, U, U], rune: [6, 7, 4, 5, 2] } },
@@ -506,11 +514,11 @@
     //   where it lands crimson spikes burst up along the ground `wide` cells, out from that spot each way; a body standing on one is cut, bleeds, takes `dmg` and is tossed (`toss`); they melt after `secs` s. BLOOD GRIP (kind 'grip', HELD, on another):
     //   a rope of blood HOLDS them where they are (round 2, the user: hold, not pull) for at most `holdS` s, each fresh movement key they press `press` s off; it breaks past `reach` + `slack` or out of sight. BLOOD WHIP (kind 'whip', HELD): `cost` off you,
     //   a lash of your blood `len` px long trailing the pointer; its tip cuts whom it whips (`dmg`, each body at most every `gap` s).
-    bloodshield: { name: 'Blood shield', school: 'blood', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'bshield', learn: 5, cost: 2, hp: 3, secs: 20,
+    bloodshield: { name: 'Blood shield', school: 'blood', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 20, stance: 'raise', kind: 'bshield', learn: 5, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, cost: 2, hp: 3, secs: 20,
       plain: { keys: [R, D, D, D, U], rune: [2, 3, 6, 7, 4] } },
     bloodspikes: { name: 'Blood spikes', school: 'blood', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'bolt', seed: 'bspikes', lob: true, lobG: 1000, learn: 5, reach: 400, speed: 600, life: 1.8, grav: 0.4, r: 3.5, dmg: 0, wide: 10, spikeDmg: 1.5, toss: 6, secs: 2.2,
       plain: { keys: [R, D, D, L, R], rune: [0, 3, 7, 8, 5] } },
-    bloodgrip: { name: 'Blood grip', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'grip', learn: 5, other: true, chan: true, chanS: 10, reach: 280, slack: 60, holdS: 10, press: 0.6,
+    bloodgrip: { name: 'Blood grip', school: 'blood', form: 'stream', tier: 1, cd: 12, stance: 'level', kind: 'grip', learn: 5, car: 1, carBody: 1, speed: 520, life: 0.6, grav: 0, r: 3.5, other: true, chan: true, chanS: 10, reach: 280, slack: 60, holdS: 10, press: 0.6,
       fx: '#b3121f', plain: { keys: [R, D, L, L, L], rune: [8, 7, 3, 1, 2] } },
     bloodwhip: { name: 'Blood whip', school: 'blood', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'whip', learn: 3, chan: true, chanS: 5, cost: 1, len: 100, dmg: 1, gap: 0.45,
       fx: '#b3121f', plain: { keys: [R, D, R, L, R], rune: [6, 4, 2, 1, 3] } },

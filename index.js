@@ -3834,7 +3834,8 @@ function magicCarryOpen(L, m, UU) { const x = Math.round(+m.x), y = Math.round(+
   // ⭐ (21 — Force / Space / Wards, 2026-11-28) WHAT ITS CASTER'S GAME FOUND WHERE IT ENDED (`ex`, 16zj `magicCarEx` — the same code the cast used at the pointer, run at the
   //   carrier's end): the spot that fits (blink, a door, the pocket's unfolding, an alarm), the ward line's reach, the dome's body, a swap's / blink's caster's feet — every
   //   number then checked by the cast as ever. ON A BODY OR A THING (`carThing`): the body struck (`tgt`), else the thing (`obj`), else lost (an emptying pocket opens anyway)
-  const EX = {}; if (m.ex && typeof m.ex === 'object') { for (const f of ['tx', 'ty', 'bx', 'by', 'br', 'ly0', 'ly1']) if (isFinite(m.ex[f])) EX[f] = Math.round(+m.ex[f]); for (const f of ['sh', 'on']) if (m.ex[f] != null) EX[f] = m.ex[f] ? 1 : 0; }
+  // (21 — Life) the face it struck (`nx`, `ny` — a vine's seed in a wall's face hangs from there)
+  const EX = isFinite(UU.nx) && isFinite(UU.ny) ? { nx: UU.nx, ny: UU.ny } : {}; if (m.ex && typeof m.ex === 'object') { for (const f of ['tx', 'ty', 'bx', 'by', 'br', 'ly0', 'ly1']) if (isFinite(m.ex[f])) EX[f] = Math.round(+m.ex[f]); for (const f of ['sh', 'on']) if (m.ex[f] != null) EX[f] = m.ex[f] ? 1 : 0; }
   let TH = null, spell = L.spell; if (S0 && S0.carThing) { const ob = typeof m.obj === 'string' && m.obj.length < 64 ? m.obj : null;
     TH = pl ? { tgt: pl === 'dummy' ? 'mw-test-dummy' : pl } : ob ? { obj: ob } : null; if (!TH && !(S0.kind === 'pocket' && isFinite(EX.tx))) return;
     // (REWIND, one spell: on a thing it is 'Rewind a thing')
@@ -4093,7 +4094,7 @@ function magicObjWardOf(room, oid) { const W = typeof oid === 'string' ? _magicO
 //   (2026-11-28, the user: the firebolt 'goes through the ward skin') …and a WARD SKIN's thing while it holds: fire is harm, so each refusal on one soaks a blow — at most one
 //   every 0.4 s (`magicFireRefused`), so fire pressing on it wears it away and then it can catch. → Map cell → thing id, or null
 function magicFireWardCells(room) { if (!_magicObjWards.size) return null; const now = Date.now(), BS = roomBodyStamp[room]; let out = null;
-  for (const [id, W] of _magicObjWards) { if (W.room !== room || !((W.fire && now < W.fire) || (W.skin && now < W.skin && W.hp > 0))) continue; const S = BS && BS.get(id); if (!S || !S.idx) continue; if (!out) out = new Map(); for (const i of S.idx) out.set(i, id); }
+  for (const [id, W] of _magicObjWards) { if (W.room !== room || !((W.fire && now < W.fire) || (W.skin && now < W.skin && W.hp > 0 && W.look !== 'bark'))) continue; const S = BS && BS.get(id); if (!S || !S.idx) continue; if (!out) out = new Map(); for (const i of S.idx) out.set(i, id); }
   return out; }
 // fire refused on a guarded thing: a fire ward costs nothing; a ward skin soaks a blow (at most every 0.4 s)
 function magicFireRefused(room, id) { const W = _magicObjWards.get(id), now = Date.now(); if (!W || (W.fire && now < W.fire)) return; if (now - (W.soakAt || 0) < 400) return; W.soakAt = now; magicObjSkinSoak(room, id); }
@@ -4101,7 +4102,8 @@ function magicFireRefused(room, id) { const W = _magicObjWards.get(id), now = Da
 function magicObjSkinHolds(room, oid) { const W = magicObjWardOf(room, oid); return !!(W && W.skin && Date.now() < W.skin && W.hp > 0); }
 function magicObjFireWarded(room, oid) { const W = magicObjWardOf(room, oid); return !!(W && W.fire && Date.now() < W.fire); }
 // a blow on a thing: soaked by its ward skin (true — the blow does nothing), one off its strength, every screen shown
-function magicObjSkinSoak(room, oid) { const W = magicObjWardOf(room, oid); if (!W || !W.skin || Date.now() > W.skin || !(W.hp > 0)) return false; W.hp--;
+// (21 — Life) `fire`: a fire hit — a bark shell lets it through (bark burns)
+function magicObjSkinSoak(room, oid, fire) { const W = magicObjWardOf(room, oid); if (!W || !W.skin || Date.now() > W.skin || !(W.hp > 0) || (fire && W.look === 'bark')) return false; W.hp--;
   io.to(room).emit('magic-objward', { obj: oid, k: 'skin', hp: W.hp }); return true; }
 // (2026-11-28, rig: the fire ward called `bodyBurnOut` — which is a body BURNT AWAY, and took a cold resting crate out of the world) PUTTING A WARDED THING'S FIRE OUT:
 //   the burning cells over its box go out (a resting body is written into the grid — the rain's way, `fire-cells` with `lift`), and a moving one's burning marks (bit 4
@@ -4113,6 +4115,30 @@ function magicObjFireOut(room, ob) { const st = cellsOf(room), fs = st.fineFire,
   if (out.length) wireFanout(room, 'fire-cells', { cells: out, lift: 1 });
   const ost = objStOf(room), rec = ost.get(ob.id); if (rec && rec.bc) { const cells = bodyCellsOf(rec, ob); let any = false; for (let k = 0; k < cells.length; k++) if (cells[k] & 4) { cells[k] &= ~4; any = true; } if (any) { bodyCellsSet(rec, ob, cells); ost.set(ob.id, rec); broadcastObjSt(room); } }
   const bm = roomBodyBurn[room]; if (bm) bm.delete(ob.id); }
+// ⭐ (21 — Life, 2026-11-28, the user's pick: close wounds on a thing 'mends its damage') A THING MENDED: its hit points back to what it had before its first blow (an ice
+//   block grows back to its size with them), every screen told as a blow's update is. → hit points given back (0: it was whole)
+const _objHpFull = new Map();   // obj id → its hit points before its first blow
+function magicObjMend(room, ob) { const full = ob.hp0 > 0 ? ob.hp0 : _objHpFull.get(ob.id); if (typeof ob.hp !== 'number' || !(full > ob.hp)) return 0; const n = full - ob.hp; ob.hp = full;
+  const upd = { id: ob.id, hp: ob.hp }; if (ob.melt > 0 && ob.hp0 > 0 && ob.w0 > 0) { const k = 0.34 + 0.66 * Math.max(0, ob.hp) / ob.hp0; ob.w = Math.max(6, Math.round(ob.w0 * k)); ob.h = Math.max(6, Math.round(ob.h0 * k)); upd.w = ob.w; upd.h = ob.h; }
+  try { objsTouch(room, ob.ch); } catch (e) {} emitObjToChunks(room, ob, 'avatar-object-update', upd); return n; }
+// (21 — Life) CURE ON A THING thaws it: the spell ice (the freeze's, the cold snap's — `magicTemp` 'ice') over its box and a cell round it goes back to water now. → cells
+function magicObjThaw(room, ob) { const M = magicTemp.get(room), st = cellsOf(room); if (!M || !M.size || !st.rows) return 0; const P = magicBoulderPose(room, ob), T = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols, hw = Math.hypot(ob.w || 32, ob.h || 32) / 2 + T * 2, list = [];
+  for (let c = Math.max(0, Math.floor((P.x - hw) / T)); c <= Math.min(COLS - 1, Math.floor((P.x + hw) / T)); c++) for (let r = Math.max(0, Math.floor((P.y - hw) / T)); r <= Math.min(ROWS - 1, Math.floor((P.y + hw) / T)); r++) { const i = c * ROWS + r, q = M.get(i); if (q && q.kind === 'ice') list.push(i); }
+  if (list.length) magicTempEnd(room, list); return list.length; }
+// (21, the rule 'a spell kept a few a caster counts CASTS, not pieces') `entries` [[key, { cast }]] oldest first → the keys of the oldest casts to end so that, with the
+//   cast `CASTK` (its pieces never end each other), at most `most` casts are kept
+// (21 — Life / Decay, rig: three seeds that came down on a tree's trunk were lost — a point at a trunk's face reads its column solid all the way up) THE GROUND WHERE A
+//   LOBBED CARRIER CAME DOWN: there, else a cell or two back the way it came (towards its caster — `m.x` is a pixel back that way)
+function magicCarGround(room, m, tx, ty, CAR) { const g = magicGroundAt(room, tx, ty); if (g || !CAR) return g; const sx = Math.sign(+m.x - tx) || 1;
+  return magicGroundAt(room, tx + sx * TERRAIN_CELL, ty) || magicGroundAt(room, tx + sx * 2 * TERRAIN_CELL, ty); }
+function magicMostCasts(entries, CASTK, most) { const casts = []; for (const [k, q] of entries) { const c = q && q.cast != null ? q.cast : k; if (c === CASTK) continue; let g = casts.find(x => x.c === c); if (!g) casts.push(g = { c, ks: [] }); g.ks.push(k); }
+  const out = []; while (casts.length && casts.length >= most) out.push(...casts.shift().ks); return out; }
+// (21 — Life) A VINE STUCK IN A WALL'S FACE (`nx` the face's way out): it hangs from where it struck, down the face, to just over the ground (at most `len` cells) → plan or null
+function magicVineFacePlan(room, x, y, nx, S) { const st = cellsOf(room), grid = st.terrain; if (!grid) return null; const T = TERRAIN_CELL, ROWS = st.rows, COLS = st.cols, floorRow = Math.floor(roomFloorTop(room) / T);
+  const solidXY = (px, py) => { const c = Math.floor(px / T), r = Math.floor(py / T); if (c < 0 || c >= COLS || r < 0) return false; if (r >= ROWS || r >= floorRow) return true; const v = peekCellAt(grid, c * ROWS + r); return v > 0 && isSolidCell(v); };
+  const sx = nx > 0 ? 1 : -1; if (!solidXY(x - sx * 6, y) || solidXY(x, y)) return null; const ax = x - sx * 2, hx = x + sx * 4, len = (S.len || 40) * T; let down = len;
+  for (let d = 4; d <= len; d += 4) if (solidXY(hx, y + d)) { down = d - 8; break; } if (down < 24) return null;
+  return { x: Math.round(ax), y: Math.round(y), rp: [[0, 0, 0, 1], [Math.round(hx - ax), Math.round(down), 0, 1]], L: Math.round(Math.hypot(hx - ax, down)) }; }
 function magicSealOf(room, oid) { const q = typeof oid === 'string' ? _magicSeals.get(oid) : null; return q && q.room === room && Date.now() < q.until ? q : null; }
 // sealed by somebody other than `sid`: their magic does not move it, they do not pick it up
 function magicSealedOther(room, oid, sid) { const q = magicSealOf(room, oid); return !!q && q.by !== sid; }
@@ -29136,7 +29162,7 @@ io.on('connection', (socket) => {
     // (21) a WARDED thing: heat does nothing to a fire-warded one; any other blow is soaked by its ward skin
     if (obj && (fire || light) && magicObjFireWarded(currentAvatarRoom, id)) { io.to(currentAvatarRoom).emit('magic-objward', { obj: id, k: 'fire' }); return; }
     // (2026-11-28, the user: a firebolt went 'through the ward skin') heat is harm too — soaked like any blow
-    if (obj && !douse && !light && magicObjSkinSoak(currentAvatarRoom, id)) return;
+    if (obj && !douse && !light && magicObjSkinSoak(currentAvatarRoom, id, !!fire)) return;
     // ⭐ #184 round 19 — HITTING A MIMIC'S OBJECT WAKES IT rather than damaging the object (fire still burns it). Punching
     //   a suspicious crate is how you find out.
     if (obj && obj.mimic && !fire && !douse) { mimicHitWake(currentAvatarRoom, obj, x); return; }
@@ -29160,6 +29186,8 @@ io.on('connection', (socket) => {
       return;
     }
     if (!obj || typeof obj.hp !== 'number') return;
+    // (21 — Life) its whole hit points, kept from its first blow (close wounds mends it back to them — `magicObjMend`)
+    if (!_objHpFull.has(id)) { _objHpFull.set(id, obj.hp); if (_objHpFull.size > 20000) _objHpFull.delete(_objHpFull.keys().next().value); }
     obj.hp -= (typeof dmg === 'number' && dmg > 0) ? Math.min(dmg, 99) : 1;
     if (obj.hp <= 0) {
       objUnindex(currentAvatarRoom, obj);
@@ -29571,8 +29599,9 @@ io.on('connection', (socket) => {
     // (4e) ON ANOTHER: a player in this room, near enough (by where their own game last said they were)
     // (magic 16e) a MIND on one of the creator's enemies: in this room, near enough to the caster's point
     let MINDE = null; if ((S.kind === 'mind' || S.kind === 'seekmark') && typeof m.enemy === 'string') { const RE = roomEnemies.get(room), E = RE && RE.E && RE.E.get(m.enemy); if (!E || E.dead || Math.hypot(E.x - m.x, E.y - m.y) > (S.reach || 260) + 160) return no('nobody'); MINDE = E; }
-    if (S.other && m.tgt !== 'mw-test-dummy' && !MINDE) { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;   // (4e round 2: the practice dummy lives on its caster's machine alone)
-      if (!ts || ts.id === socket.id || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 240) + 120)) return no('nobody'); }
+    // (21 — Life / Decay / Blood) on a carrier: its launch names nobody (it opens on whom it strikes); where it lands it may be its own caster, or a thing (rust)
+    if (S.other && !FLY && m.tgt !== 'mw-test-dummy' && !MINDE && !(CAR && S0.carThing && typeof m.obj === 'string')) { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;   // (4e round 2: the practice dummy lives on its caster's machine alone)
+      if (!ts || (ts.id === socket.id && !CAR) || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 240) + 120)) return no('nobody'); }
     // (magic 15b round 2) AIMED (`aim`): the body under the caster's pointer — yourself, the dummy (its caster's machine), or a player in this room near enough; none named: on yourself
     if (S.aim && typeof m.tgt === 'string' && m.tgt !== socket.id && m.tgt !== 'mw-test-dummy') { const ts = io.sockets.sockets.get(m.tgt), tp = ts && ts._avPos;
       if (!ts || socketToAvatarRoom[ts.id] !== room || (tp && Date.now() - tp.t < 4000 && Math.hypot(tp.x - m.x, tp.y - m.y) > (S.reach || 240) + 120)) return no('nobody'); }
@@ -29755,8 +29784,20 @@ io.on('connection', (socket) => {
     if (CAR && typeof m.obj === 'string' && S0.carThing && (S.kind === 'boon' || S.kind === 'wardskin' || S.kind === 'mirror')) { const ob = roomObjects[room] && roomObjects[room].get(m.obj);
       if (!ob || ob.type !== 'stamp' || (S.pw === 'levitate' && !ob.loose)) return no('nothing'); out.obj = m.obj; delete out.tgt; out.secs = +(SK.secs || 20).toFixed(2);
       if (S.pw === 'fireproof' || S.kind === 'wardskin') { const W = _magicObjWards.get(m.obj) || { by: socket.id }; W.room = room; W.by = socket.id;
-        if (S.pw === 'fireproof') { W.fire = now + out.secs * 1000; if (bodySpec(ob)) { try { magicObjFireOut(room, ob); } catch (e) {} } } else { W.skin = now + out.secs * 1000; W.hp = out.hp = SK.hp || 4; }
+        if (S.pw === 'fireproof') { W.fire = now + out.secs * 1000; if (bodySpec(ob)) { try { magicObjFireOut(room, ob); } catch (e) {} } } else { W.skin = now + out.secs * 1000; W.hp = out.hp = SK.hp || 4; W.look = 'ward'; }
         _magicObjWards.set(m.obj, W); if (_magicObjWards.size > 4000) _magicObjWards.delete(_magicObjWards.keys().next().value); } }
+    // ⭐ (21 — Life / Decay / Blood, 2026-11-28, the user's picks) carried onto a THING: CLOSE WOUNDS mends its damage (its hit points back — `magicObjMend`) · CURE puts its
+    //   fire out (`magicObjFireOut` — never `bodyBurnOut`, a body burnt away) and thaws the spell ice round it (`magicObjThaw`) · BARKSKIN a bark shell and the BLOOD SHIELD a
+    //   shell of blood, each soaking `hp` blows as a ward skin (one shell a thing — `look` which; fire goes through bark) · RUST on a metal thing (its caster's game found it
+    //   metal): rusted `thingS` s — every screen shows it, its holder's blows duller
+    if (CAR && typeof m.obj === 'string' && S0.carThing && ['heal', 'cure', 'bark', 'bshield', 'rust'].indexOf(S.kind) >= 0) { const ob = roomObjects[room] && roomObjects[room].get(m.obj);
+      if (!ob || ob.type !== 'stamp') return no('nothing'); out.obj = m.obj; delete out.tgt;
+      if (S.kind === 'heal') out.n = magicObjMend(room, ob);
+      if (S.kind === 'cure') { if (bodySpec(ob)) { try { magicObjFireOut(room, ob); } catch (e) {} } out.n = magicObjThaw(room, ob); }
+      if (S.kind === 'bark' || S.kind === 'bshield') { out.secs = +(SK.secs || 20).toFixed(2); const W = _magicObjWards.get(m.obj) || { by: socket.id }; W.room = room; W.by = socket.id;
+        W.skin = now + out.secs * 1000; W.hp = out.hp = Math.max(1, SK.hp || 3); W.look = S.kind === 'bark' ? 'bark' : 'blood'; _magicObjWards.set(m.obj, W);
+        if (_magicObjWards.size > 4000) _magicObjWards.delete(_magicObjWards.keys().next().value); }
+      if (S.kind === 'rust') out.secs = +(SK.thingS || 60).toFixed(2); }
     if (S.kind === 'mirror') { out.secs = +(SK.secs || 6).toFixed(2); _magicMirrors.set(S.aim && typeof m.tgt === 'string' && m.tgt !== 'mw-test-dummy' ? m.tgt : socket.id, now + out.secs * 1000 + 300); }   // (magic 15b round 8: on whom the pointer chose — its keeper's game catches)
     if (S.kind === 'blink' || S.kind === 'pass') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); }
     // (magic 10b) a MARK kept (the last one, wherever it was, gone) · a RECALL told where the mark is (its held record too)
@@ -29851,32 +29892,35 @@ io.on('connection', (socket) => {
     // (21 Storm) a boon / wind shield's time — a carrier's share of it (`magicCarScale`)
     if (S.kind === 'boon' || S.kind === 'windshield') out.secs = +(SK.secs || 20).toFixed(2);
     // ⭐ (magic 12c) A VINE from the rock over the point (none in reach: refused), `most` a caster · A TREE on the ground under the point · REGROW (a generated world only)
-    if (S.kind === 'vine') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const V = S.swing ? (isFinite(m.bx) && isFinite(m.by) && Math.hypot(+m.bx - m.x, +m.by - m.y) < 160 ? magicSwingPlan(room, out.tx, out.ty, +m.bx, +m.by, S) : null) : magicVinePlan(room, out.tx, out.ty, S); if (!V) return no('rock');
-      const mine = [..._magicVines.entries()].filter(([, q]) => q.by === socket.id).sort((a, b) => a[0] - b[0]); while (mine.length >= (S.most || 3)) { const [k, q] = mine.shift(); _magicVines.delete(k); magicObjDrop(q.room, q.oid); }
+    // (21 — Life, 2026-11-28) carried: the swing vine runs to your hands (where your game says they are, near where the server has you); a vine whose seed stuck in a wall's
+    //   FACE (the face it struck, `nx`) hangs down that face from where it struck
+    if (S.kind === 'vine') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const handsOk = isFinite(m.bx) && isFinite(m.by) && (CAR ? !(p && now - p.t < 4000 && Math.hypot(+m.bx - p.x, +m.by - p.y) > 240) : Math.hypot(+m.bx - m.x, +m.by - m.y) < 160);
+      const V = S.swing ? (handsOk ? magicSwingPlan(room, out.tx, out.ty, +m.bx, +m.by, S) : null) : (CAR && isFinite(m.nx) && Math.abs(+m.nx) > 0.6 && magicVineFacePlan(room, out.tx, out.ty, +m.nx, S)) || magicVinePlan(room, out.tx, out.ty, S); if (!V) return no('rock');
+      for (const k of magicMostCasts([..._magicVines.entries()].filter(([, q]) => q.by === socket.id).sort((a, b) => a[0] - b[0]), CASTK, S.most || 3)) { const q = _magicVines.get(k); _magicVines.delete(k); if (q) magicObjDrop(q.room, q.oid); }
       const secs = +(SK.secs || 180).toFixed(2), oid = 'mvine-' + id, o = magicObjAdd(room, 'platform', { look: 'rope', x: V.x, y: V.y, w: 24, h: 8, rp: V.rp, rl: V.L, rk: 'vine', vt0: now, vEnd: now + secs * 1000, vrev: S.swing ? 1 : 0 }, oid, socket.id);
-      if (!o) return no('room'); _magicVines.set(id, { room, by: socket.id, oid, x: V.x, y: V.y, L: V.L, until: now + secs * 1000 }); out.obj = oid; out.vx = V.x; out.vy = V.y; out.L = V.L; out.secs = secs; }
-    if (S.kind === 'tree') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground'); const P = magicTreePlan(room, g.x, g.y, S, id * 7919 + 13); if (!P) return no('room');
-      const mine = [..._magicTrees.entries()].filter(([, q]) => q.by === socket.id).sort((a, b) => a[0] - b[0]); if (mine.length >= (S.most || 2)) { const [k, q] = mine[0]; const M = magicTemp.get(q.room); if (M) { for (const i of q.cells) { const T2 = M.get(i); if (T2 && T2.kind === 'tree') T2.until = Math.min(T2.until, now); } } }
-      const secs = +(SK.secs || 300).toFixed(2), until = magicTreeGrow(room, P, secs); _magicTrees.set(id, { id, room, by: socket.id, cells: P.cells.map(q => q.i), until, t0: now, fruits: [], S, trunkMat: MAGIC_GXL[P.SP.trunk] });
+      if (!o) return no('room'); _magicVines.set(id, { cast: CASTK, room, by: socket.id, oid, x: V.x, y: V.y, L: V.L, until: now + secs * 1000 }); out.obj = oid; out.vx = V.x; out.vy = V.y; out.L = V.L; out.secs = secs; }
+    if (S.kind === 'tree') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicCarGround(room, m, out.tx, out.ty, CAR); if (!g) return no('ground'); const P = magicTreePlan(room, g.x, g.y, S, id * 7919 + 13); if (!P) return no('room');
+      for (const k of magicMostCasts([..._magicTrees.entries()].filter(([, q]) => q.by === socket.id && !q.gone).sort((a, b) => a[0] - b[0]), CASTK, S.most || 2)) { const q = _magicTrees.get(k); if (!q) continue; q.gone = 1; const M = magicTemp.get(q.room); if (M) { for (const i of q.cells) { const T2 = M.get(i); if (T2 && T2.kind === 'tree') T2.until = Math.min(T2.until, now); } } }
+      const secs = +(SK.secs || 300).toFixed(2), until = magicTreeGrow(room, P, secs); _magicTrees.set(id, { id, cast: CASTK, room, by: socket.id, cells: P.cells.map(q => q.i), until, t0: now, fruits: [], S, trunkMat: MAGIC_GXL[P.SP.trunk] });
       setTimeout(() => magicTreeFruit(id), (S.fruitS || 20) * 1000); out.tx = g.x; out.ty = g.y; out.h = P.hgt; out.n = P.cells.length; out.ms = S.growMs || 3000; out.secs = secs; out.sp = P.SP.key; }
     if (S.kind === 'regrow') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const n = magicRegrow(room, out.tx, out.ty, S); if (n < 0) return no('nogen'); out.n = n; out.R = (S.R || 15) * TERRAIN_CELL; out.ms = S.growMs || 2000; }
     // ⭐ (magic 12a) THE HEALING GROVE: on the ground under the point (none there: refused), `most` a caster (the oldest goes)
-    if (S.kind === 'grove') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
+    if (S.kind === 'grove') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicCarGround(room, m, out.tx, out.ty, CAR); if (!g) return no('ground');
       for (const [k, q] of _magicGroves) if (now > q.until) _magicGroves.delete(k);
-      const mine = [..._magicGroves.values()].filter(q => q.by === socket.id).sort((a, b) => a.id - b.id); while (mine.length >= (S.most || 2)) { const q = mine.shift(); _magicGroves.delete(q.id); io.to(q.room).emit('magic-grove-gone', { id: q.id }); }
+      for (const k of magicMostCasts([..._magicGroves.entries()].filter(([, q]) => q.by === socket.id).sort((a, b) => a[0] - b[0]), CASTK, S.most || 2)) { const q = _magicGroves.get(k); _magicGroves.delete(k); if (q) io.to(q.room).emit('magic-grove-gone', { id: q.id }); }
       out.tx = Math.round(out.tx); out.ty = g.y; out.w = (S.wide || 14) * TERRAIN_CELL; out.secs = +(SK.secs || 12).toFixed(2);
-      _magicGroves.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, until: now + out.secs * 1000 }); }
+      _magicGroves.set(id, { id, cast: CASTK, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, until: now + out.secs * 1000 }); }
     // ⭐ (magic 13c) ROT about the point (nothing there to rot: it is cast all the same — the mould is seen)
     if (S.kind === 'rot') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = (S.R || 8) * TERRAIN_CELL; out.ms = S.ms || 2000; out.n = magicRot(room, out.tx, out.ty, S); }
     // ⭐ (magic 13c round 2) WEATHERING about the point
     if (S.kind === 'weather') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = (S.R || 7) * TERRAIN_CELL; out.ms = S.ms || 5000; out.n = magicWeather(room, out.tx, out.ty, S); }
     // ⭐ (magic 13a) THE POISON CLOUD: on the ground under the point (none: refused), `most` a caster (the oldest goes) · SPORE PODS: the same, `most` a caster
-    if (S.kind === 'pcloud' || S.kind === 'spores') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicGroundAt(room, out.tx, out.ty); if (!g) return no('ground');
+    if (S.kind === 'pcloud' || S.kind === 'spores') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const g = magicCarGround(room, m, out.tx, out.ty, CAR); if (!g) return no('ground');
       const M = S.kind === 'pcloud' ? _magicPClouds : _magicSpores, gone = S.kind === 'pcloud' ? 'magic-pcloud-gone' : 'magic-spore-gone'; for (const [k, q] of M) if (now > q.until) M.delete(k);
-      const mine = [...M.values()].filter(q => q.by === socket.id).sort((a, b) => a.id - b.id); while (mine.length >= (S.most || 2)) { const q = mine.shift(); M.delete(q.id); io.to(q.room).emit(gone, { id: q.id }); }
+      for (const k of magicMostCasts([...M.entries()].filter(([, q]) => q.by === socket.id).sort((a, b) => a[0] - b[0]), CASTK, S.most || 2)) { const q = M.get(k); M.delete(k); if (q) io.to(q.room).emit(gone, { id: q.id }); }
       out.tx = Math.round(out.tx); out.ty = g.y; out.secs = +(SK.secs || 10).toFixed(2);
-      if (S.kind === 'pcloud') { out.w = (S.wide || 16) * TERRAIN_CELL; out.h = (S.high || 4) * TERRAIN_CELL; M.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, h: out.h, until: now + out.secs * 1000 }); }
-      else M.set(id, { id, by: socket.id, room, x: out.tx, y: out.ty, until: now + out.secs * 1000, armAt: now + (S.armS || 1.2) * 1000 }); }
+      if (S.kind === 'pcloud') { out.w = (S.wide || 16) * TERRAIN_CELL; out.h = (S.high || 4) * TERRAIN_CELL; M.set(id, { id, cast: CASTK, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, h: out.h, until: now + out.secs * 1000 }); }
+      else M.set(id, { id, cast: CASTK, by: socket.id, room, x: out.tx, y: out.ty, until: now + out.secs * 1000, armAt: now + (S.armS || 1.2) * 1000 }); }
     // ⭐ (magic 19) A BOUND TOOL in the caster's hand (made at the catalyst's tip; their game takes it at once) · A SPIRIT STEP at the point (not open there: refused)
     if (S.kind === 'bound') { const B = magicBoundMake(room, socket, currentUsername, m.look, out.x, out.y, false); if (!B) return no('bad'); out.obj = B.id; out.look = B.look;
       if (typeof m.off === 'string') { const B2 = magicBoundMake(room, socket, currentUsername, m.off, out.x, out.y, true); if (B2) { out.offObj = B2.id; out.off = B2.look; } } }   // (round 2) a shield in the off hand
