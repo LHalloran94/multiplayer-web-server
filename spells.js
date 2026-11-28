@@ -159,7 +159,7 @@
       plain: { keys: [D, L, D, R], rune: [2, 4, 6, 7] } },
     stonewall: { name: 'Stone wall', school: 'earth', form: 'placed', tier: 1, cd: 8, stance: 'level', kind: 'wall', learn: 5, reach: 360, secs: 45, crackS: 6, wide: 2, high: 12, rowMs: 55, crumbleMs: 30, thruLiq: true, speed: 560, life: 3, grav: 0.35, r: 4.5,
       plain: { keys: [D, U, U, L, D], rune: [6, 7, 8, 5, 2] } },
-    rune: { name: 'Warding rune', school: 'wards', form: 'placed', tier: 1, cd: 6, stance: 'level', kind: 'rune', learn: 5, reach: 300, secs: 180, armS: 1.5, most: 3, blastR: 90, blastF: 14, dmg: 3,
+    rune: { name: 'Warding rune', school: 'wards', form: 'placed', tier: 1, cd: 6, stance: 'level', kind: 'rune', learn: 5, reach: 300, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 4, secs: 180, armS: 1.5, most: 3, blastR: 90, blastF: 14, dmg: 3,
       plain: { keys: [R, L, L, D, U], rune: [0, 3, 6, 7, 4] } },
     // ⭐ STEP 3g (2026-11-17), BATCH c (the user's picks): CLOSE WOUNDS (6A + 6B — motes drawn in, stitches across each cut, one after another; it heals into its scar) ·
     //   LIFT AND THROW (7A — a thread of light to a loose thing; held while the button is, the other button throws) · A DOUBLE OF YOU (8Y — it walks on the way you were going;
@@ -375,14 +375,19 @@
     //   grant a pickup uses (client 16a `powerGrant`) — each player's own game holds their own, everybody sees it by the powers' mask on the position packet. On yourself = the
     //   form 'On yourself'; ON ANOTHER = its variant with 'Touch' (`other`): the player nearest your pointer within `reach` px of you (the server checks they are there).
     //   CHILL BOLT: a frost bolt that SLOWS whoever it hits (`slow` × their speed for `slowS` s — the new 'slow' power, 01_state `POWERUP_KINDS.slow`).
-    leap: { name: 'Leap', school: 'force', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'boots', secs: 20, learn: 3, aim: 'self', reach: 240, plain: { keys: [R, U, U, D, R], rune: [6, 4, 2, 5, 8] } },
+    leap: { name: 'Leap', school: 'force', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'boots', secs: 20, learn: 3, aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, plain: { keys: [R, U, U, D, R], rune: [6, 4, 2, 5, 8] } },
     feather: { name: 'Feather fall', school: 'storm', form: 'self', tier: 0, cd: 8, stance: 'raise', kind: 'boon', pw: 'feather', secs: 20, learn: 3, aim: 'self', reach: 360, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, plain: { keys: [L, R, D, D, U], rune: [0, 4, 8, 7, 6] } },
-    haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, aim: 'self', reach: 240, plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
+    haste: { name: 'Haste', school: 'space', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'speed', secs: 15, learn: 3, aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, plain: { keys: [R, R, R, D, L], rune: [3, 5, 2, 0, 1] } },
     // ⭐ STEP 10a (2026-11-21) SPACE: BLINK (kind 'blink') — to the free spot nearest the pointer, at most `blinkR` px from your middle and in sight (the caster's game finds it:
     //   client 16zj `magicBlinkSpot`; the server holds it to `reach` px from the hand); your speed kept. PASS THROUGH (kind 'pass') — through at most `cells` cells of rock met within `near` cells of
     //   you, the way the pointer points (8 ways) to the first place your body fits (16zj `magicPassSpot`); carried there over a time set by how far.
-    blink: { name: 'Blink', school: 'space', form: 'placed', tier: 0, cd: 5, stance: 'level', kind: 'blink', learn: 3, reach: 540, blinkR: 480, fx: '#b08cff',
+    blink: { name: 'Blink', school: 'space', form: 'placed', tier: 0, cd: 5, stance: 'level', kind: 'blink', learn: 3, reach: 540, car: 1, fuse: 1, carReach: 700, holdMs: 250, speed: 900, life: 0.9, grav: 0, r: 3.5, alts: ['farblink'], blinkR: 480, fx: '#b08cff',
       plain: { keys: [U, U, L, U, R], rune: [4, 1, 8, 0, 7] } },
+    // ⭐ (21 — FORCE, SPACE, WARDS ONTO CARRIERS, 2026-11-28, the user) FAR BLINK, blink's variant: the mote FLIES ON (~1000 px; blink stops at the pointer) — so modifiers carry
+    //   it round corners (bounce, follows, homing …). Both: a TAP blinks you where the mote ends; the fire button HELD past `holdMs` blinks you where it is when you LET GO
+    //   (a split: the piece nearest your pointer, the others lost), or where it ends first (16zj `magicBlinkLet`)
+    farblink: { name: 'Far blink', school: 'space', form: 'bolt', tier: 0, cd: 6, stance: 'level', kind: 'blink', learn: 3, alt: 'blink', reach: 1000, blinkR: 480, car: 1, speed: 800, life: 1.3, grav: 0, r: 3.5, fx: '#b08cff',
+      plain: { keys: [U, U, L, U, D], rune: [4, 1, 8, 0, 6] } },
     passthrough: { name: 'Pass through', school: 'space', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'pass', learn: 3, reach: 380, cells: 16, near: 12, fx: '#b08cff',
       plain: { keys: [U, U, D, D, L], rune: [7, 6, 0, 3, 1] } },
     // ⭐ STEP 10b (2026-11-21) SPACE: MARK (kind 'mark') — a sigil where you stand, one a player, `secs` s (the server's `_magicMarks`); its variant RECALL (kind 'recall',
@@ -393,26 +398,26 @@
       plain: { keys: [L, D, U, R, D], rune: [3, 2, 7, 5, 6] } },
     recall: { name: 'Recall', school: 'space', form: 'stream', tier: 1, cd: 20, stance: 'raise', kind: 'recall', alt: 'mark', chan: true, chanS: 1.5, fx: '#b08cff',
       plain: { keys: [L, D, U, R, U], rune: [3, 2, 7, 5, 8] } },
-    rewind: { name: 'Rewind yourself', school: 'space', form: 'stream', tier: 1, cd: 15, stance: 'raise', kind: 'rewind', learn: 5, alts: ['rewind_o'], chan: true, chanS: 40, backPerS: 4, backMax: 20, runMs0: 700, runPxMs: 1.1, runMin: 800, runMax: 3000, fx: '#b08cff',
+    rewind: { name: 'Rewind', school: 'space', form: 'stream', tier: 1, cd: 15, stance: 'raise', kind: 'rewind', learn: 5, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, chan: true, chanS: 40, backPerS: 4, backMax: 20, runMs0: 700, runPxMs: 1.1, runMin: 800, runMax: 3000, fx: '#b08cff',
       plain: { keys: [R, R, L, L, U], rune: [8, 2, 0, 1, 6] } },
     // (10c round 2, the user: swap's range 'increased massively' 320 → 1200; call back's 800 → 1600)
     // ⭐ STEP 10c (2026-11-21) SPACE: SWAP (kind 'swap') — you and the loose thing / player nearest the pointer within `reach` change places. CALL BACK (kind 'callback') —
     //   the last thing that left your hands, within `reach`, flies back to your hand at up to `speed` px a tick (through rock by folding). REWIND A THING (kind 'rewindobj',
     //   rewind's variant, HELD, live): the thing nearest the pointer within `reach` runs back along its own path, at most `backMax` s.
-    swap: { name: 'Swap', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'swap', learn: 5, reach: 1200, fx: '#b08cff',
+    swap: { name: 'Swap', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'swap', learn: 5, reach: 1200, car: 1, carThing: 1, speed: 640, life: 1.9, grav: 0, r: 3.5, fx: '#b08cff',
       plain: { keys: [R, R, L, D, R], rune: [6, 5, 3, 2, 0] } },
     callback: { name: 'Call back', school: 'space', form: 'shaping', tier: 0, cd: 3, stance: 'raise', kind: 'callback', learn: 3, reach: 1600, speed: 16, fx: '#b08cff',
       plain: { keys: [D, R, U, L, R], rune: [3, 0, 8, 2, 5] } },
-    rewind_o: { name: 'Rewind a thing', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'rewindobj', alt: 'rewind', chan: true, chanS: 40, reach: 320, backMax: 20, fx: '#b08cff',
+    rewind_o: { name: 'Rewind a thing', school: 'space', form: 'touch', tier: 1, cd: 10, stance: 'level', kind: 'rewindobj', inner: 1, chan: true, chanS: 40, reach: 320, backMax: 20, fx: '#b08cff',
       plain: { keys: [R, R, L, L, R], rune: [8, 2, 0, 1, 4] } },
     // ⭐ STEP 10d (2026-11-21) SPACE: DOORWAYS (kind 'doorway') — two casts set two doorways (each at most `reach` px from you, the second at most `pair` px from the first),
     //   open together `secs` s: you, loose things, arrows and bolts go in one and out of the other keeping their speed; liquid flows through, `flow` cells' worth a tick
     //   (server `_magicDoors`). The first's cooldown is short — the full one starts with the second.
-    doorways: { name: 'Doorways', school: 'space', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'doorway', learn: 5, reach: 400, pair: 1500, secs: 30, flow: 6, fx: '#b08cff',
+    doorways: { name: 'Doorways', school: 'space', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'doorway', learn: 5, reach: 400, car: 1, fuse: 1, carReach: 700, speed: 480, life: 1.6, grav: 0, r: 4, pair: 1500, secs: 30, flow: 6, fx: '#b08cff',
       plain: { keys: [D, D, L, U, R], rune: [3, 5, 6, 2, 1] } },
     // ⭐ STEP 10e (2026-11-22) SPACE: POCKET (kind 'pocket') — empty: the loose thing nearest the pointer within `reach` folds away into nothing over `foldMs` (the server keeps it,
     //   one a player — `_magicPockets`); full: cast again and it unfolds where you point (within `reach`, where it fits), in the world it came from. You die: it falls out there.
-    pocket: { name: 'Pocket', school: 'space', form: 'touch', tier: 1, cd: 6, stance: 'level', kind: 'pocket', learn: 5, reach: 320, foldMs: 450, fx: '#b08cff',
+    pocket: { name: 'Pocket', school: 'space', form: 'touch', tier: 1, cd: 6, stance: 'level', kind: 'pocket', learn: 5, reach: 320, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, carReach: 700, foldMs: 450, fx: '#b08cff',
       plain: { keys: [L, L, D, L, R], rune: [5, 7, 4, 3, 6] } },
     grow: { name: 'Grow', school: 'alteration', form: 'self', tier: 1, cd: 12, stance: 'raise', kind: 'boon', pw: 'mega', secs: 15, learn: 5, aim: 'self', reach: 240, plain: { keys: [U, L, U, R, U], rune: [7, 3, 1, 5, 7] } },
     // ⭐ STEP 15a (2026-11-24) ALTERATION — boons through the pickups' own grant (16a `powerGrant`), each with its look on every screen (16zj §'STEP 15a'):
@@ -509,22 +514,22 @@
       fx: '#b3121f', plain: { keys: [R, D, L, L, L], rune: [8, 7, 3, 1, 2] } },
     bloodwhip: { name: 'Blood whip', school: 'blood', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'whip', learn: 3, chan: true, chanS: 5, cost: 1, len: 100, dmg: 1, gap: 0.45,
       fx: '#b3121f', plain: { keys: [R, D, R, L, R], rune: [6, 4, 2, 1, 3] } },
-    fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, aim: 'self', reach: 240, plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
+    fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
     //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
     //   bolts, arrows, thrown things and ice shards that come within `R` px of your body turn back the way they came, now yours (catch's hand-off).
-    wardskin: { name: 'Ward skin', school: 'wards', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'wardskin', secs: 20, hp: 4, learn: 3, aim: 'self', reach: 240, fx: '#ffd86b',
+    wardskin: { name: 'Ward skin', school: 'wards', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'wardskin', secs: 20, hp: 4, learn: 3, aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, fx: '#ffd86b',
       plain: { keys: [L, U, U, R, D], rune: [0, 2, 5, 4, 7] } },
-    mirror: { name: 'Mirror ward', school: 'wards', form: 'self', aim: 'self', reach: 240, tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 10, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
+    mirror: { name: 'Mirror ward', school: 'wards', form: 'self', aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 10, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
       plain: { keys: [R, D, L, U, R], rune: [2, 0, 3, 5, 8] } },
     // ⭐ STEP 11b (2026-11-22; round 3, the user: the wall had no purpose of its own — 'I like the ward line option') WARDS: WARD LINE (kind 'wardline') — a line of light where
     //   you point, from rock to rock (at most `high` cells), `secs` s: no other player crosses it (each game stops its own body at it; the test dummy too); you, things,
     //   liquid and spells pass. WARD DOME (kind 'warddome', its own spell — the user) — HELD: it grows from `Rmin` to `Rmax` px over `chargeS` s held, set on let-go; a
     //   half-sphere of gold light where its caster's feet were (or, by its caster's switch, a sphere about their middle), resting on the ground under it, `secs` s; bodies walk
     //   through it, what flies into it from outside is stopped.
-    wardline: { name: 'Ward line', school: 'wards', form: 'placed', tier: 0, cd: 12, stance: 'level', kind: 'wardline', learn: 3, reach: 300, secs: 30, high: 16, fx: '#ffd86b',
+    wardline: { name: 'Ward line', school: 'wards', form: 'placed', tier: 0, cd: 12, stance: 'level', kind: 'wardline', learn: 3, reach: 300, car: 1, fuse: 1, carReach: 700, speed: 480, life: 1.6, grav: 0, r: 4, secs: 30, high: 16, fx: '#ffd86b',
       plain: { keys: [D, U, L, R, U], rune: [1, 7, 6, 8, 2] } },
-    warddome: { name: 'Ward dome', school: 'wards', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'warddome', learn: 5, reach: 320, chan: true, chanS: 2.5, chargeS: 2.5, Rmin: 56, Rmax: 140, secs: 10, fx: '#ffd86b',
+    warddome: { name: 'Ward dome', school: 'wards', form: 'placed', tier: 1, cd: 20, stance: 'level', kind: 'warddome', learn: 5, reach: 320, car: 1, fuse: 1, carReach: 700, speed: 480, life: 1.6, grav: 0, r: 4, chan: true, chanS: 2.5, chargeS: 2.5, Rmin: 56, Rmax: 140, secs: 10, fx: '#ffd86b',
       plain: { keys: [D, R, U, L, L], rune: [1, 7, 6, 8, 5] } },
     // ⭐ STEP 11c (2026-11-22) WARDS AGAINST MAGIC: NULL CIRCLE (kind 'nullc') — a ring of gold glyphs on the ground where you point, `R` px round (18 cells across), and a faint
     //   dome of upright light lines over it, `secs` s: no spell is cast from inside it, its caster's too (the server refuses), a held spell inside ends, a spell bolt fizzles at
@@ -533,7 +538,7 @@
     //   (11c round 3, the user: held to grow as the ward sphere, and bigger — it should stop casting over a large area) the null circle is HELD: from `Rmin` to `Rmax` px over
     //   `chargeS` s, set (and only then at work) on let-go. (round 4, the user: the circle should not stop spells coming in from outside — that is the ward dome's) only
     //   casting inside it is stopped. THE WARD DOME is cast AT THE POINTER (within `reach`): on a body there (yours, another's, the dummy) about its middle, else about the point.
-    nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'nullc', learn: 5, reach: 320, secs: 60, chan: true, chanS: 3, chargeS: 3, Rmin: 96, Rmax: 240, fx: '#ffd86b',
+    nullcircle: { name: 'Null circle', school: 'wards', form: 'placed', tier: 1, cd: 10, stance: 'level', kind: 'nullc', learn: 5, reach: 320, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 4, secs: 60, chan: true, chanS: 3, chargeS: 3, Rmin: 96, Rmax: 240, fx: '#ffd86b',
       plain: { keys: [U, D, R, L, D], rune: [6, 8, 5, 3, 0] } },
     // ⭐ STEP 11d (2026-11-22) WARDS ON PLACES AND THINGS: ALARM (kind 'alarm') — a small gold eye sigil on the ground where you point (faint to others, as the warding rune),
     //   `most` a caster, `secs` s, awake after `armS` s: another player, the test dummy or a loose thing crossing it — a chime for its owner wherever they are, an arrow at the
@@ -541,11 +546,11 @@
     //   object, `secs` s: nobody else's magic moves it, nothing breaks it, nobody else picks it up; bodies still push it.
     //   (11d round 2, the user) THE ALARM floats where you point, an orb with an eye, an hour; it goes off when anybody or anything comes within `R` px in sight of it; it can be
     //   BROKEN (a spell, a blow, a swing, a thing thrown through it), which sets it off its own way. THE NULL CIRCLE: one a caster (a new one ends the old), `cd` 10.
-    alarm: { name: 'Alarm', school: 'wards', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'alarm', learn: 3, reach: 300, secs: 3600, most: 3, armS: 1, R: 90, fx: '#ffd86b',
+    alarm: { name: 'Alarm', school: 'wards', form: 'placed', tier: 0, cd: 4, stance: 'level', kind: 'alarm', learn: 3, reach: 300, car: 1, fuse: 1, carReach: 700, speed: 480, life: 1.6, grav: 0, r: 4, secs: 3600, most: 3, armS: 1, R: 90, fx: '#ffd86b',
       plain: { keys: [U, R, D, U, L], rune: [3, 1, 5, 4, 6] } },
-    seal: { name: 'Seal', school: 'wards', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'seal', learn: 3, reach: 320, secs: 120, fx: '#ffd86b',
+    seal: { name: 'Seal', school: 'wards', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'seal', learn: 3, reach: 320, car: 1, carThing: 2, speed: 520, life: 1.9, grav: 0, r: 3.5, secs: 120, fx: '#ffd86b',
       plain: { keys: [D, L, U, R, R], rune: [7, 3, 1, 5, 2] } },
-    dispel: { name: 'Dispel', school: 'wards', form: 'placed', tier: 1, cd: 15, stance: 'level', kind: 'dispel', learn: 5, reach: 320, R: 120, ms: 450, fx: '#ffd86b',
+    dispel: { name: 'Dispel', school: 'wards', form: 'placed', tier: 1, cd: 15, stance: 'level', kind: 'dispel', learn: 5, reach: 320, car: 1, fuse: 1, carReach: 700, speed: 480, life: 1.6, grav: 0, r: 4, R: 120, ms: 450, fx: '#ffd86b',
       plain: { keys: [R, U, D, L, U], rune: [8, 4, 0, 1, 2] } },
     chillbolt: { name: 'Chill bolt', school: 'frost', form: 'bolt', tier: 0, cd: 4, stance: 'level', kind: 'bolt', learn: 3, speed: 640, life: 1.1, grav: 0.05, r: 3, dmg: 0.4, slow: 0.55, slowS: 4, freezeN: 2, freezeS: 20,
       plain: { keys: [D, D, R, U, R], rune: [2, 4, 3, 6, 7] } },
@@ -805,17 +810,24 @@
     // ⭐ STEP 9b (2026-11-21) FORCE: HEAVY and its variant WEIGHTLESS (`light`), kind 'weight' — on the loose thing or player nearest the pointer within `reach` px (yourself too),
     //   `secs` s: a thing's weight / float / fall (client 16b `lbMagicWt`), a player's power 'heavy' / 'light' (their own game). LEVITATE (+ on another): a boon, the power
     //   'levitate' (client 16zj `magicBodyForce`: hovering, at most 6 cells over the ground under you).
-    heavy: { name: 'Heavy', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', learn: 3, reach: 260, secs: 10, alts: ['weightless'], fx: '#9a7ef0',
+    // ⭐ (21 — FORCE, SPACE, WARDS ONTO CARRIERS, 2026-11-28, the user's picks) the three kinds again. ON A BODY (`carBody`, flies on ~1000 px; you when pointed at yourself;
+    //   nobody: lost; a piece gives less): leap, levitate, haste, fire ward, ward skin, mirror ward. ON A BODY OR A THING (`carThing` — the mote also stops on loose things;
+    //   2: any placed thing too): heavy, weightless, stasis (it may hold you now), swap (with what it strikes), seal, the pocket's fold, REWIND (one spell now: whatever it
+    //   strikes — you, another, the dummy, a thing — runs back while you hold; 'Rewind a thing' is what it opens on a thing, `inner`: no inputs, not in the tome).
+    //   STOPS AT THE POINTER (`fuse`, `carReach` 700 — the placed reach, `reach`, is the carriers-off one): blink, doorways (each piece that lands the next door), the
+    //   pocket's unfolding, alarm, dispel, ward line, ward dome (flies out, then held to grow). LOBBED: warding rune, null circle (lands, then held to grow).
+    //   What a landed carrier opens is worked out by its caster's game where it ended (16zj `magicCarEx`: the spot that fits, what it struck) and checked here as ever.
+    heavy: { name: 'Heavy', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', learn: 3, reach: 260, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, secs: 10, alts: ['weightless'], fx: '#9a7ef0',
       plain: { keys: [R, D, L, D, D], rune: [3, 7, 6, 4, 8] } },
-    weightless: { name: 'Weightless', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', alt: 'heavy', light: 1, reach: 260, secs: 10, fx: '#ece8ff',
+    weightless: { name: 'Weightless', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', alt: 'heavy', light: 1, reach: 260, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, secs: 10, fx: '#ece8ff',
       plain: { keys: [R, D, L, D, U], rune: [3, 7, 6, 4, 0] } },
-    levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 20, learn: 3, aim: 'self', reach: 240,
+    levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 20, learn: 3, aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3,
       plain: { keys: [R, U, D, U, R], rune: [5, 7, 3, 1, 2] } },
     // ⭐ STEP 9c (2026-11-21) FORCE: STASIS (kind 'stasis', on the loose thing or player nearest the pointer within `reach`, never yourself): a thing stops dead for `secs` s, the
     //   blows it takes stored and given all at once at the end (client 16b `lbStasis`); a player held at most `holdS` s, each fresh movement key `press` s off, a blow breaks it.
     //   BARRAGE (kind 'barrage', held ≤ `chanS` s): up to `n` loose things within `grab` px orbit you (`orbit` px, `spin` rad/s; driven `pull`, `vmax`); let go, they fly at the
     //   pointer `gapMs` apart at `throwV` (px a tick), each a thrown thing.
-    stasis: { name: 'Stasis', school: 'force', form: 'placed', tier: 1, cd: 12, stance: 'level', kind: 'stasis', learn: 5, reach: 300, secs: 5, holdS: 1.5, press: 0.3, fx: '#e6e6f0',
+    stasis: { name: 'Stasis', school: 'force', form: 'placed', tier: 1, cd: 12, stance: 'level', kind: 'stasis', learn: 5, reach: 300, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, secs: 5, holdS: 1.5, press: 0.3, fx: '#e6e6f0',
       plain: { keys: [R, L, D, R, U], rune: [3, 5, 1, 7, 6] } },
     barrage: { name: 'Barrage', school: 'force', form: 'stream', tier: 1, cd: 14, stance: 'level', kind: 'barrage', learn: 5, chan: true, chanS: 8, grab: 140, n: 6, orbit: 46, spin: 4.5, pull: 0.5, vmax: 22,
       throwV: 18, gapMs: 120, fx: '#e6e6f0', plain: { keys: [R, U, L, D, R], rune: [5, 4, 0, 6, 8] } },
@@ -1039,7 +1051,7 @@
     heavy: [[L, D], [4, 6, 7]], weightless: [[L, U], [4, 0, 1]], levitate: [[U, D], [4, 7, 1]], stasis: [[D, L], [4, 8, 2]], barrage: [[D, D], [4, 0, 2, 5]], catch: [[D, R], [4, 8, 6]],   // (9b: pressed down / lifted, mirrored, as grow and shrink · up off the ground, as the rising pillar)   // (9a: sent at the pointer, the bolt ending · the same line back towards you)
     haste: [[L, L], [3, 5]],
     // (10a) Space's stroke runs straight through the middle (2 → 4 → 6), so no word may go 4 → 2 (it would fold into the school's line): blink up, out and up · straight up
-    blink: [[U, R], [4, 5, 2]], passthrough: [[U, U], [4, 1]],
+    blink: [[U, R], [4, 5, 2]], farblink: [[R, U], [4, 5, 8]], passthrough: [[U, U], [4, 1]],
     // (10b) set down · and back up out of it, mirrored · back and up, a hook turned back
     mark: [[D, D], [4, 7, 6]], recall: [[D, U], [4, 7, 8]], rewind: [[L, U], [4, 3, 0]],
     // (10c) this side for that side · back and down into the hand · rewind's, its first mark turned → and on to the top right
@@ -1125,7 +1137,7 @@
   //   pages as it needs: its lines (a school, then its spells; the modifiers last) laid into COLUMNS — a left page holds 10 under its title, a right page 13; a school's name never
   //   ends a column — `contents` = the columns, each line with the page it is on; a contents page (`contents`, `part`) is one spread, two columns
   { const T = TOMES.tome_master, rows = [], pageOf = [];
-    for (const sc of Object.keys(SCHOOLS)) { const ids = Object.keys(SPELLS).filter(id => !SPELLS[id].innate && !SPELLS[id].alt && SPELLS[id].school === sc); if (!ids.length) continue; rows.push({ school: sc }); for (const id of ids) rows.push({ spell: id }); }
+    for (const sc of Object.keys(SCHOOLS)) { const ids = Object.keys(SPELLS).filter(id => !SPELLS[id].innate && !SPELLS[id].inner && !SPELLS[id].alt && SPELLS[id].school === sc); if (!ids.length) continue; rows.push({ school: sc }); for (const id of ids) rows.push({ spell: id }); }
     rows.push({ school: 'mods' }); for (const id of Object.keys(MODS)) rows.push({ spell: id, mod: 1 });
     const CAP = [10, 13], cols = []; let cur = [];
     for (const r of rows) { const cap = CAP[cols.length % 2]; if (cur.length >= cap || (r.school && cur.length >= cap - 1)) { cols.push(cur); cur = []; } cur.push(r); }
@@ -1186,7 +1198,7 @@
     for (let i = 1; i < p.length - 1;) { const a = p[i - 1], b = p[i], c = p[i + 1];
       if ((a % 3) + (c % 3) === 2 * (b % 3) && Math.floor(a / 3) + Math.floor(c / 3) === 2 * Math.floor(b / 3) && a !== c) p.splice(i, 1); else i++; }
     return p; };
-  const castable = () => Object.keys(SPELLS).filter(id => !SPELLS[id].innate);
+  const castable = () => Object.keys(SPELLS).filter(id => !SPELLS[id].innate && !SPELLS[id].inner);
   // keys so far → { spell } when they are exactly a spell's (and `more` too when a longer spell also begins with them — firebolt is the start of great firebolt) ·
   //   { more: true } while some spell still begins with them · null = wrong. `ownH(id)` = that spell's own number, or null
   //   (4c) `mods` = the modifiers that may follow (each spell is tried alone, then with each that goes on it) → also `mod` (the one put in) and `moreOf` (the spells a modifier

@@ -3822,6 +3822,8 @@ let _magicSeq = 0; const _magicLive = new Map();   // (magic step 1) bolts in th
 function magicCarryOpen(L, m, UU) { const x = Math.round(+m.x), y = Math.round(+m.y), C = L.car;
   io.to(L.room).emit('magic-end', Object.assign({}, UU, { id: m.id, x, y, air: m.air ? 1 : 0, land: 'car', spell: L.spell, from: L.by, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined }));
   const s = io.sockets.sockets.get(L.by); if (!s || !s._magicCastFn || socketToAvatarRoom[s.id] !== L.room) return;
+  // (21 — Force / Space / Wards, 2026-11-28) a piece its caster's game let fall (a held blink let go: the pieces not chosen; nowhere to open) — it ends, nothing opens
+  if (m.lost) return;
   const S00 = SPELLS.of(L.spell);
   // (21 — Earth, 2026-11-28, the user) STONE SPIKES run on THE WAY THE SEED WAS GOING where it struck (its flight's `ux`; straight down: away from its caster)
   const dir = S00 && S00.kind === 'spikes' && isFinite(UU.ux) && Math.abs(UU.ux) > 0.05 ? (UU.ux > 0 ? 1 : -1) : x - C.x0 >= 0 ? 1 : -1;
@@ -3829,10 +3831,18 @@ function magicCarryOpen(L, m, UU) { const x = Math.round(+m.x), y = Math.round(+
   //   id), the dummy ('dummy'), another player — with the weapon that body holds (`wpn`, its caster's game found it); it met none: lost
   const S0 = SPELLS.of(L.spell), pl = typeof m.pl === 'string' && m.pl.length < 64 ? m.pl : null, BOD = S0 && S0.carBody ? { tgt: pl === 'dummy' ? 'mw-test-dummy' : pl } : null;
   if (BOD && !BOD.tgt) return;
+  // ⭐ (21 — Force / Space / Wards, 2026-11-28) WHAT ITS CASTER'S GAME FOUND WHERE IT ENDED (`ex`, 16zj `magicCarEx` — the same code the cast used at the pointer, run at the
+  //   carrier's end): the spot that fits (blink, a door, the pocket's unfolding, an alarm), the ward line's reach, the dome's body, a swap's / blink's caster's feet — every
+  //   number then checked by the cast as ever. ON A BODY OR A THING (`carThing`): the body struck (`tgt`), else the thing (`obj`), else lost (an emptying pocket opens anyway)
+  const EX = {}; if (m.ex && typeof m.ex === 'object') { for (const f of ['tx', 'ty', 'bx', 'by', 'br', 'ly0', 'ly1']) if (isFinite(m.ex[f])) EX[f] = Math.round(+m.ex[f]); for (const f of ['sh', 'on']) if (m.ex[f] != null) EX[f] = m.ex[f] ? 1 : 0; }
+  let TH = null, spell = L.spell; if (S0 && S0.carThing) { const ob = typeof m.obj === 'string' && m.obj.length < 64 ? m.obj : null;
+    TH = pl ? { tgt: pl === 'dummy' ? 'mw-test-dummy' : pl } : ob ? { obj: ob } : null; if (!TH && !(S0.kind === 'pocket' && isFinite(EX.tx))) return;
+    // (REWIND, one spell: on a thing it is 'Rewind a thing')
+    if (S0.kind === 'rewind' && TH && TH.obj) spell = 'rewind_o'; }
   if (BOD && typeof m.wpn === 'string' && m.wpn.length < 64) BOD.wpn = m.wpn;
   // (21 — Earth) the RISING PILLAR rises under the FEET of the body struck (`fx`, `fy` — its caster's game found them; near where it struck, else under the strike)
   if (BOD && isFinite(m.fx) && isFinite(m.fy) && Math.hypot(+m.fx - x, +m.fy - y) < 80) { BOD.bx = Math.round(+m.fx); BOD.by = Math.round(+m.fy); }
-  try { s._magicCastFn(Object.assign({ spell: L.spell, cat: C.cat, x: x - dir, y, ax: C.ax, ay: C.ay, tx: x, ty: y, bx: x, by: y + 10, br: 10, shot: C.shot, car: 0 }, BOD || {}), C); } catch (e) { console.error('[magic carrier]', e && e.message); } }
+  try { s._magicCastFn(Object.assign({ spell, cat: C.cat, x: x - dir, y, ax: C.ax, ay: C.ay, tx: x, ty: y, bx: x, by: y + 10, br: 10, shot: C.shot, car: 0 }, EX, BOD || {}, TH || {}), C); } catch (e) { console.error('[magic carrier]', e && e.message); } }
 // (carriers) a spell's numbers at a carrier's size: its cells, width, height, length, reach (the split shot's) and a whirlpool's reach and pump, a blizzard's clouds and their spread
 // (21 Storm) its maker's sizes too (`magicModSplitSK`): cells, width, height, length, a clap's reach, a shield's reach
 function magicCarScale(S, k) { const o = magicModSplitSK(S, k); for (const f of ['maxR', 'spread', 'pump']) if (isFinite(o[f]) && o[f] > 0) o[f] = Math.max(1, o[f] * k);
@@ -3842,7 +3852,10 @@ function magicCarScale(S, k) { const o = magicModSplitSK(S, k); for (const f of 
   if (o.kind === 'spikes') { if (isFinite(o.n)) o.n = Math.max(1, Math.round(o.n * k)); if (isFinite(o.base)) o.base = o.base * Math.min(1.6, Math.max(0.4, k)); }
   if (o.kind === 'quake' && isFinite(o.loose)) o.loose = Math.max(1, Math.round(o.loose * k));
   // (21 Storm, the user: a split / smaller piece gives LESS — by its share) a boon on a body: its time, the wind shield's strength (its reach is `R`, above)
-  if (o.carBody) { if (isFinite(o.secs)) o.secs = Math.max(0.5, o.secs * k); if (isFinite(o.k)) o.k = o.k * k; }
+  if (o.carBody) { if (isFinite(o.secs)) o.secs = Math.max(0.5, o.secs * k); if (isFinite(o.k)) o.k = o.k * k; if (isFinite(o.hp)) o.hp = Math.max(1, Math.round(o.hp * k)); }
+  // (21 — Wards) a carried dome / null circle grows from and to sizes × its own; a thing held, weighed or sealed for its share of the time
+  for (const f of ['Rmin', 'Rmax']) if (isFinite(o[f]) && o[f] > 0) o[f] = Math.max(16, o[f] * k);
+  if (o.carThing && isFinite(o.secs)) o.secs = Math.max(0.5, o.secs * Math.min(1, k));
   return o; }
 function magicModSplitSK(S, k) { const o = Object.assign({}, S); for (const f of ['cells', 'wide', 'high', 'len', 'rad', 'R']) if (isFinite(o[f]) && o[f] > 0) o[f] = Math.max(1, Math.round(o[f] * k)); return o; }
 // ⭐ MAGIC, STEP 2 (2026-11-17, `scratchpad/kickoff_magic.md` §ROUND 3 step 2): WHAT YOU HAVE LEARNT THIS LIFE, by player key (`playerKeyFor` — a Level's are its own): each spell's
@@ -29480,9 +29493,11 @@ io.on('connection', (socket) => {
     // (magic 10b) MARK: where the caster's feet are · RECALL: only with a mark of theirs here (REWIND's path comes with its let-go: 'magic-chan-stop')
     if (S.kind === 'mark' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
     // (magic 10c) SWAP: where the caster stands · CALL BACK / REWIND A THING: a loose thing nobody holds, near enough (by where this server last had it)
-    if (S.kind === 'swap' && (!isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    // (21) carried: the caster's feet near where the server last had them (the 'hand' is where the carrier ended)
+    const feetOk = () => CAR ? !(p && now - p.t < 4000 && Math.hypot(+m.bx - p.x, +m.by - p.y) > 240) : Math.hypot(+m.bx - m.x, +m.by - m.y) <= 160;
+    if (S.kind === 'swap' && (!isFinite(m.bx) || !isFinite(m.by) || !feetOk())) return no('bad');
     if (S.kind === 'callback' || S.kind === 'rewindobj') { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing');
-      if (p && now - p.t < 4000 && isFinite(ob.x) && isFinite(ob.y) && Math.hypot(ob.x - p.x, ob.y - p.y) > (S.reach || 320) + 600) return no('far'); }
+      if (!CAR && p && now - p.t < 4000 && isFinite(ob.x) && isFinite(ob.y) && Math.hypot(ob.x - p.x, ob.y - p.y) > (S.reach || 320) + 600) return no('far'); }
     // (magic 10d) DOORWAYS: the first of a pair, or the second (its caster's pair waiting, set within a minute, near enough to the first)
     let DR = null; if (S.kind === 'doorway') { if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); const cur = _magicDoorBy.get(socket.id), q = cur != null ? _magicDoors.get(cur) : null;
       if (q && q.room === room && !q.b && now - q.at < 60000) { if (Math.hypot(+m.tx - q.a.x, +m.ty - q.a.y) > (S.pair || 1500) + 20) return no('far'); DR = { q, end: 'b' }; } else DR = { end: 'a', old: q }; }
@@ -29491,12 +29506,12 @@ io.on('connection', (socket) => {
       if (cur && cur.obj) { if (cur.room !== room) return no('elsewhere'); if (!isFinite(m.tx) || !isFinite(m.ty)) return no('bad'); PK = { out: cur, pk }; }
       else { const ob = typeof m.obj === 'string' && roomObjects[room] ? roomObjects[room].get(m.obj) : null;
         if (!ob || ob.type !== 'stamp' || !ob.loose || ob.eq || (hm && hm.has(m.obj)) || (HELD.is(ob.look) && HELD.LOOKS[ob.look].hook) || ob.look === 'rope') return no('nothing');
-        const P0 = magicBoulderPose(room, ob); if (p && now - p.t < 4000 && Math.hypot(P0.x - p.x, P0.y - p.y) > (S.reach || 320) + 600) return no('far'); PK = { into: ob, pk }; } }
+        const P0 = magicBoulderPose(room, ob); if (!CAR && p && now - p.t < 4000 && Math.hypot(P0.x - p.x, P0.y - p.y) > (S.reach || 320) + 600) return no('far'); PK = { into: ob, pk }; } }
     let MK = null; if (S.kind === 'recall') { MK = _magicMarks.get(socket.id); if (!MK || MK.room !== room || now > MK.until) return no('nomark'); }
-    if ((S.kind === 'blink' || S.kind === 'pass') && (!isFinite(m.tx) || !isFinite(m.ty) || !isFinite(m.bx) || !isFinite(m.by) || Math.hypot(+m.bx - m.x, +m.by - m.y) > 160)) return no('bad');
+    if ((S.kind === 'blink' || S.kind === 'pass') && (!isFinite(m.tx) || !isFinite(m.ty) || !isFinite(m.bx) || !isFinite(m.by) || !feetOk())) return no('bad');
     // (magic 9b) HEAVY / WEIGHTLESS: a loose thing nobody holds, or a player in this room near enough (yourself, the dummy on its caster's machine)
     // (magic 9c) STASIS: as the weight's (never yourself) · BARRAGE: the loose things named, each in this room, loose, nobody holding it — none: refused
-    if ((S.kind === 'stasis' || S.kind === 'swap') && (m.tgt === socket.id || (typeof m.obj !== 'string' && typeof m.tgt !== 'string'))) return no('nobody');
+    if ((S.kind === 'stasis' || S.kind === 'swap') && ((m.tgt === socket.id && (S.kind === 'swap' || !CAR)) || (typeof m.obj !== 'string' && typeof m.tgt !== 'string'))) return no('nobody');
     let BRG = null; if (S.kind === 'barrage') { const mp = roomObjects[room]; BRG = (Array.isArray(m.objs) ? m.objs : []).slice(0, S.n || 6).filter(id => typeof id === 'string' && mp && mp.get(id) && mp.get(id).loose && !(hm && hm.has(id)) && !magicSealedOther(room, id, socket.id)); if (!BRG.length) return no('nothing'); }
     if (S.kind === 'weight' || S.kind === 'stasis' || S.kind === 'swap') { if (typeof m.obj === 'string') { const ob = roomObjects[room] ? roomObjects[room].get(m.obj) : null; if (!ob || !ob.loose || (hm && hm.has(m.obj))) return no('nothing'); }
       else if (m.tgt !== socket.id && m.tgt !== 'mw-test-dummy') { const ts = typeof m.tgt === 'string' ? io.sockets.sockets.get(m.tgt) : null, tp = ts && ts._avPos;
@@ -29561,13 +29576,14 @@ io.on('connection', (socket) => {
     if (SC) { out.charge = 1; out.cat = ''; }
     // (carriers) every screen flies it as a bolt · …and opens its spell where it landed
     if (FLY) out.car = 1; if (CAR) { out.carried = 1; if (CAR.k && CAR.k !== 1) out.ck = +CAR.k.toFixed(3); }   // (21 Storm: `ck` the carrier's size — each screen's look sized by it)
-    if ((S.other && !MINDE) || (S.aim && typeof m.tgt === 'string')) out.tgt = m.tgt;   // (4e) (magic 15b round 2: an aimed spell's body)
+    if ((S.other && !MINDE) || (S.aim && typeof m.tgt === 'string')) out.tgt = m.tgt;
+    else if (CAR && typeof m.tgt === 'string' && (S0.carBody || S0.carThing)) out.tgt = m.tgt;   // (21: carried onto the body it struck)   // (4e) (magic 15b round 2: an aimed spell's body)
     if (MINDE) { const secs = +((S.secsEnemy || S.secs || 10) * (socket._magicSecsK || 1)).toFixed(2); if (S.kind === 'mind') MINDE.mind = { k: S.mind, by: socket.id, until: now + secs * 1000 }; out.enemy = m.enemy; out.secs = secs; }   // (magic 16e; 17c: a seeker's mark on an enemy is checked the same way)
     // ⭐ (magic 17c) SEEKER'S MARK on a player: who marked whom, till when — so 'magic-where' answers its caster with their place wherever they are in the room
     if (S.kind === 'fareye') { const secs = +((S.secs || 30) * (socket._magicSecsK || 1)).toFixed(2); out.secs = secs; if (socket._eye) io.to(room).emit('magic-eye-end', { id: socket._eye.id }); socket._eye = { id, room, until: now + secs * 1000, reach: S.reach || 960 }; }   // (17c round 2: one eye a caster)
     if (S.kind === 'seekmark' && typeof out.tgt === 'string' && out.tgt !== 'mw-test-dummy') { const secs = +((S.secs || 120) * (socket._magicSecsK || 1)).toFixed(2); _magicSeekMarks.set(socket.id + '>' + out.tgt, now + secs * 1000); out.secs = secs; if (_magicSeekMarks.size > 2000) for (const [k, t] of _magicSeekMarks) if (t < now) _magicSeekMarks.delete(k); }
     // (step 3a) where a placed spell goes (the light orb): the caster's point, no further than its reach
-    if (isFinite(m.tx) && isFinite(m.ty)) { const dx = m.tx - out.x, dy = m.ty - out.y, d = Math.hypot(dx, dy), lim = ((MDo('mod_arc') && MDo('mod_arc').reach) || S.reach || 400) * (S.kind === 'zap' ? SPELLS.modFlight(ML).k : 1) + 8, k = d > lim ? lim / d : 1; out.tx = Math.round(out.x + dx * k); out.ty = Math.round(out.y + dy * k); }   // (4c: the lob's reach)
+    if (isFinite(m.tx) && isFinite(m.ty)) { const dx = m.tx - out.x, dy = m.ty - out.y, d = Math.hypot(dx, dy), lim = ((MDo('mod_arc') && MDo('mod_arc').reach) || (FLY && S.carReach) || S.reach || 400) * (S.kind === 'zap' ? SPELLS.modFlight(ML).k : 1) + 8, k = d > lim ? lim / d : 1; out.tx = Math.round(out.x + dx * k); out.ty = Math.round(out.y + dy * k); }   // (4c: the lob's reach)
     if (ML.length) { out.mods = ML; if (MS.has('mod_arc') && !isFinite(out.tx)) return no('bad'); }
     const SK = socket._magicSecsK && socket._magicSecsK !== 1 && S.secs ? Object.assign({}, S, { secs: S.secs * socket._magicSecsK, crackS: (S.crackS || 0) * Math.min(1, socket._magicSecsK) }) : S;
     // (step 3e, the user) FREEZE and the STONE WALL are SHOTS: they fly from the hand (each screen flies them, as a bolt) and do what they do where they land — the caster's game says where (`magic-hit`)
