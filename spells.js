@@ -381,12 +381,12 @@
     // ⭐ STEP 10a (2026-11-21) SPACE: BLINK (kind 'blink') — to the free spot nearest the pointer, at most `blinkR` px from your middle and in sight (the caster's game finds it:
     //   client 16zj `magicBlinkSpot`; the server holds it to `reach` px from the hand); your speed kept. PASS THROUGH (kind 'pass') — through at most `cells` cells of rock met within `near` cells of
     //   you, the way the pointer points (8 ways) to the first place your body fits (16zj `magicPassSpot`); carried there over a time set by how far.
-    blink: { name: 'Blink', school: 'space', form: 'placed', tier: 0, cd: 5, stance: 'level', kind: 'blink', learn: 3, reach: 540, car: 1, fuse: 1, carReach: 700, holdMs: 250, speed: 900, life: 0.9, grav: 0, r: 3.5, alts: ['farblink'], blinkR: 480, fx: '#b08cff',
+    blink: { name: 'Blink', school: 'space', form: 'placed', tier: 0, cd: 5, stance: 'level', kind: 'blink', gapMs: 250, learn: 3, reach: 540, car: 1, fuse: 1, carReach: 700, holdMs: 250, speed: 900, life: 0.9, grav: 0, r: 3.5, alts: ['farblink'], blinkR: 480, fx: '#b08cff',
       plain: { keys: [U, U, L, U, R], rune: [4, 1, 8, 0, 7] } },
     // ⭐ (21 — FORCE, SPACE, WARDS ONTO CARRIERS, 2026-11-28, the user) FAR BLINK, blink's variant: the mote FLIES ON (~1000 px; blink stops at the pointer) — so modifiers carry
     //   it round corners (bounce, follows, homing …). Both: a TAP blinks you where the mote ends; the fire button HELD past `holdMs` blinks you where it is when you LET GO
     //   (a split: the piece nearest your pointer, the others lost), or where it ends first (16zj `magicBlinkLet`)
-    farblink: { name: 'Far blink', school: 'space', form: 'bolt', tier: 0, cd: 6, stance: 'level', kind: 'blink', learn: 3, alt: 'blink', reach: 1000, blinkR: 480, car: 1, speed: 800, life: 1.3, grav: 0, r: 3.5, fx: '#b08cff',
+    farblink: { name: 'Far blink', school: 'space', form: 'bolt', tier: 0, cd: 6, stance: 'level', kind: 'blink', gapMs: 250, learn: 3, alt: 'blink', reach: 1000, blinkR: 480, car: 1, speed: 800, life: 1.3, grav: 0, r: 3.5, fx: '#b08cff',
       plain: { keys: [U, U, L, U, D], rune: [4, 1, 8, 0, 6] } },
     passthrough: { name: 'Pass through', school: 'space', form: 'placed', tier: 0, cd: 8, stance: 'level', kind: 'pass', learn: 3, reach: 380, cells: 16, near: 12, fx: '#b08cff',
       plain: { keys: [U, U, D, D, L], rune: [7, 6, 0, 3, 1] } },
@@ -514,13 +514,13 @@
       fx: '#b3121f', plain: { keys: [R, D, L, L, L], rune: [8, 7, 3, 1, 2] } },
     bloodwhip: { name: 'Blood whip', school: 'blood', form: 'stream', tier: 0, cd: 6, stance: 'level', kind: 'whip', learn: 3, chan: true, chanS: 5, cost: 1, len: 100, dmg: 1, gap: 0.45,
       fx: '#b3121f', plain: { keys: [R, D, R, L, R], rune: [6, 4, 2, 1, 3] } },
-    fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
+    fireward: { name: 'Fire ward', school: 'wards', form: 'self', tier: 0, cd: 10, stance: 'raise', kind: 'boon', pw: 'fireproof', secs: 20, learn: 3, aim: 'self', reach: 240, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, plain: { keys: [L, D, R, U, U], rune: [0, 6, 8, 2, 4] } },
     // ⭐ STEP 11a (2026-11-22) WARDS: WARD SKIN (kind 'wardskin', on yourself; its Touch variant on another) — a lattice of gold light over the body soaks the next `hp` half-hearts
     //   of harm of any kind for `secs` s (each game its own body: 16e `hurtMe`; the dummy's on its caster's machine). MIRROR WARD (kind 'mirror', on yourself, `secs` s — 11a round 2, the user: about 10 s): spell
     //   bolts, arrows, thrown things and ice shards that come within `R` px of your body turn back the way they came, now yours (catch's hand-off).
-    wardskin: { name: 'Ward skin', school: 'wards', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'wardskin', secs: 20, hp: 4, learn: 3, aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, fx: '#ffd86b',
+    wardskin: { name: 'Ward skin', school: 'wards', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'wardskin', secs: 20, hp: 4, learn: 3, aim: 'self', reach: 240, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, fx: '#ffd86b',
       plain: { keys: [L, U, U, R, D], rune: [0, 2, 5, 4, 7] } },
-    mirror: { name: 'Mirror ward', school: 'wards', form: 'self', aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3, tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 10, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
+    mirror: { name: 'Mirror ward', school: 'wards', form: 'self', aim: 'self', reach: 240, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3, tier: 1, cd: 14, stance: 'raise', kind: 'mirror', secs: 10, R: 18, minV: 3, learn: 5, fx: '#ffd86b',
       plain: { keys: [R, D, L, U, R], rune: [2, 0, 3, 5, 8] } },
     // ⭐ STEP 11b (2026-11-22; round 3, the user: the wall had no purpose of its own — 'I like the ward line option') WARDS: WARD LINE (kind 'wardline') — a line of light where
     //   you point, from rock to rock (at most `high` cells), `secs` s: no other player crosses it (each game stops its own body at it; the test dummy too); you, things,
@@ -817,11 +817,15 @@
     //   STOPS AT THE POINTER (`fuse`, `carReach` 700 — the placed reach, `reach`, is the carriers-off one): blink, doorways (each piece that lands the next door), the
     //   pocket's unfolding, alarm, dispel, ward line, ward dome (flies out, then held to grow). LOBBED: warding rune, null circle (lands, then held to grow).
     //   What a landed carrier opens is worked out by its caster's game where it ended (16zj `magicCarEx`: the spot that fits, what it struck) and checked here as ever.
+    // ⭐ (21, 2026-11-28, the user) LEVITATE, FIRE WARD, WARD SKIN, MIRROR WARD work on THINGS too (`carThing`): a thing levitated hovers over the ground for its time (16b's
+    //   solver: `lbMagicWt` `lev`); a warded thing is kept from harm — fire ward: it does not catch or burn (put out if burning); ward skin: it soaks `hp` blows; mirror ward:
+    //   what flies at it is turned back (its caster's game keeps it). EVERY carrier is stopped by a thing it meets (one it cannot open on: lost). `gapMs` (blink): after
+    //   a blink, another piece ending sooner than that is lost (a split's pieces landing together take you once)
     heavy: { name: 'Heavy', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', learn: 3, reach: 260, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, secs: 10, alts: ['weightless'], fx: '#9a7ef0',
       plain: { keys: [R, D, L, D, D], rune: [3, 7, 6, 4, 8] } },
     weightless: { name: 'Weightless', school: 'force', form: 'touch', tier: 0, cd: 8, stance: 'level', kind: 'weight', alt: 'heavy', light: 1, reach: 260, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, secs: 10, fx: '#ece8ff',
       plain: { keys: [R, D, L, D, U], rune: [3, 7, 6, 4, 0] } },
-    levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 20, learn: 3, aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3,
+    levitate: { name: 'Levitate', school: 'force', form: 'self', tier: 0, cd: 12, stance: 'raise', kind: 'boon', pw: 'levitate', secs: 20, learn: 3, aim: 'self', reach: 240, car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3,
       plain: { keys: [R, U, D, U, R], rune: [5, 7, 3, 1, 2] } },
     // ⭐ STEP 9c (2026-11-21) FORCE: STASIS (kind 'stasis', on the loose thing or player nearest the pointer within `reach`, never yourself): a thing stops dead for `secs` s, the
     //   blows it takes stored and given all at once at the end (client 16b `lbStasis`); a player held at most `holdS` s, each fresh movement key `press` s off, a blow breaks it.

@@ -3852,7 +3852,8 @@ function magicCarScale(S, k) { const o = magicModSplitSK(S, k); for (const f of 
   if (o.kind === 'spikes') { if (isFinite(o.n)) o.n = Math.max(1, Math.round(o.n * k)); if (isFinite(o.base)) o.base = o.base * Math.min(1.6, Math.max(0.4, k)); }
   if (o.kind === 'quake' && isFinite(o.loose)) o.loose = Math.max(1, Math.round(o.loose * k));
   // (21 Storm, the user: a split / smaller piece gives LESS — by its share) a boon on a body: its time, the wind shield's strength (its reach is `R`, above)
-  if (o.carBody) { if (isFinite(o.secs)) o.secs = Math.max(0.5, o.secs * k); if (isFinite(o.k)) o.k = o.k * k; if (isFinite(o.hp)) o.hp = Math.max(1, Math.round(o.hp * k)); }
+  if (o.carBody) { if (isFinite(o.secs)) o.secs = Math.max(0.5, o.secs * k); if (isFinite(o.k)) o.k = o.k * k; }
+  if ((o.carBody || o.carThing) && isFinite(o.hp)) o.hp = Math.max(1, Math.round(o.hp * k));   // (a ward skin's strength)
   // (21 — Wards) a carried dome / null circle grows from and to sizes × its own; a thing held, weighed or sealed for its share of the time
   for (const f of ['Rmin', 'Rmax']) if (isFinite(o[f]) && o[f] > 0) o[f] = Math.max(16, o[f] * k);
   if (o.carThing && isFinite(o.secs)) o.secs = Math.max(0.5, o.secs * Math.min(1, k));
@@ -4082,6 +4083,15 @@ function magicHedgeFire(room, x, y, r) { if (!_magicHedges.size) return; const n
   for (const q of _magicHedges.values()) { if (q.room !== room || now > q.until || q.burnAt) continue; if (Math.abs(x - q.x) > q.w / 2 + (r || 0) + 4 || y < q.y - q.h - (r || 0) - 4 || y > q.y + (r || 0) + 8) continue;
     q.burnAt = now; q.until = Math.min(q.until, now + (q.burnS || 2) * 1000); io.to(room).emit('magic-hedge-burn', { id: q.id }); } }
 function magicAlarmsOf(room) { let a = _magicAlarms.get(room); if (!a) _magicAlarms.set(room, a = []); return a; }
+// ⭐ (21, 2026-11-28, the user: wards on things 'to protect said objects from damage') A WARDED THING: fire ward (`fire` until) — not set alight, not burnt, not set off by
+//   heat; ward skin (`skin` until, `hp` left) — each blow, dig or chop on it soaked (one a blow) and shown (`magic-objward`). One record a thing, either or both
+const _magicObjWards = new Map();   // obj id → { room, by, fire, skin, hp }
+function magicObjWardOf(room, oid) { const W = typeof oid === 'string' ? _magicObjWards.get(oid) : null; if (!W) return null; const now = Date.now();
+  if (W.room !== room || !((W.fire && now < W.fire) || (W.skin && now < W.skin && W.hp > 0))) { if (now > Math.max(W.fire || 0, W.skin || 0)) _magicObjWards.delete(oid); return null; } return W; }
+function magicObjFireWarded(room, oid) { const W = magicObjWardOf(room, oid); return !!(W && W.fire && Date.now() < W.fire); }
+// a blow on a thing: soaked by its ward skin (true — the blow does nothing), one off its strength, every screen shown
+function magicObjSkinSoak(room, oid) { const W = magicObjWardOf(room, oid); if (!W || !W.skin || Date.now() > W.skin || !(W.hp > 0)) return false; W.hp--;
+  io.to(room).emit('magic-objward', { obj: oid, k: 'skin', hp: W.hp }); return true; }
 function magicSealOf(room, oid) { const q = typeof oid === 'string' ? _magicSeals.get(oid) : null; return q && q.room === room && Date.now() < q.until ? q : null; }
 // sealed by somebody other than `sid`: their magic does not move it, they do not pick it up
 function magicSealedOther(room, oid, sid) { const q = magicSealOf(room, oid); return !!q && q.by !== sid; }
@@ -7867,6 +7877,7 @@ function objFireAsleep(room, x, y) {
 // this only makes sure. Not stamped (it is moving): the cells nearest the brush are flagged alight, in the pose the
 // client that saw it reports, and they catch in the world the moment it comes to rest.
 function bodyIgnite(room, obj, x, y, r, px, py, pa) {
+  if (obj && magicObjFireWarded(room, obj.id)) return false;   // (21: a fire-warded thing does not catch)
   const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id);
   if (S) { igniteBox(room, x, y, Math.max(TERRAIN_CELL / 2, Math.min(160, r || 16))); return false; }   // nothing in the record changed
   if (!isFinite(px) || !isFinite(py)) { px = obj.x; py = obj.y; pa = obj.angle || 0; }
@@ -29085,6 +29096,9 @@ io.on('connection', (socket) => {
     if (typeof src === 'string' && src && !worldHitOk(currentAvatarRoom, id, src.slice(0, 48), obj)) return;
     // (magic 11d) a SEALED thing is not broken, set off or burnt by any hit; every screen sees its seal flash
     if (obj && magicSealOf(currentAvatarRoom, id)) { io.to(currentAvatarRoom).emit('magic-seal-flash', { obj: id }); return; }
+    // (21) a WARDED thing: heat does nothing to a fire-warded one; any other blow is soaked by its ward skin
+    if (obj && (fire || light) && magicObjFireWarded(currentAvatarRoom, id)) { io.to(currentAvatarRoom).emit('magic-objward', { obj: id, k: 'fire' }); return; }
+    if (obj && !fire && !douse && !light && magicObjSkinSoak(currentAvatarRoom, id)) return;
     // ⭐ #184 round 19 — HITTING A MIMIC'S OBJECT WAKES IT rather than damaging the object (fire still burns it). Punching
     //   a suspicious crate is how you find out.
     if (obj && obj.mimic && !fire && !douse) { mimicHitWake(currentAvatarRoom, obj, x); return; }
@@ -29698,6 +29712,13 @@ io.on('connection', (socket) => {
     if (WL) { out.lx = WL.x; out.ly0 = WL.y0; out.ly1 = WL.y1; out.secs = +(SK.secs || 30).toFixed(2); }
     // (magic 11a) WARD SKIN: how much it soaks and for how long (every screen keeps it on that body) · MIRROR WARD: kept while it holds
     if (S.kind === 'wardskin') { out.hp = SK.hp || 4; out.secs = +(SK.secs || 20).toFixed(2); }
+    // ⭐ (21, the user) LEVITATE / FIRE WARD / WARD SKIN / MIRROR WARD carried onto a THING (not a body): it, not you — levitating needs a loose one; a ward kept here (a burning
+    //   one put out by the fire ward)
+    if (CAR && typeof m.obj === 'string' && S0.carThing && (S.kind === 'boon' || S.kind === 'wardskin' || S.kind === 'mirror')) { const ob = roomObjects[room] && roomObjects[room].get(m.obj);
+      if (!ob || ob.type !== 'stamp' || (S.pw === 'levitate' && !ob.loose)) return no('nothing'); out.obj = m.obj; delete out.tgt; out.secs = +(SK.secs || 20).toFixed(2);
+      if (S.pw === 'fireproof' || S.kind === 'wardskin') { const W = _magicObjWards.get(m.obj) || { by: socket.id }; W.room = room; W.by = socket.id;
+        if (S.pw === 'fireproof') { W.fire = now + out.secs * 1000; if (bodySpec(ob)) { try { bodyBurnOut(room, ob); } catch (e) {} } } else { W.skin = now + out.secs * 1000; W.hp = out.hp = SK.hp || 4; }
+        _magicObjWards.set(m.obj, W); if (_magicObjWards.size > 4000) _magicObjWards.delete(_magicObjWards.keys().next().value); } }
     if (S.kind === 'mirror') { out.secs = +(SK.secs || 6).toFixed(2); _magicMirrors.set(S.aim && typeof m.tgt === 'string' && m.tgt !== 'mw-test-dummy' ? m.tgt : socket.id, now + out.secs * 1000 + 300); }   // (magic 15b round 8: on whom the pointer chose — its keeper's game catches)
     if (S.kind === 'blink' || S.kind === 'pass') { out.bx = Math.round(+m.bx); out.by = Math.round(+m.by); }
     // (magic 10b) a MARK kept (the last one, wherever it was, gone) · a RECALL told where the mark is (its held record too)
@@ -30310,6 +30331,7 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || !canBuild() || !Array.isArray(ks) || !ks.length || ks.length > 64) return;
     const obj = roomObjects[room] && roomObjects[room].get(id);
     if (!obj || bodySpec(obj) !== 'fallen') return;
+    if (magicObjSkinSoak(room, obj.id)) return;   // (21: soaked by its ward skin)
     bodyMine(room, obj, ks);
   });
   // ⭐ (2026-10-30, round D) AN AXE'S CHOP INTO A FELLED PIECE: each named cell takes its share `fs[i]` (0…1 of the cell — the axe's damage over the
@@ -30322,6 +30344,7 @@ io.on('connection', (socket) => {
     const room = currentAvatarRoom; if (!room || !canBuild() || !Array.isArray(ks) || !ks.length || ks.length > 64 || !Array.isArray(fs) || fs.length !== ks.length) return;
     const obj = roomObjects[room] && roomObjects[room].get(id);
     if (!obj || bodySpec(obj) !== 'fallen') return;
+    if (magicObjSkinSoak(room, obj.id)) return;   // (21: soaked by its ward skin)
     const fm = fallMats(obj), fw = fallWear(obj), fn = fallNotch(obj), up = u ? 1 : 0, mine = [];
     for (let i = 0; i < ks.length; i++) { const k = ks[i] | 0, f = Math.max(0, Math.min(1, +fs[i] || 0)); if (k < 0 || k >= fm.length || !fm[k] || !f) continue;
       // (2026-11-19, 5b round 5) A BOULDER'S ROCK (the pick's blow): no notch — its damage only, and mined once it is used up, as a rock cell in the ground is
