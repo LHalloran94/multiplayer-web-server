@@ -3844,7 +3844,8 @@ function magicCarryOpen(L, m, UU) { const x = Math.round(+m.x), y = Math.round(+
   const EX = isFinite(UU.nx) && isFinite(UU.ny) ? { nx: UU.nx, ny: UU.ny } : {}; if (pl) EX.onBody = 1; if (S00 && S00.kind === 'vine' && typeof m.obj === 'string' && m.obj.length < 64) EX.obj = m.obj; if (m.ex && typeof m.ex === 'object') { for (const f of ['tx', 'ty', 'bx', 'by', 'br', 'ly0', 'ly1']) if (isFinite(m.ex[f])) EX[f] = Math.round(+m.ex[f]); for (const f of ['sh', 'on']) if (m.ex[f] != null) EX[f] = m.ex[f] ? 1 : 0; }
   // (2026-11-29) the light orb's body, a look carried (disguise, the guise: whom it struck — `carLook`) · what its caster's game found there: a tool's look, a thing's look,
   //   a false wall's box, a double's walk · colour spray's fan the way the carrier was going
-  if (S00 && (S00.kind === 'orb' || S00.carLook) && pl) EX.tgt = pl === 'dummy' ? 'mw-test-dummy' : pl;
+  // (batch 3) through the stone: whom it struck — its own caster: the window goes round them
+  if (S00 && (S00.kind === 'orb' || S00.kind === 'stone' || S00.carLook) && pl) EX.tgt = pl === 'dummy' ? 'mw-test-dummy' : pl;
   if (m.ex && typeof m.ex === 'object') { for (const f of ['look', 'off', 'shape']) if (typeof m.ex[f] === 'string' && m.ex[f].length < 40) EX[f] = m.ex[f]; for (const f of ['lw', 'lh', 'dv']) if (isFinite(m.ex[f])) EX[f] = +m.ex[f]; if (m.ex.fb && typeof m.ex.fb === 'object') EX.fb = m.ex.fb; }
   if (S00 && S00.kind === 'sense' && S00.sense === 'spray' && isFinite(UU.ux) && isFinite(UU.uy)) { EX.ax = UU.ux; EX.ay = UU.uy; }
   let TH = null, spell = L.spell; if (S0 && S0.carThing) { const ob = typeof m.obj === 'string' && m.obj.length < 64 ? m.obj : null;
@@ -29691,7 +29692,7 @@ io.on('connection', (socket) => {
     // (carriers) every screen flies it as a bolt · …and opens its spell where it landed
     if (FLY) out.car = 1; if (CAR) { out.carried = 1; if (CAR.k && CAR.k !== 1) out.ck = +CAR.k.toFixed(3); }   // (21 Storm: `ck` the carrier's size — each screen's look sized by it)
     if ((S.other && !MINDE) || (S.aim && typeof m.tgt === 'string')) out.tgt = m.tgt;
-    else if (CAR && typeof m.tgt === 'string' && (S0.carBody || S0.carThing || S0.kind === 'orb')) out.tgt = m.tgt;   // (21: carried onto the body it struck)   // (4e) (magic 15b round 2: an aimed spell's body)
+    else if (CAR && typeof m.tgt === 'string' && (S0.carBody || S0.carThing || S0.kind === 'orb' || S0.kind === 'stone')) out.tgt = m.tgt;   // (21: carried onto the body it struck)   // (4e) (magic 15b round 2: an aimed spell's body)
     if (MINDE) { const secs = +((S.secsEnemy || S.secs || 10) * (socket._magicSecsK || 1)).toFixed(2); if (S.kind === 'mind') MINDE.mind = { k: S.mind, by: socket.id, until: now + secs * 1000 }; out.enemy = m.enemy; out.secs = secs; }   // (magic 16e; 17c: a seeker's mark on an enemy is checked the same way)
     // ⭐ (magic 17c) SEEKER'S MARK on a player: who marked whom, till when — so 'magic-where' answers its caster with their place wherever they are in the room
     if (S.kind === 'fareye') { const secs = +((S.secs || 30) * (socket._magicSecsK || 1)).toFixed(2); out.secs = secs; if (socket._eye) io.to(room).emit('magic-eye-end', { id: socket._eye.id }); socket._eye = { id, room, until: now + secs * 1000, reach: S.reach || 960 }; }   // (17c round 2: one eye a caster)

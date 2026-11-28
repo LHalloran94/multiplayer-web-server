@@ -144,8 +144,9 @@
   // ⭐ ONE READER FOR THE WHOLE FILE. Clamped rather than trusted: `sizeK` arrives from a client packet on the
   // relay, and a body of size 0 (or 40) is not a small avatar, it is a hole in every collision test here.
   // ⚠️ THE BOUNDS MUST MATCH THE CLIENT'S SIZE RANGE. 2..11 cells of 8px against a 40px default is 0.4..2.2.
-  // (2026-11-29) up to 6 (30 cells): GROW with bigger pieces grows past the old most (2.2 = 11 cells) — a safety stop, not a size anything aims for
-  function sizeOf(s) { const k = (s && s.sizeK) || 1; return k < 0.4 ? 0.4 : (k > 6 ? 6 : k); }
+  // (2026-11-29) up to 4 (20 cells): GROW with bigger pieces grows past the old most (2.2 = 11 cells) — a safety stop, not a size anything aims for
+  //   (the user: 30 cells lagged and the feet went wrong — 20 for now)
+  function sizeOf(s) { const k = (s && s.sizeK) || 1; return k < 0.4 ? 0.4 : (k > 4 ? 4 : k); }
   const clamp = (v, lo, hi) => (v < lo ? lo : (v > hi ? hi : v));
   function bodyW(s) { return C.AV_W * sizeOf(s); }
   function bodyH(s) { return C.AV_H * sizeOf(s); }

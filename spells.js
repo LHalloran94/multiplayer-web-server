@@ -1173,6 +1173,9 @@
   for (const id of ['disguise', 'guise', 'colourspray', 'hiderock']) Object.assign(SPELLS[id], { car: 1, speed: 520, life: 1.9, grav: 0, r: 3 });
   SPELLS.disguise.carLook = 1; SPELLS.guise.carLook = 1;
   Object.assign(SPELLS.veil, { car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3 });
+  // ⭐ (2026-11-29, BATCH 3) THROUGH THE STONE flies on: the window opens where it strikes (the rock round it does not stop YOUR sight; it stays there) — striking you:
+  //   today's, round you and going with you · SEEK ORE / WATER / LIFE fly on: the pulse goes out from where they strike
+  for (const id of ['throughstone', 'seek', 'seek_w', 'seek_l']) Object.assign(SPELLS[id], { car: 1, speed: 520, life: 1.9, grav: 0, r: 3 });
   SPELLS.tunnelbolt.noMods = ['mod_thru'];   // (21 M1) it bores through rock already
   const wordOf = (S) => S.word || FORMS[S.form] || { keys: [], rune: [] };
   // (step 3h, the user: "add a contents page to the master tome … the tabs should probably just be for each school and the spells should be arranged by schools") its first page
