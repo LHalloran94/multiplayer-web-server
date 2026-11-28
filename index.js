@@ -3835,13 +3835,20 @@ function magicCarryOpen(L, m, UU) { const x = Math.round(+m.x), y = Math.round(+
   const EN = BOD && !pl && (S0.kind === 'mind' || S0.kind === 'seekmark') && typeof m.enemy === 'string' && m.enemy.length < 64 ? m.enemy : null;
   if (BOD && !BOD.tgt && !EN) return;
   if (BOD && S0.selfLost && BOD.tgt === L.by) return;
+  // (2026-11-29) a bound tool, or mislead's walking double, needs a body that plays it — the dummy has none: lost
+  if (BOD && BOD.tgt === 'mw-test-dummy' && (S0.kind === 'bound' || S0.kind === 'double')) return;
   // ⭐ (21 — Force / Space / Wards, 2026-11-28) WHAT ITS CASTER'S GAME FOUND WHERE IT ENDED (`ex`, 16zj `magicCarEx` — the same code the cast used at the pointer, run at the
   //   carrier's end): the spot that fits (blink, a door, the pocket's unfolding, an alarm), the ward line's reach, the dome's body, a swap's / blink's caster's feet — every
   //   number then checked by the cast as ever. ON A BODY OR A THING (`carThing`): the body struck (`tgt`), else the thing (`obj`), else lost (an emptying pocket opens anyway)
   // (21 — Life) the face it struck (`nx`, `ny` — a vine's seed in a wall's face hangs from there)
   const EX = isFinite(UU.nx) && isFinite(UU.ny) ? { nx: UU.nx, ny: UU.ny } : {}; if (pl) EX.onBody = 1; if (S00 && S00.kind === 'vine' && typeof m.obj === 'string' && m.obj.length < 64) EX.obj = m.obj; if (m.ex && typeof m.ex === 'object') { for (const f of ['tx', 'ty', 'bx', 'by', 'br', 'ly0', 'ly1']) if (isFinite(m.ex[f])) EX[f] = Math.round(+m.ex[f]); for (const f of ['sh', 'on']) if (m.ex[f] != null) EX[f] = m.ex[f] ? 1 : 0; }
+  // (2026-11-29) the light orb's body, a look carried (disguise, the guise: whom it struck — `carLook`) · what its caster's game found there: a tool's look, a thing's look,
+  //   a false wall's box, a double's walk · colour spray's fan the way the carrier was going
+  if (S00 && (S00.kind === 'orb' || S00.carLook) && pl) EX.tgt = pl === 'dummy' ? 'mw-test-dummy' : pl;
+  if (m.ex && typeof m.ex === 'object') { for (const f of ['look', 'off', 'shape']) if (typeof m.ex[f] === 'string' && m.ex[f].length < 40) EX[f] = m.ex[f]; for (const f of ['lw', 'lh', 'dv']) if (isFinite(m.ex[f])) EX[f] = +m.ex[f]; if (m.ex.fb && typeof m.ex.fb === 'object') EX.fb = m.ex.fb; }
+  if (S00 && S00.kind === 'sense' && S00.sense === 'spray' && isFinite(UU.ux) && isFinite(UU.uy)) { EX.ax = UU.ux; EX.ay = UU.uy; }
   let TH = null, spell = L.spell; if (S0 && S0.carThing) { const ob = typeof m.obj === 'string' && m.obj.length < 64 ? m.obj : null;
-    TH = pl ? { tgt: pl === 'dummy' ? 'mw-test-dummy' : pl } : ob ? { obj: ob } : null; if (!TH && !(S0.kind === 'pocket' && isFinite(EX.tx))) return;
+    TH = S0.kind === 'veil' ? (ob ? { obj: ob } : null) : pl ? { tgt: pl === 'dummy' ? 'mw-test-dummy' : pl } : ob ? { obj: ob } : null; if (!TH && !(S0.kind === 'pocket' && isFinite(EX.tx))) return;
     // (REWIND, one spell: on a thing it is 'Rewind a thing')
     if (S0.kind === 'rewind' && TH && TH.obj) spell = 'rewind_o'; }
   if (BOD && typeof m.wpn === 'string' && m.wpn.length < 64) BOD.wpn = m.wpn;
@@ -29684,7 +29691,7 @@ io.on('connection', (socket) => {
     // (carriers) every screen flies it as a bolt · …and opens its spell where it landed
     if (FLY) out.car = 1; if (CAR) { out.carried = 1; if (CAR.k && CAR.k !== 1) out.ck = +CAR.k.toFixed(3); }   // (21 Storm: `ck` the carrier's size — each screen's look sized by it)
     if ((S.other && !MINDE) || (S.aim && typeof m.tgt === 'string')) out.tgt = m.tgt;
-    else if (CAR && typeof m.tgt === 'string' && (S0.carBody || S0.carThing)) out.tgt = m.tgt;   // (21: carried onto the body it struck)   // (4e) (magic 15b round 2: an aimed spell's body)
+    else if (CAR && typeof m.tgt === 'string' && (S0.carBody || S0.carThing || S0.kind === 'orb')) out.tgt = m.tgt;   // (21: carried onto the body it struck)   // (4e) (magic 15b round 2: an aimed spell's body)
     if (MINDE) { const secs = +((S.secsEnemy || S.secs || 10) * (socket._magicSecsK || 1)).toFixed(2); if (S.kind === 'mind') MINDE.mind = { k: S.mind, by: socket.id, until: now + secs * 1000 }; out.enemy = m.enemy; out.secs = secs; }   // (magic 16e; 17c: a seeker's mark on an enemy is checked the same way)
     // ⭐ (magic 17c) SEEKER'S MARK on a player: who marked whom, till when — so 'magic-where' answers its caster with their place wherever they are in the room
     if (S.kind === 'fareye') { const secs = +((S.secs || 30) * (socket._magicSecsK || 1)).toFixed(2); out.secs = secs; if (socket._eye) io.to(room).emit('magic-eye-end', { id: socket._eye.id }); socket._eye = { id, room, until: now + secs * 1000, reach: S.reach || 960 }; }   // (17c round 2: one eye a caster)
@@ -29855,7 +29862,7 @@ io.on('connection', (socket) => {
     if (S.kind === 'wall' && !shot) out.n = magicWall(room, out.tx, out.ty, SK);
     if (S.kind === 'firewall' && !shot) { const g = magicGroundAt(room, isFinite(out.tx) ? out.tx : out.x, isFinite(out.ty) ? out.ty : out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; Object.assign(out, magicFireWallAt(room, g.x, g.y, SK)); }   // (6b)
     // ⭐ (6b) THE FLAME RING: kept here while it burns, so the ground its flames brush can be lit (`magic-fire-at`) — one a caster, a new one ends the old
-    if (S.kind === 'firering') { const secs = +(SK.secs || 12).toFixed(2); for (const [k, q] of _magicAuras) if (q.by === socket.id || now > q.until) _magicAuras.delete(k); _magicAuras.set(id, { by: socket.id, at: S.aim && typeof m.tgt === 'string' && m.tgt !== 'mw-test-dummy' ? m.tgt : socket.id, room, until: now + secs * 1000 + 500 }); out.secs = secs; }
+    if (S.kind === 'firering') { const secs = +(SK.secs || 12).toFixed(2); for (const [k, q] of _magicAuras) if ((q.by === socket.id && q.cast !== CASTK) || now > q.until) _magicAuras.delete(k); out.cast = CASTK; _magicAuras.set(id, { cast: CASTK, by: socket.id, at: S.aim && typeof m.tgt === 'string' && m.tgt !== 'mw-test-dummy' ? m.tgt : socket.id, room, until: now + secs * 1000 + 500 }); out.secs = secs; }
     if (S.kind === 'shard') { const secs = +(SK.secs || 20).toFixed(2); socket._magicShard = { id, until: now + 3000, secs }; out.secs = secs; }   // (7a) the caster's game makes the shard (`avatar-object-spawn` `shard`)
     if (CL) { const K = socket._magicSecsK || 1, secs = S.cloudS || 8, until = now + secs * 1000; for (const [k, q] of _magicClouds) if (q.by === socket.id && q.spell === m.spell && q.cast !== CASTK && now < q.until) q.until = now;   // (one of each at a time: a new one ends your last)
       _magicClouds.set(id, { cast: CASTK, room, by: socket.id, spell: m.spell, x: CL.x, y: CL.y, gy: CL.gy, w: (S.wide || 14) * TERRAIN_CELL, until, snow: !!S.snow, made: 0, acc: 0, lt: null, put: [], melt: until + (S.meltSecs || 60) * 1000 * K, dryMs: (S.drySecs || 60) * 1000 * K });
@@ -29950,8 +29957,11 @@ io.on('connection', (socket) => {
       if (S.kind === 'pcloud') { out.w = (S.wide || 16) * TERRAIN_CELL; out.h = (S.high || 4) * TERRAIN_CELL; M.set(id, { id, cast: CASTK, by: socket.id, room, x: out.tx, y: out.ty, w: out.w, h: out.h, until: now + out.secs * 1000 }); }
       else M.set(id, { id, cast: CASTK, by: socket.id, room, x: out.tx, y: out.ty, until: now + out.secs * 1000, armAt: now + (S.armS || 1.2) * 1000 }); }
     // ⭐ (magic 19) A BOUND TOOL in the caster's hand (made at the catalyst's tip; their game takes it at once) · A SPIRIT STEP at the point (not open there: refused)
-    if (S.kind === 'bound') { const B = magicBoundMake(room, socket, currentUsername, m.look, out.x, out.y, false); if (!B) return no('bad'); out.obj = B.id; out.look = B.look;
-      if (typeof m.off === 'string') { const B2 = magicBoundMake(room, socket, currentUsername, m.off, out.x, out.y, true); if (B2) { out.offObj = B2.id; out.off = B2.look; } } }   // (round 2) a shield in the off hand
+    // (2026-11-29) carried: into the hand of whom it struck (their own game takes it)
+    if (S.kind === 'bound') { const BT = CAR && typeof m.tgt === 'string' && m.tgt !== socket.id ? io.sockets.sockets.get(m.tgt) : null; if (CAR && typeof m.tgt === 'string' && m.tgt !== socket.id && (!BT || socketToAvatarRoom[BT.id] !== room)) return no('nobody');
+      const bs = BT || socket, bn = BT ? (BT.username || '') : currentUsername;
+      const B = magicBoundMake(room, bs, bn, m.look, out.x, out.y, false); if (!B) return no('bad'); out.obj = B.id; out.look = B.look;
+      if (typeof m.off === 'string') { const B2 = magicBoundMake(room, bs, bn, m.off, out.x, out.y, true); if (B2) { out.offObj = B2.id; out.off = B2.look; } } }   // (round 2) a shield in the off hand
     if (S.kind === 'step') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); const n = magicStepMake(room, out.tx, out.ty, SK); if (!n) return no('room');
       out.tx = Math.round(out.tx); out.ty = Math.round(out.ty); out.n = n; out.wide = S.wide || 10; out.thick = S.thick || 1; out.secs = +(SK.secs || 20).toFixed(2); }
     if (S.kind === 'dispel') { if (!isFinite(out.tx) || !isFinite(out.ty)) return no('bad'); out.R = S.R || 120; out.ms = S.ms || 450; out.n = magicDispel(room, out.tx, out.ty, out.R, out.ms, socket.id); }

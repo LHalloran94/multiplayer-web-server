@@ -1158,6 +1158,21 @@
   for (const id of ['fear', 'charm', 'seekmark']) SPELLS[id].selfLost = 1;
   // (2026-11-29, the user: colour wash belongs with Light's painting spells) — its three-key word stands in Light (Light's two-key words are all taken)
   SPELLS.colourwash.school = 'light';
+  // ⭐ (21, 2026-11-29, the user — the audit's answers + BATCH 2) ON THE BODY STRUCK: the FLAME RING (round whoever it strikes), the BOUND TOOLS / WEAPONS (into the struck
+  //   one's hand — they lose it as their own: switching away, throwing it), TWO FACES (you and whom it strikes swap; you: lost), FAKE YOUR DEATH and MISLEAD (the struck
+  //   one's own game plays it — their death, their walking double)
+  for (const id of ['flamering', 'boundtool', 'boundblade', 'boundaxe', 'boundspear', 'boundmace', 'boundshield', 'boundbow', 'twofaces', 'fakedeath', 'mislead'])
+    Object.assign(SPELLS[id], { car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3 });
+  SPELLS.twofaces.selfLost = 1;
+  //   STOPS AT THE POINTER (≤ 700 px, or the first thing on the way): the LIGHT ORB (striking a body on the way it FOLLOWS that body), SPIRIT STEP, the VEIL OF HIDING,
+  //   the FALSE WALL (it fills the gap where it stops), the DOUBLE and the MIRROR DOUBLE (where it stops, walking on the way it went)
+  for (const id of ['lightorb', 'spiritstep', 'hiding', 'falsewall', 'double', 'double_m']) Object.assign(SPELLS[id], { car: 1, fuse: 1, carReach: 700, speed: 520, life: 1.9, grav: 0, r: 3 });
+  //   FLIES ON, opening wherever it ends: DISGUISE (you take the look of the body it strikes, else a stranger's — `carLook`), the GUISE (a thing struck: you take its look;
+  //   a body: it becomes a thing; else you, as a thing that suits your spot), COLOUR SPRAY (its fan bursts out where it ends, on the way it was going), UNSEEN ROCK (the
+  //   rock round where it strikes; in the air: lost) · VEIL A THING on the thing struck, or on what the body struck holds
+  for (const id of ['disguise', 'guise', 'colourspray', 'hiderock']) Object.assign(SPELLS[id], { car: 1, speed: 520, life: 1.9, grav: 0, r: 3 });
+  SPELLS.disguise.carLook = 1; SPELLS.guise.carLook = 1;
+  Object.assign(SPELLS.veil, { car: 1, carThing: 1, speed: 520, life: 1.9, grav: 0, r: 3 });
   SPELLS.tunnelbolt.noMods = ['mod_thru'];   // (21 M1) it bores through rock already
   const wordOf = (S) => S.word || FORMS[S.form] || { keys: [], rune: [] };
   // (step 3h, the user: "add a contents page to the master tome … the tabs should probably just be for each school and the spells should be arranged by schools") its first page
