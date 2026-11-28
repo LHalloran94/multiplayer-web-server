@@ -3822,18 +3822,25 @@ let _magicSeq = 0; const _magicLive = new Map();   // (magic step 1) bolts in th
 function magicCarryOpen(L, m, UU) { const x = Math.round(+m.x), y = Math.round(+m.y), C = L.car;
   io.to(L.room).emit('magic-end', Object.assign({}, UU, { id: m.id, x, y, air: m.air ? 1 : 0, land: 'car', spell: L.spell, from: L.by, pl: typeof m.pl === 'string' ? m.pl.slice(0, 40) : undefined }));
   const s = io.sockets.sockets.get(L.by); if (!s || !s._magicCastFn || socketToAvatarRoom[s.id] !== L.room) return;
-  const dir = x - C.x0 >= 0 ? 1 : -1;
+  const S00 = SPELLS.of(L.spell);
+  // (21 — Earth, 2026-11-28, the user) STONE SPIKES run on THE WAY THE SEED WAS GOING where it struck (its flight's `ux`; straight down: away from its caster)
+  const dir = S00 && S00.kind === 'spikes' && isFinite(UU.ux) && Math.abs(UU.ux) > 0.05 ? (UU.ux > 0 ? 1 : -1) : x - C.x0 >= 0 ? 1 : -1;
   // ⭐ (21 — Storm, 2026-11-28) a spell that opens ON A BODY (`carBody`: feather fall, the wind shield, the lightning weapon) opens on the one it struck — its caster (`pl` is their
   //   id), the dummy ('dummy'), another player — with the weapon that body holds (`wpn`, its caster's game found it); it met none: lost
   const S0 = SPELLS.of(L.spell), pl = typeof m.pl === 'string' && m.pl.length < 64 ? m.pl : null, BOD = S0 && S0.carBody ? { tgt: pl === 'dummy' ? 'mw-test-dummy' : pl } : null;
   if (BOD && !BOD.tgt) return;
   if (BOD && typeof m.wpn === 'string' && m.wpn.length < 64) BOD.wpn = m.wpn;
+  // (21 — Earth) the RISING PILLAR rises under the FEET of the body struck (`fx`, `fy` — its caster's game found them; near where it struck, else under the strike)
+  if (BOD && isFinite(m.fx) && isFinite(m.fy) && Math.hypot(+m.fx - x, +m.fy - y) < 80) { BOD.bx = Math.round(+m.fx); BOD.by = Math.round(+m.fy); }
   try { s._magicCastFn(Object.assign({ spell: L.spell, cat: C.cat, x: x - dir, y, ax: C.ax, ay: C.ay, tx: x, ty: y, bx: x, by: y + 10, br: 10, shot: C.shot, car: 0 }, BOD || {}), C); } catch (e) { console.error('[magic carrier]', e && e.message); } }
 // (carriers) a spell's numbers at a carrier's size: its cells, width, height, length, reach (the split shot's) and a whirlpool's reach and pump, a blizzard's clouds and their spread
 // (21 Storm) its maker's sizes too (`magicModSplitSK`): cells, width, height, length, a clap's reach, a shield's reach
 function magicCarScale(S, k) { const o = magicModSplitSK(S, k); for (const f of ['maxR', 'spread', 'pump']) if (isFinite(o[f]) && o[f] > 0) o[f] = Math.max(1, o[f] * k);
   if (isFinite(o.depth) && o.depth > 0) o.depth = Math.max(2, Math.round(o.depth * k));   // (the whirlpool's depth, the user: smaller = shallower too)
   if (isFinite(o.clouds)) o.clouds = Math.max(1, Math.round(o.clouds * k));
+  // (21 — Earth) fewer stone spikes (and narrower — `base`), a quake that shakes less loose
+  if (o.kind === 'spikes') { if (isFinite(o.n)) o.n = Math.max(1, Math.round(o.n * k)); if (isFinite(o.base)) o.base = o.base * Math.min(1.6, Math.max(0.4, k)); }
+  if (o.kind === 'quake' && isFinite(o.loose)) o.loose = Math.max(1, Math.round(o.loose * k));
   // (21 Storm, the user: a split / smaller piece gives LESS — by its share) a boon on a body: its time, the wind shield's strength (its reach is `R`, above)
   if (o.carBody) { if (isFinite(o.secs)) o.secs = Math.max(0.5, o.secs * k); if (isFinite(o.k)) o.k = o.k * k; }
   return o; }
@@ -5199,7 +5206,7 @@ function magicRubbleBits(room, list, dx, dy) {
 //   blow's: `terrain-wear` with where it came from); then those cracked near through, or hanging by one, shaken loose — touching ones together as LOOSE BOULDERS (`magicBoulderMake`),
 //   a cell alone as falling scree. Every screen is told (`magic-quake`: where, how far, how long) for the shaking and the dust; each ring's cells their own effect (`magic-cells`
 //   look 'quake'). PROCESSOR: a few hundred cell reads and a few dozen writes, once a cast, spread over the rings.
-function magicQuake(room, x, y, S, sp, by) {
+function magicQuake(room, x, y, S, sp, by, car) {
   const st = cellsOf(room), grid = st.terrain; if (!grid) return; ensureTerrainHp(room); const ROWS = st.rows, COLS = st.cols, N = grid.length, T = TERRAIN_CELL, mats = roomMats[room] || {}, floorRow = Math.floor(roomFloorTop(room) / T);
   const W = wearOf(room), geom = worldGeom(room), oldW = (i) => { const m = W.by.get(wearChunkOf(geom, i)), e = m && m.get(i); return e ? e[0] | 0 : 0; };
   const rock = (i) => { if (i < 0 || i >= N || i % ROWS >= floorRow) return false; const v = peekCellAt(grid, i); return v > 0 && isSolidCell(v) && !isBodyId(v) && !isPlantId(v) && !MAGIC_WOODY.has(v) && !isPowderId(v); };
@@ -5208,7 +5215,8 @@ function magicQuake(room, x, y, S, sp, by) {
     const i = c * ROWS + r; if (!rock(i) || !matBreakableSrv(mats, peekCellAt(grid, i))) continue; const k = Math.floor(d); (rings[k] || (rings[k] = [])).push([i, d]); }
   const ms = S.ringMs || 55, cand = new Set();
   magicQuakeBodies(room, x, y, S, Rr, ms);
-  io.to(room).emit('magic-quake', { x: Math.round(x), y: Math.round(y), r: Rr * T, ms: rings.length * ms, by, spell: sp });
+  // (21 — Earth) `rm` how long the ground goes on rumbling (the look only — the damage is the rings'), `car` thrown (its caster is in it too)
+  io.to(room).emit('magic-quake', { x: Math.round(x), y: Math.round(y), r: Rr * T, ms: rings.length * ms, by, spell: sp, rm: Math.round(S.rumbleMs || 0), car: car ? 1 : 0 });
   rings.forEach((ring, k) => { if (!ring) return; setTimeout(() => {
     if (cellsOf(room).terrain !== grid) return; const out = [], fx = [];
     for (const [i, d] of ring) { if (!rock(i)) continue; const v = peekCellAt(grid, i), add = (S.crack || 34) * (1 - d / (Rr + 1)) * (0.75 + 0.5 * Math.random()), nw = Math.min(59, oldW(i) + Math.round(add));
@@ -29566,8 +29574,9 @@ io.on('connection', (socket) => {
     const shot = (S.kind === 'freeze' || S.kind === 'wall' || S.kind === 'change' || S.kind === 'tunnel' || S.kind === 'firewall') && S.speed > 0 && m.shot !== 0; if (shot) out.shot = 1;   // (6b: the wall of fire, lobbed as the stone wall's stone)   // (5a: the ground changed — a shot too; 5c: the tunnelling bolt)
     // (5c) THE QUAKE: on the ground under the catalyst's tip, once the staff's foot is down (`slamMs`)
     if (S.kind === 'tunnel') { const st0 = cellsOf(room), g0 = st0.terrain, c = Math.floor(out.x / TERRAIN_CELL), r = Math.floor(out.y / TERRAIN_CELL); if (g0 && c >= 0 && c < st0.cols && r >= 0 && r < st0.rows) { const v = peekCellAt(g0, c * st0.rows + r); if (v > 0 && isSolidCell(v)) return no('rock'); } }   // (5c round 2: not cast from inside rock)
-    if (S.kind === 'quake') { const g = magicGroundAt(room, out.x, out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; out.slam = S.slamMs || 0; const by = socket.id, sp = m.spell, SQ = SK;
-      setTimeout(() => magicQuake(room, g.x, g.y, SQ, sp, by), S.slamMs || 0); }
+    // (21 — Earth, 2026-11-28) LOBBED: where its stone came down (`CAR`), at once — no slam (`car` on its 'magic-quake': its caster's own body is jolted too)
+    if (S.kind === 'quake') { const g = magicGroundAt(room, out.x, out.y); if (!g) return no('ground'); out.tx = g.x; out.ty = g.y; const slam = CAR ? 0 : S.slamMs || 0; out.slam = slam; const by = socket.id, sp = m.spell, SQ = SK, qc = CAR ? 1 : 0;
+      setTimeout(() => magicQuake(room, g.x, g.y, SQ, sp, by, qc), slam); }
     // (4d) A HELD SPELL: kept while its caster holds it (one at a time); its cooldown waits for its end
     if (S.chan) { const secs = S.chanS > 0 ? S.chanS : 60; for (const [k, q] of _magicChans) if (q.by === socket.id && q.cast !== CASTK) magicChanEnd(k, 'new');
       _magicChans.set(id, { cast: CASTK, by: socket.id, room, spell: m.spell, cat: H ? H.catalyst : null, until: now + secs * 1000 + (CHK || WB ? 3000 : 300), water: WB ? { u: WB.u, cx: WB.cx, cy: WB.cy } : null, x: out.x, y: out.y, ax: out.ax, ay: out.ay, reach: S.reach || 120, chunk: CHK ? { m: CHK.m, o: CHK.o, cx: CHK.cx, cy: CHK.cy, soil: !!S.soil, a: CHK.a || 0, w: CHK.w || null, co: CHK.co || null, cs: CHK.cs != null ? CHK.cs : (CHK.cs = (Math.random() * 1e6) | 0) } : null });

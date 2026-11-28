@@ -556,17 +556,18 @@
     //   `mend` = the damage taken out of rock (its strength and its cracks — wood and plants not) · `oil` = GREASE: that many cells of oil as a film (`film` of a cell each) on the
 //   rock it hit — floor, wall or ceiling (the open cells touching rock nearest it, within `oilR`),
     //   MADE (so it dries away after `secs`, as much as was poured, from round where it was — `dryR` cells). `fx` the shot's and the change's colour.
-    crumble: { name: 'Rock to sand', school: 'earth', form: 'burst', tier: 0, cd: 5, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 24, ringMs: 60, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#e6cb86', look: 'sand',
+    // ⭐ (21 — EARTH ONTO CARRIERS, 2026-11-28, the user's picks) the six changes FLY ON further (~1000 px: `life` 1.3 → 1.6 s at 620 px/s)
+    crumble: { name: 'Rock to sand', school: 'earth', form: 'burst', tier: 0, cd: 5, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 24, ringMs: 60, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#e6cb86', look: 'sand',
       map: { 2: 3, 19: 3, 22: 3, 23: 3, 24: 3, 25: 3, 26: 3, 33: 3, 43: 3, 44: 3, 45: 3, 76: 3, 77: 3, 79: 3, 80: 3, 81: 3, 89: 3 }, plain: { keys: [D, U, L, D, D], rune: [0, 3, 4, 7, 6] } },
-    harden: { name: 'Sand to rock', school: 'earth', form: 'burst', tier: 0, cd: 5, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 30, ringMs: 60, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#a08868', look: 'rock',
+    harden: { name: 'Sand to rock', school: 'earth', form: 'burst', tier: 0, cd: 5, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 30, ringMs: 60, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#a08868', look: 'rock',
       map: { 3: 25, 21: 89, 38: 44, 39: 89, 8: 4, 5: 19 }, plain: { keys: [D, U, L, U, U], rune: [6, 3, 4, 1, 0] } },
-    glassify: { name: 'Sand to glass', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 20, ringMs: 70, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#bfe6ea', look: 'glass',
+    glassify: { name: 'Sand to glass', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 20, ringMs: 70, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#bfe6ea', look: 'glass',
       map: { 3: 16 }, plain: { keys: [D, U, D, L, R], rune: [8, 5, 4, 3, 0] } },
-    coollava: { name: 'Lava to rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 30, ringMs: 60, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#ff9a4a', look: 'cool',
+    coollava: { name: 'Lava to rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 30, ringMs: 60, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#ff9a4a', look: 'cool',
       lava: true, to: 23, inLiq: true, plain: { keys: [D, U, D, R, U], rune: [2, 5, 4, 7, 8] } },
-    mend: { name: 'Mend rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 60, ringMs: 50, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#d9c08a', look: 'mend',
+    mend: { name: 'Mend rock', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, cells: 60, ringMs: 50, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#d9c08a', look: 'mend',
       mend: true, plain: { keys: [D, U, U, L, U], rune: [6, 7, 4, 1, 2] } },
-    grease: { name: 'Grease', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, oil: 3, film: 0.5, oilR: 6, secs: 60, dryR: 30, speed: 620, life: 1.3, grav: 0.04, r: 3.5, fx: '#caa12a', look: 'oil',
+    grease: { name: 'Grease', school: 'earth', form: 'burst', tier: 0, cd: 6, stance: 'level', kind: 'change', learn: 3, reach: 420, oil: 3, film: 0.5, oilR: 6, secs: 60, dryR: 30, speed: 620, life: 1.6, grav: 0.04, r: 3.5, fx: '#caa12a', look: 'oil',
       plain: { keys: [D, U, U, R, D], rune: [0, 1, 4, 5, 8] } },
     // ⭐ STEP 5b (2026-11-18 — EARTH, THE THROWS; the user: the chunk 'should come from pulling actual terrain near the pointer … then I guess you could move it around and such, and
     //   then releasing it would shoot it in the direction it is pointing away from the player'). kind 'chunk', HELD (`chan`, `chanS` the most): the cast TEARS up to `cells` of the
@@ -594,8 +595,13 @@
     //   (`kn`); the caster's own body is not jolted.
     tunnelbolt: { name: 'Tunnelling bolt', school: 'earth', form: 'bolt', tier: 0, cd: 6, stance: 'level', kind: 'tunnel', learn: 3, reach: 480, speed: 680, life: 1.4, grav: 0, r: 3.5,
       push: 34, len: 40, bore: 1.05, stepMs: 30, air: 4, rubbleV: 22, fan: 0.45, fx: '#e2b878', look: 'bore', plain: { keys: [D, U, R, R, R], rune: [3, 4, 5, 2, 1] } },
+    // ⭐ (21 — EARTH ONTO CARRIERS, 2026-11-28, the user's pick A) THE QUAKE IS LOBBED: a heavy stone thrown along the aim (`lob`, 600 px/s, falling at `lobG`) that quakes where
+    //   it comes down — its caster too, if they stand in it (switch 'Your own spells strike you too'). With carriers off it is the staff's slam under the tip, as before.
+    //   (the user: rumble the ground more and last longer, the SAME damage to the terrain) `rumbleMs` = how long every screen's ground goes on rumbling after the rings
+    //   (shaking, dust, grit hopping on the tops, small jolts, a low sound) — `shake` the first blow's, stronger; `rad`, `crack`, `looseW`, `loose` unchanged
     quake: { name: 'Quake', school: 'earth', form: 'burst', tier: 0, cd: 10, stance: 'level', kind: 'quake', learn: 3, rad: 9, crack: 34, looseW: 52, ringMs: 55, loose: 30, clump: 9,
-      slamMs: 260, shake: 5, kn: 4, fx: '#d8b07a', look: 'quake', plain: { keys: [D, U, D, D, D], rune: [6, 3, 0, 1, 2] } },
+      car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 5, rumbleMs: 2600,
+      slamMs: 260, shake: 8, kn: 4, fx: '#d8b07a', look: 'quake', plain: { keys: [D, U, D, D, D], rune: [6, 3, 0, 1, 2] } },
     // ⭐ STEP 5d (2026-11-19 — EARTH, MADE MATTER: it goes; the user agreed the proposal and its picks — the spikes a line along the ground, the pillar SINKS back, the bridge
     //   follows the line to the pointer). All three grow as the stone wall does (server `magicWallLines`: the ground's own rock, through liquid pushing it aside, kept in the
     //   database, cracking over `crackS` before `secs` is up, then going `crumbleMs` a cell from the far end). What it does to bodies is each player's own game's (16zj).
@@ -607,9 +613,15 @@
     //     resting loose thing on it is hopped up (it waits `waitN` ticks for it); `secs`, then it SINKS back a row every `crumbleMs` (`sink`: no cracks, no rubble).
     //   BRIDGE, kind 'bridge': from the edge in front of your feet towards the pointer, `thick` cells deep, its top level with your ground, along the line to the pointer (slope at
     //     most `slope`: 1 = 45°), `len` columns, `rowMs` a column; rock it meets ends it (joined). `skip` = how far the ground may go on before it begins.
+    // ⭐ (21 — EARTH ONTO CARRIERS, 2026-11-28, the user's picks) STONE SPIKES: a stone SEED that flies on (~1000 px); where it strikes the ground (or the ground under the body
+    //   it strikes, or under where it runs out — within 12 cells, else lost) the line runs on THE WAY IT WAS GOING, from there; they may catch their caster. A smaller / split
+    //   piece: fewer, shorter, narrower spikes (`n`, `high`, `base` × its size — server `magicCarScale`, 16zj `magicCarSK`), a lighter blow.
+    //   RISING PILLAR: a mote that flies on (~1000 px) and opens only ON THE BODY it strikes (`carBody` — you when pointed at yourself, the dummy, another): the pillar rises
+    //   under its feet; it meets no body: lost. A smaller / split piece: a shorter, narrower pillar
     spikes: { name: 'Stone spikes', school: 'earth', form: 'trail', tier: 0, cd: 6, stance: 'level', kind: 'spikes', learn: 3, n: 5, first: 0, gap: 4, step: 3, high: 6.5, base: 1.1, warnMs: 140, waveMs: 70,
+      car: 1, speed: 560, life: 1.8, grav: 0.04, r: 3.5,
       secs: 4, dmg: 1.5, kn: 7, fx: '#d9b27a', look: 'spike', plain: { keys: [D, U, U, D, U], rune: [6, 4, 8, 5, 2] } },
-    pillar: { name: 'Rising pillar', school: 'earth', form: 'self', aim: 'self', reach: 240, tier: 0, cd: 8, stance: 'raise', kind: 'pillar', learn: 3, wide: 3, high: 16, rowMs: 90, waitN: 12, secs: 30, crackS: 0, crumbleMs: 90, sink: true,
+    pillar: { name: 'Rising pillar', school: 'earth', form: 'self', aim: 'self', reach: 240, car: 1, carBody: 1, speed: 520, life: 1.9, grav: 0, r: 3.5, tier: 0, cd: 8, stance: 'raise', kind: 'pillar', learn: 3, wide: 3, high: 16, rowMs: 90, waitN: 12, secs: 30, crackS: 0, crumbleMs: 90, sink: true,
       thruLiq: true, warnMs: 300, fx: '#d9b27a', look: 'pillar', plain: { keys: [D, U, D, U, U], rune: [8, 7, 4, 1, 2] } },
     bridge: { name: 'Bridge', school: 'earth', form: 'shaping', tier: 0, cd: 8, stance: 'level', kind: 'bridge', learn: 3, len: 32, thick: 2, slope: 1, skip: 12, rowMs: 40, secs: 40, crackS: 4, crumbleMs: 30,
       thruLiq: true, fx: '#d9b27a', look: 'bridge', plain: { keys: [D, U, R, L, R], rune: [3, 4, 5, 8, 6] } },
