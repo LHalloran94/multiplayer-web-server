@@ -623,7 +623,11 @@
     //     standing on it (alight, no blow), a bomb's fuse. A thread of sparks from the catalyst's tip to it, a flare there.
     fireball: { name: 'Fireball', school: 'fire', form: 'burst', tier: 1, cd: 8, stance: 'level', kind: 'bolt', learn: 5, uses: [['ember_salt', 1]], speed: 430, life: 1.6, grav: 0.16, r: 6,
       dmg: 0, burn: true, burst: { r: 64, dmg: 2.5, f: 14 }, plain: { keys: [U, D, R, U, D], rune: [6, 1, 5, 3, 8] } },
-    kindle: { name: 'Kindle', school: 'fire', form: 'placed', tier: 0, cd: 2, stance: 'level', kind: 'kindle', learn: 3, reach: 400, fx: '#ffb060',
+    // ⭐ (21, 2026-11-28 — THE SPELLS ON CARRIERS, the user's picks in kickoff §'STEP 21') `car`: it FLIES as a bolt (`speed` px/s, `life` s, `grav`, `r`; `fuse` it ends at the
+    //   pointer, as the flash; `lob` it comes down on the pointer, `lobG` its fall) and its spell OPENS where it ends — on rock, a body, liquid, at the pointer, or in the air
+    //   (server `magicCarryOpen`). Modifiers go on it. The panel's 'Fire and Frost spells fly out as carriers' off: placed as before
+    //   KINDLE: a spark, quick and nearly straight, fused at the pointer — water puts it out (nothing burns there)
+    kindle: { name: 'Kindle', school: 'fire', form: 'placed', tier: 0, cd: 2, stance: 'level', kind: 'kindle', learn: 3, reach: 400, car: 1, speed: 900, life: 0.6, grav: 0.02, r: 2.5, fuse: 1, fx: '#ffb060',
       plain: { keys: [U, R, U, L, U], rune: [6, 5, 1, 3, 2] } },
     // ⭐ 6b (2026-11-19, kickoff §'STEP 6' — the user's picks): WALL OF FIRE, kind 'firewall', two variants (`alt`, as the light orb's): lobbed as the stone wall's stone (`speed`,
     //   `life`, `grav`, `r`) — it goes OUT in liquid (steam) — and where it comes down on the ground a wall of flame stands `secs`: the CURTAIN `wide` × `high` cells upright, the
@@ -680,9 +684,10 @@
     //   COLD SNAP, kind 'coldsnap' (tier 1): a burst round you — the water within `rad` px turns to ice outward from you, ring by ring (`ringMs` a cell), as the freeze does (back
     //   to water after `secs`); burning ground there goes out; every OTHER player within reach (nothing solid between) is frosted and held still `hold` s and put out, as the frost
     //   flask does; a frost crust lies on the ground it reached for `crustS` s. You are untouched.
-    raincloud: { name: 'Rain cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', learn: 3, reach: 360, cloudS: 8, wide: 14, down: 3, ups: 40, dropV: 6, dropR: 1.1, drySecs: 60, alts: ['snowcloud'], fx: '#9fd2f4',
+    //   (21 carriers) RAIN / SNOW CLOUD, COLD SNAP, BLIZZARD: a wisp of cold flies out to the pointer (`fuse`) and opens there, or where it meets something on the way
+    raincloud: { name: 'Rain cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', learn: 3, reach: 360, car: 1, speed: 420, life: 1.1, grav: 0, r: 4, fuse: 1, cloudS: 8, wide: 14, down: 3, ups: 40, dropV: 6, dropR: 1.1, drySecs: 60, alts: ['snowcloud'], fx: '#9fd2f4',
       plain: { keys: [D, U, L, U, L], rune: [6, 4, 1, 0, 3] } },
-    snowcloud: { name: 'Snow cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', alt: 'raincloud', snow: true, reach: 360, cloudS: 8, wide: 14, down: 3, cps: 8, flakeG: 4, flakeD: 1.2, meltSecs: 60, fx: '#eef7ff', look: 'melt',
+    snowcloud: { name: 'Snow cloud', school: 'frost', form: 'placed', tier: 0, cd: 10, stance: 'level', kind: 'cloud', alt: 'raincloud', snow: true, reach: 360, car: 1, speed: 420, life: 1.1, grav: 0, r: 4, fuse: 1, cloudS: 8, wide: 14, down: 3, cps: 8, flakeG: 4, flakeD: 1.2, meltSecs: 60, fx: '#eef7ff', look: 'melt',
       plain: { keys: [D, U, L, U, R], rune: [6, 4, 1, 2, 5] } },
     // ⭐ STEP 7d (2026-11-20): ICE WALL, kind 'wall' (the stone wall's: lobbed, a wall `wide` × `high` where it lands, or level out of a rock face), MADE OF ICE (`mat` 4 —
     //   slippery), `melts`: when its time is up it MELTS away from the top, `meltMs` a cell — no rubble, no water left. Like all ice it falls straight down when nothing
@@ -690,7 +695,7 @@
     //   to ice and help you cross it — server commit 'Magic 7d' has it.)
     icewall: { name: 'Ice wall', school: 'frost', form: 'placed', tier: 1, cd: 8, stance: 'level', kind: 'wall', learn: 5, reach: 360, secs: 30, crackS: 0, wide: 2, high: 12, rowMs: 55, crumbleMs: 45, thruLiq: true, speed: 560, life: 3, grav: 0.35, r: 4.5,
       mat: 4, melts: true, fx: '#cfefff', look: 'icemelt', plain: { keys: [D, R, L, R, U], rune: [2, 5, 4, 6, 3] } },
-    coldsnap: { name: 'Cold snap', school: 'frost', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'coldsnap', learn: 5, rad: 96, cells: 220, ringMs: 22, secs: 30, hold: 1.5, crustS: 8, fx: '#cfefff',
+    coldsnap: { name: 'Cold snap', school: 'frost', form: 'burst', tier: 1, cd: 12, stance: 'raise', kind: 'coldsnap', learn: 5, reach: 360, car: 1, speed: 520, life: 0.9, grav: 0, r: 4, fuse: 1, rad: 96, cells: 220, ringMs: 22, secs: 30, hold: 1.5, crustS: 8, fx: '#cfefff',
       plain: { keys: [D, L, U, R, D], rune: [8, 4, 3, 1, 5] } },
     // ⭐ STEP 8a (2026-11-20, STORM — kickoff §'STEP 8'): LIGHTNING, kind 'zap': an instant jagged strike from the tip towards the pointer, `reach` px, stopped by the first rock,
     //   liquid or body on the way (the caster's game traces it); it JUMPS on to `jumps` more bodies within `jumpR` px (× `metalK` for one wearing plate or mail — they are found
@@ -725,7 +730,7 @@
     //   over the pointer (in sight), formed from vapour out of the staff as the thunderstorm's; once formed each SNOWS (`cps` grains a second of real snow, as the snow cloud — melted
     //   `meltSecs` after) blown by a WIND away from the caster (`wind` cells a step on each flake); under them (and `lee` px downwind) bodies are pushed by the wind (`windPush`),
     //   loose things blown, and whoever stays `frostS` s is slowed (`slow`) and put out. Let go and it ends.
-    blizzard: { name: 'Blizzard', school: 'frost', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'blizzard', learn: 5, chan: true, chanS: 10, reach: 400, clouds: 4, spread: 76, wide: 14, down: 1, formMs: 1400,
+    blizzard: { name: 'Blizzard', school: 'frost', form: 'stream', tier: 1, cd: 16, stance: 'level', kind: 'blizzard', learn: 5, chan: true, chanS: 10, reach: 400, car: 1, speed: 420, life: 1.2, grav: 0, r: 5, fuse: 1, clouds: 4, spread: 76, wide: 14, down: 1, formMs: 1400,
       cps: 14, flakeG: 4, flakeD: 1.2, meltSecs: 60, wind: 2.6, lee: 90, windPush: 30, frostS: 1.5, slow: 0.6, look: 'melt', fx: '#eef7ff', plain: { keys: [D, L, D, U, L], rune: [2, 5, 1, 3, 7] } },
     // ⭐ STEP 8c (2026-11-20, STORM): WHIRLWIND, kind 'whirl' (placed on the ground at the pointer, in sight; `secs` s): a funnel `high` px tall that DRIFTS along the ground away from
     //   its caster at `speed` px/s (turned back once by a wall, then it stays). It takes up the surface's loose powder (`grab` cells a tick, at most `carry` — never a spell's own snow)
@@ -753,13 +758,15 @@
     // ⭐ FROST AND WATER (the user's ideas, 2026-11-20): WHIRLPOOL, kind 'pool' (placed IN liquid at the pointer, `secs` s): stationary; the server keeps pumping the liquid from its
     //   middle out to its rim (`pump` units a tick) so its surface dips into a funnel — moved, nothing made or lost; bodies and loose things in the liquid within its reach are drawn
     //   in and carried round, and in its middle SUCKED DOWN to the bottom and held there spinning until it ends (the user: 'hold them and suck them downwards').
-    whirlpool: { name: 'Whirlpool', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'pool', learn: 5, reach: 400, secs: 10, maxR: 12, minR: 3, pump: 60, pull: 2.2, turnS: 1.2, inward: 16,
+    //   (21 carriers) WHIRLPOOL: a swirling mote of water LOBBED onto the pointer — it opens where it goes into liquid (on dry ground it is lost) · WAVE: a lob, the wave rising
+    //   where it lands and rolling on away from you (`roll` px/s — was `speed`). `speed` 260 only sets how high the lob goes (a slower throw arcs higher — `arcAim`)
+    whirlpool: { name: 'Whirlpool', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'pool', learn: 5, reach: 400, car: 1, lob: 1, lobG: 1100, speed: 260, life: 2.4, grav: 0, r: 4, secs: 10, maxR: 12, minR: 3, pump: 60, pull: 2.2, turnS: 1.2, inward: 16,
       spin: 3.2, down: 5, core: 0.35, fx: '#7fd0ff', plain: { keys: [D, R, D, L, L], rune: [2, 5, 8, 7, 6] } },
     // WAVE, kind 'wave' (placed: it rises on the ground at the pointer and rolls AWAY from its caster along the terrain, `secs` s at most): REAL WATER, conjured — the server moves a
     //   mound of it (`len` cells long, `high` cells at its crest) forward `speed` px/s, taking its own water back each tick and putting it down ahead, over the ground or a pool's
     //   surface; climbs steps up to `step` cells, breaks against anything taller. Bodies and loose things are carried along and up its face, knocked down (no harm); fire under it
     //   is put out by the water; the surface's powder at its front swept along and dropped where it breaks. When it ends its water is gone (in spray and mist): nothing left.
-    wave: { name: 'Wave', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'wave', learn: 5, reach: 360, secs: 4.5, speed: 130, len: 26, high: 8, step: 3, tickMs: 30,
+    wave: { name: 'Wave', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'wave', learn: 5, reach: 360, car: 1, lob: 1, lobG: 1100, speed: 260, life: 2.4, grav: 0, r: 4.5, secs: 4.5, roll: 130, len: 26, high: 8, step: 3, tickMs: 30,
       grab: 2, carry: 60, push: 7, lift: 5, knockMs: 350, fx: '#7fd0ff', plain: { keys: [R, U, R, D, R], rune: [6, 4, 1, 5, 8] } },
     // ⭐ STEP 9a (2026-11-21, kickoff §'STEP 9') FORCE: PUSH and its variant PULL (one mark changed), kind 'push'. A LENS OF BENT AIR travels down a narrow cone (`cone`° each side)
     //   from the hand to `reach` px in `ms` (PULL `toward`: it forms out at the far end and sweeps IN to the hand), stopped by rock. What it passes: a player thrown away from the
@@ -937,7 +944,7 @@
   // (21 M1) HOW A SPELL IS DELIVERED (what `fits` means) — by its kind and form
   const SHOT_KINDS = ['freeze', 'wall', 'change', 'tunnel', 'firewall'], THROWN_KINDS = ['shard', 'waterball', 'chunk'], PAINT_KINDS = ['paint', 'rainbow'];
   const isShot = (S) => !!S && SHOT_KINDS.indexOf(S.kind) >= 0 && S.speed > 0;
-  const delivOf = (S) => { if (!S || S.innate) return null; if (S.kind === 'bolt' || isShot(S)) return 'fly'; if (THROWN_KINDS.indexOf(S.kind) >= 0) return 'thrown';
+  const delivOf = (S) => { if (!S || S.innate) return null; if (S.kind === 'bolt' || isShot(S) || S.car) return 'fly';   /* (21: the spells on carriers fly) */ if (THROWN_KINDS.indexOf(S.kind) >= 0) return 'thrown';
     if (PAINT_KINDS.indexOf(S.kind) >= 0) return 'paint'; if (S.chan) return 'held'; if (S.form === 'touch') return 'touch'; if (S.form === 'burst' || S.aim === 'self') return 'round';
     if (S.form === 'self') return 'self'; return 'placed'; };
   const modFits = (mid, spell) => { const M = modAny(mid), S = SPELLS[spell] && Object.prototype.hasOwnProperty.call(SPELLS, spell) ? SPELLS[spell] : null; if (!M || !S || S.innate) return false;
