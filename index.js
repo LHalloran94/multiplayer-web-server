@@ -4090,9 +4090,15 @@ function magicObjWardOf(room, oid) { const W = typeof oid === 'string' ? _magicO
   if (W.room !== room || !((W.fire && now < W.fire) || (W.skin && now < W.skin && W.hp > 0))) { if (now > Math.max(W.fire || 0, W.skin || 0)) _magicObjWards.delete(oid); return null; } return W; }
 // (2026-11-28, the user: a fire-warded crate touching a burning one still caught, and flashed alight for an instant when shot) THE CELLS OF FIRE-WARDED THINGS at rest
 //   (written into the grid — `roomBodyStamp`'s `idx`): no fire may light them — the spread, an area set alight (a bolt's end, a burst), a body's own burning. null when none
+//   (2026-11-28, the user: the firebolt 'goes through the ward skin') …and a WARD SKIN's thing while it holds: fire is harm, so each refusal on one soaks a blow — at most one
+//   every 0.4 s (`magicFireRefused`), so fire pressing on it wears it away and then it can catch. → Map cell → thing id, or null
 function magicFireWardCells(room) { if (!_magicObjWards.size) return null; const now = Date.now(), BS = roomBodyStamp[room]; let out = null;
-  for (const [id, W] of _magicObjWards) { if (W.room !== room || !(W.fire && now < W.fire)) continue; const S = BS && BS.get(id); if (!S || !S.idx) continue; if (!out) out = new Set(); for (const i of S.idx) out.add(i); }
+  for (const [id, W] of _magicObjWards) { if (W.room !== room || !((W.fire && now < W.fire) || (W.skin && now < W.skin && W.hp > 0))) continue; const S = BS && BS.get(id); if (!S || !S.idx) continue; if (!out) out = new Map(); for (const i of S.idx) out.set(i, id); }
   return out; }
+// fire refused on a guarded thing: a fire ward costs nothing; a ward skin soaks a blow (at most every 0.4 s)
+function magicFireRefused(room, id) { const W = _magicObjWards.get(id), now = Date.now(); if (!W || (W.fire && now < W.fire)) return; if (now - (W.soakAt || 0) < 400) return; W.soakAt = now; magicObjSkinSoak(room, id); }
+// a thing whose ward skin still holds
+function magicObjSkinHolds(room, oid) { const W = magicObjWardOf(room, oid); return !!(W && W.skin && Date.now() < W.skin && W.hp > 0); }
 function magicObjFireWarded(room, oid) { const W = magicObjWardOf(room, oid); return !!(W && W.fire && Date.now() < W.fire); }
 // a blow on a thing: soaked by its ward skin (true — the blow does nothing), one off its strength, every screen shown
 function magicObjSkinSoak(room, oid) { const W = magicObjWardOf(room, oid); if (!W || !W.skin || Date.now() > W.skin || !(W.hp > 0)) return false; W.hp--;
@@ -4337,7 +4343,8 @@ function magicFireBurst(room, x, y, R) {
   const fwB = magicFireWardCells(room);
   for (let c = c0; c <= c1; c++) for (let rw = r0; rw <= r1; rw++) {
     if (Math.hypot((c + 0.5) * C - x, (rw + 0.5) * C - y) > R) continue;
-    const i = c * ROWS + rw; if (fs.has(i) || (fwB !== null && fwB.has(i))) continue;
+    const i = c * ROWS + rw; if (fs.has(i)) continue;
+    if (fwB !== null && fwB.has(i)) { magicFireRefused(room, fwB.get(i)); continue; }
     const g = peekCellAt(grid, i); if (g < 0) continue;
     const solid = liquidCfg.fireSolids && g > 0 && FIRE_RATE[g] > 0;
     const oil = !solid && amt.rp(i)[amt.o(i) + 5] > 0;
@@ -6061,9 +6068,12 @@ function bodyUnstamp(room, id, readBack) {
   // ⭐ EACH BODY CELL FROM ITS READ CELL (`bodyRep`) — read BEFORE the loop below clears them. A cell whose read cell the
   // stamp could not write (`skip`) keeps its own state. …and how long each alight one has been burning, so it can go on.
   let nw = null, age = null;
-  const X = old && S.fire ? bodyReadExact(room, st, obj, S, old) : null;   // …the exact, one-way read (`bodyReadExact`)
+  // ⭐ (2026-11-28, the user: a crate hit by a firebolt 'ignites for an instant' and goes out — sometimes; magic 21) `S.fire` is only set when the body's tick next looks; a body
+  //   set alight and moved off before then (a bolt's knock) dropped its fire here. Asked NOW too: any of its cells burning
+  const litNow = !S.fire && !!(fs && fs.size && S.idx && S.idx.some(i => fs.has(i)));
+  const X = old && (S.fire || litNow) ? bodyReadExact(room, st, obj, S, old) : null;   // …the exact, one-way read (`bodyReadExact`)
   if (X) { nw = X.cells; age = X.age; }
-  else if (old && S.fire) {
+  else if (old && (S.fire || litNow)) {
     nw = new Uint8Array(old.length); age = new Float32Array(old.length);
     for (let k = 0; k < old.length; k++) {
       if (!(old[k] & 3)) continue;                          // gone stays gone
@@ -7897,9 +7907,13 @@ function objFireAsleep(room, x, y) {
 // client that saw it reports, and they catch in the world the moment it comes to rest.
 function bodyIgnite(room, obj, x, y, r, px, py, pa) {
   if (obj && magicObjFireWarded(room, obj.id)) return false;   // (21: a fire-warded thing does not catch)
+  if (obj && magicObjSkinHolds(room, obj.id)) { magicFireRefused(room, obj.id); return false; }
   const S = roomBodyStamp[room] && roomBodyStamp[room].get(obj.id);
-  if (S) { igniteBox(room, x, y, Math.max(TERRAIN_CELL / 2, Math.min(160, r || 16))); return false; }   // nothing in the record changed
-  if (!isFinite(px) || !isFinite(py)) { px = obj.x; py = obj.y; pa = obj.angle || 0; }
+  // ⭐ (2026-11-28, the user: a crate hit by a firebolt 'ignites for an instant' and goes out, sometimes) A RESTING body was only lit in the world grid, its record left as
+  //   it was — and a body burning on its own record (`bodyOwnOn`) learns of that only when its tick next looks; knocked off its rest before then (the bolt's own knock),
+  //   it was read back from the unchanged record and the fire was gone. Now the struck cells are marked alight in its record too, at its resting pose
+  if (S) { igniteBox(room, x, y, Math.max(TERRAIN_CELL / 2, Math.min(160, r || 16))); if (!bodyOwnOn()) return false; px = S.x; py = S.y; pa = S.a || 0; }
+  else if (!isFinite(px) || !isFinite(py)) { px = obj.x; py = obj.y; pa = obj.angle || 0; }
   px = Math.max(obj.x - 4000, Math.min(obj.x + 4000, px)); py = Math.max(obj.y - 4000, Math.min(obj.y + 4000, py));
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
   const cells = bodyCellsOf(rec, obj), D = bodyDims(obj), w = obj.w || 64, h = obj.h || 64;
@@ -13745,7 +13759,8 @@ function igniteBox(room, x, y, r, ry) {
   const fs = fineFireSet(room), lit = [], fwC = magicFireWardCells(room);
   for (let c = c0; c <= c1; c++) for (let rw = r0; rw <= r1; rw++) {
     const i = c * ROWS + rw;
-    if (fs.has(i) || (fwC !== null && fwC.has(i))) continue;
+    if (fs.has(i)) continue;
+    if (fwC !== null && fwC.has(i)) { magicFireRefused(room, fwC.get(i)); continue; }
     const g = peekCellAt(grid, i);
     if (g < 0) continue;                                        // not produced: nothing there to set alight
     const solid = liquidCfg.fireSolids && g > 0 && FIRE_RATE[g] > 0;
@@ -13792,7 +13807,7 @@ function fineReactTickRoom(room, SUB, phase) {
   const burningAny = (fs, j) => fs.has(j) || (fireAll !== null && fireAll.has(j));
   // (magic 21: a fire-warded thing's cells are never lit)
   const fireWardC = magicFireWardCells(room);
-  const lightCell = (fs, j) => { if (fireWardC !== null && fireWardC.has(j)) return; fs.add(j); if (fireAll !== null) fireAll.add(j); fireLit.push(j); };
+  const lightCell = (fs, j) => { if (fireWardC !== null && fireWardC.has(j)) { magicFireRefused(room, fireWardC.get(j)); return; } fs.add(j); if (fireAll !== null) fireAll.add(j); fireLit.push(j); };
   // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
   // && gid === 2` ⇒ steam, etc). In fine mode liquid is not a grid id at all, so no transition can ever match and every
   // one of those effects is unreachable. The server knows exactly which reaction fired, so it says so: [cell, code].
@@ -29120,7 +29135,8 @@ io.on('connection', (socket) => {
     if (obj && magicSealOf(currentAvatarRoom, id)) { io.to(currentAvatarRoom).emit('magic-seal-flash', { obj: id }); return; }
     // (21) a WARDED thing: heat does nothing to a fire-warded one; any other blow is soaked by its ward skin
     if (obj && (fire || light) && magicObjFireWarded(currentAvatarRoom, id)) { io.to(currentAvatarRoom).emit('magic-objward', { obj: id, k: 'fire' }); return; }
-    if (obj && !fire && !douse && !light && magicObjSkinSoak(currentAvatarRoom, id)) return;
+    // (2026-11-28, the user: a firebolt went 'through the ward skin') heat is harm too — soaked like any blow
+    if (obj && !douse && !light && magicObjSkinSoak(currentAvatarRoom, id)) return;
     // ⭐ #184 round 19 — HITTING A MIMIC'S OBJECT WAKES IT rather than damaging the object (fire still burns it). Punching
     //   a suspicious crate is how you find out.
     if (obj && obj.mimic && !fire && !douse) { mimicHitWake(currentAvatarRoom, obj, x); return; }
