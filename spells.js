@@ -760,9 +760,11 @@
     // ⭐ FROST AND WATER (the user's ideas, 2026-11-20): WHIRLPOOL, kind 'pool' (placed IN liquid at the pointer, `secs` s): stationary; the server keeps pumping the liquid from its
     //   middle out to its rim (`pump` units a tick) so its surface dips into a funnel — moved, nothing made or lost; bodies and loose things in the liquid within its reach are drawn
     //   in and carried round, and in its middle SUCKED DOWN to the bottom and held there spinning until it ends (the user: 'hold them and suck them downwards').
+    //   (2026-11-28, the user: it always went to the bottom of the water) no deeper than `depth` cells under the surface; made smaller (smaller, a split's or a cluster's
+    //   piece) it is shallower as well as narrower (server `magicCarScale`)
     //   (21 carriers) WHIRLPOOL: a swirling mote of water LOBBED onto the pointer — it opens where it goes into liquid (on dry ground it is lost) · WAVE: a lob, the wave rising
     //   where it lands and rolling on away from you (`roll` px/s — was `speed`)
-    whirlpool: { name: 'Whirlpool', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'pool', learn: 5, reach: 400, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 4, secs: 10, maxR: 12, minR: 3, pump: 60, pull: 2.2, turnS: 1.2, inward: 16,
+    whirlpool: { name: 'Whirlpool', school: 'frost', form: 'placed', tier: 1, cd: 14, stance: 'level', kind: 'pool', learn: 5, reach: 400, car: 1, lob: 1, lobG: 1000, speed: 600, life: 2.4, grav: 0, r: 4, depth: 8, secs: 10, maxR: 12, minR: 3, pump: 60, pull: 2.2, turnS: 1.2, inward: 16,
       spin: 3.2, down: 5, core: 0.35, fx: '#7fd0ff', plain: { keys: [D, R, D, L, L], rune: [2, 5, 8, 7, 6] } },
     // WAVE, kind 'wave' (placed: it rises on the ground at the pointer and rolls AWAY from its caster along the terrain, `secs` s at most): REAL WATER, conjured — the server moves a
     //   mound of it (`len` cells long, `high` cells at its crest) forward `speed` px/s, taking its own water back each tick and putting it down ahead, over the ground or a pool's
@@ -858,7 +860,8 @@
   //   back / circling are phases, so they go with a steerer; heavy / weightless change an arc's own fall). (M5: 'body' gone too — pierces and chains queue in the order put in, bursts layer on every strike.)
   const MODS = {
     mod_follow: { name: 'Follows the pointer', keys: [R, L], rune: [2, 4], fits: ['fly'], group: ['path'], rep: 0, cdK: 1.5, learn: 3, turn: 16, speedK: 0.7, lifeK: 3.5, gravK: 0.3, more: 1.5 },   // (again: turns × `more`)
-    mod_arc:    { name: 'Arcs', keys: [U, R], rune: [2, 5], fits: ['fly'], cdK: 1.5, learn: 3, g: 1100, reach: 560 },   // (M3 round 2: on pieces too — they lob onto the cast's point)
+    // (2026-11-28, the user: 'arcs and heavy … accomplishing the same thing really — just keep heavy') ARCS is gone: `mod_arc` { keys U R, rune 2 → 5, g 1100, reach 560 } — its
+    //   code stays asleep (nothing can put it in), its keys and stroke free
     mod_split:  { name: 'Splits in three', keys: [L, R], rune: [6, 5], fits: ['fly'], rep: 0, cdK: 1.5, learn: 3, n: 3, at: 0.05, fan: 10, dmgK: 0.45, shotK: 0.6, szK: 0.75 },   // (M3 round 2: smaller and weaker each split, compounding; M4: again — each of the three in three)
     mod_faint:  { name: 'Faint', keys: [D, D], rune: [0, 5], fits: ['fly'], rep: 0, cdK: 1.25, learn: 3, seen: 0.22, seenOwn: 0.5, more: 0.5 },   // (again: × `more` as seen)
     // ⭐ M2 (2026-11-27 — the user's four):
