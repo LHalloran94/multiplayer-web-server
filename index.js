@@ -4088,6 +4088,11 @@ function magicAlarmsOf(room) { let a = _magicAlarms.get(room); if (!a) _magicAla
 const _magicObjWards = new Map();   // obj id → { room, by, fire, skin, hp }
 function magicObjWardOf(room, oid) { const W = typeof oid === 'string' ? _magicObjWards.get(oid) : null; if (!W) return null; const now = Date.now();
   if (W.room !== room || !((W.fire && now < W.fire) || (W.skin && now < W.skin && W.hp > 0))) { if (now > Math.max(W.fire || 0, W.skin || 0)) _magicObjWards.delete(oid); return null; } return W; }
+// (2026-11-28, the user: a fire-warded crate touching a burning one still caught, and flashed alight for an instant when shot) THE CELLS OF FIRE-WARDED THINGS at rest
+//   (written into the grid — `roomBodyStamp`'s `idx`): no fire may light them — the spread, an area set alight (a bolt's end, a burst), a body's own burning. null when none
+function magicFireWardCells(room) { if (!_magicObjWards.size) return null; const now = Date.now(), BS = roomBodyStamp[room]; let out = null;
+  for (const [id, W] of _magicObjWards) { if (W.room !== room || !(W.fire && now < W.fire)) continue; const S = BS && BS.get(id); if (!S || !S.idx) continue; if (!out) out = new Set(); for (const i of S.idx) out.add(i); }
+  return out; }
 function magicObjFireWarded(room, oid) { const W = magicObjWardOf(room, oid); return !!(W && W.fire && Date.now() < W.fire); }
 // a blow on a thing: soaked by its ward skin (true — the blow does nothing), one off its strength, every screen shown
 function magicObjSkinSoak(room, oid) { const W = magicObjWardOf(room, oid); if (!W || !W.skin || Date.now() > W.skin || !(W.hp > 0)) return false; W.hp--;
@@ -4328,9 +4333,11 @@ function magicFireBurst(room, x, y, R) {
   const c0 = Math.max(0, Math.floor((x - R) / C)), c1 = Math.min(COLS - 1, Math.floor((x + R) / C)), r0 = Math.max(0, Math.floor((y - R) / C)), r1 = Math.min(ROWS - 1, Math.floor((y + R) / C));
   if ((c1 - c0 + 1) * (r1 - r0 + 1) > 4096) return 0;
   const open = (c, r) => { if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return false; return peekCellAt(grid, c * ROWS + r) === 0; };
+  // (magic 21: not a fire-warded thing's cells)
+  const fwB = magicFireWardCells(room);
   for (let c = c0; c <= c1; c++) for (let rw = r0; rw <= r1; rw++) {
     if (Math.hypot((c + 0.5) * C - x, (rw + 0.5) * C - y) > R) continue;
-    const i = c * ROWS + rw; if (fs.has(i)) continue;
+    const i = c * ROWS + rw; if (fs.has(i) || (fwB !== null && fwB.has(i))) continue;
     const g = peekCellAt(grid, i); if (g < 0) continue;
     const solid = liquidCfg.fireSolids && g > 0 && FIRE_RATE[g] > 0;
     const oil = !solid && amt.rp(i)[amt.o(i) + 5] > 0;
@@ -7422,6 +7429,8 @@ function ropeFireTick() {
 setInterval(ropeFireTick, 100);
 function bodyOwnBurn(room, obj, S, st, now) {
   if (!S.kOf || S.kOf.length !== S.idx.length) return false;
+  // (magic 21: a fire-warded thing does not burn on)
+  if (magicObjFireWarded(room, obj.id)) return false;
   const ost = objStOf(room), rec = ost.get(obj.id) || {};
   let cells = bodyCellsOf(rec, obj);
   const n = cells.length, D = bodyDims(obj);
@@ -13732,10 +13741,11 @@ function igniteBox(room, x, y, r, ry) {
   const c0 = Math.max(0, Math.floor((x - pad) / TERRAIN_CELL)), c1 = Math.min(COLS - 1, Math.floor((x + pad) / TERRAIN_CELL));
   const r0 = Math.max(0, Math.floor((y - padY) / TERRAIN_CELL)), r1 = Math.min(ROWS - 1, Math.floor((y + padY) / TERRAIN_CELL));
   if ((c1 - c0 + 1) * (r1 - r0 + 1) > 4096) return 0;          // a brush is at most 160px; anything bigger is not one
-  const fs = fineFireSet(room), lit = [];
+  // (magic 21: not a fire-warded thing's cells)
+  const fs = fineFireSet(room), lit = [], fwC = magicFireWardCells(room);
   for (let c = c0; c <= c1; c++) for (let rw = r0; rw <= r1; rw++) {
     const i = c * ROWS + rw;
-    if (fs.has(i)) continue;
+    if (fs.has(i) || (fwC !== null && fwC.has(i))) continue;
     const g = peekCellAt(grid, i);
     if (g < 0) continue;                                        // not produced: nothing there to set alight
     const solid = liquidCfg.fireSolids && g > 0 && FIRE_RATE[g] > 0;
@@ -13780,7 +13790,9 @@ function fineReactTickRoom(room, SUB, phase) {
   // Embers thrown this pass, stride 7: [launch cell, vx×100, vy×100, flight ticks, landing cell or -1, smoulder ticks, phase].
   const emberWire = [];
   const burningAny = (fs, j) => fs.has(j) || (fireAll !== null && fireAll.has(j));
-  const lightCell = (fs, j) => { fs.add(j); if (fireAll !== null) fireAll.add(j); fireLit.push(j); };
+  // (magic 21: a fire-warded thing's cells are never lit)
+  const fireWardC = magicFireWardCells(room);
+  const lightCell = (fs, j) => { if (fireWardC !== null && fireWardC.has(j)) return; fs.add(j); if (fireAll !== null) fireAll.add(j); fireLit.push(j); };
   // FX WIRE. The client used to derive reaction FX from grid TRANSITIONS on the coarse liquid-cells wire (`old === 11
   // && gid === 2` ⇒ steam, etc). In fine mode liquid is not a grid id at all, so no transition can ever match and every
   // one of those effects is unreachable. The server knows exactly which reaction fired, so it says so: [cell, code].
